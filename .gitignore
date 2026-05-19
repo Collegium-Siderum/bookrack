@@ -1,0 +1,30 @@
+# Build output
+/target/
+
+# Private library data — never commit
+/data/
+/books/
+/index/
+*.lance/
+*.sqlite
+*.sqlite-*
+*.db
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+
+# Agent instructions — local working file, deliberately not committed
+/CLAUDE.md
+
+# Leak-check denylist — holds private literals, must stay local
+/scripts/leak-denylist.txt
+
+# Exploratory spikes — contain hardcoded local paths
+/spikes/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
