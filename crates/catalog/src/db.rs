@@ -25,7 +25,11 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// schema is rendered from these specs and conformance-checked; there is
 /// no separately maintained DDL for them. Compatibility across revisions
 /// is enforced by the `schema_version` check, not by the DDL.
-const SPECS: &[&TableSpec] = &[&crate::catalog_meta::SPEC, &crate::intake::SPEC];
+const SPECS: &[&TableSpec] = &[
+    &crate::catalog_meta::SPEC,
+    &crate::intake::SPEC,
+    &crate::book_state::SPEC,
+];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
 /// Each will move into its own module — gaining a `TableSpec` and
@@ -37,20 +41,6 @@ const SPECS: &[&TableSpec] = &[&crate::catalog_meta::SPEC, &crate::intake::SPEC]
 /// integer soft reference, keeping the two databases independently
 /// movable and restorable.
 const PENDING_TABLES_DDL: &str = r"
-
--- Book-level pipeline state, one row per ingested book.
-CREATE TABLE IF NOT EXISTS book_state (
-  book_root_id           INTEGER PRIMARY KEY,   -- soft reference to corpus.nodes
-  intake_id              INTEGER NOT NULL UNIQUE,
-  current_stage          TEXT NOT NULL,
-  embed_model            TEXT,
-  parsed_at              TEXT,                  -- STRUCTURE completed
-  embedded_at            TEXT,                  -- EMBED completed; non-NULL iff vectors exist
-  ocr_marker_finished_at TEXT,
-  last_error             TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_book_state_stage ON book_state(current_stage);
-CREATE INDEX IF NOT EXISTS idx_book_state_embed ON book_state(embedded_at) WHERE embedded_at IS NULL;
 
 -- The six-stage pipeline log. Audit rows outlive the books they describe.
 CREATE TABLE IF NOT EXISTS book_pipeline_audit (
