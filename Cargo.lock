@@ -20,6 +20,10 @@ dependencies = [
 [[package]]
 name = "bookrack-catalog"
 version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "thiserror",
+]
 
 [[package]]
 name = "bookrack-cli"
