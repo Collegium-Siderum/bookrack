@@ -32,6 +32,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_publication_attrs::SPEC,
     &crate::node_overrides::SPEC,
     &crate::node_contributors::SPEC,
+    &crate::node_role_takeovers::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -68,17 +69,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Explicit 'the user has taken over this role' marker, resolving the
--- ambiguity of an empty user contributor list.
-CREATE TABLE IF NOT EXISTS node_role_takeovers (
-  node_id    INTEGER NOT NULL,
-  role       TEXT NOT NULL,
-  curated_at TEXT NOT NULL,
-  curated_by TEXT NOT NULL,
-  notes      TEXT,
-  PRIMARY KEY (node_id, role)
-);
 
 -- Category tags, many-to-many.
 CREATE TABLE IF NOT EXISTS node_categories (

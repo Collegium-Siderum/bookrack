@@ -24,6 +24,7 @@ mod intake;
 mod node_contributors;
 mod node_overrides;
 mod node_publication_attrs;
+mod node_role_takeovers;
 
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use intake::{Intake, IntakeStatus, NewIntake, Registration};
