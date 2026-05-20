@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use bookrack_dbkit::{TableSpec, apply_schema};
 use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
@@ -19,57 +20,16 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// `index_meta` key under which [`SCHEMA_VERSION`] is recorded.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 
-/// Full schema for `corpus.db`. Idempotent: every statement uses
-/// `IF NOT EXISTS`, so applying it to an up-to-date database is a no-op.
-/// Compatibility across revisions is enforced separately by the
+/// Every table `corpus.db` owns, in creation order. The schema is built
+/// by rendering these specs, and the same list drives the conformance
+/// check — there is no separately maintained DDL string that could drift
+/// from the code. Compatibility across revisions is enforced by the
 /// `schema_version` check, not by the DDL.
-const SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS nodes (
-  node_id                INTEGER PRIMARY KEY,
-  parent_id              INTEGER REFERENCES nodes(node_id) ON DELETE CASCADE,
-  book_root_id           INTEGER NOT NULL,
-  ordinal                INTEGER NOT NULL,
-  depth                  INTEGER NOT NULL,
-  node_type              TEXT NOT NULL,
-  title                  TEXT,
-  text_content           TEXT,
-  char_count             INTEGER,
-  sentence_count         INTEGER,
-  toc_lo                 INTEGER,
-  toc_hi                 INTEGER,
-  page_index_start       INTEGER,
-  page_index_end         INTEGER,
-  stable_anchor          TEXT,
-  text_sha256            TEXT,
-  norm_text_sha256       TEXT,
-  subtree_content_sha256 TEXT,
-  expression_id          INTEGER
-);
-
-CREATE INDEX IF NOT EXISTS idx_node_root
-  ON nodes(book_root_id, parent_id, ordinal);
-CREATE INDEX IF NOT EXISTS idx_node_parent
-  ON nodes(parent_id, ordinal);
-CREATE INDEX IF NOT EXISTS idx_node_type
-  ON nodes(node_type);
-CREATE INDEX IF NOT EXISTS idx_node_norm_sha
-  ON nodes(norm_text_sha256) WHERE norm_text_sha256 IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_node_subtree_sig
-  ON nodes(subtree_content_sha256) WHERE subtree_content_sha256 IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS node_id_partitions (
-  partition_idx INTEGER PRIMARY KEY,
-  book_root_id  INTEGER NOT NULL UNIQUE,
-  intake_id     INTEGER NOT NULL UNIQUE,
-  next_local_id INTEGER NOT NULL DEFAULT 2,
-  allocated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS index_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-";
+const SPECS: &[&TableSpec] = &[
+    &crate::node::SPEC,
+    &crate::partition::SPEC,
+    &crate::index_meta::SPEC,
+];
 
 /// A handle to one `corpus.db` database.
 ///
@@ -102,7 +62,13 @@ impl Corpus {
         // Foreign keys are off by default and the setting is not
         // persisted, so it must be re-enabled on every connection.
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.execute_batch(SCHEMA)?;
+        apply_schema(&conn, SPECS)?;
+        // In debug builds, fail loudly if an existing file's schema has
+        // drifted from the specs. A freshly built database always
+        // conforms, so this only bites on a stale file — which a release
+        // build instead catches through the version stamp.
+        #[cfg(debug_assertions)]
+        bookrack_dbkit::verify_all(&conn, SPECS).expect("corpus.db schema conformance");
         let corpus = Corpus { conn };
         corpus.reconcile_schema_version()?;
         Ok(corpus)
@@ -188,5 +154,15 @@ mod tests {
             corpus.meta_get("embed_model").expect("get"),
             Some("qwen3-v2".to_string())
         );
+    }
+
+    #[test]
+    fn the_built_schema_conforms_to_every_spec() {
+        // Proves the DDL rendered from the specs builds a database whose
+        // live schema — columns, keys, indexes, foreign keys — matches
+        // those same specs.
+        let corpus = Corpus::open_in_memory().expect("open");
+        bookrack_dbkit::verify_all(&corpus.conn, SPECS)
+            .expect("the rendered schema must conform to every spec");
     }
 }

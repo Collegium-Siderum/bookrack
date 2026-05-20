@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use bookrack_dbkit::{TableSpec, apply_schema};
 use rusqlite::Connection;
 
 use crate::{CatalogError, Result};
@@ -20,36 +21,22 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// `catalog_meta` key under which [`SCHEMA_VERSION`] is recorded.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
 
-/// Full schema for `catalog.db`. Idempotent: every statement uses
-/// `IF NOT EXISTS`. Compatibility across revisions is enforced by the
-/// `schema_version` check, not by the DDL.
-///
-/// There are no foreign keys: every link — to a `corpus.db` node, and
-/// even an expression to its work — is a bare integer soft reference,
-/// keeping the two databases independently movable and restorable.
-const SCHEMA: &str = r"
--- Database-level scalars; currently just the schema version stamp.
-CREATE TABLE IF NOT EXISTS catalog_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
+/// Every `catalog.db` table that has a table module of its own. Their
+/// schema is rendered from these specs and conformance-checked; there is
+/// no separately maintained DDL for them. Compatibility across revisions
+/// is enforced by the `schema_version` check, not by the DDL.
+const SPECS: &[&TableSpec] = &[&crate::catalog_meta::SPEC, &crate::intake::SPEC];
 
--- A file manifestation: the identity anchor of one ingested source file.
-CREATE TABLE IF NOT EXISTS intake (
-  intake_id     INTEGER PRIMARY KEY AUTOINCREMENT,  -- long-lived, never reused
-  source_sha256 TEXT NOT NULL UNIQUE,               -- whole-file hash; the identity anchor
-  stored_path   TEXT,                               -- opaque store location; set once the file is stored
-  original_path TEXT,                               -- forensic: where the file came from
-  format        TEXT,                               -- pdf / epub / mobi / azw3 / text / ...
-  byte_size     INTEGER,
-  adapter       TEXT,                               -- extraction adapter, chosen at EXTRACT
-  intake_at     TEXT NOT NULL,                      -- ISO-8601 UTC
-  status        TEXT NOT NULL,                      -- see IntakeStatus
-  expression_id INTEGER,                            -- FRBR soft reference; backfilled at METADATA
-  notes         TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_intake_status ON intake(status);
-CREATE INDEX IF NOT EXISTS idx_intake_format ON intake(format);
+/// DDL for the `catalog.db` tables that do not yet have a table module.
+/// Each will move into its own module — gaining a `TableSpec` and
+/// conformance coverage — when its repository is built; until then its
+/// schema lives here verbatim.
+///
+/// There are no foreign keys anywhere in `catalog.db`: every link — to a
+/// `corpus.db` node, and even an expression to its work — is a bare
+/// integer soft reference, keeping the two databases independently
+/// movable and restorable.
+const PENDING_TABLES_DDL: &str = r"
 
 -- Book-level pipeline state, one row per ingested book.
 CREATE TABLE IF NOT EXISTS book_state (
@@ -305,7 +292,13 @@ impl Catalog {
         // keeps the connection ready to enforce any added later. It is
         // off by default and not persisted, so it is set on every open.
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.execute_batch(SCHEMA)?;
+        apply_schema(&conn, SPECS)?;
+        conn.execute_batch(PENDING_TABLES_DDL)?;
+        // In debug builds, fail loudly if an existing file's schema has
+        // drifted from the specs. The pending tables carry no spec yet
+        // and so are not covered.
+        #[cfg(debug_assertions)]
+        bookrack_dbkit::verify_all(&conn, SPECS).expect("catalog.db schema conformance");
         let catalog = Catalog { conn };
         catalog.reconcile_schema_version()?;
         Ok(catalog)
@@ -371,5 +364,14 @@ mod tests {
             .expect("overwrite version");
         let err = catalog.reconcile_schema_version().expect_err("must reject");
         assert!(matches!(err, CatalogError::SchemaMismatch { .. }));
+    }
+
+    #[test]
+    fn the_built_schema_conforms_to_every_spec() {
+        // Proves the DDL rendered from the specs builds a database whose
+        // live schema matches those same specs.
+        let catalog = Catalog::open_in_memory().expect("open");
+        bookrack_dbkit::verify_all(&catalog.conn, SPECS)
+            .expect("the rendered schema must conform to every spec");
     }
 }
