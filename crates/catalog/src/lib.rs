@@ -21,6 +21,7 @@ mod book_state;
 mod catalog_meta;
 mod db;
 mod intake;
+mod node_overrides;
 mod node_publication_attrs;
 
 pub use db::{Catalog, SCHEMA_VERSION};

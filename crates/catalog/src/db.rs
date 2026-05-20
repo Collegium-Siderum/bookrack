@@ -30,6 +30,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::intake::SPEC,
     &crate::book_state::SPEC,
     &crate::node_publication_attrs::SPEC,
+    &crate::node_overrides::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -66,19 +67,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- User EAV edits overriding the base layer. Three states per field:
--- absent (no row), a value, or an explicit NULL (a deliberate nullify).
-CREATE TABLE IF NOT EXISTS node_overrides (
-  node_id    INTEGER NOT NULL,
-  field      TEXT NOT NULL,
-  value      TEXT,
-  confirmed  INTEGER NOT NULL DEFAULT 0,
-  curated_at TEXT NOT NULL,
-  curated_by TEXT NOT NULL,
-  notes      TEXT,
-  PRIMARY KEY (node_id, field)
-);
 
 -- Contributor roles (author / translator / editor / ...), many-to-many.
 -- The surrogate key lets a later per-contributor edit address one row;
