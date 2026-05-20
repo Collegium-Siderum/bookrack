@@ -12,6 +12,7 @@
 //! titles, never sits next to the source code.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Environment variable naming the data root (an absolute directory).
 pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
@@ -107,6 +108,64 @@ impl Config {
     pub fn lancedb_dir(&self) -> PathBuf {
         self.data_dir.join("lancedb")
     }
+
+    /// Directory for log files and crash reports. Kept under the data
+    /// root — like every other path — so diagnostics never land inside
+    /// the project workspace.
+    pub fn logs_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
+    }
+}
+
+/// Embedding model served by the local Ollama daemon, used when
+/// [`EmbedConfig`] is left at its default.
+pub const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding:0.6b";
+
+/// Tunable parameters for the embedding subsystem.
+///
+/// A single source of truth for the knobs the `embed` client and the
+/// ingest-side batching read, rather than scattering them as literals.
+/// The defaults are the values the EMBED spike calibrated against real
+/// books: deliberately conservative, and meant to be retuned from real
+/// run data rather than treated as fixed.
+///
+/// Scheduler-side knobs (throttle mode, sleep curve, AIMD coefficients)
+/// join this struct when the ingest EMBED stage lands; for now it
+/// carries the client and batching parameters, which are stable.
+#[derive(Debug, Clone)]
+pub struct EmbedConfig {
+    /// Ollama model tag to embed with.
+    pub model: String,
+    /// Per-request HTTP timeout.
+    pub request_timeout: Duration,
+    /// How many times a transient transport failure is retried.
+    pub max_retries: u32,
+    /// Base delay for exponential backoff between retries.
+    pub backoff_base: Duration,
+    /// Target batch size, in characters of chunk text — a proxy for
+    /// token count that needs no client-side tokenizer.
+    pub batch_char_budget: usize,
+    /// Hard cap on chunks per embed request, regardless of the budget.
+    pub batch_max_chunks: usize,
+    /// Floor the char budget cannot shrink below under OOM feedback.
+    pub batch_min_char_budget: usize,
+    /// Capacity of the producer-to-consumer channel, in chunks.
+    pub channel_capacity: usize,
+}
+
+impl Default for EmbedConfig {
+    fn default() -> EmbedConfig {
+        EmbedConfig {
+            model: DEFAULT_EMBED_MODEL.to_string(),
+            request_timeout: Duration::from_secs(120),
+            max_retries: 4,
+            backoff_base: Duration::from_secs(1),
+            batch_char_budget: 8_000,
+            batch_max_chunks: 64,
+            batch_min_char_budget: 500,
+            channel_capacity: 2_000,
+        }
+    }
 }
 
 /// Pure resolution logic, factored out of [`Config::load`] so it can be
@@ -183,5 +242,16 @@ mod tests {
         assert_eq!(cfg.corpus_db(), root.join("corpus.db"));
         assert_eq!(cfg.catalog_db(), root.join("catalog.db"));
         assert_eq!(cfg.lancedb_dir(), root.join("lancedb"));
+        assert_eq!(cfg.logs_dir(), root.join("logs"));
+    }
+
+    #[test]
+    fn embed_config_default_carries_the_calibrated_budget() {
+        let cfg = EmbedConfig::default();
+        assert_eq!(cfg.model, DEFAULT_EMBED_MODEL);
+        // The spike's calibration knee.
+        assert_eq!(cfg.batch_char_budget, 8_000);
+        // The OOM-shrink floor must sit below the steady-state budget.
+        assert!(cfg.batch_min_char_budget < cfg.batch_char_budget);
     }
 }
