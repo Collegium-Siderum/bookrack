@@ -51,6 +51,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-dbkit"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "thiserror",
+]
+
+[[package]]
 name = "bookrack-embed"
 version = "0.1.0"
 
