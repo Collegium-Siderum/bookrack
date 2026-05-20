@@ -37,6 +37,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_reviews::SPEC,
     &crate::metadata_audit::SPEC,
     &crate::book_pipeline_audit::SPEC,
+    &crate::works::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -50,14 +51,7 @@ const SPECS: &[&TableSpec] = &[
 /// movable and restorable.
 const PENDING_TABLES_DDL: &str = r"
 
--- FRBR identity (lightweight; empty in v1 by decision D3).
-CREATE TABLE IF NOT EXISTS works (
-  work_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-  title      TEXT,
-  notes      TEXT,
-  curated_at TEXT,
-  curated_by TEXT
-);
+-- One manifestation-class of a work: a translation, an edition.
 CREATE TABLE IF NOT EXISTS expressions (
   expression_id  INTEGER PRIMARY KEY AUTOINCREMENT,
   work_id        INTEGER,                   -- soft reference to works

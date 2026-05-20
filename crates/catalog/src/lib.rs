@@ -31,6 +31,7 @@ mod node_overrides;
 mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
+mod works;
 
 pub use actor::ActorKind;
 pub use book_pipeline_audit::{BookPipelineAudit, NewBookPipelineAudit};
@@ -45,6 +46,7 @@ pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
 pub use node_reviews::{NewReview, NodeReview};
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
+pub use works::{NewWork, Work};
 
 /// A fallible `catalog` operation.
 pub type Result<T> = std::result::Result<T, CatalogError>;
