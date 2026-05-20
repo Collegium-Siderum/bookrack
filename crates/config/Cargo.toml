@@ -6,3 +6,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dotenvy.workspace = true
+thiserror.workspace = true

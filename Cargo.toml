@@ -27,3 +27,5 @@ sha2 = "0.10"
 # NFKC for the `normalize` crate. Behaviour-sensitive: a bundled Unicode
 # data update can shift normalized output. Pinned via Cargo.lock.
 unicode-normalization = "0.1"
+# `.env` file loading for the `config` crate.
+dotenvy = "0.15"
