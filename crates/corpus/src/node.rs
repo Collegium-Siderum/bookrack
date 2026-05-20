@@ -11,27 +11,74 @@
 //! the write boundary, so a malformed node never reaches the store.
 
 use bookrack_core::{NodeId, NodeType};
-use rusqlite::{Connection, OptionalExtension, Row};
+use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec, decode};
+use rusqlite::{Connection, OptionalExtension, Row, named_params};
 
 use crate::{Corpus, CorpusError, Result};
 
-/// Column list shared by every `nodes` `SELECT`. Its order is the
-/// contract between the queries and [`Node::from_row`] — keep them in
-/// step.
-const NODE_COLUMNS: &str = "node_id, parent_id, book_root_id, ordinal, depth, node_type, \
-     title, text_content, char_count, sentence_count, toc_lo, toc_hi, \
-     page_index_start, page_index_end, stable_anchor, text_sha256, \
-     norm_text_sha256, subtree_content_sha256, expression_id";
+/// The single source of truth for the `nodes` table's schema. Its DDL is
+/// rendered from this spec, so the schema and the code that reads it
+/// cannot drift apart.
+pub(crate) const SPEC: TableSpec = TableSpec {
+    name: "nodes",
+    comment: None,
+    columns: &[
+        ColumnSpec::int("node_id").primary_key(),
+        ColumnSpec::int("parent_id").references(ForeignKey::new(
+            "nodes",
+            "node_id",
+            OnDelete::Cascade,
+        )),
+        ColumnSpec::int("book_root_id").not_null(),
+        ColumnSpec::int("ordinal").not_null(),
+        ColumnSpec::int("depth").not_null(),
+        ColumnSpec::text("node_type").not_null(),
+        ColumnSpec::text("title"),
+        ColumnSpec::text("text_content"),
+        ColumnSpec::int("char_count"),
+        ColumnSpec::int("sentence_count"),
+        ColumnSpec::int("toc_lo"),
+        ColumnSpec::int("toc_hi"),
+        ColumnSpec::int("page_index_start"),
+        ColumnSpec::int("page_index_end"),
+        ColumnSpec::text("stable_anchor"),
+        ColumnSpec::text("text_sha256"),
+        ColumnSpec::text("norm_text_sha256"),
+        ColumnSpec::text("subtree_content_sha256"),
+        ColumnSpec::int("expression_id"),
+    ],
+    composite_pk: None,
+    uniques: &[],
+    table_checks: &[],
+    indexes: &[
+        IndexSpec::on("idx_node_root", &["book_root_id", "parent_id", "ordinal"]),
+        IndexSpec::on("idx_node_parent", &["parent_id", "ordinal"]),
+        IndexSpec::on("idx_node_type", &["node_type"]),
+        IndexSpec::on("idx_node_norm_sha", &["norm_text_sha256"])
+            .partial("norm_text_sha256 IS NOT NULL"),
+        IndexSpec::on("idx_node_subtree_sig", &["subtree_content_sha256"])
+            .partial("subtree_content_sha256 IS NOT NULL"),
+    ],
+};
 
-/// `INSERT` for one node. Column order matches the bind list in
-/// [`insert_one`].
+/// `INSERT` for one node. Parameters are bound by name, so this column
+/// order and the bind list in [`insert_one`] need not be kept in step.
 const INSERT_NODE_SQL: &str = "INSERT INTO nodes \
      (node_id, parent_id, book_root_id, ordinal, depth, node_type, \
       title, text_content, char_count, sentence_count, toc_lo, toc_hi, \
       page_index_start, page_index_end, stable_anchor, text_sha256, \
       norm_text_sha256, subtree_content_sha256, expression_id) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-             ?15, ?16, ?17, ?18, ?19)";
+     VALUES (:node_id, :parent_id, :book_root_id, :ordinal, :depth, :node_type, \
+             :title, :text_content, :char_count, :sentence_count, :toc_lo, :toc_hi, \
+             :page_index_start, :page_index_end, :stable_anchor, :text_sha256, \
+             :norm_text_sha256, :subtree_content_sha256, :expression_id)";
+
+/// A `SELECT` of every node column with `tail` (a `WHERE` / `ORDER BY`
+/// clause) appended. The column list is derived from [`SPEC`], so it can
+/// never drift from the schema.
+fn select_sql(tail: &str) -> String {
+    format!("SELECT {} FROM nodes {tail}", SPEC.select_list())
+}
 
 /// A node read back from `corpus.db` — one full `nodes` row.
 ///
@@ -83,47 +130,31 @@ pub struct Node {
 }
 
 impl Node {
-    /// Build a [`Node`] from a row whose columns are [`NODE_COLUMNS`].
+    /// Build a [`Node`] from a row that includes every `nodes` column.
+    /// Columns are read by name, so the row's column order is irrelevant.
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Node> {
         Ok(Node {
-            node_id: NodeId::new(row.get(0)?),
-            parent_id: row.get::<_, Option<i64>>(1)?.map(NodeId::new),
-            book_root_id: NodeId::new(row.get(2)?),
-            ordinal: row.get(3)?,
-            depth: row.get(4)?,
-            node_type: node_type_at(row, 5)?,
-            title: row.get(6)?,
-            text_content: row.get(7)?,
-            char_count: row.get(8)?,
-            sentence_count: row.get(9)?,
-            toc_lo: row.get(10)?,
-            toc_hi: row.get(11)?,
-            page_index_start: row.get(12)?,
-            page_index_end: row.get(13)?,
-            stable_anchor: row.get(14)?,
-            text_sha256: row.get(15)?,
-            norm_text_sha256: row.get(16)?,
-            subtree_content_sha256: row.get(17)?,
-            expression_id: row.get(18)?,
+            node_id: NodeId::new(row.get("node_id")?),
+            parent_id: row.get::<_, Option<i64>>("parent_id")?.map(NodeId::new),
+            book_root_id: NodeId::new(row.get("book_root_id")?),
+            ordinal: row.get("ordinal")?,
+            depth: row.get("depth")?,
+            node_type: decode(row, "node_type", NodeType::from_db_str)?,
+            title: row.get("title")?,
+            text_content: row.get("text_content")?,
+            char_count: row.get("char_count")?,
+            sentence_count: row.get("sentence_count")?,
+            toc_lo: row.get("toc_lo")?,
+            toc_hi: row.get("toc_hi")?,
+            page_index_start: row.get("page_index_start")?,
+            page_index_end: row.get("page_index_end")?,
+            stable_anchor: row.get("stable_anchor")?,
+            text_sha256: row.get("text_sha256")?,
+            norm_text_sha256: row.get("norm_text_sha256")?,
+            subtree_content_sha256: row.get("subtree_content_sha256")?,
+            expression_id: row.get("expression_id")?,
         })
     }
-}
-
-/// Read a `node_type` cell and decode it to a [`NodeType`]. An
-/// unrecognized string means the database was written by something
-/// other than this crate; surface it as a conversion failure.
-fn node_type_at(row: &Row<'_>, idx: usize) -> rusqlite::Result<NodeType> {
-    let raw: String = row.get(idx)?;
-    NodeType::from_db_str(&raw).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            idx,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unknown node_type {raw:?}"),
-            )),
-        )
-    })
 }
 
 /// A node about to be written to `corpus.db`.
@@ -331,29 +362,29 @@ impl NewNode {
 }
 
 /// Insert one already-validated node through the connection's statement
-/// cache. The bind order matches [`INSERT_NODE_SQL`].
+/// cache. Parameters are bound by name against [`INSERT_NODE_SQL`].
 fn insert_one(conn: &Connection, node: &NewNode) -> rusqlite::Result<()> {
     let mut stmt = conn.prepare_cached(INSERT_NODE_SQL)?;
-    stmt.execute(rusqlite::params![
-        node.node_id.get(),
-        node.parent_id.map(NodeId::get),
-        node.book_root_id.get(),
-        node.ordinal,
-        node.depth,
-        node.node_type.as_str(),
-        node.title,
-        node.text_content,
-        node.char_count,
-        node.sentence_count,
-        node.toc_lo,
-        node.toc_hi,
-        node.page_index_start,
-        node.page_index_end,
-        node.stable_anchor,
-        node.text_sha256,
-        node.norm_text_sha256,
-        node.subtree_content_sha256,
-        node.expression_id,
+    stmt.execute(named_params![
+        ":node_id": node.node_id.get(),
+        ":parent_id": node.parent_id.map(NodeId::get),
+        ":book_root_id": node.book_root_id.get(),
+        ":ordinal": node.ordinal,
+        ":depth": node.depth,
+        ":node_type": node.node_type.as_str(),
+        ":title": node.title,
+        ":text_content": node.text_content,
+        ":char_count": node.char_count,
+        ":sentence_count": node.sentence_count,
+        ":toc_lo": node.toc_lo,
+        ":toc_hi": node.toc_hi,
+        ":page_index_start": node.page_index_start,
+        ":page_index_end": node.page_index_end,
+        ":stable_anchor": node.stable_anchor,
+        ":text_sha256": node.text_sha256,
+        ":norm_text_sha256": node.norm_text_sha256,
+        ":subtree_content_sha256": node.subtree_content_sha256,
+        ":expression_id": node.expression_id,
     ])?;
     Ok(())
 }
@@ -394,8 +425,8 @@ impl Corpus {
         let node = self
             .conn
             .query_row(
-                &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE node_id = ?1"),
-                [node_id.get()],
+                &select_sql("WHERE node_id = :node_id"),
+                named_params! { ":node_id": node_id.get() },
                 Node::from_row,
             )
             .optional()?;
@@ -405,8 +436,8 @@ impl Corpus {
     /// Fetch a node's direct children, ordered by sibling `ordinal`.
     pub fn children(&self, parent_id: NodeId) -> Result<Vec<Node>> {
         self.query_nodes(
-            &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE parent_id = ?1 ORDER BY ordinal"),
-            [parent_id.get()],
+            &select_sql("WHERE parent_id = :parent_id ORDER BY ordinal"),
+            named_params! { ":parent_id": parent_id.get() },
         )
     }
 
@@ -414,8 +445,8 @@ impl Corpus {
     /// the order their ids were allocated.
     pub fn book_nodes(&self, book_root_id: NodeId) -> Result<Vec<Node>> {
         self.query_nodes(
-            &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE book_root_id = ?1 ORDER BY node_id"),
-            [book_root_id.get()],
+            &select_sql("WHERE book_root_id = :book_root_id ORDER BY node_id"),
+            named_params! { ":book_root_id": book_root_id.get() },
         )
     }
 
@@ -423,8 +454,8 @@ impl Corpus {
     /// the inverted lookup behind cross-file content deduplication.
     pub fn find_by_norm_text_sha256(&self, hash: &str) -> Result<Vec<Node>> {
         self.query_nodes(
-            &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE norm_text_sha256 = ?1"),
-            [hash],
+            &select_sql("WHERE norm_text_sha256 = :hash"),
+            named_params! { ":hash": hash },
         )
     }
 
@@ -433,8 +464,8 @@ impl Corpus {
     /// manifestations.
     pub fn find_by_subtree_content_sha256(&self, signature: &str) -> Result<Vec<Node>> {
         self.query_nodes(
-            &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE subtree_content_sha256 = ?1"),
-            [signature],
+            &select_sql("WHERE subtree_content_sha256 = :signature"),
+            named_params! { ":signature": signature },
         )
     }
 
@@ -442,14 +473,13 @@ impl Corpus {
     /// with that id existed.
     pub fn set_expression_id(&self, node_id: NodeId, expression_id: Option<i64>) -> Result<bool> {
         let affected = self.conn.execute(
-            "UPDATE nodes SET expression_id = ?1 WHERE node_id = ?2",
-            (expression_id, node_id.get()),
+            "UPDATE nodes SET expression_id = :expression_id WHERE node_id = :node_id",
+            named_params! { ":expression_id": expression_id, ":node_id": node_id.get() },
         )?;
         Ok(affected > 0)
     }
 
-    /// Run a `nodes` query whose `SELECT` list is [`NODE_COLUMNS`] and
-    /// collect the rows.
+    /// Run a `nodes` query built by [`select_sql`] and collect the rows.
     fn query_nodes(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Node>> {
         let mut stmt = self.conn.prepare(sql)?;
         let nodes = stmt
@@ -475,16 +505,19 @@ mod tests {
     }
 
     #[test]
-    fn a_node_round_trips_through_the_store() {
+    fn a_prose_leaf_round_trips_every_field() {
         let mut corpus = Corpus::open_in_memory().expect("open");
         let (idx, root) = seed_book(&mut corpus, 1);
         let leaf_id = corpus.allocate_node_ids(idx, 1).expect("ids")[0];
 
-        let leaf = NewNode::child(leaf_id, root, root, 0, 1, NodeType::Paragraph)
+        // Every field a prose leaf may carry is set to a distinct value,
+        // so a column dropped from a query or a parameter left unbound
+        // shows up as a failed assertion.
+        let leaf = NewNode::child(leaf_id, root, root, 7, 1, NodeType::Paragraph)
             .text("Hello, world.")
             .text_stats(13, 1)
             .toc_span(5, 5)
-            .pages(2, 2)
+            .pages(2, 3)
             .content_hashes("anchor", "raw-sha", "norm-sha");
         corpus.insert_node(&leaf).expect("insert leaf");
 
@@ -492,12 +525,54 @@ mod tests {
         assert_eq!(read.node_id, leaf_id);
         assert_eq!(read.parent_id, Some(root));
         assert_eq!(read.book_root_id, root);
+        assert_eq!(read.ordinal, 7);
+        assert_eq!(read.depth, 1);
         assert_eq!(read.node_type, NodeType::Paragraph);
         assert_eq!(read.text_content.as_deref(), Some("Hello, world."));
         assert_eq!(read.char_count, Some(13));
+        assert_eq!(read.sentence_count, Some(1));
         assert_eq!(read.toc_lo, Some(5));
         assert_eq!(read.toc_hi, Some(5));
+        assert_eq!(read.page_index_start, Some(2));
+        assert_eq!(read.page_index_end, Some(3));
+        assert_eq!(read.stable_anchor.as_deref(), Some("anchor"));
+        assert_eq!(read.text_sha256.as_deref(), Some("raw-sha"));
         assert_eq!(read.norm_text_sha256.as_deref(), Some("norm-sha"));
+        // A prose leaf carries neither a title nor a subtree signature.
+        assert_eq!(read.title, None);
+        assert_eq!(read.subtree_content_sha256, None);
+        assert_eq!(read.expression_id, None);
+    }
+
+    #[test]
+    fn an_organizing_node_round_trips_every_field() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let chapter_id = corpus.allocate_node_ids(idx, 1).expect("ids")[0];
+
+        // Covers the columns a prose leaf cannot: the title and the
+        // subtree content signature.
+        let chapter = NewNode::child(chapter_id, root, root, 4, 1, NodeType::Chapter)
+            .title("Chapter One")
+            .toc_span(10, 40)
+            .pages(8, 25)
+            .subtree_signature("subtree-sig");
+        corpus.insert_node(&chapter).expect("insert chapter");
+
+        let read = corpus.get_node(chapter_id).expect("get").expect("present");
+        assert_eq!(read.node_type, NodeType::Chapter);
+        assert_eq!(read.ordinal, 4);
+        assert_eq!(read.depth, 1);
+        assert_eq!(read.title.as_deref(), Some("Chapter One"));
+        assert_eq!(read.toc_lo, Some(10));
+        assert_eq!(read.toc_hi, Some(40));
+        assert_eq!(read.page_index_start, Some(8));
+        assert_eq!(read.page_index_end, Some(25));
+        assert_eq!(read.subtree_content_sha256.as_deref(), Some("subtree-sig"));
+        // An organizing node carries no body text or prose-leaf hashes.
+        assert_eq!(read.text_content, None);
+        assert_eq!(read.char_count, None);
+        assert_eq!(read.norm_text_sha256, None);
     }
 
     #[test]

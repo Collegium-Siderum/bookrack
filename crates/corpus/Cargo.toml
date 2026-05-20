@@ -7,5 +7,6 @@ repository.workspace = true
 
 [dependencies]
 bookrack-core = { path = "../core" }
+bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
 thiserror.workspace = true

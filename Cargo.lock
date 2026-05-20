@@ -46,6 +46,7 @@ name = "bookrack-corpus"
 version = "0.1.0"
 dependencies = [
  "bookrack-core",
+ "bookrack-dbkit",
  "rusqlite",
  "thiserror",
 ]
