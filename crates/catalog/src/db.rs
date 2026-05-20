@@ -39,6 +39,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::book_pipeline_audit::SPEC,
     &crate::works::SPEC,
     &crate::expressions::SPEC,
+    &crate::mcp_tool_calls::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -70,23 +71,6 @@ CREATE TABLE IF NOT EXISTS toc_edits (
   session_id    TEXT,
   UNIQUE (book_root_id, seq)
 );
-
--- Observability: the MCP / CLI tool-call log.
-CREATE TABLE IF NOT EXISTS mcp_tool_calls (
-  call_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts          TEXT NOT NULL,
-  source      TEXT NOT NULL,                -- mcp / cli
-  tool        TEXT NOT NULL,
-  status      TEXT NOT NULL,                -- ok / error
-  duration_ms REAL,
-  session_id  TEXT,
-  error_type  TEXT,
-  error_msg   TEXT,
-  args        TEXT,                         -- JSON
-  timings_ms  TEXT,                         -- JSON
-  extras      TEXT                          -- JSON
-);
-CREATE INDEX IF NOT EXISTS idx_mcp_tool_ts ON mcp_tool_calls(tool, ts);
 
 -- Observability: retrieval-quality issue reports.
 CREATE TABLE IF NOT EXISTS retrieval_issues (
