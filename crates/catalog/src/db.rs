@@ -29,6 +29,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::catalog_meta::SPEC,
     &crate::intake::SPEC,
     &crate::book_state::SPEC,
+    &crate::node_publication_attrs::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -65,27 +66,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Extracted bibliographic attributes — the metadata base layer.
-CREATE TABLE IF NOT EXISTS node_publication_attrs (
-  node_id           INTEGER PRIMARY KEY,    -- soft reference to corpus.nodes
-  title             TEXT,
-  subtitle          TEXT,
-  publisher         TEXT,
-  year              TEXT,
-  publication_date  TEXT,
-  isbn              TEXT,
-  series            TEXT,
-  series_number     TEXT,
-  edition           TEXT,
-  language          TEXT,
-  original_title    TEXT,                   -- pre-FRBR stopgap: a translation's original-language title
-  original_language TEXT,                   -- pre-FRBR stopgap: the work's original language
-  source_format     TEXT,
-  source            TEXT,                   -- ocr_marker / extracted / web
-  confidence        TEXT,                   -- high / medium / low
-  enriched_by       TEXT
-);
 
 -- User EAV edits overriding the base layer. Three states per field:
 -- absent (no row), a value, or an explicit NULL (a deliberate nullify).
