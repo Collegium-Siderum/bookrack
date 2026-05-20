@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
 
@@ -123,34 +123,6 @@ impl Corpus {
                 expected: SCHEMA_VERSION,
             })
         }
-    }
-
-    /// Read an `index_meta` scalar, or `None` if the key is unset.
-    ///
-    /// `index_meta` records the parameters an index was built with —
-    /// embedding model, vector dimension, chunk and normalization
-    /// versions — so a daemon can refuse to serve an index that no
-    /// longer matches its compiled-in constants.
-    pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
-        let value = self
-            .conn
-            .query_row(
-                "SELECT value FROM index_meta WHERE key = ?1",
-                [key],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        Ok(value)
-    }
-
-    /// Write an `index_meta` scalar, replacing any previous value.
-    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO index_meta(key, value) VALUES(?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )?;
-        Ok(())
     }
 }
 

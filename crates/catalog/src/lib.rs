@@ -17,6 +17,7 @@
 //! All SQL is contained in this crate; callers work through the typed
 //! [`Catalog`] handle.
 
+mod catalog_meta;
 mod db;
 mod intake;
 

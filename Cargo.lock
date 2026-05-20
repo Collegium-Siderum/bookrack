@@ -21,6 +21,7 @@ dependencies = [
 name = "bookrack-catalog"
 version = "0.1.0"
 dependencies = [
+ "bookrack-dbkit",
  "rusqlite",
  "thiserror",
 ]

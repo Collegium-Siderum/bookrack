@@ -18,6 +18,7 @@
 //! crate boundary that keeps the two-database split honest.
 
 mod db;
+mod index_meta;
 mod node;
 mod partition;
 
