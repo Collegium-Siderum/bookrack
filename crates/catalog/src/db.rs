@@ -33,6 +33,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_overrides::SPEC,
     &crate::node_contributors::SPEC,
     &crate::node_role_takeovers::SPEC,
+    &crate::node_categories::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -69,19 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Category tags, many-to-many.
-CREATE TABLE IF NOT EXISTS node_categories (
-  node_id    INTEGER NOT NULL,
-  category   TEXT NOT NULL,
-  is_primary INTEGER NOT NULL DEFAULT 0,
-  source     TEXT NOT NULL,                 -- user / llm_suggested / inferred
-  confirmed  INTEGER NOT NULL DEFAULT 0,
-  curated_at TEXT NOT NULL,
-  curated_by TEXT NOT NULL,
-  PRIMARY KEY (node_id, category)
-);
-CREATE INDEX IF NOT EXISTS idx_cat_cat ON node_categories(category);
 
 -- Per-node review status.
 CREATE TABLE IF NOT EXISTS node_reviews (

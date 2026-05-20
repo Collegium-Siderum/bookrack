@@ -21,6 +21,7 @@ mod book_state;
 mod catalog_meta;
 mod db;
 mod intake;
+mod node_categories;
 mod node_contributors;
 mod node_overrides;
 mod node_publication_attrs;
