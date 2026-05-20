@@ -17,11 +17,13 @@
 //! All SQL is contained in this crate; callers work through the typed
 //! [`Catalog`] handle.
 
+mod actor;
 mod book_state;
 mod catalog_meta;
 mod db;
 mod effective;
 mod intake;
+mod metadata_audit;
 mod node_categories;
 mod node_contributors;
 mod node_overrides;
@@ -29,10 +31,12 @@ mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
 
+pub use actor::ActorKind;
 pub use book_state::{BookState, NewBookState};
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::EffectiveAttrs;
 pub use intake::{Intake, IntakeStatus, NewIntake, Registration};
+pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
 pub use node_categories::{NewCategory, NodeCategory};
 pub use node_contributors::{NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};

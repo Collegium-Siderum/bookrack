@@ -35,6 +35,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_role_takeovers::SPEC,
     &crate::node_categories::SPEC,
     &crate::node_reviews::SPEC,
+    &crate::metadata_audit::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -71,25 +72,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Audit trail of user metadata edits; supports history and undo.
-CREATE TABLE IF NOT EXISTS metadata_audit (
-  audit_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-  node_id      INTEGER,                     -- soft reference; audit outlives the node
-  table_name   TEXT NOT NULL,
-  field        TEXT,                        -- NULL for a row-level insert/delete
-  action       TEXT NOT NULL,
-  old_value    TEXT,
-  new_value    TEXT,
-  changed_at   TEXT NOT NULL,
-  actor_kind   TEXT NOT NULL
-    CHECK (actor_kind IN ('human', 'llm', 'import', 'pipeline', 'system')),
-  actor_detail TEXT,
-  reason       TEXT,
-  session_id   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_node    ON metadata_audit(node_id, changed_at);
-CREATE INDEX IF NOT EXISTS idx_audit_session ON metadata_audit(session_id);
 
 -- FRBR identity (lightweight; empty in v1 by decision D3).
 CREATE TABLE IF NOT EXISTS works (
