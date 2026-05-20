@@ -19,6 +19,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # `bundled` compiles SQLite in-tree, so no system libsqlite is required.
 rusqlite = { version = "0.37", features = ["bundled"] }
 lancedb = "0.29"
+# Arrow companions of lancedb: the chunks-table record batches are built
+# and read through them. Their version must track lancedb's arrow.
+arrow-array = "58"
+arrow-schema = "58"
+futures = "0.3"
 rbook = "0.7"
 text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
@@ -29,3 +34,5 @@ sha2 = "0.10"
 unicode-normalization = "0.1"
 # `.env` file loading for the `config` crate.
 dotenvy = "0.15"
+# Temp directories for tests that need an on-disk store (e.g. LanceDB).
+tempfile = "3"
