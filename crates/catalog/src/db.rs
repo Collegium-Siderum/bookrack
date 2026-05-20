@@ -40,12 +40,16 @@ const SPECS: &[&TableSpec] = &[
     &crate::works::SPEC,
     &crate::expressions::SPEC,
     &crate::mcp_tool_calls::SPEC,
+    &crate::retrieval_issues::SPEC,
 ];
 
-/// DDL for the `catalog.db` tables that do not yet have a table module.
-/// Each will move into its own module — gaining a `TableSpec` and
-/// conformance coverage — when its repository is built; until then its
-/// schema lives here verbatim.
+/// DDL for the one `catalog.db` table that has no table module yet.
+///
+/// `toc_edits` is the authoritative log of manual TOC edits. Its schema
+/// is created here so the table exists, but its repository — writing
+/// edit verbs and replaying them on a corpus rebuild — is part of the
+/// TOC-editing feature and is deferred along with it; until that lands,
+/// the schema lives here verbatim rather than as a rendered `TableSpec`.
 ///
 /// There are no foreign keys anywhere in `catalog.db`: every link — to a
 /// `corpus.db` node, and even an expression to its work — is a bare
@@ -71,30 +75,6 @@ CREATE TABLE IF NOT EXISTS toc_edits (
   session_id    TEXT,
   UNIQUE (book_root_id, seq)
 );
-
--- Observability: retrieval-quality issue reports.
-CREATE TABLE IF NOT EXISTS retrieval_issues (
-  issue_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL,
-  status         TEXT NOT NULL DEFAULT 'open',   -- open / triaged / resolved / wontfix
-  kind           TEXT NOT NULL,                  -- recall_miss / zero_hits / wrong_volume / ...
-  severity       TEXT NOT NULL DEFAULT 'medium',
-  query          TEXT,
-  query_hash     TEXT,
-  mode           TEXT,
-  filters_json   TEXT,
-  expected       TEXT,
-  observed       TEXT,
-  suspected_book TEXT,
-  agent_notes    TEXT,
-  seen_count     INTEGER NOT NULL DEFAULT 1,
-  resolution     TEXT,
-  resolved_at    TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_issues_status ON retrieval_issues(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_issues_dedup
-  ON retrieval_issues(query_hash) WHERE status = 'open';
 ";
 
 /// A handle to one `catalog.db` database.

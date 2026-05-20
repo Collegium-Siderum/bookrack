@@ -33,6 +33,7 @@ mod node_overrides;
 mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
+mod retrieval_issues;
 mod works;
 
 pub use actor::ActorKind;
@@ -50,6 +51,7 @@ pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
 pub use node_reviews::{NewReview, NodeReview};
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
+pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
 
 /// A fallible `catalog` operation.
