@@ -20,6 +20,7 @@
 mod book_state;
 mod catalog_meta;
 mod db;
+mod effective;
 mod intake;
 mod node_categories;
 mod node_contributors;
@@ -28,8 +29,16 @@ mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
 
+pub use book_state::{BookState, NewBookState};
 pub use db::{Catalog, SCHEMA_VERSION};
+pub use effective::EffectiveAttrs;
 pub use intake::{Intake, IntakeStatus, NewIntake, Registration};
+pub use node_categories::{NewCategory, NodeCategory};
+pub use node_contributors::{NewContributor, NodeContributor};
+pub use node_overrides::{NewOverride, NodeOverride};
+pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
+pub use node_reviews::{NewReview, NodeReview};
+pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 
 /// A fallible `catalog` operation.
 pub type Result<T> = std::result::Result<T, CatalogError>;
