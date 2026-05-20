@@ -24,3 +24,6 @@ text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
+# NFKC for the `normalize` crate. Behaviour-sensitive: a bundled Unicode
+# data update can shift normalized output. Pinned via Cargo.lock.
+unicode-normalization = "0.1"
