@@ -18,6 +18,7 @@
 //! [`Catalog`] handle.
 
 mod actor;
+mod book_pipeline_audit;
 mod book_state;
 mod catalog_meta;
 mod db;
@@ -32,6 +33,7 @@ mod node_reviews;
 mod node_role_takeovers;
 
 pub use actor::ActorKind;
+pub use book_pipeline_audit::{BookPipelineAudit, NewBookPipelineAudit};
 pub use book_state::{BookState, NewBookState};
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::EffectiveAttrs;

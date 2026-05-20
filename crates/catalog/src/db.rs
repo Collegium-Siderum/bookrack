@@ -36,6 +36,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_categories::SPEC,
     &crate::node_reviews::SPEC,
     &crate::metadata_audit::SPEC,
+    &crate::book_pipeline_audit::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -48,30 +49,6 @@ const SPECS: &[&TableSpec] = &[
 /// integer soft reference, keeping the two databases independently
 /// movable and restorable.
 const PENDING_TABLES_DDL: &str = r"
-
--- The six-stage pipeline log. Audit rows outlive the books they describe.
-CREATE TABLE IF NOT EXISTS book_pipeline_audit (
-  audit_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  book_root_id    INTEGER,                  -- soft reference; NULL allowed
-  source_sha256   TEXT,                     -- denormalized so the row survives book deletion
-  stage           TEXT NOT NULL,
-  sub_step        TEXT NOT NULL,
-  outcome         TEXT NOT NULL,            -- ok / fail / partial / skipped
-  adapter         TEXT,
-  metric_summary  TEXT,                     -- JSON
-  error_message   TEXT,
-  duration_ms     INTEGER,
-  ts              TEXT NOT NULL,
-  pipeline_run_id TEXT NOT NULL,            -- ties one pipeline run together
-  actor_kind      TEXT NOT NULL
-    CHECK (actor_kind IN ('human', 'llm', 'import', 'pipeline', 'system')),
-  actor_detail    TEXT,                     -- model name, import source, run id, ...
-  session_id      TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, ts);
-CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
-CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
-CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
 
 -- FRBR identity (lightweight; empty in v1 by decision D3).
 CREATE TABLE IF NOT EXISTS works (
