@@ -31,6 +31,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::book_state::SPEC,
     &crate::node_publication_attrs::SPEC,
     &crate::node_overrides::SPEC,
+    &crate::node_contributors::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -67,22 +68,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Contributor roles (author / translator / editor / ...), many-to-many.
--- The surrogate key lets a later per-contributor edit address one row;
--- the natural key stays UNIQUE.
-CREATE TABLE IF NOT EXISTS node_contributors (
-  contributor_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  node_id        INTEGER NOT NULL,
-  role           TEXT NOT NULL,
-  ordinal        INTEGER NOT NULL,
-  origin         TEXT NOT NULL,             -- extracted / user
-  name           TEXT NOT NULL,
-  nationality    TEXT,
-  inheritable    INTEGER NOT NULL DEFAULT 1,
-  UNIQUE (node_id, role, ordinal, origin)
-);
-CREATE INDEX IF NOT EXISTS idx_contrib_role_name ON node_contributors(role, name);
 
 -- Explicit 'the user has taken over this role' marker, resolving the
 -- ambiguity of an empty user contributor list.
