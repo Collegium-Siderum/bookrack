@@ -32,6 +32,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
         ColumnSpec::int("byte_size"),
         ColumnSpec::text("adapter").comment("extraction adapter, chosen at EXTRACT"),
+        ColumnSpec::text("rbook_version")
+            .comment("rbook extractor version, stamped at EXTRACT; identifies a stale partition"),
         ColumnSpec::text("intake_at")
             .not_null()
             .comment("ISO-8601 UTC"),
@@ -125,6 +127,10 @@ pub struct Intake {
     pub byte_size: Option<i64>,
     /// Extraction adapter chosen for this file.
     pub adapter: Option<String>,
+    /// The `rbook` extractor version that parsed this file, stamped at
+    /// EXTRACT. A mismatch against the current version marks a partition
+    /// stale and due for re-extraction.
+    pub rbook_version: Option<String>,
     /// Registration time, as an ISO-8601 UTC timestamp.
     pub intake_at: String,
     /// Coarse lifecycle state.
@@ -148,6 +154,7 @@ impl Intake {
             format: row.get("format")?,
             byte_size: row.get("byte_size")?,
             adapter: row.get("adapter")?,
+            rbook_version: row.get("rbook_version")?,
             intake_at: row.get("intake_at")?,
             status: decode(row, "status", IntakeStatus::from_db_str)?,
             expression_id: row.get("expression_id")?,
@@ -367,6 +374,7 @@ mod tests {
         assert!(!read.intake_at.is_empty());
         // No write path fills these columns yet; later pipeline stages do.
         assert_eq!(read.adapter, None);
+        assert_eq!(read.rbook_version, None);
         assert_eq!(read.expression_id, None);
         assert_eq!(read.notes, None);
     }

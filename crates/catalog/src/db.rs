@@ -16,7 +16,7 @@ use crate::{CatalogError, Result};
 /// truth and is not rebuildable, so a future schema change will need a
 /// real migration; a mismatch is a hard error rather than a silent
 /// recreation.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// `catalog_meta` key under which [`SCHEMA_VERSION`] is recorded.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
