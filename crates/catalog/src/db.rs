@@ -38,6 +38,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::metadata_audit::SPEC,
     &crate::book_pipeline_audit::SPEC,
     &crate::works::SPEC,
+    &crate::expressions::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -50,20 +51,6 @@ const SPECS: &[&TableSpec] = &[
 /// integer soft reference, keeping the two databases independently
 /// movable and restorable.
 const PENDING_TABLES_DDL: &str = r"
-
--- One manifestation-class of a work: a translation, an edition.
-CREATE TABLE IF NOT EXISTS expressions (
-  expression_id  INTEGER PRIMARY KEY AUTOINCREMENT,
-  work_id        INTEGER,                   -- soft reference to works
-  content_sha256 TEXT,                      -- content signature defining this expression's text
-  kind           TEXT,                      -- translation / edition / printing
-  label          TEXT,
-  notes          TEXT,
-  curated_at     TEXT,
-  curated_by     TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_expr_content
-  ON expressions(content_sha256) WHERE content_sha256 IS NOT NULL;
 
 -- Authoritative log of manual TOC edits. The corpus.db node tree is a
 -- materialized projection of the extracted skeleton plus this overlay,
