@@ -34,6 +34,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_contributors::SPEC,
     &crate::node_role_takeovers::SPEC,
     &crate::node_categories::SPEC,
+    &crate::node_reviews::SPEC,
 ];
 
 /// DDL for the `catalog.db` tables that do not yet have a table module.
@@ -70,15 +71,6 @@ CREATE INDEX IF NOT EXISTS idx_pa_book    ON book_pipeline_audit(book_root_id, t
 CREATE INDEX IF NOT EXISTS idx_pa_run     ON book_pipeline_audit(pipeline_run_id, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_stage   ON book_pipeline_audit(stage, ts);
 CREATE INDEX IF NOT EXISTS idx_pa_outcome ON book_pipeline_audit(outcome, ts);
-
--- Per-node review status.
-CREATE TABLE IF NOT EXISTS node_reviews (
-  node_id     INTEGER PRIMARY KEY,
-  reviewed_at TEXT NOT NULL,
-  reviewed_by TEXT NOT NULL,
-  status      TEXT NOT NULL,                -- clean / needs_work / rejected
-  notes       TEXT
-);
 
 -- Audit trail of user metadata edits; supports history and undo.
 CREATE TABLE IF NOT EXISTS metadata_audit (
