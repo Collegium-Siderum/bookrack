@@ -44,19 +44,30 @@ impl Partition {
 }
 
 impl Corpus {
-    /// Allocate a fresh partition for `intake_id`.
+    /// Allocate the partition for `intake_id`.
     ///
-    /// Partitions are allocated sequentially; index 0 is reserved as a
-    /// sentinel so a zero node id can never name a real book. The root
-    /// node itself is not created here — only its id is reserved, at
-    /// local offset 1 — because the root carries a node type and title
-    /// that only the caller knows.
+    /// The partition index *is* the intake id. Intake and partition are
+    /// one-to-one — one source file, one intake, one book — and an
+    /// intake id is a never-reused surrogate key, so keying the
+    /// partition by it makes a book's partition (and therefore every
+    /// node id in the book) reproduce identically across a rebuild. A
+    /// counter-allocated index would instead drift whenever an earlier
+    /// intake was removed before a rebuild. `intake_id` must be a
+    /// positive `catalog.intake` id; intake ids start at 1, so index 0
+    /// stays free as a sentinel and a zero node id never names a book.
+    ///
+    /// The root node itself is not created here — only its id is
+    /// reserved, at local offset 1 — because the root carries a node
+    /// type and title that only the caller knows.
     ///
     /// Allocation happens exactly once per intake: a second call for an
     /// intake that already owns a partition fails with
     /// [`CorpusError::PartitionAlreadyAllocated`]. Re-ingesting a book
     /// means removing it first, then allocating anew.
     pub fn allocate_partition(&mut self, intake_id: i64) -> Result<Partition> {
+        let idx = PartitionIdx::new(intake_id);
+        let book_root_id = idx.root();
+
         let tx = self.conn.transaction()?;
         let already: Option<i64> = tx
             .query_row(
@@ -69,14 +80,6 @@ impl Corpus {
             return Err(CorpusError::PartitionAlreadyAllocated(intake_id));
         }
 
-        let next_idx: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(partition_idx), 0) + 1 FROM node_id_partitions",
-            [],
-            |row| row.get(0),
-        )?;
-        let idx = PartitionIdx::new(next_idx);
-        let book_root_id = idx.root();
-
         // The freshly allocated partition starts its cursor at offset 2,
         // immediately past the reserved root. The timestamp is generated
         // by SQLite so the whole crate has one timestamp source.
@@ -85,7 +88,7 @@ impl Corpus {
                (partition_idx, book_root_id, intake_id, next_local_id, allocated_at)
              VALUES (?1, ?2, ?3, 2, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
              RETURNING allocated_at",
-            (next_idx, book_root_id.get(), intake_id),
+            (idx.get(), book_root_id.get(), intake_id),
             |row| row.get(0),
         )?;
         tx.commit()?;
@@ -194,17 +197,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn partitions_are_allocated_sequentially_from_one() {
+    fn a_partition_is_keyed_by_its_intake_id() {
         let mut corpus = Corpus::open_in_memory().expect("open");
 
+        // The partition index is the intake id itself, so allocation
+        // order is irrelevant and the mapping survives any rebuild.
         let first = corpus.allocate_partition(10).expect("allocate");
-        assert_eq!(first.idx, PartitionIdx::new(1));
-        assert_eq!(first.book_root_id, PartitionIdx::new(1).root());
+        assert_eq!(first.idx, PartitionIdx::new(10));
+        assert_eq!(first.book_root_id, PartitionIdx::new(10).root());
         assert_eq!(first.next_local_id, 2);
         assert!(!first.allocated_at.is_empty());
 
-        let second = corpus.allocate_partition(20).expect("allocate");
-        assert_eq!(second.idx, PartitionIdx::new(2));
+        // A later, smaller intake id still maps to its own index — the
+        // allocator never derives the index from a running counter.
+        let second = corpus.allocate_partition(3).expect("allocate");
+        assert_eq!(second.idx, PartitionIdx::new(3));
     }
 
     #[test]
