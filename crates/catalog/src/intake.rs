@@ -8,14 +8,63 @@
 //! hash, so re-offering a file that is already known returns the
 //! existing row instead of creating a duplicate.
 
-use rusqlite::{OptionalExtension, Row};
+use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
+use rusqlite::{OptionalExtension, Row, named_params};
 
 use crate::{Catalog, Result};
 
-/// Column list shared by every `intake` `SELECT` and `RETURNING`. Its
-/// order is the contract with [`Intake::from_row`].
-const INTAKE_COLUMNS: &str = "intake_id, source_sha256, stored_path, original_path, \
-     format, byte_size, adapter, intake_at, status, expression_id, notes";
+/// The single source of truth for the `intake` table's schema. Its DDL
+/// is rendered from this spec.
+pub(crate) const SPEC: TableSpec = TableSpec {
+    name: "intake",
+    comment: Some("A file manifestation: the identity anchor of one ingested source file."),
+    columns: &[
+        ColumnSpec::int("intake_id")
+            .pk_autoinc()
+            .comment("long-lived, never reused"),
+        ColumnSpec::text("source_sha256")
+            .not_null()
+            .unique()
+            .comment("whole-file hash; the identity anchor"),
+        ColumnSpec::text("stored_path")
+            .comment("opaque store location; set once the file is stored"),
+        ColumnSpec::text("original_path").comment("forensic: where the file came from"),
+        ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
+        ColumnSpec::int("byte_size"),
+        ColumnSpec::text("adapter").comment("extraction adapter, chosen at EXTRACT"),
+        ColumnSpec::text("intake_at")
+            .not_null()
+            .comment("ISO-8601 UTC"),
+        ColumnSpec::text("status")
+            .not_null()
+            .comment("see IntakeStatus"),
+        ColumnSpec::int("expression_id").comment("FRBR soft reference; backfilled at METADATA"),
+        ColumnSpec::text("notes"),
+    ],
+    composite_pk: None,
+    uniques: &[],
+    table_checks: &[],
+    indexes: &[
+        IndexSpec::on("idx_intake_status", &["status"]),
+        IndexSpec::on("idx_intake_format", &["format"]),
+    ],
+};
+
+/// `INSERT` for a freshly registered intake. The columns absent here —
+/// `intake_id`, `stored_path`, `adapter`, `expression_id`, `notes` — are
+/// autoincremented or filled by later pipeline stages. Callers append a
+/// `RETURNING` clause built from [`SPEC`].
+const INSERT_INTAKE_SQL: &str = "INSERT INTO intake \
+     (source_sha256, original_path, format, byte_size, intake_at, status) \
+     VALUES (:source_sha256, :original_path, :format, :byte_size, \
+             strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), :status)";
+
+/// A `SELECT` of every intake column with `tail` (a `WHERE` clause)
+/// appended. The column list is derived from [`SPEC`], so it can never
+/// drift from the schema.
+fn select_sql(tail: &str) -> String {
+    format!("SELECT {} FROM intake {tail}", SPEC.select_list())
+}
 
 /// Coarse lifecycle state of an intake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,21 +136,22 @@ pub struct Intake {
 }
 
 impl Intake {
-    /// Build an [`Intake`] from a row whose columns are
-    /// [`INTAKE_COLUMNS`].
+    /// Build an [`Intake`] from a row that includes every `intake`
+    /// column. Columns are read by name, so the row's column order is
+    /// irrelevant.
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Intake> {
         Ok(Intake {
-            intake_id: row.get(0)?,
-            source_sha256: row.get(1)?,
-            stored_path: row.get(2)?,
-            original_path: row.get(3)?,
-            format: row.get(4)?,
-            byte_size: row.get(5)?,
-            adapter: row.get(6)?,
-            intake_at: row.get(7)?,
-            status: status_from_row(row, 8)?,
-            expression_id: row.get(9)?,
-            notes: row.get(10)?,
+            intake_id: row.get("intake_id")?,
+            source_sha256: row.get("source_sha256")?,
+            stored_path: row.get("stored_path")?,
+            original_path: row.get("original_path")?,
+            format: row.get("format")?,
+            byte_size: row.get("byte_size")?,
+            adapter: row.get("adapter")?,
+            intake_at: row.get("intake_at")?,
+            status: decode(row, "status", IntakeStatus::from_db_str)?,
+            expression_id: row.get("expression_id")?,
+            notes: row.get("notes")?,
         })
     }
 }
@@ -191,8 +241,8 @@ impl Catalog {
         let tx = self.conn.transaction()?;
         let existing = tx
             .query_row(
-                &format!("SELECT {INTAKE_COLUMNS} FROM intake WHERE source_sha256 = ?1"),
-                [new.source_sha256.as_str()],
+                &select_sql("WHERE source_sha256 = :source_sha256"),
+                named_params! { ":source_sha256": new.source_sha256 },
                 Intake::from_row,
             )
             .optional()?;
@@ -200,22 +250,15 @@ impl Catalog {
             return Ok(Registration::AlreadyPresent(intake));
         }
 
-        // The timestamp is generated by SQLite so the whole crate has
-        // one timestamp source.
         let intake = tx.query_row(
-            &format!(
-                "INSERT INTO intake
-                   (source_sha256, original_path, format, byte_size, intake_at, status)
-                 VALUES (?1, ?2, ?3, ?4, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?5)
-                 RETURNING {INTAKE_COLUMNS}"
-            ),
-            rusqlite::params![
-                new.source_sha256,
-                new.original_path,
-                new.format,
-                new.byte_size,
-                IntakeStatus::Pending.as_str(),
-            ],
+            &format!("{INSERT_INTAKE_SQL} RETURNING {}", SPEC.select_list()),
+            named_params! {
+                ":source_sha256": new.source_sha256,
+                ":original_path": new.original_path,
+                ":format": new.format,
+                ":byte_size": new.byte_size,
+                ":status": IntakeStatus::Pending.as_str(),
+            },
             Intake::from_row,
         )?;
         tx.commit()?;
@@ -227,8 +270,8 @@ impl Catalog {
         let intake = self
             .conn
             .query_row(
-                &format!("SELECT {INTAKE_COLUMNS} FROM intake WHERE source_sha256 = ?1"),
-                [source_sha256],
+                &select_sql("WHERE source_sha256 = :source_sha256"),
+                named_params! { ":source_sha256": source_sha256 },
                 Intake::from_row,
             )
             .optional()?;
@@ -240,8 +283,8 @@ impl Catalog {
         let intake = self
             .conn
             .query_row(
-                &format!("SELECT {INTAKE_COLUMNS} FROM intake WHERE intake_id = ?1"),
-                [intake_id],
+                &select_sql("WHERE intake_id = :intake_id"),
+                named_params! { ":intake_id": intake_id },
                 Intake::from_row,
             )
             .optional()?;
@@ -252,8 +295,8 @@ impl Catalog {
     /// that id existed.
     pub fn set_intake_status(&self, intake_id: i64, status: IntakeStatus) -> Result<bool> {
         let affected = self.conn.execute(
-            "UPDATE intake SET status = ?1 WHERE intake_id = ?2",
-            (status.as_str(), intake_id),
+            "UPDATE intake SET status = :status WHERE intake_id = :intake_id",
+            named_params! { ":status": status.as_str(), ":intake_id": intake_id },
         )?;
         Ok(affected > 0)
     }
@@ -262,28 +305,11 @@ impl Catalog {
     /// Returns whether a row with that id existed.
     pub fn set_stored_path(&self, intake_id: i64, stored_path: &str) -> Result<bool> {
         let affected = self.conn.execute(
-            "UPDATE intake SET stored_path = ?1 WHERE intake_id = ?2",
-            (stored_path, intake_id),
+            "UPDATE intake SET stored_path = :stored_path WHERE intake_id = :intake_id",
+            named_params! { ":stored_path": stored_path, ":intake_id": intake_id },
         )?;
         Ok(affected > 0)
     }
-}
-
-/// Read a `status` cell and decode it to an [`IntakeStatus`]. An
-/// unrecognized string means the database was written by something
-/// other than this crate; surface it as a conversion failure.
-fn status_from_row(row: &Row<'_>, idx: usize) -> rusqlite::Result<IntakeStatus> {
-    let raw: String = row.get(idx)?;
-    IntakeStatus::from_db_str(&raw).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
-            idx,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unknown intake status {raw:?}"),
-            )),
-        )
-    })
 }
 
 #[cfg(test)]
@@ -307,6 +333,42 @@ mod tests {
         assert_eq!(intake.status, IntakeStatus::Pending);
         assert_eq!(intake.stored_path, None);
         assert!(!intake.intake_at.is_empty());
+    }
+
+    #[test]
+    fn an_intake_round_trips_every_field() {
+        let mut catalog = catalog();
+        let registered = catalog
+            .register_intake(
+                &NewIntake::new("sha-rt")
+                    .original_path("incoming/book.epub")
+                    .format("epub")
+                    .byte_size(8192),
+            )
+            .expect("register")
+            .into_intake();
+        let id = registered.intake_id;
+        assert!(catalog.set_stored_path(id, "store/42").expect("set path"));
+        assert!(
+            catalog
+                .set_intake_status(id, IntakeStatus::Extracted)
+                .expect("set status")
+        );
+
+        // Fetch through `from_row` and confirm every column survives.
+        let read = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(read.intake_id, id);
+        assert_eq!(read.source_sha256, "sha-rt");
+        assert_eq!(read.stored_path.as_deref(), Some("store/42"));
+        assert_eq!(read.original_path.as_deref(), Some("incoming/book.epub"));
+        assert_eq!(read.format.as_deref(), Some("epub"));
+        assert_eq!(read.byte_size, Some(8192));
+        assert_eq!(read.status, IntakeStatus::Extracted);
+        assert!(!read.intake_at.is_empty());
+        // No write path fills these columns yet; later pipeline stages do.
+        assert_eq!(read.adapter, None);
+        assert_eq!(read.expression_id, None);
+        assert_eq!(read.notes, None);
     }
 
     #[test]
