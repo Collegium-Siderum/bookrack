@@ -14,8 +14,10 @@
 
 mod common;
 
+use std::collections::BTreeSet;
+
 use bookrack_extract::{
-    BlockKind, ExtractError, ExtractOutcome, Extraction, TextLayerQuality, extract,
+    BlockKind, ContributorRole, ExtractError, ExtractOutcome, Extraction, TextLayerQuality, extract,
 };
 use common::{pdf_fixture, pdfium_available};
 
@@ -180,6 +182,79 @@ fn corrupt_pdf_is_reported_as_a_corrupt_file() {
     assert!(
         matches!(err, ExtractError::CorruptFile { .. }),
         "got {err:?}"
+    );
+}
+
+#[test]
+fn toc_deep_preserves_outline_depth_and_anchors_every_entry() {
+    if !pdfium_available() {
+        return;
+    }
+    let ex = extracted("toc_deep.pdf");
+
+    // The fixture's /Outline carries 18 headings, four levels deep.
+    assert_eq!(ex.toc.entries.len(), 18, "every outline entry is lifted");
+
+    let depths: BTreeSet<u8> = ex.toc.entries.iter().map(|e| e.depth).collect();
+    assert_eq!(
+        depths,
+        BTreeSet::from([0, 1, 2, 3]),
+        "all four outline levels survive flattening",
+    );
+
+    // Every heading has a target page, so every entry anchors.
+    assert!(
+        ex.toc.entries.iter().all(|e| e.start_block.is_some()),
+        "every outline entry anchors to a block",
+    );
+
+    // The handbook runs several pages, so anchoring spreads across
+    // blocks rather than collapsing every entry onto block 0.
+    let anchors: BTreeSet<usize> = ex
+        .toc
+        .entries
+        .iter()
+        .filter_map(|e| e.start_block)
+        .collect();
+    assert!(
+        anchors.len() >= 3,
+        "anchors spread across pages: {anchors:?}"
+    );
+}
+
+#[test]
+fn prose_en_transcribes_clean_info_metadata() {
+    if !pdfium_available() {
+        return;
+    }
+    let ex = extracted("prose_en.pdf");
+
+    assert_eq!(ex.biblio.title.as_deref(), Some("The Printed Page"));
+    // The /Info CreationDate is pinned in the fixture source.
+    assert_eq!(ex.biblio.year, Some(2011));
+    assert_eq!(ex.biblio.contributors.len(), 1, "one /Info author");
+    assert_eq!(ex.biblio.contributors[0].role, ContributorRole::Author);
+}
+
+#[test]
+fn biblio_garbage_transcribes_unreliable_info_verbatim() {
+    if !pdfium_available() {
+        return;
+    }
+    let ex = extracted("biblio_garbage.pdf");
+
+    // /Info is deliberately unreliable: a Word working-file name in the
+    // title slot and a production date unrelated to the publication
+    // year. extract transcribes it as-is — reconciling it against the
+    // page text is the METADATA stage's job, not extract's.
+    assert_eq!(
+        ex.biblio.title.as_deref(),
+        Some("Microsoft Word - chapter_revised_FINAL (2).docx"),
+    );
+    assert_eq!(
+        ex.biblio.year,
+        Some(2023),
+        "the production date is transcribed, not the real publication year",
     );
 }
 

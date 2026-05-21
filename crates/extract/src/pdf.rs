@@ -13,8 +13,11 @@
 //! page, soft-wrapped lines are joined and a blank line ends a
 //! paragraph. This is a deliberately simple first cut; a later commit
 //! replaces it with reconstruction from glyph coordinates, which can
-//! recover multi-column reading order and true paragraph breaks. The
-//! PDF outline and `/Info` bibliography are likewise not lifted yet.
+//! recover multi-column reading order and true paragraph breaks.
+//!
+//! Beyond the body text the adapter lifts the PDF outline (`/Outline`)
+//! into a [`Toc`], anchored to blocks by target page, and the `/Info`
+//! dictionary into a [`Biblio`].
 //!
 //! ## Thread safety
 //!
@@ -38,8 +41,8 @@ use std::sync::{Mutex, OnceLock};
 use pdfium_render::prelude::*;
 
 use crate::contract::{
-    Biblio, Block, BlockKind, ExtractError, ExtractOutcome, Extraction, Provenance, SkippedUnit,
-    Toc,
+    Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, ExtractOutcome,
+    Extraction, Provenance, SkippedUnit, Toc, TocEntry,
 };
 use crate::quality::{self, QualityDecision};
 
@@ -143,12 +146,13 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
         }
     }
 
+    let toc = build_toc(&document, &blocks);
+    let biblio = build_biblio(&read_info_tags(&document));
+
     Ok(ExtractOutcome::Extracted(Extraction {
         blocks,
-        // The PDF outline and `/Info` dictionary graduate in the next
-        // commit; until then a PDF carries no TOC or bibliography.
-        toc: Toc::default(),
-        biblio: Biblio::default(),
+        toc,
+        biblio,
         provenance: Provenance {
             adapter: "pdf".to_string(),
             extractor_version: extractor_version(),
@@ -171,6 +175,158 @@ fn extractor_version() -> String {
          pdf-adapter={PDF_ADAPTER_VERSION};quality={};para=line-heuristic",
         quality::QUALITY_VERSION,
     )
+}
+
+// --- TOC: the PDF outline ------------------------------------------------
+
+/// Guards against a pathologically deep or cyclic outline graph.
+const MAX_TOC_DEPTH: u8 = 30;
+const MAX_TOC_ENTRIES: usize = 50_000;
+
+/// Build the [`Toc`] from the PDF outline (`/Outline`), anchoring each
+/// entry to a block. An outline entry points at a *target page*, not at
+/// a text fragment, so it is anchored to the first block on (or after)
+/// that page.
+fn build_toc(document: &PdfDocument, blocks: &[Block]) -> Toc {
+    let mut raw: Vec<(String, u8, Option<usize>)> = Vec::new();
+    if let Some(root) = document.bookmarks().root() {
+        walk_bookmarks(root, 0, &mut raw);
+    }
+
+    let entries = raw
+        .into_iter()
+        .map(|(label, depth, page)| TocEntry {
+            label,
+            depth,
+            start_block: page.and_then(|p| anchor_block(blocks, p)),
+        })
+        .collect();
+    Toc { entries }
+}
+
+/// Depth-first prefix walk of the outline tree. Siblings are walked
+/// iteratively (a flat outline can hold thousands of them); only
+/// descent recurses, so recursion depth is bounded by tree depth.
+fn walk_bookmarks(first: PdfBookmark, depth: u8, out: &mut Vec<(String, u8, Option<usize>)>) {
+    if depth > MAX_TOC_DEPTH {
+        return;
+    }
+    let mut node = Some(first);
+    while let Some(current) = node {
+        if out.len() >= MAX_TOC_ENTRIES {
+            return;
+        }
+        out.push((
+            current.title().unwrap_or_default(),
+            depth,
+            bookmark_target_page(&current),
+        ));
+        if let Some(child) = current.first_child() {
+            walk_bookmarks(child, depth + 1, out);
+        }
+        node = current.next_sibling();
+    }
+}
+
+/// Resolve the 0-based target page of an outline entry. Pdfium exposes
+/// the page either through a direct destination or, for a `GoTo`
+/// action, through the action's destination — both are tried.
+fn bookmark_target_page(node: &PdfBookmark) -> Option<usize> {
+    if let Some(dest) = node.destination()
+        && let Ok(index) = dest.page_index()
+    {
+        return Some(index as usize);
+    }
+    if let Some(action) = node.action()
+        && let Some(local) = action.as_local_destination_action()
+        && let Ok(dest) = local.destination()
+        && let Ok(index) = dest.page_index()
+    {
+        return Some(index as usize);
+    }
+    None
+}
+
+/// The block an outline entry resolves to: the first block whose source
+/// page is the target page or later. Anchoring forward (rather than
+/// requiring an exact page) keeps the entry resolvable when its target
+/// page carries no extracted block — e.g. a part-title or blank page.
+fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
+    blocks
+        .iter()
+        .position(|b| b.source_unit as usize >= target_page)
+}
+
+// --- biblio: the /Info dictionary ----------------------------------------
+
+/// Read every populated `/Info` tag, verbatim and trimmed.
+fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
+    use PdfDocumentMetadataTagType as Tag;
+    let metadata = document.metadata();
+    let mut tags = Vec::new();
+    for (name, tag) in [
+        ("Title", Tag::Title),
+        ("Author", Tag::Author),
+        ("Subject", Tag::Subject),
+        ("Keywords", Tag::Keywords),
+        ("Creator", Tag::Creator),
+        ("Producer", Tag::Producer),
+        ("CreationDate", Tag::CreationDate),
+        ("ModificationDate", Tag::ModificationDate),
+    ] {
+        if let Some(found) = metadata.get(tag) {
+            let value = found.value().trim().to_string();
+            if !value.is_empty() {
+                tags.push((name, value));
+            }
+        }
+    }
+    tags
+}
+
+/// Map the `/Info` tags onto the `Biblio` contract. A PDF's `/Info`
+/// only ever carries title, author, and dates: publisher, ISBN,
+/// series, and language have no `/Info` field and stay absent. The
+/// author string is transcribed as a single contributor — `/Info`
+/// gives no structure to split it on reliably.
+///
+/// `/Info` is transcribed faithfully, garbage and all: reconciling it
+/// against the page text is the METADATA stage's job, not extract's.
+fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
+    let find = |key: &str| {
+        info_tags
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.clone())
+    };
+
+    let mut contributors = Vec::new();
+    if let Some(author) = find("Author") {
+        contributors.push(Contributor {
+            name: author,
+            role: ContributorRole::Author,
+        });
+    }
+
+    Biblio {
+        title: find("Title"),
+        year: find("CreationDate").and_then(|d| parse_pdf_year(&d)),
+        contributors,
+        ..Biblio::default()
+    }
+}
+
+/// Extract the year from a PDF date string. PDF dates are formatted
+/// `D:YYYYMMDDHHmmSSOHH'mm'`; only the leading `YYYY` is needed.
+fn parse_pdf_year(date: &str) -> Option<i32> {
+    let digits: String = date.trim_start_matches("D:").chars().take(4).collect();
+    if digits.len() == 4 && digits.bytes().all(|b| b.is_ascii_digit()) {
+        let year: i32 = digits.parse().ok()?;
+        if (1000..=9999).contains(&year) {
+            return Some(year);
+        }
+    }
+    None
 }
 
 /// Borrow the process-wide PDFium handle, loading the native library on
