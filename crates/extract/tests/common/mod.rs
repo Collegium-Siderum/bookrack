@@ -15,7 +15,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use bookrack_extract::{ExtractOutcome, Extraction, extract};
+use bookrack_extract::{ExtractError, ExtractOutcome, Extraction, extract};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -27,6 +27,32 @@ pub fn extracted(path: &Path) -> Extraction {
     match extract(path) {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         other => panic!("expected a usable text layer, got {other:?}"),
+    }
+}
+
+/// Path to a fixture under `tests/fixtures/pdf/`.
+pub fn pdf_fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pdf")
+        .join(name)
+}
+
+/// Whether the PDFium native library can be loaded. PDF tests call this
+/// first and skip — rather than fail — when it returns false, so a
+/// contributor without the binary still gets a green `cargo test`. CI
+/// always provides the binary (see the workflow), so coverage there is
+/// never silently lost.
+///
+/// The probe extracts a known-good fixture: a valid PDF can fail with
+/// [`ExtractError::Io`] only when PDFium itself could not be loaded, so
+/// that error uniquely identifies the "binary absent" case.
+pub fn pdfium_available() -> bool {
+    match extract(&pdf_fixture("prose_en.pdf")) {
+        Err(ExtractError::Io(e)) => {
+            eprintln!("skipping PDF test: PDFium native library unavailable ({e})");
+            false
+        }
+        _ => true,
     }
 }
 

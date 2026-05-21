@@ -16,6 +16,7 @@ mod epub;
 mod html;
 mod html_parse;
 mod pdf;
+mod quality;
 mod txt;
 
 pub use contract::*;
@@ -36,6 +37,9 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
         detect::Format::Epub => epub::extract(path).map(ExtractOutcome::Extracted),
         detect::Format::Html => html::extract(path).map(ExtractOutcome::Extracted),
         detect::Format::Txt => txt::extract(path).map(ExtractOutcome::Extracted),
+        // The PDF adapter resolves the three-state outcome itself — a
+        // PDF can route to OCR — so it is not wrapped like the others.
+        detect::Format::Pdf => pdf::extract(path),
         other => Err(ExtractError::UnsupportedFormat {
             detected: other.label().to_string(),
         }),
