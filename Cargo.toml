@@ -24,7 +24,13 @@ lancedb = "0.29"
 arrow-array = "58"
 arrow-schema = "58"
 futures = "0.3"
+# EPUB container access for the `extract` crate. Behaviour-sensitive:
+# the spine and TOC it yields shape block boundaries, so its version is
+# part of the stamped `extractor_version`.
 rbook = "0.7"
+# HTML / XHTML parsing for `extract`, behaviour-sensitive for the same
+# reason: a parser change can shift where blocks begin and end.
+scraper = "0.24"
 text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
@@ -36,3 +42,6 @@ unicode-normalization = "0.1"
 dotenvy = "0.15"
 # Temp directories for tests that need an on-disk store (e.g. LanceDB).
 tempfile = "3"
+# Builds throwaway EPUB archives from unzipped fixtures in `extract`
+# tests, so the fixtures stay reviewable as plain files in the repo.
+zip = "2"

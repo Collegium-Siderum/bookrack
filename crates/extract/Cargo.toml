@@ -6,5 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rbook.workspace = true
+scraper.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip.workspace = true
