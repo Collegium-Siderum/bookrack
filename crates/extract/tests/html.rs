@@ -3,9 +3,12 @@
 //! Integration tests for the standalone-HTML adapter, driven by a
 //! fixture under `tests/fixtures/html/`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use bookrack_extract::{BlockKind, ContributorRole, extract};
+use common::extracted;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -15,7 +18,7 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn standalone_infers_toc_from_heading_hierarchy() {
-    let ex = extract(&fixture("standalone.html")).expect("html extracts");
+    let ex = extracted(&fixture("standalone.html"));
 
     // No nav document: the TOC is inferred from <h1>-<h6>, depth taken
     // straight from the heading level.
@@ -37,7 +40,7 @@ fn standalone_infers_toc_from_heading_hierarchy() {
 
 #[test]
 fn standalone_reads_head_metadata() {
-    let ex = extract(&fixture("standalone.html")).expect("html extracts");
+    let ex = extracted(&fixture("standalone.html"));
     let b = &ex.biblio;
 
     assert_eq!(b.title.as_deref(), Some("A Standalone Synthetic Document"));

@@ -15,7 +15,36 @@
 
 use serde::Serialize;
 
-/// One source file, fully extracted. The deliverable of an adapter.
+/// What extraction yielded for one source file — the deliverable of an
+/// adapter.
+///
+/// A born-digital format (EPUB / HTML / TXT) always yields
+/// [`ExtractOutcome::Extracted`]: it carries a structured text layer by
+/// construction. A PDF may instead carry no usable text layer — a bare
+/// scan, or a layer too corrupt to use — and then yields
+/// [`ExtractOutcome::NeedsOcr`], routing the file onto the OCR path.
+///
+/// There is deliberately no third "cannot be handled at all" variant.
+/// Such a state was considered and consciously deferred: the licence
+/// and feasibility review judged every format in scope either
+/// extractable or OCR-able, and no file in the corpus needs it. It
+/// should be introduced only when a real format arrives that is
+/// neither — not as empty scaffolding before then.
+// The two variants differ greatly in size, but the large one is the
+// overwhelmingly common result and an `ExtractOutcome` is produced and
+// consumed one at a time, never held in bulk — boxing would only add an
+// allocation to the hot path for no aggregate-memory gain.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ExtractOutcome {
+    /// A usable text layer was extracted.
+    Extracted(Extraction),
+    /// No usable text layer — absent, too sparse, or corrupt. The file
+    /// must be routed to OCR; `reason` records why, for the audit log.
+    NeedsOcr { reason: String },
+}
+
+/// One source file, fully extracted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Extraction {
     /// Content blocks in reading order.
@@ -45,7 +74,8 @@ pub struct Block {
     /// (that is STRUCTURE's job and carries its own version dimension).
     pub text: String,
     /// Which physical sub-unit of the source this block came from.
-    /// For EPUB, the spine-document index (the reader position).
+    /// For EPUB, the spine-document index (the reader position); for
+    /// PDF, the 0-based page index.
     pub source_unit: u32,
 }
 
@@ -119,6 +149,15 @@ pub enum ContributorRole {
     Other,
 }
 
+/// One source sub-unit that extraction skipped rather than aborting on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SkippedUnit {
+    /// 0-based index of the skipped sub-unit — for PDF, the page index.
+    pub index: u32,
+    /// Why it was skipped, for the audit log.
+    pub reason: String,
+}
+
 /// How the file was extracted, plus the boundary verdict on its text
 /// layer (the extract / OCR seam).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -130,9 +169,19 @@ pub struct Provenance {
     pub extractor_version: String,
     /// The text-layer quality verdict.
     pub text_layer_quality: TextLayerQuality,
+    /// Sub-units skipped during extraction (a malformed PDF page, say)
+    /// rather than aborting the whole file. Empty for born-digital
+    /// formats, which abort on any sub-unit failure.
+    pub skipped_units: Vec<SkippedUnit>,
 }
 
-/// The extract / OCR boundary verdict for a source file.
+/// The quality grade of an extracted text layer.
+///
+/// This enum describes only text that was *kept*: there is no
+/// "needs OCR" grade. A file with no usable text layer never produces
+/// an [`Extraction`] at all — it yields [`ExtractOutcome::NeedsOcr`] —
+/// so by the time a `TextLayerQuality` is stamped, the text is already
+/// known to be worth keeping; the grade only says how much to trust it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextLayerQuality {
@@ -143,27 +192,34 @@ pub enum TextLayerQuality {
     /// A text layer present but of doubtful quality — extracted, but the
     /// caller should treat it with low confidence.
     Doubtful,
-    /// No usable text layer — the file should be routed to OCR instead.
-    NeedsOcr,
 }
 
-/// Why extraction failed.
+/// Why extraction failed outright.
 ///
-/// Each variant is a distinct failure the caller can react to
-/// separately, rather than a single opaque error. Extraction fails
-/// loudly: a broken sub-unit aborts the whole book rather than silently
-/// dropping chapters.
+/// Each variant is a distinct *structural* failure the caller can react
+/// to separately: the file as a whole cannot be opened or read, so the
+/// whole book aborts. A failure confined to one sub-unit is not an
+/// error — that sub-unit is skipped and recorded in
+/// [`Provenance::skipped_units`], and extraction continues. Born-digital
+/// formats record no skips: a missing spine document means the book is
+/// genuinely broken, so they abort on any sub-unit failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
     /// No adapter for this file's format.
     #[error("unsupported format: {detected}")]
     UnsupportedFormat { detected: String },
-    /// The file could not be read or is not a valid archive.
-    #[error("corrupt archive: {0}")]
-    CorruptArchive(String),
+    /// The file could not be read, decompressed, or parsed as the
+    /// container its extension claims — corrupt at the file level.
+    #[error("corrupt file: {detail}")]
+    CorruptFile { detail: String },
     /// The container opened but is structurally broken.
     #[error("malformed package: {detail}")]
     MalformedPackage { detail: String },
+    /// The file is encrypted with a digital-rights-management scheme.
+    /// This project does not decrypt: such a file is rejected outright
+    /// rather than partially read.
+    #[error("file is DRM-protected")]
+    DrmProtected,
     /// Extraction produced zero body blocks — a real failure, since a
     /// book with no prose is not an empty success.
     #[error("extraction produced no body blocks")]

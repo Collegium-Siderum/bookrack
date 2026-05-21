@@ -3,9 +3,12 @@
 //! Integration tests for the plain-text adapter, driven by a fixture
 //! under `tests/fixtures/txt/`.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 
 use bookrack_extract::{BlockKind, extract};
+use common::extracted;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -15,7 +18,7 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn utf8_text_yields_blocks_and_a_chapter_toc() {
-    let ex = extract(&fixture("web_novel.txt")).expect("txt extracts");
+    let ex = extracted(&fixture("web_novel.txt"));
 
     // Volume markers nest at depth 0, chapter markers at depth 1.
     let depths: Vec<u8> = ex.toc.entries.iter().map(|e| e.depth).collect();
@@ -38,8 +41,8 @@ fn legacy_gbk_text_is_decoded_via_gb18030() {
     let path = dir.path().join("legacy.txt");
     std::fs::write(&path, &gbk).expect("write gbk file");
 
-    let from_gbk = extract(&path).expect("gbk txt extracts");
-    let from_utf8 = extract(&fixture("web_novel.txt")).expect("utf-8 txt extracts");
+    let from_gbk = extracted(&path);
+    let from_utf8 = extracted(&fixture("web_novel.txt"));
 
     assert_eq!(from_gbk.blocks, from_utf8.blocks);
     assert_eq!(from_gbk.toc, from_utf8.toc);

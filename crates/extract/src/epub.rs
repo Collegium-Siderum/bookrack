@@ -29,7 +29,9 @@ const EXTRACTOR_VERSION: &str = "rbook=0.7;scraper=0.24;epub-adapter=1";
 
 /// Extract one EPUB file.
 pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
-    let epub = Epub::open(path).map_err(|e| ExtractError::CorruptArchive(e.to_string()))?;
+    let epub = Epub::open(path).map_err(|e| ExtractError::CorruptFile {
+        detail: e.to_string(),
+    })?;
 
     // --- spine documents -> ordered blocks + anchoring indexes -------
     let mut blocks: Vec<Block> = Vec::new();
@@ -79,6 +81,9 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
             adapter: "epub".to_string(),
             extractor_version: EXTRACTOR_VERSION.to_string(),
             text_layer_quality: TextLayerQuality::BornDigital,
+            // Born-digital: a broken spine document aborts the whole
+            // file (see ExtractError), so nothing is ever skipped.
+            skipped_units: Vec::new(),
         },
     })
 }

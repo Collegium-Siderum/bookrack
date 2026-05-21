@@ -7,12 +7,28 @@
 //! text in the repo. rbook needs a real archive, so each test packs its
 //! fixture into a throwaway `.epub` on the fly.
 
+// Each integration-test file is its own crate and uses a different
+// subset of these helpers, so some are unused per crate by design.
+#![allow(dead_code)]
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use bookrack_extract::{ExtractOutcome, Extraction, extract};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
+
+/// Extract a fixture and unwrap the [`ExtractOutcome::Extracted`] case,
+/// failing the test on an OCR-routing outcome or an error. Born-digital
+/// fixtures always carry a usable text layer, so this keeps the success
+/// assertion sites uncluttered.
+pub fn extracted(path: &Path) -> Extraction {
+    match extract(path) {
+        Ok(ExtractOutcome::Extracted(extraction)) => extraction,
+        other => panic!("expected a usable text layer, got {other:?}"),
+    }
+}
 
 /// A fixture packed into a temporary `.epub`. Holds the temp directory
 /// open for the lifetime of the value, so `path` stays valid.

@@ -6,12 +6,12 @@
 mod common;
 
 use bookrack_extract::{BlockKind, ContributorRole, ExtractError, extract};
-use common::pack_epub;
+use common::{extracted, pack_epub};
 
 #[test]
 fn omnibus_keeps_toc_hierarchy_and_anchors_every_entry() {
     let epub = pack_epub("omnibus");
-    let ex = extract(&epub.path).expect("omnibus extracts");
+    let ex = extracted(&epub.path);
 
     // The nav nests part > work > chapter; the depth tags must survive,
     // since a flattened TOC would lose the middle level.
@@ -32,7 +32,7 @@ fn omnibus_keeps_toc_hierarchy_and_anchors_every_entry() {
 #[test]
 fn omnibus_classifies_footnote_and_caption_blocks() {
     let epub = pack_epub("omnibus");
-    let ex = extract(&epub.path).expect("omnibus extracts");
+    let ex = extracted(&epub.path);
 
     let kinds: Vec<BlockKind> = ex.blocks.iter().map(|b| b.kind).collect();
     assert!(kinds.contains(&BlockKind::Footnote), "a footnote block");
@@ -56,7 +56,7 @@ fn extraction_is_deterministic() {
 #[test]
 fn flat_transcribes_bibliographic_metadata() {
     let epub = pack_epub("flat");
-    let ex = extract(&epub.path).expect("flat extracts");
+    let ex = extracted(&epub.path);
     let b = &ex.biblio;
 
     assert_eq!(b.title.as_deref(), Some("A Flat Single Work"));
@@ -83,14 +83,14 @@ fn headings_with_no_prose_is_empty_extraction() {
 }
 
 #[test]
-fn a_non_archive_is_a_corrupt_archive() {
+fn a_non_archive_is_a_corrupt_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("broken.epub");
     std::fs::write(&path, b"this is plainly not a zip archive").expect("write");
 
     let err = extract(&path).expect_err("not an archive");
     assert!(
-        matches!(err, ExtractError::CorruptArchive(_)),
+        matches!(err, ExtractError::CorruptFile { .. }),
         "got {err:?}"
     );
 }

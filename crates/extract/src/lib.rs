@@ -21,16 +21,20 @@ pub use contract::*;
 
 use std::path::Path;
 
-/// Extract one source file into the format-neutral [`Extraction`].
+/// Extract one source file into an [`ExtractOutcome`].
 ///
-/// The format is detected from the file extension. An unrecognized
-/// format, or one not yet supported, is reported as
-/// [`ExtractError::UnsupportedFormat`] rather than guessed at.
-pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
+/// The format is detected from the file extension. The outcome is
+/// three-state: a usable text layer yields [`ExtractOutcome::Extracted`]
+/// with the format-neutral [`Extraction`]; a file with a text layer too
+/// poor to use — only PDF can produce this today — yields
+/// [`ExtractOutcome::NeedsOcr`] to route the file onto the OCR path; and
+/// a structural failure (an unreadable file, an unsupported format) is
+/// an [`ExtractError`].
+pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
     match detect::detect(path) {
-        detect::Format::Epub => epub::extract(path),
-        detect::Format::Html => html::extract(path),
-        detect::Format::Txt => txt::extract(path),
+        detect::Format::Epub => epub::extract(path).map(ExtractOutcome::Extracted),
+        detect::Format::Html => html::extract(path).map(ExtractOutcome::Extracted),
+        detect::Format::Txt => txt::extract(path).map(ExtractOutcome::Extracted),
         other => Err(ExtractError::UnsupportedFormat {
             detected: other.label().to_string(),
         }),

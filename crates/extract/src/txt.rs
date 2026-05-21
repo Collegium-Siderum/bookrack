@@ -87,6 +87,8 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
             // guess yields different text — so it is stamped here.
             extractor_version: format!("{ADAPTER_VERSION};encoding={encoding}"),
             text_layer_quality: TextLayerQuality::BornDigital,
+            // A plain-text file is one source unit; nothing to skip.
+            skipped_units: Vec::new(),
         },
     })
 }

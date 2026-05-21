@@ -59,6 +59,9 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
             adapter: "html".to_string(),
             extractor_version: EXTRACTOR_VERSION.to_string(),
             text_layer_quality: TextLayerQuality::BornDigital,
+            // A standalone HTML file is one source unit; there is no
+            // sub-unit to skip.
+            skipped_units: Vec::new(),
         },
     })
 }
