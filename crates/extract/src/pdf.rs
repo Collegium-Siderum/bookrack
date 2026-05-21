@@ -9,11 +9,12 @@
 //! layer becomes an [`Extraction`] — otherwise the file is routed to
 //! OCR via [`ExtractOutcome::NeedsOcr`].
 //!
-//! Paragraphs are reconstructed by a blank-line heuristic: within a
-//! page, soft-wrapped lines are joined and a blank line ends a
-//! paragraph. This is a deliberately simple first cut; a later commit
-//! replaces it with reconstruction from glyph coordinates, which can
-//! recover multi-column reading order and true paragraph breaks.
+//! Paragraphs are reconstructed from glyph coordinates: text segments
+//! are grouped into rows, columns are detected by the gutter between
+//! them, and each column's lines are split into paragraphs by spacing
+//! and first-line indentation. A full-width element above a two-column
+//! body reads before the columns; running headers, footers, and page
+//! numbers are dropped.
 //!
 //! Beyond the body text the adapter lifts the PDF outline (`/Outline`)
 //! into a [`Toc`], anchored to blocks by target page, and the `/Info`
@@ -35,6 +36,7 @@
 //! another. EPUB / HTML / TXT extraction touches no PDFium and stays
 //! genuinely parallel.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -49,6 +51,10 @@ use crate::quality::{self, QualityDecision};
 /// Behaviour-sensitive version of this adapter. Bump when a change here
 /// shifts block boundaries or the extraction outcome.
 const PDF_ADAPTER_VERSION: u32 = 1;
+
+/// Bump on any change to coordinate paragraph reconstruction: it
+/// decides block boundaries, so a change must re-extract downstream.
+const COORDS_VERSION: u32 = 1;
 
 /// The pinned PDFium native build (see `PDFIUM_VERSION.md`). A different
 /// PDFium build can extract text differently, so the build number is
@@ -95,13 +101,14 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
         }
     };
 
-    // Pull each page's text. A page whose text pdfium cannot read is
-    // skipped and recorded — not fatal: the rest of the book is still
-    // worth extracting (see `ExtractError`'s contract). `page_numbers`
-    // keeps each kept page's index so a block's `source_unit` stays the
-    // true page number even when an earlier page was skipped.
+    // Reconstruct each page's paragraphs from glyph coordinates. A page
+    // whose text pdfium cannot read is skipped and recorded — not fatal:
+    // the rest of the book is still worth extracting (see the
+    // `ExtractError` contract). Each kept page keeps its own index, so a
+    // block's `source_unit` stays the true page number even when an
+    // earlier page was skipped.
     let mut pages_text: Vec<String> = Vec::new();
-    let mut page_numbers: Vec<u32> = Vec::new();
+    let mut pages: Vec<PageParagraphs> = Vec::new();
     let mut skipped_units: Vec<SkippedUnit> = Vec::new();
     let mut image_pages = 0usize;
     for (index, page) in document.pages().iter().enumerate() {
@@ -115,8 +122,12 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
                 {
                     image_pages += 1;
                 }
+                let paragraphs = reconstruct_by_coords(&text, page.width().value);
                 pages_text.push(text.all());
-                page_numbers.push(index);
+                pages.push(PageParagraphs {
+                    page: index,
+                    paragraphs,
+                });
             }
             Err(e) => skipped_units.push(SkippedUnit {
                 index,
@@ -135,16 +146,7 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
         QualityDecision::Keep { grade, .. } => grade,
     };
 
-    let mut blocks: Vec<Block> = Vec::new();
-    for (text, &page) in pages_text.iter().zip(&page_numbers) {
-        for paragraph in split_paragraphs(text) {
-            blocks.push(Block {
-                kind: BlockKind::Body,
-                text: paragraph,
-                source_unit: page,
-            });
-        }
-    }
+    let blocks = build_blocks(pages);
 
     let toc = build_toc(&document, &blocks);
     let biblio = build_biblio(&read_info_tags(&document));
@@ -166,13 +168,11 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
 ///
 /// It concatenates every dimension a downstream re-extraction must
 /// react to: the `pdfium-render` crate, the pinned PDFium native build,
-/// this adapter, and the quality gate. `para=line-heuristic` records
-/// that paragraphs come from the blank-line heuristic — coordinate
-/// reconstruction replaces that marker when it lands.
+/// this adapter, the quality gate, and coordinate reconstruction.
 fn extractor_version() -> String {
     format!(
         "pdfium-render=0.9;pdfium-bin={PDFIUM_BUILD};\
-         pdf-adapter={PDF_ADAPTER_VERSION};quality={};para=line-heuristic",
+         pdf-adapter={PDF_ADAPTER_VERSION};quality={};coords={COORDS_VERSION}",
         quality::QUALITY_VERSION,
     )
 }
@@ -361,25 +361,383 @@ fn load_pdfium() -> Result<Pdfium, String> {
         })
 }
 
-// --- paragraph reconstruction: line heuristic ----------------------------
+// --- block assembly ------------------------------------------------------
 
-/// Split one page's extracted text into paragraphs. A blank line ends a
-/// paragraph; within a paragraph, soft-wrapped lines are joined —
-/// without a space between two CJK characters, with a space otherwise,
-/// and de-hyphenating a Latin word broken across the line break.
-fn split_paragraphs(page: &str) -> Vec<String> {
+/// One page's reconstructed paragraphs, tagged with its page number.
+struct PageParagraphs {
+    page: u32,
+    paragraphs: Vec<String>,
+}
+
+/// The longest a paragraph can be and still be taken for a running
+/// header / footer. Body paragraphs are far longer, so the cap keeps a
+/// genuine paragraph that happens to recur from being mistaken for one.
+const RUNNING_ELEMENT_MAX_CHARS: usize = 80;
+
+/// The longest a paragraph can be and still be taken for a bare page
+/// number.
+const PAGE_NUMBER_MAX_CHARS: usize = 6;
+
+/// Flatten per-page paragraphs into ordered body blocks, dropping the
+/// running headers, footers, and page numbers that pollute the text.
+///
+/// Coordinate reconstruction isolates these as their own short
+/// paragraphs but cannot tell they are not body text; that judgement
+/// needs the whole document. A running header or footer is a short
+/// paragraph repeated verbatim across pages; a page number is a short
+/// run of digits.
+fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
+    // Which pages each short paragraph appears on. A short paragraph
+    // present on two or more pages is a running header or footer.
+    let mut pages_of: HashMap<&str, HashSet<u32>> = HashMap::new();
+    for page in &pages {
+        for paragraph in &page.paragraphs {
+            if paragraph.chars().count() <= RUNNING_ELEMENT_MAX_CHARS {
+                pages_of
+                    .entry(paragraph.as_str())
+                    .or_default()
+                    .insert(page.page);
+            }
+        }
+    }
+    let is_running = |text: &str| pages_of.get(text).is_some_and(|p| p.len() >= 2);
+
+    let mut blocks = Vec::new();
+    for page in &pages {
+        for paragraph in &page.paragraphs {
+            if is_page_number(paragraph) || is_running(paragraph) {
+                continue;
+            }
+            blocks.push(Block {
+                kind: BlockKind::Body,
+                text: paragraph.clone(),
+                source_unit: page.page,
+            });
+        }
+    }
+    blocks
+}
+
+/// Whether a paragraph is a bare page number — a short run of digits
+/// that coordinate reconstruction isolated as its own line.
+fn is_page_number(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= PAGE_NUMBER_MAX_CHARS
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+}
+
+// --- paragraph reconstruction from glyph coordinates ---------------------
+
+/// One pdfium text segment's geometry: a run of characters sharing a
+/// baseline and font, positioned in page coordinates (origin
+/// bottom-left, y increasing upward). The segment text is deliberately
+/// not kept — see [`build_line`].
+struct Seg {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+impl Seg {
+    fn cy(&self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
+
+    fn height(&self) -> f32 {
+        (self.top - self.bottom).abs()
+    }
+}
+
+/// One reconstructed line of text, with the page-coordinate extent the
+/// paragraph splitter needs.
+struct Line {
+    text: String,
+    left: f32,
+    cy: f32,
+}
+
+/// Reconstruct a page's paragraphs from text geometry: group segments
+/// into rows, detect columns, then split each column's lines into
+/// paragraphs by spacing and indentation.
+fn reconstruct_by_coords(text: &PdfPageText, page_width: f32) -> Vec<String> {
+    let mut segments: Vec<Seg> = Vec::new();
+    for segment in text.segments().iter() {
+        if segment.text().trim().is_empty() {
+            continue;
+        }
+        let bounds = segment.bounds();
+        segments.push(Seg {
+            left: bounds.left().value,
+            right: bounds.right().value,
+            top: bounds.top().value,
+            bottom: bounds.bottom().value,
+        });
+    }
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    // A reference glyph height drives every later tolerance.
+    let heights: Vec<f32> = segments.iter().map(Seg::height).collect();
+    let unit = {
+        let m = median(&heights);
+        if m > 0.1 { m } else { 10.0 }
+    };
+
+    // Rows first, then columns: a row groups every segment on one
+    // baseline across the full page width, so column detection can ask
+    // the robust question "do whole rows cross this x?" rather than the
+    // segment-granularity-dependent "do segments cross this x?".
+    let rows = group_rows(&segments, unit);
+    let columns = detect_columns(&rows, page_width);
+
+    // On a two-column page, a row whose text spans the gutter is a
+    // full-width element — a masthead title, a spanning abstract — not
+    // column body. It reads as its own band before either column; left
+    // in the column pass it would be sliced at the gutter and its halves
+    // scattered down the two columns.
+    let gutter = (columns.len() == 2).then(|| columns[1].0);
+
+    let mut paragraphs = Vec::new();
+    if let Some(gutter) = gutter {
+        let band: Vec<Line> = rows
+            .iter()
+            .filter(|row| spans_gutter(row, gutter))
+            .map(|row| build_line(row, text))
+            .filter(|line| !line.text.is_empty())
+            .collect();
+        paragraphs.extend(lines_to_paragraphs(&band, unit));
+    }
+
+    for (low, high) in &columns {
+        let mut lines: Vec<Line> = Vec::new();
+        for row in &rows {
+            // A full-width row belongs to the band emitted above, never
+            // to a column.
+            if gutter.is_some_and(|g| spans_gutter(row, g)) {
+                continue;
+            }
+            let line_segs: Vec<&Seg> = row
+                .iter()
+                .copied()
+                .filter(|s| {
+                    let centre = (s.left + s.right) / 2.0;
+                    centre >= *low && centre <= *high
+                })
+                .collect();
+            if line_segs.is_empty() {
+                continue;
+            }
+            let line = build_line(&line_segs, text);
+            if !line.text.is_empty() {
+                lines.push(line);
+            }
+        }
+        paragraphs.extend(lines_to_paragraphs(&lines, unit));
+    }
+    paragraphs
+}
+
+/// Whether a row's text crosses the column gutter — the mark of a
+/// full-width element on an otherwise two-column page.
+fn spans_gutter(row: &[&Seg], gutter: f32) -> bool {
+    row.iter().any(|s| s.left < gutter && s.right > gutter)
+}
+
+/// Detect the column layout by scanning for a vertical gutter: the x
+/// position crossed by the fewest *rows*. A genuine two-column page has
+/// a band no row crosses; on a single-column page every body row runs
+/// the full width, so every interior x is crossed. Counting rows, not
+/// segments, makes this robust to how finely pdfium happens to split a
+/// line into segments.
+fn detect_columns(rows: &[Vec<&Seg>], page_width: f32) -> Vec<(f32, f32)> {
+    let mut content_left = f32::MAX;
+    let mut content_right = f32::MIN;
+    for row in rows {
+        for s in row {
+            content_left = content_left.min(s.left);
+            content_right = content_right.max(s.right);
+        }
+    }
+    let whole = vec![(content_left, content_right)];
+
+    let count = rows.len();
+    if count < 6 || page_width <= 0.0 {
+        return whole;
+    }
+
+    let (low, high) = (page_width * 0.30, page_width * 0.70);
+    let steps = 40;
+    let mut min_crossing = usize::MAX;
+    let mut best_x: Vec<f32> = Vec::new();
+    for step in 0..=steps {
+        let x = low + (high - low) * (step as f32 / steps as f32);
+        // A row crosses x if any of its segments spans x.
+        let crossing = rows
+            .iter()
+            .filter(|row| row.iter().any(|s| s.left < x && s.right > x))
+            .count();
+        let left = rows
+            .iter()
+            .filter(|row| row.iter().any(|s| s.right <= x))
+            .count();
+        let right = rows
+            .iter()
+            .filter(|row| row.iter().any(|s| s.left >= x))
+            .count();
+        // Both sides must carry a real share of the page's rows.
+        if left * 3 < count || right * 3 < count {
+            continue;
+        }
+        if crossing < min_crossing {
+            min_crossing = crossing;
+            best_x = vec![x];
+        } else if crossing == min_crossing {
+            best_x.push(x);
+        }
+    }
+
+    // Two columns need under ~17% of rows crossing the candidate x.
+    if min_crossing == usize::MAX || min_crossing * 6 >= count {
+        return whole;
+    }
+    let x = best_x[best_x.len() / 2];
+
+    // Confirm the gutter is a genuine empty stripe, not a per-line seam
+    // that pdfium happens to place at a consistent x (observed on some
+    // Calibre-produced PDFs, where a line is emitted as two abutting
+    // runs). A real column gutter is wide whitespace; a seam is not.
+    let mut gaps: Vec<f32> = Vec::new();
+    for row in rows {
+        let left_edge = row
+            .iter()
+            .filter(|s| s.right <= x)
+            .map(|s| s.right)
+            .fold(f32::MIN, f32::max);
+        let right_edge = row
+            .iter()
+            .filter(|s| s.left >= x)
+            .map(|s| s.left)
+            .fold(f32::MAX, f32::min);
+        if left_edge > f32::MIN && right_edge < f32::MAX {
+            gaps.push(right_edge - left_edge);
+        }
+    }
+    if !gaps.is_empty() && median(&gaps) > page_width * 0.03 {
+        vec![(content_left, x), (x, content_right)]
+    } else {
+        whole
+    }
+}
+
+/// Group segments into rows by vertical position. Segments within one
+/// row are returned together; rows are ordered top to bottom.
+fn group_rows(segments: &[Seg], unit: f32) -> Vec<Vec<&Seg>> {
+    let mut order: Vec<usize> = (0..segments.len()).collect();
+    // Top to bottom (descending y), with stable tie-breaks.
+    order.sort_by(|&a, &b| {
+        segments[b]
+            .cy()
+            .total_cmp(&segments[a].cy())
+            .then(segments[a].left.total_cmp(&segments[b].left))
+            .then(a.cmp(&b))
+    });
+
+    let mut rows: Vec<Vec<&Seg>> = Vec::new();
+    let mut row_top = f32::NAN;
+    for &i in &order {
+        let segment = &segments[i];
+        // A segment joins the current row while it stays within one
+        // glyph height of that row's topmost segment.
+        if rows.is_empty() || (row_top - segment.cy()) > 0.7 * unit {
+            rows.push(vec![segment]);
+            row_top = segment.cy();
+        } else {
+            rows.last_mut().unwrap().push(segment);
+        }
+    }
+    rows
+}
+
+/// Build one line's text from the union of its segment rectangles.
+///
+/// The text is read with a single bounded-text query over the whole
+/// line, not by concatenating per-segment text: pdfium's per-segment
+/// bounded-text query drops the spaces that sit on segment-rectangle
+/// edges, so a join would weld adjacent words together.
+fn build_line(segments: &[&Seg], text: &PdfPageText) -> Line {
+    let left = segments.iter().map(|s| s.left).fold(f32::MAX, f32::min);
+    let right = segments.iter().map(|s| s.right).fold(f32::MIN, f32::max);
+    let top = segments.iter().map(|s| s.top).fold(f32::MIN, f32::max);
+    let bottom = segments.iter().map(|s| s.bottom).fold(f32::MAX, f32::min);
+    let cy = segments.iter().map(|s| s.cy()).sum::<f32>() / segments.len() as f32;
+
+    // A small horizontal margin keeps the first and last glyphs from
+    // falling outside the query box; the column gutter is far wider, so
+    // this cannot reach into a neighbouring column.
+    let rect = PdfRect::new_from_values(bottom, left - 2.0, top, right + 2.0);
+    let raw = text.inside_rect(rect);
+    // Collapse the line's internal whitespace (and any stray newline)
+    // to single spaces; this leaves CJK, which has none, untouched.
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    Line {
+        text: normalized,
+        left,
+        cy,
+    }
+}
+
+/// Split a column's ordered lines into paragraphs. A paragraph break is
+/// taken where the inter-line gap is markedly larger than the column's
+/// usual line spacing, or where a line begins with a first-line
+/// indent — the two ways books mark a new paragraph.
+fn lines_to_paragraphs(lines: &[Line], unit: f32) -> Vec<String> {
+    let lines: Vec<&Line> = lines.iter().filter(|l| !l.text.is_empty()).collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    // The column's body-text left edge is the *typical* line start, not
+    // the minimum: a page number, running header, or figure caption can
+    // sit further left than the body, and taking the min would then make
+    // every body line look first-line-indented.
+    let lefts: Vec<f32> = lines.iter().map(|l| l.left).collect();
+    let column_left = median(&lefts);
+    let gaps: Vec<f32> = lines
+        .windows(2)
+        .map(|w| (w[0].cy - w[1].cy).max(0.0))
+        .collect();
+    let normal_gap = if gaps.is_empty() { unit } else { median(&gaps) };
+    let indent = 0.8 * unit;
+
     let mut paragraphs = Vec::new();
     let mut current = String::new();
-    for line in page.lines() {
-        let line = line.trim();
-        if line.is_empty() {
+    for (i, line) in lines.iter().enumerate() {
+        let starts_paragraph =
+            i == 0 || gaps[i - 1] > normal_gap * 1.5 || line.left > column_left + indent;
+        if starts_paragraph {
             push_paragraph(&mut paragraphs, &mut current);
+            current.push_str(&line.text);
         } else {
-            append_line(&mut current, line);
+            append_line(&mut current, &line.text);
         }
     }
     push_paragraph(&mut paragraphs, &mut current);
     paragraphs
+}
+
+/// The median of a slice of measurements. The slice is small (segment
+/// heights or line gaps on one page), so a copy-and-sort is fine.
+fn median(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[sorted.len() / 2]
 }
 
 /// Flush the paragraph being built into `out`, if it holds any text.
@@ -391,7 +749,9 @@ fn push_paragraph(out: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
-/// Append a soft-wrapped line to the paragraph being built.
+/// Append a soft-wrapped line to the paragraph being built — without a
+/// space between two CJK characters, with a space otherwise, and
+/// de-hyphenating a Latin word broken across the line break.
 fn append_line(current: &mut String, line: &str) {
     if current.is_empty() {
         current.push_str(line);

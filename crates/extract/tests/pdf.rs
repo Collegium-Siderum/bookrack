@@ -81,14 +81,13 @@ fn prose_en_blocks_carry_english_prose_in_page_order() {
     }
     let ex = extracted("prose_en.pdf");
 
-    // The fixture is three pages. The line-heuristic joins each page's
-    // wrapped lines into a small number of blocks rather than splitting
-    // true paragraphs — "page lumps" — so the block count stays far
-    // below the source's paragraph count. This pins that known
-    // limitation; coordinate reconstruction will raise the count.
+    // Coordinate reconstruction recovers real paragraphs, so the
+    // three-page fixture yields a paragraph-grained block count — well
+    // above the one-or-two blocks per page the spike's blank-line
+    // heuristic would lump together.
     assert!(
-        (3..=8).contains(&ex.blocks.len()),
-        "expected page-lump blocks, got {}",
+        (6..=14).contains(&ex.blocks.len()),
+        "expected paragraph-grained blocks, got {}",
         ex.blocks.len(),
     );
 
@@ -105,6 +104,19 @@ fn prose_en_blocks_carry_english_prose_in_page_order() {
         joined_text(&ex).contains("A margin is not wasted paper"),
         "a known sentence survives extraction",
     );
+
+    // The running header and the page numbers are stripped, not carried
+    // as body blocks.
+    assert!(
+        ex.blocks.iter().all(|b| b.text != "The Printed Page"),
+        "the running header is stripped",
+    );
+    assert!(
+        ex.blocks
+            .iter()
+            .all(|b| b.text.trim().parse::<u64>().is_err()),
+        "no block is a bare page number",
+    );
 }
 
 #[test]
@@ -115,8 +127,8 @@ fn prose_cjk_blocks_carry_joined_ideographic_text() {
     let ex = extracted("prose_cjk.pdf");
 
     assert!(
-        (2..=6).contains(&ex.blocks.len()),
-        "expected page-lump blocks, got {}",
+        (3..=10).contains(&ex.blocks.len()),
+        "expected paragraph-grained blocks, got {}",
         ex.blocks.len(),
     );
 
@@ -255,6 +267,35 @@ fn biblio_garbage_transcribes_unreliable_info_verbatim() {
         ex.biblio.year,
         Some(2023),
         "the production date is transcribed, not the real publication year",
+    );
+}
+
+#[test]
+fn two_column_places_the_full_width_abstract_before_the_columns() {
+    if !pdfium_available() {
+        return;
+    }
+    let ex = extracted("two_column.pdf");
+    let texts: Vec<&str> = ex.blocks.iter().map(|b| b.text.as_str()).collect();
+
+    // The full-width abstract is reconstructed as one contiguous block,
+    // not sliced at the column gutter: a single block holds both its
+    // opening word and its closing sentence.
+    let abstract_idx = texts
+        .iter()
+        .position(|t| {
+            t.contains("Abstract.") && t.contains("scale of measurement is reported beside it")
+        })
+        .expect("the full-width abstract survives as one block");
+
+    // The two-column body reads after the masthead band, not before it.
+    let body_idx = texts
+        .iter()
+        .position(|t| t.contains("Ask how long a coastline is"))
+        .expect("the column body is present");
+    assert!(
+        abstract_idx < body_idx,
+        "the full-width abstract reads before the column body",
     );
 }
 

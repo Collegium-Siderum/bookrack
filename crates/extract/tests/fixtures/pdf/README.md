@@ -83,11 +83,14 @@ adapter's present behaviour, not fixture defects:
   the `/Outline` TOC, not `BlockKind::Heading`.
 - **Footnotes are `Body`.** `prose_en`'s footnote extracts as text but
   is not labelled `Footnote`.
-- **Paragraphs are page lumps.** Paragraphs are currently rebuilt by a
-  blank-line heuristic, which has only a page's blank-line structure to
-  work with; a page tends to collapse into one or a few blocks rather
-  than one block per paragraph. Reconstruction from glyph coordinates
-  replaces this and recovers true paragraph and column structure.
+- **Paragraphs are reconstructed from glyph coordinates.** Columns are
+  read in order, left then right; a full-width element above a
+  two-column body reads before the columns; running headers, footers,
+  and page numbers are dropped. Two limitations remain: a paragraph
+  that continues across a column break is reported as two blocks, one
+  per column; and a running header is dropped only where it appears as
+  its own line on two or more pages, so a page on which reconstruction
+  merged it into the body text keeps it.
 
 ## Not yet covered
 
