@@ -6,7 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-config = { path = "../config" }
 encoding_rs.workspace = true
+pdfium-render.workspace = true
 rbook.workspace = true
 scraper.workspace = true
 serde.workspace = true

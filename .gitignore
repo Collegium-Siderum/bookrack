@@ -25,6 +25,9 @@
 # Exploratory spikes — contain hardcoded local paths
 /spikes/
 
+# Local scratch space — native binaries and throwaway working files
+/scratch/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -15,6 +15,7 @@ mod detect;
 mod epub;
 mod html;
 mod html_parse;
+mod pdf;
 mod txt;
 
 pub use contract::*;

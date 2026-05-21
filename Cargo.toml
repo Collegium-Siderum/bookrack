@@ -34,6 +34,16 @@ scraper = "0.24"
 # Legacy-encoding detection for `extract`'s plain-text adapter: decodes
 # GBK / GB2312 (`.txt` files carry no encoding declaration).
 encoding_rs = "0.8"
+# PDF text extraction for `extract`. Binds the PDFium native library at
+# runtime; the binary is sourced and pinned separately — see
+# crates/extract/PDFIUM_VERSION.md. The pdfium_NNNN feature pins the C
+# API surface to one PDFium build and MUST match the chromium/NNNN
+# binary release, or symbol resolution fails at runtime. `thread_safe`
+# serializes PDFium's non-reentrant C API behind a global mutex.
+pdfium-render = { version = "0.9", default-features = false, features = [
+    "pdfium_7763",
+    "thread_safe",
+] }
 text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }

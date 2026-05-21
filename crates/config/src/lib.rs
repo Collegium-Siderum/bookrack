@@ -23,6 +23,12 @@ pub const OLLAMA_URL_ENV: &str = "BOOKRACK_OLLAMA_URL";
 /// Ollama endpoint used when [`OLLAMA_URL_ENV`] is unset.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
+/// Environment variable naming the directory that holds the PDFium
+/// dynamic library. When unset, the directory of the running executable
+/// is used — the layout of a shipped bookrack build, which places the
+/// library beside the binary.
+pub const PDFIUM_LIB_ENV: &str = "BOOKRACK_PDFIUM_LIB";
+
 /// Resolved configuration. Construct with [`Config::load`] (from the
 /// environment) or [`Config::new`] (from an explicit data root, e.g. a
 /// CLI override).
@@ -189,6 +195,36 @@ fn resolve(data_dir: Option<String>, ollama_url: Option<String>) -> Result<Confi
     })
 }
 
+/// Resolve the directory to load the PDFium dynamic library from.
+///
+/// This is a free function, not a [`Config`] method: the PDF adapter
+/// needs the directory but takes no `Config`, and threading one through
+/// only to reach this would widen its signature for nothing.
+pub fn pdfium_lib_dir() -> PathBuf {
+    pdfium_lib_dir_from(std::env::var(PDFIUM_LIB_ENV).ok())
+}
+
+/// Pure resolution logic for [`pdfium_lib_dir`], factored out so it can
+/// be tested without mutating process-global environment variables.
+///
+/// The override wins when set; otherwise the running executable's own
+/// directory is used. A failure to locate the executable falls back to
+/// the current directory rather than panicking — a missing PDFium
+/// library is then reported by the adapter, where the error has
+/// context, not here.
+fn pdfium_lib_dir_from(override_dir: Option<String>) -> PathBuf {
+    if let Some(dir) = override_dir
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +289,28 @@ mod tests {
         assert_eq!(cfg.batch_char_budget, 8_000);
         // The OOM-shrink floor must sit below the steady-state budget.
         assert!(cfg.batch_min_char_budget < cfg.batch_char_budget);
+    }
+
+    #[test]
+    fn pdfium_lib_dir_uses_the_override_when_set() {
+        let pinned = "a/pinned/pdfium/dir";
+        assert_eq!(
+            pdfium_lib_dir_from(Some(pinned.to_string())),
+            PathBuf::from(pinned),
+        );
+        // Whitespace-only counts as unset and falls through to the
+        // executable-directory default.
+        assert_ne!(
+            pdfium_lib_dir_from(Some("   ".to_string())),
+            PathBuf::from("   "),
+        );
+    }
+
+    #[test]
+    fn pdfium_lib_dir_falls_back_to_a_usable_directory_when_unset() {
+        // With no override, resolution must still yield a non-empty
+        // directory (the running executable's own folder), never an
+        // empty path the loader could not use.
+        assert!(!pdfium_lib_dir_from(None).as_os_str().is_empty());
     }
 }

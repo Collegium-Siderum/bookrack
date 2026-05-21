@@ -14,6 +14,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Fetch pinned PDFium
+        # The PDF adapter binds PDFium at runtime, so its tests need the
+        # native library. Pinned to one build — see
+        # crates/extract/PDFIUM_VERSION.md. The sha256 check makes a
+        # corrupt download or a silently re-cut upstream asset fail
+        # loudly here, so PDF test coverage is never quietly lost.
+        # clippy needs no binary (it links nothing), so this runs after.
+        run: |
+          curl -L -o pdfium.tgz \
+            https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/pdfium-linux-x64.tgz
+          echo "e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d  pdfium.tgz" | sha256sum -c -
+          mkdir -p "$GITHUB_WORKSPACE/.pdfium"
+          tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
+          echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
       - run: cargo test --workspace
 
   leak-gate:
