@@ -6,11 +6,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+encoding_rs.workspace = true
 rbook.workspace = true
 scraper.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# Also a normal dependency above; the TXT test re-encodes a fixture to
+# GB18030 to exercise the legacy-encoding decode path.
+encoding_rs.workspace = true
 tempfile.workspace = true
 zip.workspace = true

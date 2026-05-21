@@ -13,7 +13,9 @@
 mod contract;
 mod detect;
 mod epub;
+mod html;
 mod html_parse;
+mod txt;
 
 pub use contract::*;
 
@@ -27,6 +29,8 @@ use std::path::Path;
 pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
     match detect::detect(path) {
         detect::Format::Epub => epub::extract(path),
+        detect::Format::Html => html::extract(path),
+        detect::Format::Txt => txt::extract(path),
         other => Err(ExtractError::UnsupportedFormat {
             detected: other.label().to_string(),
         }),

@@ -31,6 +31,9 @@ rbook = "0.7"
 # HTML / XHTML parsing for `extract`, behaviour-sensitive for the same
 # reason: a parser change can shift where blocks begin and end.
 scraper = "0.24"
+# Legacy-encoding detection for `extract`'s plain-text adapter: decodes
+# GBK / GB2312 (`.txt` files carry no encoding declaration).
+encoding_rs = "0.8"
 text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
