@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use bookrack_dbkit::{TableSpec, apply_schema};
+use bookrack_dbkit::{TableSpec, TimedConnection, apply_schema};
 use rusqlite::Connection;
 
 use crate::{CatalogError, Result};
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS toc_edits (
 /// for a file-backed database or [`Catalog::open_in_memory`] for an
 /// ephemeral one (useful in tests).
 pub struct Catalog {
-    pub(crate) conn: Connection,
+    pub(crate) conn: TimedConnection,
 }
 
 impl Catalog {
@@ -116,7 +116,9 @@ impl Catalog {
         // and so are not covered.
         #[cfg(debug_assertions)]
         bookrack_dbkit::verify_all(&conn, SPECS).expect("catalog.db schema conformance");
-        let catalog = Catalog { conn };
+        let catalog = Catalog {
+            conn: TimedConnection::new(conn, "catalog"),
+        };
         catalog.reconcile_schema_version()?;
         Ok(catalog)
     }

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use bookrack_dbkit::{TableSpec, apply_schema};
+use bookrack_dbkit::{TableSpec, TimedConnection, apply_schema};
 use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
@@ -37,7 +37,7 @@ const SPECS: &[&TableSpec] = &[
 /// a file-backed database or [`Corpus::open_in_memory`] for an
 /// ephemeral one (useful in tests and for throwaway processing).
 pub struct Corpus {
-    pub(crate) conn: Connection,
+    pub(crate) conn: TimedConnection,
 }
 
 impl Corpus {
@@ -69,7 +69,9 @@ impl Corpus {
         // build instead catches through the version stamp.
         #[cfg(debug_assertions)]
         bookrack_dbkit::verify_all(&conn, SPECS).expect("corpus.db schema conformance");
-        let corpus = Corpus { conn };
+        let corpus = Corpus {
+            conn: TimedConnection::new(conn, "corpus"),
+        };
         corpus.reconcile_schema_version()?;
         Ok(corpus)
     }
