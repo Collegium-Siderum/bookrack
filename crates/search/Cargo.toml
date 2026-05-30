@@ -6,3 +6,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
+bookrack-corpus = { path = "../corpus" }
+bookrack-embed = { path = "../embed" }
+bookrack-vectors = { path = "../vectors" }
+thiserror.workspace = true
+
+[dev-dependencies]
+bookrack-extract = { path = "../extract" }
+bookrack-ingest = { path = "../ingest" }
+tokio.workspace = true
+tempfile.workspace = true

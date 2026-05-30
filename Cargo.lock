@@ -629,6 +629,17 @@ dependencies = [
 [[package]]
 name = "bookrack-search"
 version = "0.1.0"
+dependencies = [
+ "bookrack-core",
+ "bookrack-corpus",
+ "bookrack-embed",
+ "bookrack-extract",
+ "bookrack-ingest",
+ "bookrack-vectors",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "bookrack-vectors"
