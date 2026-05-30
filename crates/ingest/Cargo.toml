@@ -6,3 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
+bookrack-corpus = { path = "../corpus" }
+bookrack-extract = { path = "../extract" }
+bookrack-normalize = { path = "../normalize" }
+thiserror.workspace = true
+sha2.workspace = true

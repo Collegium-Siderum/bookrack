@@ -1,11 +1,435 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! ingest: assemble an `extract::Extraction` into the persistent data
-//! model.
+//! ingest: assemble an [`Extraction`] into the persistent data model.
 //!
-//! This module is the first building block of that assembly: a frozen,
-//! deterministic sentence counter that the STRUCTURE stage uses to fill
-//! each prose leaf's statistics. The tree-building, chunking and
-//! embedding stages build on top of it.
+//! This milestone implements STRUCTURE: turning one extraction into a
+//! `corpus.db` node tree — an organizing tree lifted from the table of
+//! contents, prose and structural leaves carrying the body text, and the
+//! content hashes that key cross-file deduplication. Chunking, embedding
+//! and the vector store are later stages and are not wired here.
+//!
+//! The unit of ingestion is one already-registered intake: the caller
+//! supplies its `intake_id` and the [`Extraction`] the `extract` crate
+//! produced. The node-id partition is keyed by that intake id, so a
+//! re-ingest of the same file reproduces identical ids; STRUCTURE first
+//! drops any prior tree for the intake, making the operation idempotent.
 
 pub mod sentences;
+mod structure;
+
+use bookrack_core::{NodeId, NodeType, PartitionIdx};
+use bookrack_corpus::Corpus;
+use bookrack_extract::Extraction;
+
+/// Tuning parameters for STRUCTURE.
+#[derive(Debug, Clone)]
+pub struct StructureParams {
+    /// Length, in hex characters, of the stable-anchor prefix taken from
+    /// each prose leaf's normalized-text hash.
+    pub stable_anchor_len: usize,
+}
+
+impl Default for StructureParams {
+    fn default() -> StructureParams {
+        StructureParams {
+            stable_anchor_len: 16,
+        }
+    }
+}
+
+/// What one STRUCTURE run produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructureReport {
+    /// The book's root node id (the partition's reserved root offset).
+    pub book_root_id: NodeId,
+    /// Total nodes written, including the root.
+    pub nodes_written: usize,
+    /// How many of those nodes are prose leaves.
+    pub prose_leaves: usize,
+}
+
+/// Why a STRUCTURE run failed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum IngestError {
+    /// The corpus layer reported an error — allocation, validation, or
+    /// the underlying database.
+    #[error("corpus error: {0}")]
+    Corpus(#[from] bookrack_corpus::CorpusError),
+
+    /// The extraction yielded no prose leaf, so there is no searchable
+    /// body text to ingest.
+    #[error("extraction produced no prose leaves")]
+    EmptyExtraction,
+}
+
+/// A fallible `ingest` operation.
+pub type Result<T> = std::result::Result<T, IngestError>;
+
+/// Build the corpus node tree for one extraction and write it.
+///
+/// `intake_id` names an already-registered intake; it keys the node-id
+/// partition. `book_root_type` is the organizing type of the book root
+/// (typically [`NodeType::Work`]).
+///
+/// The operation is idempotent: any tree previously written for this
+/// intake is dropped before the new one is allocated, so re-ingesting a
+/// file replaces its tree rather than duplicating or colliding with it.
+/// An extraction with no prose leaf is rejected with
+/// [`IngestError::EmptyExtraction`] before the corpus is touched.
+pub fn ingest_structure(
+    corpus: &mut Corpus,
+    intake_id: i64,
+    book_root_type: NodeType,
+    extraction: &Extraction,
+    params: &StructureParams,
+) -> Result<StructureReport> {
+    // Plan first, while nothing is written: an empty extraction must not
+    // drop an existing tree.
+    let plan = structure::plan_tree(book_root_type, extraction, params)?;
+    let prose_leaves = plan.prose_leaves;
+    let child_count = plan.child_count();
+
+    let idx = PartitionIdx::new(intake_id);
+    corpus.drop_partition(idx)?;
+    let partition = corpus.allocate_partition(intake_id)?;
+    let ids = corpus.allocate_node_ids(idx, child_count)?;
+
+    let nodes = plan.into_new_nodes(partition.book_root_id, &ids);
+    let nodes_written = nodes.len();
+    corpus.insert_nodes(&nodes)?;
+
+    Ok(StructureReport {
+        book_root_id: partition.book_root_id,
+        nodes_written,
+        prose_leaves,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_extract::{
+        Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
+    };
+    use bookrack_normalize::norm_text_sha256;
+
+    fn body(text: &str, unit: u32) -> Block {
+        Block {
+            kind: BlockKind::Body,
+            text: text.to_string(),
+            source_unit: unit,
+        }
+    }
+
+    fn heading(text: &str, level: u8, unit: u32) -> Block {
+        Block {
+            kind: BlockKind::Heading { level },
+            text: text.to_string(),
+            source_unit: unit,
+        }
+    }
+
+    fn entry(label: &str, depth: u8, start_block: Option<usize>) -> TocEntry {
+        TocEntry {
+            label: label.to_string(),
+            depth,
+            start_block,
+        }
+    }
+
+    fn extraction(blocks: Vec<Block>, entries: Vec<TocEntry>, title: Option<&str>) -> Extraction {
+        Extraction {
+            blocks,
+            toc: Toc { entries },
+            biblio: Biblio {
+                title: title.map(str::to_string),
+                ..Default::default()
+            },
+            provenance: Provenance {
+                adapter: "test".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        }
+    }
+
+    fn ingest(corpus: &mut Corpus, intake_id: i64, ex: &Extraction) -> StructureReport {
+        ingest_structure(
+            corpus,
+            intake_id,
+            NodeType::Work,
+            ex,
+            &StructureParams::default(),
+        )
+        .expect("ingest")
+    }
+
+    /// A two-chapter book; chapter one holds a section. Heading blocks
+    /// open each division and are suppressed in favour of the organizing
+    /// node titles.
+    fn sample() -> Extraction {
+        extraction(
+            vec![
+                heading("Chapter One", 1, 0),
+                body("Intro paragraph.", 0),
+                heading("Section A", 2, 1),
+                body("Section body.", 1),
+                heading("Chapter Two", 1, 2),
+                body("Second chapter body.", 2),
+            ],
+            vec![
+                entry("Chapter One", 0, Some(0)),
+                entry("Section A", 1, Some(2)),
+                entry("Chapter Two", 0, Some(4)),
+            ],
+            Some("A Test Book"),
+        )
+    }
+
+    #[test]
+    fn builds_the_expected_tree() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &sample());
+
+        // root + 3 organizing nodes + 3 prose leaves (headings suppressed).
+        assert_eq!(report.nodes_written, 7);
+        assert_eq!(report.prose_leaves, 3);
+
+        let root = corpus
+            .get_node(report.book_root_id)
+            .expect("get")
+            .expect("root present");
+        assert_eq!(root.node_type, NodeType::Work);
+        assert_eq!(root.title.as_deref(), Some("A Test Book"));
+        assert_eq!(root.parent_id, None);
+        assert_eq!(root.depth, 0);
+
+        // Root's children are the two chapters, in order.
+        let chapters = corpus.children(report.book_root_id).expect("children");
+        assert_eq!(chapters.len(), 2);
+        assert!(chapters.iter().all(|c| c.node_type == NodeType::Chapter));
+        assert_eq!(chapters[0].title.as_deref(), Some("Chapter One"));
+        assert_eq!(chapters[1].title.as_deref(), Some("Chapter Two"));
+
+        // Chapter one holds a direct prose leaf (ordinal 0) before the
+        // section (ordinal 1).
+        let ch1_children = corpus.children(chapters[0].node_id).expect("children");
+        assert_eq!(ch1_children.len(), 2);
+        assert_eq!(ch1_children[0].node_type, NodeType::Paragraph);
+        assert_eq!(
+            ch1_children[0].text_content.as_deref(),
+            Some("Intro paragraph.")
+        );
+        assert_eq!(ch1_children[1].node_type, NodeType::Section);
+        assert_eq!(ch1_children[1].title.as_deref(), Some("Section A"));
+    }
+
+    #[test]
+    fn toc_intervals_nest() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &sample());
+
+        let root = corpus.get_node(report.book_root_id).unwrap().unwrap();
+        // Three leaves => document-order coordinates 0..=2.
+        assert_eq!(root.toc_lo, Some(0));
+        assert_eq!(root.toc_hi, Some(2));
+
+        let chapters = corpus.children(report.book_root_id).unwrap();
+        // Chapter one covers its own leaf plus the section's leaf.
+        assert_eq!(chapters[0].toc_lo, Some(0));
+        assert_eq!(chapters[0].toc_hi, Some(1));
+        // Chapter two covers only the last leaf.
+        assert_eq!(chapters[1].toc_lo, Some(2));
+        assert_eq!(chapters[1].toc_hi, Some(2));
+    }
+
+    #[test]
+    fn prose_leaves_carry_consistent_hashes() {
+        // Extra internal spaces collapse under normalization, so the
+        // raw-byte hash and the normalized-text hash genuinely differ.
+        let raw = "Intro   paragraph.";
+        let ex = extraction(vec![body(raw, 0)], Vec::new(), None);
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+
+        let leaf = &corpus.children(report.book_root_id).unwrap()[0];
+        let norm = norm_text_sha256(raw);
+        assert_eq!(leaf.norm_text_sha256.as_deref(), Some(norm.as_str()));
+        // The stable anchor is the 16-hex prefix of the normalized hash.
+        assert_eq!(leaf.stable_anchor.as_deref(), Some(&norm[..16]));
+        // The raw-byte hash differs once normalization changes the text.
+        assert!(leaf.text_sha256.is_some());
+        assert_ne!(leaf.text_sha256, leaf.norm_text_sha256);
+        // The display text and char count are the raw, un-normalized form.
+        assert_eq!(leaf.text_content.as_deref(), Some(raw));
+        assert_eq!(leaf.char_count, Some(raw.chars().count() as i64));
+        assert_eq!(leaf.sentence_count, Some(1));
+    }
+
+    #[test]
+    fn organizing_nodes_carry_a_subtree_signature() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &sample());
+
+        let root = corpus.get_node(report.book_root_id).unwrap().unwrap();
+        assert!(root.subtree_content_sha256.is_some());
+        for chapter in corpus.children(report.book_root_id).unwrap() {
+            assert!(chapter.subtree_content_sha256.is_some());
+            // Organizing nodes never carry body text or prose hashes.
+            assert_eq!(chapter.text_content, None);
+            assert_eq!(chapter.norm_text_sha256, None);
+        }
+    }
+
+    #[test]
+    fn front_matter_attaches_under_the_root() {
+        // A paragraph precedes the first chapter's anchor.
+        let ex = extraction(
+            vec![
+                body("Front matter.", 0),
+                heading("Chapter One", 1, 1),
+                body("Chapter body.", 1),
+            ],
+            vec![entry("Chapter One", 0, Some(1))],
+            Some("Book"),
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+
+        let children = corpus.children(report.book_root_id).unwrap();
+        // The front-matter leaf (ordinal 0) sits before the chapter.
+        assert_eq!(children[0].node_type, NodeType::Paragraph);
+        assert_eq!(children[0].text_content.as_deref(), Some("Front matter."));
+        assert_eq!(children[1].node_type, NodeType::Chapter);
+    }
+
+    #[test]
+    fn an_empty_toc_puts_every_leaf_under_the_root() {
+        let ex = extraction(
+            vec![
+                body("Only paragraph one.", 0),
+                body("Only paragraph two.", 0),
+            ],
+            Vec::new(),
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+
+        assert_eq!(report.nodes_written, 3); // root + 2 leaves
+        let children = corpus.children(report.book_root_id).unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|c| c.node_type == NodeType::Paragraph));
+    }
+
+    #[test]
+    fn an_unresolved_entry_still_becomes_an_organizing_node() {
+        let ex = extraction(
+            vec![body("Body under no anchor.", 0)],
+            vec![entry("Dangling", 0, None)],
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+
+        // The dangling entry owns no blocks; its leaf falls under the root.
+        let children = corpus.children(report.book_root_id).unwrap();
+        let chapter = children
+            .iter()
+            .find(|c| c.node_type == NodeType::Chapter)
+            .expect("organizing node exists");
+        assert_eq!(chapter.title.as_deref(), Some("Dangling"));
+        assert!(corpus.children(chapter.node_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn block_kinds_map_to_node_types() {
+        let ex = extraction(
+            vec![
+                body("A paragraph.", 0),
+                Block {
+                    kind: BlockKind::Footnote,
+                    text: "A footnote.".to_string(),
+                    source_unit: 0,
+                },
+                Block {
+                    kind: BlockKind::Caption,
+                    text: "A caption.".to_string(),
+                    source_unit: 0,
+                },
+                Block {
+                    kind: BlockKind::Other,
+                    text: "Something else.".to_string(),
+                    source_unit: 0,
+                },
+            ],
+            Vec::new(),
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+
+        let children = corpus.children(report.book_root_id).unwrap();
+        let kinds: Vec<NodeType> = children.iter().map(|c| c.node_type).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                NodeType::Paragraph,
+                NodeType::Footnote,
+                NodeType::FigureCaption,
+                NodeType::Paragraph,
+            ]
+        );
+        // The structural caption carries no content hashes.
+        assert_eq!(children[2].norm_text_sha256, None);
+        assert_eq!(children[2].text_content.as_deref(), Some("A caption."));
+    }
+
+    #[test]
+    fn an_extraction_with_no_prose_is_rejected() {
+        let ex = extraction(
+            vec![Block {
+                kind: BlockKind::Caption,
+                text: "Lonely caption.".to_string(),
+                source_unit: 0,
+            }],
+            Vec::new(),
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let err = ingest_structure(
+            &mut corpus,
+            1,
+            NodeType::Work,
+            &ex,
+            &StructureParams::default(),
+        )
+        .expect_err("must reject");
+        assert!(matches!(err, IngestError::EmptyExtraction));
+    }
+
+    #[test]
+    fn re_ingesting_replaces_the_tree() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let first = ingest(&mut corpus, 1, &sample());
+
+        // A second run for the same intake must not collide on the
+        // partition and must not double the node count.
+        let second = ingest(&mut corpus, 1, &sample());
+        assert_eq!(first.book_root_id, second.book_root_id);
+        assert_eq!(second.nodes_written, 7);
+        assert_eq!(corpus.book_nodes(second.book_root_id).unwrap().len(), 7);
+    }
+
+    #[test]
+    fn allocated_ids_stay_inside_the_partition() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 5, &sample());
+        let partition = PartitionIdx::new(5);
+        for node in corpus.book_nodes(report.book_root_id).unwrap() {
+            assert!(partition.contains(node.node_id));
+        }
+    }
+}

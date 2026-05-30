@@ -586,6 +586,14 @@ dependencies = [
 [[package]]
 name = "bookrack-ingest"
 version = "0.1.0"
+dependencies = [
+ "bookrack-core",
+ "bookrack-corpus",
+ "bookrack-extract",
+ "bookrack-normalize",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "bookrack-mcp"
