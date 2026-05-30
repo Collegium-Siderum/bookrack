@@ -10,6 +10,14 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-extract = { path = "../extract" }
 bookrack-normalize = { path = "../normalize" }
+bookrack-catalog = { path = "../catalog" }
+bookrack-config = { path = "../config" }
+bookrack-embed = { path = "../embed" }
+bookrack-vectors = { path = "../vectors" }
 text-splitter.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

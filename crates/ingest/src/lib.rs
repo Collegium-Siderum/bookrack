@@ -15,14 +15,22 @@
 //! drops any prior tree for the intake, making the operation idempotent.
 
 mod chunk;
+mod embed_run;
 pub mod sentences;
 mod structure;
 
 pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+pub use embed_run::embed_book_chunks;
 
+use std::path::Path;
+
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::{Corpus, Node};
-use bookrack_extract::Extraction;
+use bookrack_embed::Embedder;
+use bookrack_extract::{ExtractOutcome, Extraction};
+use sha2::{Digest, Sha256};
 
 /// Tuning parameters for STRUCTURE.
 #[derive(Debug, Clone)]
@@ -51,7 +59,7 @@ pub struct StructureReport {
     pub prose_leaves: usize,
 }
 
-/// Why a STRUCTURE run failed.
+/// Why an `ingest` operation failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum IngestError {
@@ -64,6 +72,40 @@ pub enum IngestError {
     /// body text to ingest.
     #[error("extraction produced no prose leaves")]
     EmptyExtraction,
+
+    /// Reading the source file failed.
+    #[error("reading the source file failed: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// The `extract` stage failed to parse the source file.
+    #[error("extract error: {0}")]
+    Extract(#[from] bookrack_extract::ExtractError),
+
+    /// The source has no usable text layer and must go through OCR, which
+    /// this pipeline does not do.
+    #[error("source needs OCR and cannot be ingested as text: {reason}")]
+    NeedsOcr {
+        /// Why the text layer was judged unusable.
+        reason: String,
+    },
+
+    /// The catalog layer reported an error.
+    #[error("catalog error: {0}")]
+    Catalog(#[from] bookrack_catalog::CatalogError),
+
+    /// The embed client reported an error that could not be recovered by
+    /// shrinking the batch.
+    #[error("embed error: {0}")]
+    Embed(#[from] bookrack_embed::EmbedError),
+
+    /// The vector store reported an error.
+    #[error("vector store error: {0}")]
+    Vectors(#[from] bookrack_vectors::VectorsError),
+
+    /// The embedder returned no vector for a non-empty batch, so the
+    /// embedding dimension could not be determined.
+    #[error("the embedder returned no vector for a non-empty batch")]
+    EmptyEmbedding,
 }
 
 /// A fallible `ingest` operation.
@@ -136,6 +178,110 @@ pub fn plan_book_chunks(
         })
         .collect();
     Ok(chunk::plan_chunks(&chunk_leaves, params))
+}
+
+/// Tuning for one [`ingest_book`] run: the STRUCTURE, CHUNK, and EMBED
+/// knobs, gathered so a caller passes one value.
+#[derive(Debug, Clone, Default)]
+pub struct IngestParams {
+    /// STRUCTURE tuning.
+    pub structure: StructureParams,
+    /// CHUNK tuning (content-identity, frozen with `CHUNK_VERSION`).
+    pub chunk: ChunkParams,
+    /// EMBED tuning (operational; see [`EmbedConfig::from_env`]).
+    pub embed: EmbedConfig,
+}
+
+/// What one [`ingest_book`] run produced.
+#[derive(Debug, Clone)]
+pub struct IngestReport {
+    /// The intake the file registered as.
+    pub intake_id: i64,
+    /// The book's root node id.
+    pub book_root_id: NodeId,
+    /// Total corpus nodes written, including the root.
+    pub nodes_written: usize,
+    /// How many of those nodes are prose leaves.
+    pub prose_leaves: usize,
+    /// How many chunk rows were embedded and written to the vector store.
+    pub chunks_written: usize,
+    /// Whether the file was already registered (idempotent re-ingest).
+    pub already_registered: bool,
+}
+
+/// Ingest one source file end to end: extract it, register it, build its
+/// corpus tree, chunk it, embed the chunks, and write them to the dense
+/// store.
+///
+/// The whole-file SHA-256 keys the intake, so re-ingesting the same file
+/// reuses its intake and replaces its corpus tree and vector rows rather
+/// than duplicating them. `lancedb_dir` is the vector store directory;
+/// `embedder` turns chunk text into vectors. A file whose text layer is
+/// unusable yields [`IngestError::NeedsOcr`].
+pub async fn ingest_book<E: Embedder>(
+    file: &Path,
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    embedder: &E,
+    params: &IngestParams,
+) -> Result<IngestReport> {
+    let extraction = match bookrack_extract::extract(file)? {
+        ExtractOutcome::Extracted(extraction) => extraction,
+        ExtractOutcome::NeedsOcr { reason } => return Err(IngestError::NeedsOcr { reason }),
+    };
+
+    // Register the file, keyed idempotently on its whole-file hash.
+    let bytes = std::fs::read(file)?;
+    let registration = catalog.register_intake(
+        &NewIntake::new(sha256_hex(&bytes))
+            .format(extraction.provenance.adapter.clone())
+            .byte_size(bytes.len() as i64),
+    )?;
+    let already_registered = !registration.is_new();
+    let intake_id = registration.intake().intake_id;
+
+    // Stamp the extraction provenance, so a later re-extraction can tell
+    // whether this book's partition is stale.
+    catalog.set_extraction(
+        intake_id,
+        &extraction.provenance.adapter,
+        &extraction.provenance.extractor_version,
+    )?;
+
+    let structure = ingest_structure(
+        corpus,
+        intake_id,
+        NodeType::Work,
+        &extraction,
+        &params.structure,
+    )?;
+    let plans = plan_book_chunks(corpus, structure.book_root_id, &params.chunk)?;
+    let chunks_written =
+        embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed).await?;
+
+    catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
+
+    Ok(IngestReport {
+        intake_id,
+        book_root_id: structure.book_root_id,
+        nodes_written: structure.nodes_written,
+        prose_leaves: structure.prose_leaves,
+        chunks_written,
+        already_registered,
+    })
+}
+
+/// SHA-256 of raw bytes as 64 lowercase hex characters — the whole-file
+/// identity anchor an intake registers under.
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(hex, "{byte:02x}").expect("writing to a String is infallible");
+    }
+    hex
 }
 
 #[cfg(test)]

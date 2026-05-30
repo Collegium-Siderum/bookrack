@@ -218,6 +218,29 @@ impl OllamaEmbedClient {
     }
 }
 
+/// Something that embeds a batch of texts into vectors.
+///
+/// The ingest and search stages are generic over this so they can be
+/// driven by a test double with no running Ollama. The sole production
+/// implementor is [`OllamaEmbedClient`]; the returned future is `Send`
+/// so callers can drive it on a multi-threaded runtime.
+pub trait Embedder {
+    /// Embed `texts`, returning one vector per input, in input order.
+    fn embed_batch(
+        &self,
+        texts: &[String],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send;
+}
+
+impl Embedder for OllamaEmbedClient {
+    fn embed_batch(
+        &self,
+        texts: &[String],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send {
+        OllamaEmbedClient::embed_batch(self, texts)
+    }
+}
+
 /// Read a bounded, diagnostic prefix of an error response body.
 async fn error_body(response: reqwest::Response) -> String {
     response
