@@ -127,6 +127,25 @@ impl Config {
 /// [`EmbedConfig`] is left at its default.
 pub const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding:0.6b";
 
+/// Environment variable overriding the embedding model tag.
+pub const EMBED_MODEL_ENV: &str = "BOOKRACK_EMBED_MODEL";
+
+/// Environment variable overriding the target batch size, in characters.
+pub const EMBED_BATCH_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_CHAR_BUDGET";
+
+/// Environment variable overriding the hard per-request chunk cap.
+pub const EMBED_BATCH_MAX_CHUNKS_ENV: &str = "BOOKRACK_EMBED_BATCH_MAX_CHUNKS";
+
+/// Environment variable overriding the OOM-shrink char-budget floor.
+pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR_BUDGET";
+
+/// Number of nearest passages a query returns when [`SearchConfig`] is
+/// left at its default.
+pub const DEFAULT_SEARCH_TOP_K: usize = 5;
+
+/// Environment variable overriding the search result count.
+pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
+
 /// Tunable parameters for the embedding subsystem.
 ///
 /// A single source of truth for the knobs the `embed` client and the
@@ -172,6 +191,86 @@ impl Default for EmbedConfig {
             channel_capacity: 2_000,
         }
     }
+}
+
+impl EmbedConfig {
+    /// Resolve from the environment, overriding the operational knobs the
+    /// EMBED stage exposes and leaving every other field at its default.
+    ///
+    /// Only operational knobs are read here: the model tag and the
+    /// batching budgets. Content-identity parameters (chunk length,
+    /// overlap, grouping) are not configurable — they are frozen with
+    /// `CHUNK_VERSION` so a change forces a re-derivation. A malformed or
+    /// empty value falls back to the default rather than failing.
+    pub fn from_env() -> EmbedConfig {
+        EmbedConfig::resolve_from(|key| std::env::var(key).ok())
+    }
+
+    /// Pure resolution, factored out of [`EmbedConfig::from_env`] so it can
+    /// be tested without mutating process-global environment variables.
+    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> EmbedConfig {
+        let d = EmbedConfig::default();
+        EmbedConfig {
+            model: env_trimmed(get(EMBED_MODEL_ENV)).unwrap_or(d.model),
+            request_timeout: d.request_timeout,
+            max_retries: d.max_retries,
+            backoff_base: d.backoff_base,
+            batch_char_budget: env_usize(get(EMBED_BATCH_CHAR_BUDGET_ENV), d.batch_char_budget),
+            batch_max_chunks: env_usize(get(EMBED_BATCH_MAX_CHUNKS_ENV), d.batch_max_chunks),
+            batch_min_char_budget: env_usize(
+                get(EMBED_BATCH_MIN_CHAR_BUDGET_ENV),
+                d.batch_min_char_budget,
+            ),
+            channel_capacity: d.channel_capacity,
+        }
+    }
+}
+
+/// Retrieval knobs. Separate from [`EmbedConfig`] so the query side reads
+/// only what it needs.
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    /// How many nearest passages a query returns.
+    pub top_k: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> SearchConfig {
+        SearchConfig {
+            top_k: DEFAULT_SEARCH_TOP_K,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// Resolve from the environment, falling back to the default when the
+    /// override is unset or malformed.
+    pub fn from_env() -> SearchConfig {
+        SearchConfig::resolve_from(|key| std::env::var(key).ok())
+    }
+
+    /// Pure resolution, factored out so it can be tested without mutating
+    /// process-global environment variables.
+    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> SearchConfig {
+        SearchConfig {
+            top_k: env_usize(get(SEARCH_TOP_K_ENV), DEFAULT_SEARCH_TOP_K),
+        }
+    }
+}
+
+/// Trim an environment value, treating whitespace-only as unset.
+fn env_trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse an environment value as `usize`, falling back to `default` when
+/// it is unset, blank, or unparseable.
+fn env_usize(value: Option<String>, default: usize) -> usize {
+    env_trimmed(value)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Pure resolution logic, factored out of [`Config::load`] so it can be
@@ -289,6 +388,55 @@ mod tests {
         assert_eq!(cfg.batch_char_budget, 8_000);
         // The OOM-shrink floor must sit below the steady-state budget.
         assert!(cfg.batch_min_char_budget < cfg.batch_char_budget);
+    }
+
+    #[test]
+    fn embed_config_from_env_overrides_operational_knobs() {
+        let cfg = EmbedConfig::resolve_from(|key| match key {
+            EMBED_MODEL_ENV => Some("custom-model".to_string()),
+            EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
+            EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
+            EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.model, "custom-model");
+        assert_eq!(cfg.batch_char_budget, 4_000);
+        assert_eq!(cfg.batch_max_chunks, 32);
+        assert_eq!(cfg.batch_min_char_budget, 250);
+        // Untouched fields keep their calibrated defaults.
+        let d = EmbedConfig::default();
+        assert_eq!(cfg.request_timeout, d.request_timeout);
+        assert_eq!(cfg.max_retries, d.max_retries);
+        assert_eq!(cfg.channel_capacity, d.channel_capacity);
+    }
+
+    #[test]
+    fn embed_config_from_env_falls_back_on_blank_or_malformed() {
+        let d = EmbedConfig::default();
+        let cfg = EmbedConfig::resolve_from(|key| match key {
+            // Whitespace-only counts as unset.
+            EMBED_MODEL_ENV => Some("   ".to_string()),
+            // Non-numeric falls back rather than failing.
+            EMBED_BATCH_CHAR_BUDGET_ENV => Some("not-a-number".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.model, d.model);
+        assert_eq!(cfg.batch_char_budget, d.batch_char_budget);
+    }
+
+    #[test]
+    fn search_config_default_and_env_override() {
+        assert_eq!(SearchConfig::default().top_k, DEFAULT_SEARCH_TOP_K);
+
+        let cfg = SearchConfig::resolve_from(|key| match key {
+            SEARCH_TOP_K_ENV => Some("10".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.top_k, 10);
+
+        // A blank value falls back to the default.
+        let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()));
+        assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
     }
 
     #[test]
