@@ -10,3 +10,15 @@ name = "bookrack"
 path = "src/main.rs"
 
 [dependencies]
+bookrack-config = { path = "../config" }
+bookrack-obs = { path = "../obs" }
+bookrack-ingest = { path = "../ingest" }
+bookrack-search = { path = "../search" }
+bookrack-embed = { path = "../embed" }
+bookrack-corpus = { path = "../corpus" }
+bookrack-catalog = { path = "../catalog" }
+bookrack-vectors = { path = "../vectors" }
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
