@@ -143,7 +143,14 @@ pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR
 pub const LOG_ENV: &str = "BOOKRACK_LOG";
 
 /// Filter directive used when [`LOG_ENV`] is unset.
-pub const DEFAULT_LOG: &str = "info";
+///
+/// bookrack's own crates log at `info`; the vector-store dependencies
+/// (`lance*`, `datafusion`) are pinned to `warn` because they emit a high
+/// volume of `info` events — manifest loads, plan runs, file audits — that
+/// would otherwise bury the pipeline's own diagnostics. Override the whole
+/// directive with [`LOG_ENV`] to see them.
+pub const DEFAULT_LOG: &str =
+    "info,lance=warn,lance_namespace_impls=warn,lance_table=warn,datafusion=warn";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
