@@ -31,9 +31,10 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("original_path").comment("forensic: where the file came from"),
         ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
         ColumnSpec::int("byte_size"),
-        ColumnSpec::text("adapter").comment("extraction adapter, chosen at EXTRACT"),
-        ColumnSpec::text("rbook_version")
-            .comment("rbook extractor version, stamped at EXTRACT; identifies a stale partition"),
+        ColumnSpec::text("adapter").comment("extraction adapter, stamped at EXTRACT"),
+        ColumnSpec::text("extractor_version").comment(
+            "extractor version string, stamped at EXTRACT; a mismatch marks a stale partition",
+        ),
         ColumnSpec::text("intake_at")
             .not_null()
             .comment("ISO-8601 UTC"),
@@ -125,12 +126,12 @@ pub struct Intake {
     pub format: Option<String>,
     /// File size in bytes.
     pub byte_size: Option<i64>,
-    /// Extraction adapter chosen for this file.
+    /// Extraction adapter chosen for this file, stamped at EXTRACT.
     pub adapter: Option<String>,
-    /// The `rbook` extractor version that parsed this file, stamped at
+    /// The extractor version string that parsed this file, stamped at
     /// EXTRACT. A mismatch against the current version marks a partition
     /// stale and due for re-extraction.
-    pub rbook_version: Option<String>,
+    pub extractor_version: Option<String>,
     /// Registration time, as an ISO-8601 UTC timestamp.
     pub intake_at: String,
     /// Coarse lifecycle state.
@@ -154,7 +155,7 @@ impl Intake {
             format: row.get("format")?,
             byte_size: row.get("byte_size")?,
             adapter: row.get("adapter")?,
-            rbook_version: row.get("rbook_version")?,
+            extractor_version: row.get("extractor_version")?,
             intake_at: row.get("intake_at")?,
             status: decode(row, "status", IntakeStatus::from_db_str)?,
             expression_id: row.get("expression_id")?,
@@ -317,6 +318,29 @@ impl Catalog {
         )?;
         Ok(affected > 0)
     }
+
+    /// Stamp the extraction provenance: the adapter that parsed the file
+    /// and the behaviour-sensitive extractor version string. Both are
+    /// known together once EXTRACT completes; recording the version is
+    /// what later lets a re-extraction detect a stale partition. Returns
+    /// whether a row with that id existed.
+    pub fn set_extraction(
+        &self,
+        intake_id: i64,
+        adapter: &str,
+        extractor_version: &str,
+    ) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE intake SET adapter = :adapter, extractor_version = :extractor_version \
+             WHERE intake_id = :intake_id",
+            named_params! {
+                ":adapter": adapter,
+                ":extractor_version": extractor_version,
+                ":intake_id": intake_id,
+            },
+        )?;
+        Ok(affected > 0)
+    }
 }
 
 #[cfg(test)]
@@ -374,7 +398,7 @@ mod tests {
         assert!(!read.intake_at.is_empty());
         // No write path fills these columns yet; later pipeline stages do.
         assert_eq!(read.adapter, None);
-        assert_eq!(read.rbook_version, None);
+        assert_eq!(read.extractor_version, None);
         assert_eq!(read.expression_id, None);
         assert_eq!(read.notes, None);
     }
