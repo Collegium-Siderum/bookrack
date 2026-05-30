@@ -139,6 +139,12 @@ pub const EMBED_BATCH_MAX_CHUNKS_ENV: &str = "BOOKRACK_EMBED_BATCH_MAX_CHUNKS";
 /// Environment variable overriding the OOM-shrink char-budget floor.
 pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR_BUDGET";
 
+/// Environment variable overriding the log filter directive.
+pub const LOG_ENV: &str = "BOOKRACK_LOG";
+
+/// Filter directive used when [`LOG_ENV`] is unset.
+pub const DEFAULT_LOG: &str = "info";
+
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
 pub const DEFAULT_SEARCH_TOP_K: usize = 5;
@@ -254,6 +260,39 @@ impl SearchConfig {
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> SearchConfig {
         SearchConfig {
             top_k: env_usize(get(SEARCH_TOP_K_ENV), DEFAULT_SEARCH_TOP_K),
+        }
+    }
+}
+
+/// Logging verbosity, resolved separately from the data-path config so an
+/// entry point can install its subscriber before touching anything else.
+#[derive(Debug, Clone)]
+pub struct LogConfig {
+    /// Filter directive for `EnvFilter`, e.g. `info`, `debug`, or
+    /// `bookrack_ingest=debug,info`.
+    pub directive: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> LogConfig {
+        LogConfig {
+            directive: DEFAULT_LOG.to_string(),
+        }
+    }
+}
+
+impl LogConfig {
+    /// Resolve from the environment, falling back to [`DEFAULT_LOG`] when
+    /// the override is unset or blank.
+    pub fn from_env() -> LogConfig {
+        LogConfig::resolve_from(|key| std::env::var(key).ok())
+    }
+
+    /// Pure resolution, factored out so it can be tested without mutating
+    /// process-global environment variables.
+    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
+        LogConfig {
+            directive: env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string()),
         }
     }
 }
@@ -437,6 +476,26 @@ mod tests {
         // A blank value falls back to the default.
         let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()));
         assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
+    }
+
+    #[test]
+    fn log_config_default_and_env_override() {
+        assert_eq!(LogConfig::default().directive, DEFAULT_LOG);
+
+        // An unset variable falls back to the default.
+        let unset = LogConfig::resolve_from(|_| None);
+        assert_eq!(unset.directive, DEFAULT_LOG);
+
+        // A set directive is taken verbatim.
+        let set = LogConfig::resolve_from(|key| match key {
+            LOG_ENV => Some("bookrack_ingest=debug,info".to_string()),
+            _ => None,
+        });
+        assert_eq!(set.directive, "bookrack_ingest=debug,info");
+
+        // A whitespace-only value counts as unset.
+        let blank = LogConfig::resolve_from(|_| Some("   ".to_string()));
+        assert_eq!(blank.directive, DEFAULT_LOG);
     }
 
     #[test]

@@ -47,6 +47,16 @@ pdfium-render = { version = "0.9", default-features = false, features = [
 text-splitter = "0.30"
 reqwest = { version = "0.12", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
+# Structured logging facade. Library crates depend only on this; they
+# emit spans and events and never touch a subscriber.
+tracing = "0.1"
+# Subscriber implementation, pulled in only by executable entry points:
+# `env-filter` for level directives, `fmt` for the human console layer,
+# `json` for the structured file layer.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# Rolling-file, non-blocking writer for the JSON log layer. Entry-point
+# only, alongside tracing-subscriber.
+tracing-appender = "0.2"
 sha2 = "0.10"
 # NFKC for the `normalize` crate. Behaviour-sensitive: a bundled Unicode
 # data update can shift normalized output. Pinned via Cargo.lock.
