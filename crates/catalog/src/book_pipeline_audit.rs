@@ -231,6 +231,23 @@ impl Catalog {
             .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
         Ok(rows)
     }
+
+    /// Every recorded sub-step for one book, oldest first. Rows logged
+    /// before the book's root id was known (e.g. an extract that failed
+    /// before structure) carry a `NULL` `book_root_id` and are not
+    /// returned here; query by run id to see those.
+    pub fn pipeline_audit_for_book(&self, book_root_id: i64) -> Result<Vec<BookPipelineAudit>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE book_root_id = :book_root_id ORDER BY ts, audit_id",
+        ))?;
+        let rows = stmt
+            .query_map(
+                named_params! { ":book_root_id": book_root_id },
+                BookPipelineAudit::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +341,35 @@ mod tests {
                 .expect("read")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn audit_for_book_returns_only_rows_with_that_root() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        // A row before the root id is known carries a NULL book_root_id.
+        catalog
+            .record_pipeline_audit(&NewBookPipelineAudit::new(
+                "extract",
+                "extract",
+                "ok",
+                "run-1",
+                ActorKind::Pipeline,
+            ))
+            .expect("record");
+        for stage in ["structure", "embed"] {
+            let mut row =
+                NewBookPipelineAudit::new(stage, stage, "ok", "run-1", ActorKind::Pipeline);
+            row.book_root_id = Some(100_000_001);
+            catalog.record_pipeline_audit(&row).expect("record");
+        }
+
+        let stages: Vec<String> = catalog
+            .pipeline_audit_for_book(100_000_001)
+            .expect("read")
+            .into_iter()
+            .map(|row| row.stage)
+            .collect();
+        // The NULL-root extract row is excluded; the two rooted rows remain.
+        assert_eq!(stages, ["structure", "embed"]);
     }
 }

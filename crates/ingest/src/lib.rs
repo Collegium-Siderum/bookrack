@@ -24,7 +24,9 @@ pub use embed_run::embed_book_chunks;
 
 use std::path::Path;
 
-use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_catalog::{
+    ActorKind, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState, NewIntake,
+};
 use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::{Corpus, Node};
@@ -232,19 +234,65 @@ pub async fn ingest_book<E: Embedder>(
     embedder: &E,
     params: &IngestParams,
 ) -> Result<IngestReport> {
-    let extraction = tracing::info_span!("operation", stage = "extract").in_scope(|| {
-        match bookrack_extract::extract(file)? {
-            ExtractOutcome::Extracted(extraction) => Ok(extraction),
-            ExtractOutcome::NeedsOcr { reason } => Err(IngestError::NeedsOcr { reason }),
+    // One run id ties every audit row from this invocation together; the
+    // whole-file hash anchors the rows to a source that survives deletion.
+    let bytes = std::fs::read(file)?;
+    let source_sha = sha256_hex(&bytes);
+    let run_id = new_run_id(&source_sha);
+
+    // EXTRACT.
+    let started = std::time::Instant::now();
+    let extracted = tracing::info_span!("operation", stage = "extract")
+        .in_scope(|| bookrack_extract::extract(file));
+    let extraction = match extracted {
+        Ok(ExtractOutcome::Extracted(extraction)) => extraction,
+        Ok(ExtractOutcome::NeedsOcr { reason }) => {
+            audit(
+                catalog,
+                &run_id,
+                &source_sha,
+                None,
+                "extract",
+                "skipped",
+                started,
+                None,
+                Some(&reason),
+            );
+            return Err(IngestError::NeedsOcr { reason });
         }
-    })?;
-    tracing::info!(adapter = %extraction.provenance.adapter, "extracted source file");
+        Err(e) => {
+            audit(
+                catalog,
+                &run_id,
+                &source_sha,
+                None,
+                "extract",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            return Err(e.into());
+        }
+    };
+    let adapter = extraction.provenance.adapter.clone();
+    audit(
+        catalog,
+        &run_id,
+        &source_sha,
+        None,
+        "extract",
+        "ok",
+        started,
+        None,
+        None,
+    );
+    tracing::info!(adapter = %adapter, "extracted source file");
 
     // Register the file, keyed idempotently on its whole-file hash.
-    let bytes = std::fs::read(file)?;
     let registration = catalog.register_intake(
-        &NewIntake::new(sha256_hex(&bytes))
-            .format(extraction.provenance.adapter.clone())
+        &NewIntake::new(source_sha.clone())
+            .format(adapter.clone())
             .byte_size(bytes.len() as i64),
     )?;
     let already_registered = !registration.is_new();
@@ -262,7 +310,9 @@ pub async fn ingest_book<E: Embedder>(
         &extraction.provenance.extractor_version,
     )?;
 
-    let structure = tracing::info_span!("operation", stage = "structure").in_scope(|| {
+    // STRUCTURE.
+    let started = std::time::Instant::now();
+    let structure = match tracing::info_span!("operation", stage = "structure").in_scope(|| {
         ingest_structure(
             corpus,
             intake_id,
@@ -270,32 +320,205 @@ pub async fn ingest_book<E: Embedder>(
             &extraction,
             &params.structure,
         )
-    })?;
+    }) {
+        Ok(structure) => structure,
+        Err(e) => {
+            audit(
+                catalog,
+                &run_id,
+                &source_sha,
+                None,
+                "structure",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+    let book_root_id = structure.book_root_id.get();
+    let metric = format!(
+        r#"{{"nodes":{},"prose_leaves":{}}}"#,
+        structure.nodes_written, structure.prose_leaves
+    );
+    audit(
+        catalog,
+        &run_id,
+        &source_sha,
+        Some(book_root_id),
+        "structure",
+        "ok",
+        started,
+        Some(metric),
+        None,
+    );
     tracing::info!(
         nodes = structure.nodes_written,
         prose_leaves = structure.prose_leaves,
         "built corpus tree"
     );
+    let parsed_at = catalog.now_iso()?;
+    set_state(
+        catalog,
+        NewBookState::new(book_root_id, intake_id, "structure").parsed_at(&parsed_at),
+    );
 
-    let plans = tracing::info_span!("operation", stage = "chunk")
-        .in_scope(|| plan_book_chunks(corpus, structure.book_root_id, &params.chunk))?;
+    // CHUNK.
+    let started = std::time::Instant::now();
+    let plans = match tracing::info_span!("operation", stage = "chunk")
+        .in_scope(|| plan_book_chunks(corpus, structure.book_root_id, &params.chunk))
+    {
+        Ok(plans) => plans,
+        Err(e) => {
+            audit(
+                catalog,
+                &run_id,
+                &source_sha,
+                Some(book_root_id),
+                "chunk",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            set_state(
+                catalog,
+                NewBookState::new(book_root_id, intake_id, "chunk")
+                    .parsed_at(&parsed_at)
+                    .last_error(e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+    audit(
+        catalog,
+        &run_id,
+        &source_sha,
+        Some(book_root_id),
+        "chunk",
+        "ok",
+        started,
+        Some(format!(r#"{{"chunks":{}}}"#, plans.len())),
+        None,
+    );
     tracing::info!(chunks = plans.len(), "planned chunks");
 
-    let chunks_written = embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed)
+    // EMBED.
+    let started = std::time::Instant::now();
+    let embed = match embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed)
         .instrument(tracing::info_span!("operation", stage = "embed"))
-        .await?;
-    tracing::info!(chunks_written, "embedded chunks");
+        .await
+    {
+        Ok(report) => report,
+        Err(e) => {
+            audit(
+                catalog,
+                &run_id,
+                &source_sha,
+                Some(book_root_id),
+                "embed",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            set_state(
+                catalog,
+                NewBookState::new(book_root_id, intake_id, "embed")
+                    .parsed_at(&parsed_at)
+                    .embed_model(&params.embed.model)
+                    .last_error(e.to_string()),
+            );
+            return Err(e);
+        }
+    };
+    let metric = format!(
+        r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
+        embed.chunks_written, embed.batches, embed.shrink_events, embed.total_chars
+    );
+    audit(
+        catalog,
+        &run_id,
+        &source_sha,
+        Some(book_root_id),
+        "embed",
+        "ok",
+        started,
+        Some(metric),
+        None,
+    );
+    tracing::info!(
+        chunks_written = embed.chunks_written,
+        batches = embed.batches,
+        shrink_events = embed.shrink_events,
+        "embedded chunks"
+    );
 
     catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
+    let embedded_at = catalog.now_iso()?;
+    set_state(
+        catalog,
+        NewBookState::new(book_root_id, intake_id, "embed")
+            .embed_model(&params.embed.model)
+            .parsed_at(&parsed_at)
+            .embedded_at(&embedded_at),
+    );
 
     Ok(IngestReport {
         intake_id,
         book_root_id: structure.book_root_id,
         nodes_written: structure.nodes_written,
         prose_leaves: structure.prose_leaves,
-        chunks_written,
+        chunks_written: embed.chunks_written,
         already_registered,
     })
+}
+
+/// Build a per-invocation pipeline run id: a short source-hash prefix for
+/// readability, plus a nanosecond timestamp so repeated ingests of the
+/// same file stay distinct runs.
+fn new_run_id(source_sha: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("ingest-{}-{nanos}", &source_sha[..source_sha.len().min(8)])
+}
+
+/// Append one pipeline-audit row, best-effort: the audit trail is
+/// observability, so a failure to record it is logged and swallowed rather
+/// than failing the ingest it describes.
+#[allow(clippy::too_many_arguments)]
+fn audit(
+    catalog: &Catalog,
+    run_id: &str,
+    source_sha: &str,
+    book_root_id: Option<i64>,
+    stage: &str,
+    outcome: &str,
+    started: std::time::Instant,
+    metric_summary: Option<String>,
+    error_message: Option<&str>,
+) {
+    let mut row = NewBookPipelineAudit::new(stage, stage, outcome, run_id, ActorKind::Pipeline);
+    row.book_root_id = book_root_id;
+    row.source_sha256 = Some(source_sha.to_string());
+    row.metric_summary = metric_summary;
+    row.error_message = error_message.map(str::to_string);
+    row.duration_ms = Some(started.elapsed().as_millis() as i64);
+    row.actor_detail = Some("ingest".to_string());
+    if let Err(e) = catalog.record_pipeline_audit(&row) {
+        tracing::warn!(error = %e, stage, "failed to record pipeline audit row");
+    }
+}
+
+/// Upsert a book's pipeline state, best-effort for the same reason as
+/// [`audit`].
+fn set_state(catalog: &Catalog, state: NewBookState) {
+    if let Err(e) = catalog.upsert_book_state(&state) {
+        tracing::warn!(error = %e, "failed to update book state");
+    }
 }
 
 /// SHA-256 of raw bytes as 64 lowercase hex characters — the whole-file
@@ -685,5 +908,134 @@ mod tests {
         let a = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
         let b = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod book_pipeline_tests {
+    use super::*;
+    use bookrack_core::PartitionIdx;
+    use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
+    use std::future::Future;
+    use std::io::Write;
+
+    /// A fake embedder returning constant `dim`-length vectors.
+    struct Fake {
+        dim: usize,
+    }
+
+    impl Embedder for Fake {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let (dim, n) = (self.dim, texts.len());
+            async move { Ok(vec![vec![0.25f32; dim]; n]) }
+        }
+    }
+
+    /// A fake embedder that always fails, forcing the EMBED stage to fail.
+    struct Offline;
+
+    impl Embedder for Offline {
+        fn embed_batch(
+            &self,
+            _texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            std::future::ready(Err(EmbedError::Unreachable(
+                "test embedder offline".to_string(),
+            )))
+        }
+    }
+
+    /// Write a tiny plain-text book; each non-blank line becomes a block.
+    fn write_sample(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("sample.txt");
+        let mut file = std::fs::File::create(&path).expect("create sample");
+        writeln!(
+            file,
+            "The first paragraph of a short sample document about birds."
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "A second paragraph carrying more prose to chunk and embed."
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "A third and final paragraph rounding out the sample text."
+        )
+        .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_successful_ingest_advances_state_and_logs_ok_audit_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("ingest");
+        assert!(report.chunks_written > 0);
+
+        let root = report.book_root_id.get();
+        let state = catalog.book_state(root).expect("state").expect("present");
+        assert_eq!(state.current_stage, "embed");
+        assert!(state.embedded_at.is_some());
+        assert!(state.last_error.is_none());
+
+        // Every rooted stage logged an ok row; the embed row carries its
+        // batching metrics.
+        let rows = catalog.pipeline_audit_for_book(root).expect("audit");
+        let stages: Vec<&str> = rows.iter().map(|r| r.stage.as_str()).collect();
+        assert_eq!(stages, ["structure", "chunk", "embed"]);
+        assert!(rows.iter().all(|r| r.outcome == "ok"));
+        let embed = rows.iter().find(|r| r.stage == "embed").expect("embed row");
+        let metric = embed.metric_summary.as_deref().unwrap_or_default();
+        assert!(metric.contains("\"batches\""), "metric: {metric}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_embed_records_fail_outcome_and_last_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let err = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &Offline,
+            &IngestParams::default(),
+        )
+        .await
+        .expect_err("embed must fail");
+        assert!(matches!(err, IngestError::Embed(_)));
+
+        // STRUCTURE allocated the root for the first intake, so book_state
+        // exists and carries the failure; no vectors were written.
+        let root = PartitionIdx::new(1).root().get();
+        let state = catalog.book_state(root).expect("state").expect("present");
+        assert_eq!(state.current_stage, "embed");
+        assert!(state.embedded_at.is_none());
+        assert!(state.last_error.is_some());
+
+        let rows = catalog.pipeline_audit_for_book(root).expect("audit");
+        let embed = rows.iter().find(|r| r.stage == "embed").expect("embed row");
+        assert_eq!(embed.outcome, "fail");
+        assert!(embed.error_message.is_some());
     }
 }

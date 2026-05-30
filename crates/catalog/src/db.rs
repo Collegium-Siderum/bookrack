@@ -123,6 +123,18 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// The current UTC time as an ISO-8601 string, read from SQLite's
+    /// clock so timestamps the crate writes share one source with the
+    /// `ts` columns the table inserts generate themselves.
+    pub fn now_iso(&self) -> Result<String> {
+        let ts =
+            self.conn
+                .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                    row.get(0)
+                })?;
+        Ok(ts)
+    }
+
     /// Stamp the schema version on a fresh database, or verify it on an
     /// existing one.
     fn reconcile_schema_version(&self) -> Result<()> {
@@ -192,5 +204,15 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         bookrack_dbkit::verify_all(&catalog.conn, SPECS)
             .expect("the rendered schema must conform to every spec");
+    }
+
+    #[test]
+    fn now_iso_returns_a_zulu_timestamp() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let ts = catalog.now_iso().expect("now");
+        // Shape check: `YYYY-MM-DDTHH:MM:SSZ`.
+        assert_eq!(ts.len(), 20, "{ts}");
+        assert!(ts.ends_with('Z'), "{ts}");
+        assert_eq!(ts.as_bytes()[10], b'T', "{ts}");
     }
 }

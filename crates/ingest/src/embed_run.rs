@@ -23,8 +23,22 @@ use bookrack_vectors::{ChunkRow, ChunkStore};
 use crate::chunk::ChunkPlan;
 use crate::{IngestError, Result};
 
+/// What one EMBED run produced — the row count plus the batching metrics
+/// that diagnose how the run behaved against the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbedRunReport {
+    /// Rows written to the vector store.
+    pub chunks_written: usize,
+    /// Embed requests issued, after any overload shrinking.
+    pub batches: usize,
+    /// Times an overloaded server forced a batch to be halved.
+    pub shrink_events: usize,
+    /// Total characters of chunk text embedded.
+    pub total_chars: usize,
+}
+
 /// Embed a book's chunk plans and write them to the store under
-/// `lancedb_dir`. Returns the number of rows written.
+/// `lancedb_dir`. Returns the run's [`EmbedRunReport`].
 ///
 /// The embedding dimension is probed from the first chunk and the store
 /// is opened fixed to it. The book's prior rows are cleared before the
@@ -34,9 +48,9 @@ pub async fn embed_book_chunks<E: Embedder>(
     embedder: &E,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
-) -> Result<usize> {
+) -> Result<EmbedRunReport> {
     if plans.is_empty() {
-        return Ok(0);
+        return Ok(EmbedRunReport::default());
     }
 
     // Probe the dimension before opening the store: the store fixes its
@@ -56,7 +70,7 @@ pub async fn embed_book_chunks<E: Embedder>(
         .delete_partition(plans[0].start_node_id.partition())
         .await?;
 
-    let mut written = 0usize;
+    let mut report = EmbedRunReport::default();
     let mut start = 0usize;
     while start < plans.len() {
         let end = greedy_batch_end(plans, start, cfg);
@@ -65,7 +79,7 @@ pub async fn embed_book_chunks<E: Embedder>(
         tracing::debug!(chunks = batch.len(), chars = batch_chars, "embedding batch");
 
         let started = Instant::now();
-        let vectors = embed_with_shrink(embedder, batch, 0).await?;
+        let (vectors, shrinks) = embed_with_shrink(embedder, batch, 0).await?;
         tracing::debug!(
             vectors = vectors.len(),
             elapsed_ms = started.elapsed().as_secs_f64() * 1e3,
@@ -74,10 +88,14 @@ pub async fn embed_book_chunks<E: Embedder>(
 
         let rows = store.append(&to_rows(batch, vectors)).await?;
         tracing::debug!(rows, "appended batch to store");
-        written += rows;
+
+        report.chunks_written += rows;
+        report.batches += 1;
+        report.shrink_events += shrinks;
+        report.total_chars += batch_chars;
         start = end;
     }
-    Ok(written)
+    Ok(report)
 }
 
 /// Find the end of the greedy batch starting at `start`: grow while the
@@ -105,14 +123,18 @@ fn greedy_batch_end(plans: &[ChunkPlan], start: usize, cfg: &EmbedConfig) -> usi
 /// further, so an overload there surfaces as an error. `depth` is the
 /// recursion depth, recorded on the shrink event so a deep shrink cascade
 /// is visible in the logs.
+///
+/// Returns the embedding vectors and the number of shrink events the call
+/// triggered — one per overload that forced a halving, summed across the
+/// recursion.
 async fn embed_with_shrink<E: Embedder>(
     embedder: &E,
     batch: &[ChunkPlan],
     depth: usize,
-) -> Result<Vec<Vec<f32>>> {
+) -> Result<(Vec<Vec<f32>>, usize)> {
     let texts: Vec<String> = batch.iter().map(|p| p.text.clone()).collect();
     match embedder.embed_batch(&texts).await {
-        Ok(vectors) => Ok(vectors),
+        Ok(vectors) => Ok((vectors, 0)),
         Err(e) if e.is_overload() && batch.len() > 1 => {
             let mid = batch.len() / 2;
             tracing::warn!(
@@ -121,10 +143,12 @@ async fn embed_with_shrink<E: Embedder>(
                 depth,
                 "embed server overloaded; shrinking batch"
             );
-            let mut left = Box::pin(embed_with_shrink(embedder, &batch[..mid], depth + 1)).await?;
-            let right = Box::pin(embed_with_shrink(embedder, &batch[mid..], depth + 1)).await?;
+            let (mut left, left_shrinks) =
+                Box::pin(embed_with_shrink(embedder, &batch[..mid], depth + 1)).await?;
+            let (right, right_shrinks) =
+                Box::pin(embed_with_shrink(embedder, &batch[mid..], depth + 1)).await?;
             left.extend(right);
-            Ok(left)
+            Ok((left, 1 + left_shrinks + right_shrinks))
         }
         Err(e) => Err(IngestError::Embed(e)),
     }
@@ -216,7 +240,7 @@ mod tests {
     async fn embeds_every_chunk_and_writes_one_row_each() {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
-        let written = embed_book_chunks(
+        let report = embed_book_chunks(
             &plans,
             &Fake { dim: 8 },
             dir.path(),
@@ -224,7 +248,10 @@ mod tests {
         )
         .await
         .expect("embed");
-        assert_eq!(written, 5);
+        assert_eq!(report.chunks_written, 5);
+        // One greedy batch holds all five short chunks, with no shrinking.
+        assert_eq!(report.batches, 1);
+        assert_eq!(report.shrink_events, 0);
 
         let store = ChunkStore::open(dir.path(), 8).await.expect("reopen");
         assert_eq!(store.count_rows().await.expect("count"), 5);
@@ -233,10 +260,10 @@ mod tests {
     #[tokio::test]
     async fn empty_plans_write_nothing() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let written = embed_book_chunks(&[], &Fake { dim: 8 }, dir.path(), &EmbedConfig::default())
+        let report = embed_book_chunks(&[], &Fake { dim: 8 }, dir.path(), &EmbedConfig::default())
             .await
             .expect("embed");
-        assert_eq!(written, 0);
+        assert_eq!(report, EmbedRunReport::default());
     }
 
     #[tokio::test]
@@ -263,7 +290,7 @@ mod tests {
         // Many small chunks in one greedy batch; the embedder refuses any
         // batch above two, forcing repeated halving down to that size.
         let plans: Vec<ChunkPlan> = (1..=8).map(|i| plan(i, "x")).collect();
-        let written = embed_book_chunks(
+        let report = embed_book_chunks(
             &plans,
             &Overloading {
                 dim: 4,
@@ -274,6 +301,9 @@ mod tests {
         )
         .await
         .expect("embed");
-        assert_eq!(written, 8);
+        assert_eq!(report.chunks_written, 8);
+        // The eight-chunk batch is halved until each piece is within the
+        // server's limit, so the run records the shrinking it took.
+        assert!(report.shrink_events > 0);
     }
 }
