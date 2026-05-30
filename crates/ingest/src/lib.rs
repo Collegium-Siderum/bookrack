@@ -31,6 +31,7 @@ use bookrack_corpus::{Corpus, Node};
 use bookrack_embed::Embedder;
 use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
 
 /// Tuning parameters for STRUCTURE.
 #[derive(Debug, Clone)]
@@ -218,6 +219,11 @@ pub struct IngestReport {
 /// than duplicating them. `lancedb_dir` is the vector store directory;
 /// `embedder` turns chunk text into vectors. A file whose text layer is
 /// unusable yields [`IngestError::NeedsOcr`].
+#[tracing::instrument(
+    name = "book",
+    skip_all,
+    fields(file = %file.display(), intake_id = tracing::field::Empty)
+)]
 pub async fn ingest_book<E: Embedder>(
     file: &Path,
     corpus: &mut Corpus,
@@ -226,10 +232,13 @@ pub async fn ingest_book<E: Embedder>(
     embedder: &E,
     params: &IngestParams,
 ) -> Result<IngestReport> {
-    let extraction = match bookrack_extract::extract(file)? {
-        ExtractOutcome::Extracted(extraction) => extraction,
-        ExtractOutcome::NeedsOcr { reason } => return Err(IngestError::NeedsOcr { reason }),
-    };
+    let extraction = tracing::info_span!("operation", stage = "extract").in_scope(|| {
+        match bookrack_extract::extract(file)? {
+            ExtractOutcome::Extracted(extraction) => Ok(extraction),
+            ExtractOutcome::NeedsOcr { reason } => Err(IngestError::NeedsOcr { reason }),
+        }
+    })?;
+    tracing::info!(adapter = %extraction.provenance.adapter, "extracted source file");
 
     // Register the file, keyed idempotently on its whole-file hash.
     let bytes = std::fs::read(file)?;
@@ -240,6 +249,10 @@ pub async fn ingest_book<E: Embedder>(
     )?;
     let already_registered = !registration.is_new();
     let intake_id = registration.intake().intake_id;
+    // Now that the intake id is known, record it on the book span so every
+    // event under this run is attributable to one book.
+    tracing::Span::current().record("intake_id", intake_id);
+    tracing::info!(intake_id, already_registered, "registered intake");
 
     // Stamp the extraction provenance, so a later re-extraction can tell
     // whether this book's partition is stale.
@@ -249,16 +262,29 @@ pub async fn ingest_book<E: Embedder>(
         &extraction.provenance.extractor_version,
     )?;
 
-    let structure = ingest_structure(
-        corpus,
-        intake_id,
-        NodeType::Work,
-        &extraction,
-        &params.structure,
-    )?;
-    let plans = plan_book_chunks(corpus, structure.book_root_id, &params.chunk)?;
-    let chunks_written =
-        embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed).await?;
+    let structure = tracing::info_span!("operation", stage = "structure").in_scope(|| {
+        ingest_structure(
+            corpus,
+            intake_id,
+            NodeType::Work,
+            &extraction,
+            &params.structure,
+        )
+    })?;
+    tracing::info!(
+        nodes = structure.nodes_written,
+        prose_leaves = structure.prose_leaves,
+        "built corpus tree"
+    );
+
+    let plans = tracing::info_span!("operation", stage = "chunk")
+        .in_scope(|| plan_book_chunks(corpus, structure.book_root_id, &params.chunk))?;
+    tracing::info!(chunks = plans.len(), "planned chunks");
+
+    let chunks_written = embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed)
+        .instrument(tracing::info_span!("operation", stage = "embed"))
+        .await?;
+    tracing::info!(chunks_written, "embedded chunks");
 
     catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
 

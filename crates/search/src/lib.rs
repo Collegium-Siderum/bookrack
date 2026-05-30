@@ -14,6 +14,8 @@
 //! It is added only when the walk does not already lead with it. Hybrid
 //! retrieval (BM25 / full-text) and an approximate index are deferred.
 
+use std::time::Instant;
+
 use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
@@ -70,6 +72,7 @@ pub struct Citation {
 
 /// Retrieve the `top_k` passages nearest `query`, each with a citation
 /// breadcrumb resolved from `corpus`.
+#[tracing::instrument(name = "search", skip_all, fields(top_k = top_k))]
 pub async fn search<E: Embedder>(
     query: &str,
     corpus: &Corpus,
@@ -78,10 +81,23 @@ pub async fn search<E: Embedder>(
     top_k: usize,
 ) -> Result<Vec<Citation>> {
     let input = build_query_input(query);
+    let embed_started = Instant::now();
     let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
     let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
+    tracing::debug!(
+        elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
+        "embedded query"
+    );
 
+    let recall_started = Instant::now();
     let hits = store.search(query_vector, top_k).await?;
+    tracing::debug!(
+        hits = hits.len(),
+        elapsed_ms = recall_started.elapsed().as_secs_f64() * 1e3,
+        "recalled nearest passages"
+    );
+
+    let breadcrumb_started = Instant::now();
     let mut citations = Vec::with_capacity(hits.len());
     for hit in hits {
         citations.push(Citation {
@@ -95,6 +111,11 @@ pub async fn search<E: Embedder>(
             distance: hit.distance,
         });
     }
+    tracing::debug!(
+        elapsed_ms = breadcrumb_started.elapsed().as_secs_f64() * 1e3,
+        "resolved breadcrumbs"
+    );
+    tracing::info!(hits = citations.len(), "search complete");
     Ok(citations)
 }
 

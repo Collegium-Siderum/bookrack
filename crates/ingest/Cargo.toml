@@ -17,6 +17,7 @@ bookrack-vectors = { path = "../vectors" }
 text-splitter.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

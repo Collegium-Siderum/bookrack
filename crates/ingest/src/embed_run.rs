@@ -14,6 +14,7 @@
 //! the same file replaces its rows rather than duplicating them.
 
 use std::path::Path;
+use std::time::Instant;
 
 use bookrack_config::EmbedConfig;
 use bookrack_embed::Embedder;
@@ -60,8 +61,20 @@ pub async fn embed_book_chunks<E: Embedder>(
     while start < plans.len() {
         let end = greedy_batch_end(plans, start, cfg);
         let batch = &plans[start..end];
-        let vectors = embed_with_shrink(embedder, batch).await?;
-        written += store.append(&to_rows(batch, vectors)).await?;
+        let batch_chars: usize = batch.iter().map(|p| p.text.chars().count()).sum();
+        tracing::debug!(chunks = batch.len(), chars = batch_chars, "embedding batch");
+
+        let started = Instant::now();
+        let vectors = embed_with_shrink(embedder, batch, 0).await?;
+        tracing::debug!(
+            vectors = vectors.len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1e3,
+            "batch embedded"
+        );
+
+        let rows = store.append(&to_rows(batch, vectors)).await?;
+        tracing::debug!(rows, "appended batch to store");
+        written += rows;
         start = end;
     }
     Ok(written)
@@ -89,18 +102,27 @@ fn greedy_batch_end(plans: &[ChunkPlan], start: usize, cfg: &EmbedConfig) -> usi
 
 /// Embed one batch, halving and retrying each half on overload until it
 /// succeeds or reaches a single chunk. A single chunk cannot shrink
-/// further, so an overload there surfaces as an error.
+/// further, so an overload there surfaces as an error. `depth` is the
+/// recursion depth, recorded on the shrink event so a deep shrink cascade
+/// is visible in the logs.
 async fn embed_with_shrink<E: Embedder>(
     embedder: &E,
     batch: &[ChunkPlan],
+    depth: usize,
 ) -> Result<Vec<Vec<f32>>> {
     let texts: Vec<String> = batch.iter().map(|p| p.text.clone()).collect();
     match embedder.embed_batch(&texts).await {
         Ok(vectors) => Ok(vectors),
         Err(e) if e.is_overload() && batch.len() > 1 => {
             let mid = batch.len() / 2;
-            let mut left = Box::pin(embed_with_shrink(embedder, &batch[..mid])).await?;
-            let right = Box::pin(embed_with_shrink(embedder, &batch[mid..])).await?;
+            tracing::warn!(
+                before = batch.len(),
+                after = mid,
+                depth,
+                "embed server overloaded; shrinking batch"
+            );
+            let mut left = Box::pin(embed_with_shrink(embedder, &batch[..mid], depth + 1)).await?;
+            let right = Box::pin(embed_with_shrink(embedder, &batch[mid..], depth + 1)).await?;
             left.extend(right);
             Ok(left)
         }
