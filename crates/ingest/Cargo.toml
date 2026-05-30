@@ -10,5 +10,6 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-extract = { path = "../extract" }
 bookrack-normalize = { path = "../normalize" }
+text-splitter.workspace = true
 thiserror.workspace = true
 sha2.workspace = true

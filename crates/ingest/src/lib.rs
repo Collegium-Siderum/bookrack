@@ -14,11 +14,14 @@
 //! re-ingest of the same file reproduces identical ids; STRUCTURE first
 //! drops any prior tree for the intake, making the operation idempotent.
 
+mod chunk;
 pub mod sentences;
 mod structure;
 
+pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
-use bookrack_corpus::Corpus;
+use bookrack_corpus::{Corpus, Node};
 use bookrack_extract::Extraction;
 
 /// Tuning parameters for STRUCTURE.
@@ -104,6 +107,35 @@ pub fn ingest_structure(
         nodes_written,
         prose_leaves,
     })
+}
+
+/// Plan the chunks for one already-ingested book.
+///
+/// Reads the book's prose leaves from `corpus`, orders them by document
+/// position, and chunks them with the pure [`chunk`] planner. The chunks
+/// are the embed stage's input; this only reads — nothing is written.
+pub fn plan_book_chunks(
+    corpus: &Corpus,
+    book_root_id: NodeId,
+    params: &ChunkParams,
+) -> Result<Vec<ChunkPlan>> {
+    let nodes = corpus.book_nodes(book_root_id)?;
+    let mut leaves: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| n.node_type.is_prose_leaf())
+        .collect();
+    leaves.sort_by_key(|n| n.toc_lo.unwrap_or_else(|| n.node_id.get()));
+    let chunk_leaves: Vec<chunk::ChunkLeaf<'_>> = leaves
+        .iter()
+        .filter_map(|n| {
+            n.text_content.as_deref().map(|text| chunk::ChunkLeaf {
+                node_id: n.node_id,
+                parent_id: n.parent_id,
+                text,
+            })
+        })
+        .collect();
+    Ok(chunk::plan_chunks(&chunk_leaves, params))
 }
 
 #[cfg(test)]
@@ -431,5 +463,55 @@ mod tests {
         for node in corpus.book_nodes(report.book_root_id).unwrap() {
             assert!(partition.contains(node.node_id));
         }
+    }
+
+    #[test]
+    fn plan_book_chunks_reads_prose_leaves_from_the_corpus() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &sample());
+
+        let plans =
+            plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).expect("chunk");
+
+        // Every chunk's text comes from a prose leaf; the sample's three
+        // short leaves fit in their per-chapter groups.
+        assert!(!plans.is_empty());
+        let prose_ids: Vec<NodeId> = corpus
+            .book_nodes(report.book_root_id)
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.node_type.is_prose_leaf())
+            .map(|n| n.node_id)
+            .collect();
+        for plan in &plans {
+            assert!(prose_ids.contains(&plan.start_node_id));
+            assert!(prose_ids.contains(&plan.end_node_id));
+            assert!(!plan.text.is_empty());
+            assert_eq!(
+                plan.norm_chunk_sha256,
+                bookrack_normalize::norm_text_sha256(&plan.text)
+            );
+        }
+    }
+
+    #[test]
+    fn planning_chunks_for_an_empty_book_is_empty() {
+        // A book whose only leaf is structural (no prose) yields no chunks.
+        let ex = extraction(
+            vec![Block {
+                kind: BlockKind::Body,
+                text: "Only paragraph.".to_string(),
+                source_unit: 0,
+            }],
+            Vec::new(),
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let report = ingest(&mut corpus, 1, &ex);
+        // Re-chunking a real book yields the same plans twice (determinism
+        // across a corpus round-trip).
+        let a = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
+        let b = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
+        assert_eq!(a, b);
     }
 }
