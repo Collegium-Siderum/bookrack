@@ -25,7 +25,7 @@ use crate::html_parse;
 /// Behaviour-sensitive extractor versions. Any change here can shift
 /// block boundaries, so it is stamped into `Provenance` for downstream
 /// dirty-partition detection.
-const EXTRACTOR_VERSION: &str = "rbook=0.7;scraper=0.24;epub-adapter=1";
+const EXTRACTOR_VERSION: &str = "rbook=0.7;scraper=0.27;epub-adapter=1";
 
 /// Extract one EPUB file.
 pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {

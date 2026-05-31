@@ -19,8 +19,8 @@ serde_json = "1"
 # Ctrl-C graceful-shutdown signal. Additive — other crates ignore them.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 # `bundled` compiles SQLite in-tree, so no system libsqlite is required.
-rusqlite = { version = "0.37", features = ["bundled"] }
-lancedb = "0.29"
+rusqlite = { version = "0.40", features = ["bundled"] }
+lancedb = "0.30"
 # Arrow companions of lancedb: the chunks-table record batches are built
 # and read through them. Their version must track lancedb's arrow.
 arrow-array = "58"
@@ -32,7 +32,7 @@ futures = "0.3"
 rbook = "0.7"
 # HTML / XHTML parsing for `extract`, behaviour-sensitive for the same
 # reason: a parser change can shift where blocks begin and end.
-scraper = "0.24"
+scraper = "0.27"
 # Legacy-encoding detection for `extract`'s plain-text adapter: decodes
 # GBK / GB2312 (`.txt` files carry no encoding declaration).
 encoding_rs = "0.8"
@@ -47,7 +47,10 @@ pdfium-render = { version = "0.9", default-features = false, features = [
     "thread_safe",
 ] }
 text-splitter = "0.30"
-reqwest = { version = "0.12", features = ["json"] }
+# HTTP client for the `embed` crate's Ollama calls. Ollama is reached
+# over plain local HTTP, so the TLS stack is dropped entirely: only the
+# JSON body codec is enabled.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 # Structured logging facade. Library crates depend only on this; they
 # emit spans and events and never touch a subscriber.
@@ -81,4 +84,4 @@ dotenvy = "0.15"
 tempfile = "3"
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
-zip = "2"
+zip = "8"

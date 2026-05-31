@@ -26,7 +26,7 @@ use crate::contract::{
 use crate::html_parse;
 
 /// Behaviour-sensitive extractor versions, stamped into `Provenance`.
-const EXTRACTOR_VERSION: &str = "scraper=0.24;html-adapter=1";
+const EXTRACTOR_VERSION: &str = "scraper=0.27;html-adapter=1";
 
 /// Extract one standalone HTML file.
 pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
