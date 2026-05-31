@@ -8,4 +8,5 @@ repository.workspace = true
 [dependencies]
 bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
+rusqlite_migration.workspace = true
 thiserror.workspace = true

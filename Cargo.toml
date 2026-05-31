@@ -20,6 +20,11 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 # `bundled` compiles SQLite in-tree, so no system libsqlite is required.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Schema migration engine for catalog.db, which is source-of-truth and
+# cannot be rebuilt. Tracks the applied revision in SQLite's user_version
+# and runs ordered, transactional migrations. Default features only; the
+# optional rust_decimal support is not enabled.
+rusqlite_migration = "2.6.0"
 lancedb = "0.30"
 # Arrow companions of lancedb: the chunks-table record batches are built
 # and read through them. Their version must track lancedb's arrow.
