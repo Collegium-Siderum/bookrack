@@ -9,6 +9,8 @@
 
 mod node_type;
 mod partition;
+mod scope;
 
 pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
+pub use scope::{Scope, ScopeParseError};
