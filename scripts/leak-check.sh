@@ -9,8 +9,11 @@
 set -eu
 fail=0
 
-# 1. Local filesystem paths (Windows drive letter / Unix home).
-if git grep -nE '[A-Za-z]:\\|/Users/|/home/[a-z]' -- '*.rs' '*.toml' '*.md'; then
+# 1. Local filesystem paths (Windows drive letter / Unix home). The drive
+#    letter must sit at a token boundary (line start or a non-letter
+#    before it) so an escape sequence like "backtrace:\n" — a letter,
+#    colon, backslash mid-word — is not mistaken for a `C:\` path.
+if git grep -nE '(^|[^A-Za-z])[A-Za-z]:\\|/Users/|/home/[a-z]' -- '*.rs' '*.toml' '*.md'; then
   echo "LEAK: local filesystem path"
   fail=1
 fi
