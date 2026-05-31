@@ -15,7 +15,9 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# `net` and `signal` are for the MCP daemon: a TCP listener and a
+# Ctrl-C graceful-shutdown signal. Additive — other crates ignore them.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 # `bundled` compiles SQLite in-tree, so no system libsqlite is required.
 rusqlite = { version = "0.37", features = ["bundled"] }
 lancedb = "0.29"
@@ -57,6 +59,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # Rolling-file, non-blocking writer for the JSON log layer. Entry-point
 # only, alongside tracing-subscriber.
 tracing-appender = "0.2"
+# MCP protocol SDK, used only by the `mcp` entry-point crate. Features are
+# trimmed to a streamable-HTTP server: no client, no reqwest, no auth. The
+# `server` feature pulls schemars (re-exported, used for tool input
+# schemas) and chrono transitively.
+rmcp = { version = "1.7", default-features = false, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+# HTTP server that hosts the MCP streamable-HTTP service. Entry-point only,
+# alongside rmcp; hyper comes in transitively.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 sha2 = "0.10"
 # NFKC for the `normalize` crate. Behaviour-sensitive: a bundled Unicode
 # data update can shift normalized output. Pinned via Cargo.lock.

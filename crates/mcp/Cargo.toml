@@ -6,3 +6,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-query = { path = "../query" }
+bookrack-config = { path = "../config" }
+bookrack-embed = { path = "../embed" }
+bookrack-obs = { path = "../obs" }
+rmcp.workspace = true
+axum.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
