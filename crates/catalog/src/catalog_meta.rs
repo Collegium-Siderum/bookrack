@@ -2,8 +2,9 @@
 
 //! The `catalog_meta` table — database-level scalars.
 //!
-//! Currently this holds only the schema-version stamp; the helpers are
-//! crate-internal, used by the schema-version reconcile on open.
+//! Currently this holds only the schema-version mirror, written by
+//! [`Catalog::meta_set`] after each open. [`Catalog::meta_get`] reads
+//! scalars back and is used by tests.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 
@@ -25,7 +26,10 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 };
 
 impl Catalog {
-    /// Read a `catalog_meta` scalar, or `None` if the key is unset.
+    /// Read a `catalog_meta` scalar, or `None` if the key is unset. The
+    /// `user_version` is authoritative for schema state, so this reader is
+    /// exercised only by tests today.
+    #[cfg(test)]
     pub(crate) fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(bookrack_dbkit::meta_get(&self.conn, SPEC.name, key)?)
     }

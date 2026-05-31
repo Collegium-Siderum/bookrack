@@ -27,6 +27,7 @@ mod expressions;
 mod intake;
 mod mcp_tool_calls;
 mod metadata_audit;
+mod migrate;
 mod node_categories;
 mod node_contributors;
 mod node_overrides;
@@ -65,14 +66,30 @@ pub enum CatalogError {
     #[error("catalog database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
-    /// The database was built by a different schema revision than this
-    /// binary understands. `found` is the raw stored string, since a
-    /// foreign database may hold a value that is not a version number.
-    #[error("catalog schema mismatch: database reports {found:?}, this build expects v{expected}")]
-    SchemaMismatch {
-        /// Schema version string recorded in the opened database.
-        found: String,
-        /// Schema version this binary was compiled against.
-        expected: u32,
+    /// The database was written by a newer schema revision than this
+    /// binary understands: its `user_version` exceeds the highest
+    /// migration defined. Rather than downgrade it, opening fails so the
+    /// operator can run a newer build or restore a backup.
+    #[error(
+        "catalog schema is newer than this build: database is at v{found}, \
+         this build understands up to v{expected}"
+    )]
+    SchemaTooNew {
+        /// `user_version` recorded in the opened database.
+        found: i64,
+        /// Highest schema version this binary defines.
+        expected: i64,
     },
+
+    /// A schema migration failed to apply.
+    #[error("catalog migration failed: {0}")]
+    Migrate(#[from] rusqlite_migration::Error),
+
+    /// The migrated schema does not match the compiled-in specs.
+    #[error("catalog schema verification failed: {0}")]
+    Verify(#[from] bookrack_dbkit::VerifyError),
+
+    /// A filesystem error while writing or pruning a database backup.
+    #[error("catalog backup error: {0}")]
+    Io(#[from] std::io::Error),
 }

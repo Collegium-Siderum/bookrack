@@ -72,7 +72,8 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
 async fn run_ingest(cfg: &Config, path: &Path) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let mut catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
+    let mut catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
     let params = IngestParams {
         embed: embed_cfg,
