@@ -26,11 +26,13 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// ones are pruned after a successful backup.
 const BACKUP_KEEP: usize = 5;
 
-/// Every `catalog.db` table that has a table module of its own. Their
-/// schema is rendered from these specs and conformance-checked; there is
-/// no separately maintained DDL for them. Compatibility across revisions
-/// is enforced by the `schema_version` check, not by the DDL.
-pub(crate) const SPECS: &[&TableSpec] = &[
+/// Every `catalog.db` table that has a table module of its own, in a
+/// stable order. The live schema is conformance-checked against these
+/// specs on every open; they are the source of truth for the *current*
+/// schema shape, while the migration baseline in [`crate::migrate`] is the
+/// historical one. `toc_edits` has no spec yet (it is created by the
+/// migration baseline) and so is not covered here.
+const SPECS: &[&TableSpec] = &[
     &crate::catalog_meta::SPEC,
     &crate::intake::SPEC,
     &crate::book_state::SPEC,
@@ -47,40 +49,6 @@ pub(crate) const SPECS: &[&TableSpec] = &[
     &crate::mcp_tool_calls::SPEC,
     &crate::retrieval_issues::SPEC,
 ];
-
-/// DDL for the one `catalog.db` table that has no table module yet.
-///
-/// `toc_edits` is the authoritative log of manual TOC edits. Its schema
-/// is created here so the table exists, but its repository — writing
-/// edit verbs and replaying them on a corpus rebuild — is part of the
-/// TOC-editing feature and is deferred along with it; until that lands,
-/// the schema lives here verbatim rather than as a rendered `TableSpec`.
-///
-/// There are no foreign keys anywhere in `catalog.db`: every link — to a
-/// `corpus.db` node, and even an expression to its work — is a bare
-/// integer soft reference, keeping the two databases independently
-/// movable and restorable.
-pub(crate) const PENDING_TABLES_DDL: &str = r"
-
--- Authoritative log of manual TOC edits. The corpus.db node tree is a
--- materialized projection of the extracted skeleton plus this overlay,
--- so a corpus rebuild replays these verbs and never loses an edit.
-CREATE TABLE IF NOT EXISTS toc_edits (
-  edit_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  book_root_id  INTEGER NOT NULL,           -- soft reference to corpus.nodes
-  seq           INTEGER NOT NULL,           -- per-book edit order; replay sorts by this
-  verb          TEXT NOT NULL,              -- split / merge / set_range / rename / set_type / new / rm
-  args          TEXT NOT NULL,              -- JSON verb arguments
-  target_anchor TEXT,                       -- content fingerprint, to re-locate the target on replay
-  new_node_id   INTEGER,                    -- id of an org node created by new/split; reused on replay
-  actor_kind    TEXT NOT NULL
-    CHECK (actor_kind IN ('human', 'llm', 'import', 'pipeline', 'system')),
-  actor_detail  TEXT,
-  edited_at     TEXT NOT NULL,
-  session_id    TEXT,
-  UNIQUE (book_root_id, seq)
-);
-";
 
 /// A handle to one `catalog.db` database.
 ///
@@ -305,7 +273,12 @@ mod tests {
         {
             let seeded = Catalog::open(&path).expect("seed");
             // Simulate a database created before the migration framework:
-            // tables present, but no recorded migration.
+            // the baseline tables, but without the index the first
+            // migration adds, and no recorded migration.
+            seeded
+                .conn
+                .execute_batch("DROP INDEX idx_contrib_node")
+                .expect("drop the post-baseline index");
             seeded
                 .conn
                 .pragma_update(None, "user_version", 0)
@@ -375,6 +348,23 @@ mod tests {
         assert!(remaining.iter().any(|n| n.contains("-06Z-")));
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_contributor_index_migration_is_applied() {
+        // The first real migration (M[1]) adds idx_contrib_node on top of
+        // the frozen baseline; a freshly opened database must carry it.
+        let catalog = Catalog::open_in_memory().expect("open");
+        let present: i64 = catalog
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_contrib_node'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query index");
+        assert_eq!(present, 1);
     }
 
     #[test]

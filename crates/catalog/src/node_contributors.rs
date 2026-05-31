@@ -33,7 +33,13 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     composite_pk: None,
     uniques: &[&["node_id", "role", "ordinal", "origin"]],
     table_checks: &[],
-    indexes: &[IndexSpec::on("idx_contrib_role_name", &["role", "name"])],
+    indexes: &[
+        IndexSpec::on("idx_contrib_role_name", &["role", "name"]),
+        // Covering index for the per-node read path: resolve a node's
+        // contributors ordered by role then ordinal. Added as the first
+        // real schema migration (migrate::CONTRIBUTOR_INDEX_DDL).
+        IndexSpec::on("idx_contrib_node", &["node_id", "role", "ordinal"]),
+    ],
 };
 
 /// Insert one contributor and return its surrogate id.
