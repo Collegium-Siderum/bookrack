@@ -29,6 +29,10 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 /// library beside the binary.
 pub const PDFIUM_LIB_ENV: &str = "BOOKRACK_PDFIUM_LIB";
 
+/// Environment variable naming the directory database backups are written
+/// to. When unset, a `backup/` directory under the data root is used.
+pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
+
 /// Resolved configuration. Construct with [`Config::load`] (from the
 /// environment) or [`Config::new`] (from an explicit data root, e.g. a
 /// CLI override).
@@ -121,6 +125,23 @@ impl Config {
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }
+
+    /// Directory database backups are written to before a schema
+    /// migration. The [`BACKUP_DIR_ENV`] override wins when set;
+    /// otherwise `<data_dir>/backup`, beside the database files it
+    /// snapshots.
+    pub fn backup_dir(&self) -> PathBuf {
+        backup_dir_from(&self.data_dir, std::env::var(BACKUP_DIR_ENV).ok())
+    }
+}
+
+/// Pure resolution logic for [`Config::backup_dir`], factored out so it can
+/// be tested without mutating process-global environment variables. The
+/// override wins when set and non-blank; otherwise `<data_dir>/backup`.
+fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
+    env_trimmed(override_dir)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("backup"))
 }
 
 /// Embedding model served by the local Ollama daemon, used when
@@ -464,6 +485,23 @@ mod tests {
         assert_eq!(cfg.catalog_db(), root.join("catalog.db"));
         assert_eq!(cfg.lancedb_dir(), root.join("lancedb"));
         assert_eq!(cfg.logs_dir(), root.join("logs"));
+    }
+
+    #[test]
+    fn backup_dir_defaults_under_the_data_root_and_honours_the_override() {
+        let root = PathBuf::from("root");
+        // Unset falls back to `backup/` under the data root.
+        assert_eq!(backup_dir_from(&root, None), root.join("backup"));
+        // Whitespace-only counts as unset.
+        assert_eq!(
+            backup_dir_from(&root, Some("   ".to_string())),
+            root.join("backup")
+        );
+        // A set value wins, taken verbatim.
+        assert_eq!(
+            backup_dir_from(&root, Some("/elsewhere/backups".to_string())),
+            PathBuf::from("/elsewhere/backups")
+        );
     }
 
     #[test]
