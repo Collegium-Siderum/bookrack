@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
-use bookrack_config::{Config, EmbedConfig, LogConfig, SearchConfig};
+use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, SearchConfig};
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::{IngestParams, ingest_book};
@@ -27,8 +27,26 @@ use bookrack_vectors::ChunkStore;
 #[derive(clap::Parser)]
 #[command(name = "bookrack", version, about = "Search a local library of books.")]
 struct Cli {
+    /// Operate on the library at this data root, overriding the
+    /// environment. Mutually exclusive with `--library`.
+    #[arg(long, global = true, conflicts_with = "library")]
+    data_dir: Option<PathBuf>,
+    /// Operate on the named library from the registry (see
+    /// BOOKRACK_REGISTRY). Mutually exclusive with `--data-dir`.
+    #[arg(long, global = true)]
+    library: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    /// The library selection these top-level flags express.
+    fn selection(&self) -> LibrarySelection {
+        LibrarySelection {
+            data_dir: self.data_dir.clone(),
+            library: self.library.clone(),
+        }
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -48,7 +66,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
-    let cfg = Config::load().context("resolve configuration")?;
+    let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     match cli.command {
@@ -118,4 +136,33 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
         .context("run query")?;
     render::citations(&hits);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn data_dir_and_library_are_mutually_exclusive() {
+        let parsed = Cli::try_parse_from([
+            "bookrack",
+            "--data-dir",
+            "/x",
+            "--library",
+            "test",
+            "query",
+            "q",
+        ]);
+        assert!(parsed.is_err(), "the two selectors must not be combined");
+    }
+
+    #[test]
+    fn selection_carries_the_flags_through() {
+        let cli = Cli::try_parse_from(["bookrack", "--library", "test", "query", "q"])
+            .expect("a lone --library parses");
+        let selection = cli.selection();
+        assert_eq!(selection.library.as_deref(), Some("test"));
+        assert!(selection.data_dir.is_none());
+    }
 }

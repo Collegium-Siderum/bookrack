@@ -12,6 +12,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 rmcp.workspace = true
 axum.workspace = true
+clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
