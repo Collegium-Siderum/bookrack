@@ -25,6 +25,9 @@ mod resolve;
 
 pub use bookrack_core::{NodeId, NodeType, PartitionIdx, Scope};
 pub use db::{Corpus, SCHEMA_VERSION};
+pub use index_meta::{
+    CHUNK_VERSION_KEY, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
+};
 pub use node::{NewNode, Node};
 pub use partition::Partition;
 pub use resolve::ResolveError;
@@ -83,4 +86,27 @@ pub enum CorpusError {
         /// What rule it broke.
         reason: &'static str,
     },
+
+    /// A recorded index-build stamp differs from this binary's
+    /// expectation — a different embedding model or a bumped algorithm
+    /// version. The store is rebuildable, so the resolution is to rebuild
+    /// it. `found` is reported as the raw stored string, since a foreign
+    /// index may hold a value that is not even well-formed.
+    #[error(
+        "index stamp mismatch on {key}: database reports {found:?}, this build expects {expected:?}"
+    )]
+    IndexStampMismatch {
+        /// The `index_meta` key whose value drifted.
+        key: &'static str,
+        /// The value recorded in the opened index.
+        found: String,
+        /// The value this binary was compiled or configured with.
+        expected: String,
+    },
+
+    /// An existing, non-empty index carries no build stamps, so it
+    /// predates version stamping and cannot be served safely. Rebuild the
+    /// corpus.
+    #[error("index carries no build stamps; rebuild the corpus")]
+    IndexNotStamped,
 }
