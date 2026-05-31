@@ -6,7 +6,10 @@ passages. It exposes an MCP server for agent clients.
 
 ## Status
 
-Early development — workspace skeleton. Not yet functional.
+Pre-release. The end-to-end pipeline — extract, ingest, embed, and
+cited search — runs from the CLI and over the MCP server. Pre-production
+hardening (schema migrations, approximate-nearest-neighbour indexing,
+metadata) is still in progress.
 
 ## License
 
