@@ -14,8 +14,16 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod registry;
+
+use registry::{Registry, parse_registry};
+
 /// Environment variable naming the data root (an absolute directory).
 pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
+
+/// Environment variable naming the library registry file (TOML). Optional;
+/// only `--library` selection needs it. See [`registry`].
+pub const REGISTRY_ENV: &str = "BOOKRACK_REGISTRY";
 
 /// Environment variable overriding the Ollama endpoint.
 pub const OLLAMA_URL_ENV: &str = "BOOKRACK_OLLAMA_URL";
@@ -42,35 +50,79 @@ pub struct Config {
     ollama_url: String,
 }
 
+/// How the data root to operate on was selected on the command line.
+/// Both fields default to `None`; resolution then falls back to the
+/// data-root variable and finally the registry's default library.
+#[derive(Debug, Default, Clone)]
+pub struct LibrarySelection {
+    /// An explicit data root, from `--data-dir`. Wins over everything.
+    pub data_dir: Option<PathBuf>,
+    /// A registry library name, from `--library`.
+    pub library: Option<String>,
+}
+
 /// Why configuration resolution failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     /// The data-root variable is unset or empty.
     #[error("{DATA_DIR_ENV} is not set (copy .env.example to .env and fill it in)")]
     MissingDataDir,
-    /// The data-root variable points at something that is not a
-    /// directory — usually a typo in the configured path.
-    #[error(
-        "{DATA_DIR_ENV} points to {}, which is not an existing directory",
-        .0.display()
-    )]
+    /// The selected data root is not an existing directory — usually a
+    /// typo in a flag, the registry, or the data-root variable.
+    #[error("the data root {} is not an existing directory", .0.display())]
     DataDirNotFound(PathBuf),
+    /// `--library` names a library the registry does not define.
+    #[error("no library named {0:?} in the registry")]
+    UnknownLibrary(String),
+    /// `--library` was given but no registry is configured.
+    #[error("--library needs a registry; set {REGISTRY_ENV} to a TOML file")]
+    RegistryNotConfigured,
+    /// The registry file could not be read.
+    #[error("cannot read the registry at {}", .path.display())]
+    RegistryUnreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The registry file is not valid TOML or has the wrong shape.
+    #[error("the registry at {} is malformed", .path.display())]
+    RegistryMalformed {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 impl Config {
     /// Resolve configuration from the environment, loading a `.env`
     /// file first if one is present.
     ///
-    /// Fails if the data root is unset or does not name an existing
-    /// directory. The Ollama endpoint falls back to
-    /// [`DEFAULT_OLLAMA_URL`] when unset.
+    /// Equivalent to [`Config::resolve`] with an empty selection: the
+    /// data root comes from the data-root variable (or the registry's
+    /// default library, if one is set).
     pub fn load() -> Result<Config, ConfigError> {
+        Config::resolve(&LibrarySelection::default())
+    }
+
+    /// Resolve configuration for the selected library, loading a `.env`
+    /// file first if one is present.
+    ///
+    /// The data root is chosen by precedence: `--data-dir`, then
+    /// `--library` (looked up in the registry), then [`DATA_DIR_ENV`],
+    /// then the registry's default library. Fails if no source yields a
+    /// root, the chosen root is not an existing directory, or a
+    /// `--library` name is not registered. The Ollama endpoint falls
+    /// back to [`DEFAULT_OLLAMA_URL`] when unset.
+    pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
         // A missing .env is fine: the variables may be set directly.
         dotenvy::dotenv().ok();
-        resolve(
+        let registry = load_registry(std::env::var(REGISTRY_ENV).ok())?;
+        let data_dir = select_root(
+            selection,
             std::env::var(DATA_DIR_ENV).ok(),
-            std::env::var(OLLAMA_URL_ENV).ok(),
-        )
+            registry.as_ref(),
+        )?;
+        finish(data_dir, std::env::var(OLLAMA_URL_ENV).ok())
     }
 
     /// Construct from an explicit data root, for callers that resolve
@@ -380,25 +432,73 @@ fn env_usize(value: Option<String>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Pure resolution logic, factored out of [`Config::load`] so it can be
-/// tested without mutating process-global environment variables.
-fn resolve(data_dir: Option<String>, ollama_url: Option<String>) -> Result<Config, ConfigError> {
-    let data_dir = data_dir
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or(ConfigError::MissingDataDir)?;
-    let data_dir = PathBuf::from(data_dir);
+/// Pick the data root by precedence, without checking that the chosen
+/// path exists. Pure over its inputs so the precedence rules can be
+/// tested without mutating the environment or writing registry files.
+///
+/// Order: `--data-dir`, then `--library` (registry lookup), then the
+/// data-root variable, then the registry's default library.
+fn select_root(
+    selection: &LibrarySelection,
+    env_data_dir: Option<String>,
+    registry: Option<&Registry>,
+) -> Result<PathBuf, ConfigError> {
+    if let Some(dir) = &selection.data_dir {
+        return Ok(dir.clone());
+    }
+    if let Some(name) = &selection.library {
+        let registry = registry.ok_or(ConfigError::RegistryNotConfigured)?;
+        return lookup_library(registry, name);
+    }
+    if let Some(dir) = env_trimmed(env_data_dir) {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Some(registry) = registry
+        && let Some(name) = &registry.default
+    {
+        return lookup_library(registry, name);
+    }
+    Err(ConfigError::MissingDataDir)
+}
+
+/// Look up a named library's root in the registry.
+fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigError> {
+    registry
+        .libraries
+        .get(name)
+        .cloned()
+        .ok_or_else(|| ConfigError::UnknownLibrary(name.to_string()))
+}
+
+/// Validate the chosen root and build a [`Config`]. The root must be an
+/// existing directory; the Ollama endpoint falls back to its default.
+fn finish(data_dir: PathBuf, ollama_url: Option<String>) -> Result<Config, ConfigError> {
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
-    let ollama_url = ollama_url
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    let ollama_url = env_trimmed(ollama_url).unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
     Ok(Config {
         data_dir,
         ollama_url,
     })
+}
+
+/// Load the registry from the file named by [`REGISTRY_ENV`]. Returns
+/// `Ok(None)` when the variable is unset or blank — the registry is
+/// optional, and only `--library` selection requires it.
+fn load_registry(path: Option<String>) -> Result<Option<Registry>, ConfigError> {
+    let Some(path) = env_trimmed(path) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let text =
+        std::fs::read_to_string(&path).map_err(|source| ConfigError::RegistryUnreadable {
+            path: path.clone(),
+            source,
+        })?;
+    let registry =
+        parse_registry(&text).map_err(|source| ConfigError::RegistryMalformed { path, source })?;
+    Ok(Some(registry))
 }
 
 /// Resolve the directory to load the PDFium dynamic library from.
@@ -440,6 +540,28 @@ mod tests {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
 
+    /// The env-only resolution path (empty selection, no registry),
+    /// exercising [`select_root`] + [`finish`] without touching the
+    /// process environment.
+    fn resolve(
+        data_dir: Option<String>,
+        ollama_url: Option<String>,
+    ) -> Result<Config, ConfigError> {
+        let root = select_root(&LibrarySelection::default(), data_dir, None)?;
+        finish(root, ollama_url)
+    }
+
+    /// A two-entry registry with `prod` the default, for selection tests.
+    fn sample_registry() -> Registry {
+        parse_registry(
+            "default = \"prod\"\n\
+             [libraries]\n\
+             prod = \"/roots/prod\"\n\
+             test = \"/roots/test\"\n",
+        )
+        .expect("sample registry parses")
+    }
+
     #[test]
     fn missing_data_dir_is_an_error() {
         assert!(matches!(
@@ -460,6 +582,106 @@ mod tests {
             resolve(Some(bogus), None),
             Err(ConfigError::DataDirNotFound(_))
         ));
+    }
+
+    #[test]
+    fn data_dir_flag_wins_over_everything() {
+        let selection = LibrarySelection {
+            data_dir: Some(PathBuf::from("/explicit/root")),
+            library: Some("test".to_string()),
+        };
+        let root = select_root(
+            &selection,
+            Some("/env/root".to_string()),
+            Some(&sample_registry()),
+        )
+        .expect("the flag resolves");
+        assert_eq!(root, PathBuf::from("/explicit/root"));
+    }
+
+    #[test]
+    fn library_flag_looks_up_the_registry() {
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("test".to_string()),
+        };
+        // Wins over the data-root variable.
+        let root = select_root(
+            &selection,
+            Some("/env/root".to_string()),
+            Some(&sample_registry()),
+        )
+        .expect("the library resolves");
+        assert_eq!(root, PathBuf::from("/roots/test"));
+    }
+
+    #[test]
+    fn unknown_library_is_an_error() {
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("staging".to_string()),
+        };
+        assert!(matches!(
+            select_root(&selection, None, Some(&sample_registry())),
+            Err(ConfigError::UnknownLibrary(name)) if name == "staging"
+        ));
+    }
+
+    #[test]
+    fn library_without_a_registry_is_an_error() {
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("prod".to_string()),
+        };
+        assert!(matches!(
+            select_root(&selection, Some("/env/root".to_string()), None),
+            Err(ConfigError::RegistryNotConfigured)
+        ));
+    }
+
+    #[test]
+    fn data_root_variable_wins_over_the_registry_default() {
+        let selection = LibrarySelection::default();
+        let root = select_root(
+            &selection,
+            Some("/env/root".to_string()),
+            Some(&sample_registry()),
+        )
+        .expect("the variable resolves");
+        assert_eq!(root, PathBuf::from("/env/root"));
+    }
+
+    #[test]
+    fn registry_default_is_the_last_resort() {
+        let selection = LibrarySelection::default();
+        // No flag, no data-root variable: fall to the registry default.
+        let root =
+            select_root(&selection, None, Some(&sample_registry())).expect("the default resolves");
+        assert_eq!(root, PathBuf::from("/roots/prod"));
+    }
+
+    #[test]
+    fn no_source_at_all_is_missing_data_dir() {
+        assert!(matches!(
+            select_root(&LibrarySelection::default(), None, None),
+            Err(ConfigError::MissingDataDir)
+        ));
+    }
+
+    #[test]
+    fn registry_without_a_default_falls_through() {
+        let registry = parse_registry("[libraries]\nprod = \"/roots/prod\"\n")
+            .expect("registry without a default parses");
+        assert!(registry.default.is_none());
+        assert!(matches!(
+            select_root(&LibrarySelection::default(), None, Some(&registry)),
+            Err(ConfigError::MissingDataDir)
+        ));
+    }
+
+    #[test]
+    fn malformed_registry_is_rejected() {
+        assert!(parse_registry("this is not = valid = toml").is_err());
     }
 
     #[test]
