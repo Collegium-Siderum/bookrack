@@ -67,14 +67,29 @@ impl<E: Embedder> Library<E> {
     /// Open the warm state: probe the embedder for its vector width, then
     /// open the vector store at that width. The store's dimension is fixed
     /// at creation and must match the embedding model.
+    ///
+    /// `embed_model` is the model this daemon is configured to serve with.
+    /// A non-empty index is verified against the build stamps it carries:
+    /// serving an index built with a different model or a stale algorithm
+    /// version is refused here, at startup, rather than returning subtly
+    /// wrong results. An empty index has no provenance to check, so it is
+    /// served without complaint.
     pub async fn open(
         corpus_db: PathBuf,
         lancedb_dir: &Path,
         embedder: E,
+        embed_model: String,
         default_top_k: usize,
     ) -> Result<Library<E>> {
         let dim = probe_dimension(&embedder).await?;
         let store = ChunkStore::open(lancedb_dir, dim).await?;
+        if store.count_rows().await? > 0 {
+            let corpus = Corpus::open(&corpus_db)?;
+            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+                &embed_model,
+                dim as u32,
+            ))?;
+        }
         Ok(Library {
             store,
             embedder,

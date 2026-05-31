@@ -12,11 +12,12 @@ use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{
     Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
 };
-use bookrack_ingest::{StructureParams, ingest_structure};
+use bookrack_ingest::{StructureParams, current_index_stamps, ingest_structure};
 use bookrack_query::Library;
 use bookrack_vectors::{ChunkRow, ChunkStore};
 
 const DIM: usize = 4;
+const MODEL: &str = "test-model";
 
 /// An embedder that returns one fixed vector per input, ignoring the text.
 /// It serves both the dimension probe and the query embedding.
@@ -84,6 +85,11 @@ async fn search_returns_a_cited_passage_through_the_facade() {
             &StructureParams::default(),
         )
         .expect("structure");
+        // Stamp the index with the model and dimension it is built at, so
+        // the facade's serve-side gate admits it.
+        corpus
+            .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+            .expect("stamp");
         let leaf = corpus
             .book_nodes(report.book_root_id)
             .expect("nodes")
@@ -113,7 +119,7 @@ async fn search_returns_a_cited_passage_through_the_facade() {
 
     // The facade probes the dimension, opens the store, and reopens a
     // read-only corpus per search call.
-    let library = Library::open(corpus_db, &lancedb_dir, Fixed, 5)
+    let library = Library::open(corpus_db, &lancedb_dir, Fixed, MODEL.to_string(), 5)
         .await
         .expect("open library");
     assert_eq!(library.dimension(), DIM);
@@ -122,4 +128,76 @@ async fn search_returns_a_cited_passage_through_the_facade() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].start_node_id, leaf_id);
     assert_eq!(hits[0].breadcrumb, "A Test Book \u{203a} Chapter One");
+}
+
+/// Append a single stamped chunk under `corpus_db` / `lancedb_dir`, built
+/// with `MODEL` at `DIM`. Shared setup for the gate tests below.
+async fn build_stamped_index(corpus_db: &std::path::Path, lancedb_dir: &std::path::Path) {
+    let mut corpus = Corpus::open(corpus_db).expect("open corpus");
+    let report = ingest_structure(
+        &mut corpus,
+        1,
+        NodeType::Work,
+        &extraction(),
+        &StructureParams::default(),
+    )
+    .expect("structure");
+    corpus
+        .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+        .expect("stamp");
+    let leaf = corpus
+        .book_nodes(report.book_root_id)
+        .expect("nodes")
+        .into_iter()
+        .find(|n| n.node_type.is_prose_leaf())
+        .expect("a prose leaf");
+    let store = ChunkStore::open(lancedb_dir, DIM)
+        .await
+        .expect("open store");
+    store
+        .append(&[ChunkRow {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            text: leaf.text_content.clone().expect("leaf text"),
+            start_node_id: leaf.node_id,
+            start_char_offset: 0,
+            end_node_id: leaf.node_id,
+            end_char_offset: 100,
+            norm_chunk_sha256: "sha".to_string(),
+        }])
+        .await
+        .expect("append");
+}
+
+#[tokio::test]
+async fn opening_with_a_different_model_is_refused() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let lancedb_dir = dir.path().join("lancedb");
+    build_stamped_index(&corpus_db, &lancedb_dir).await;
+
+    // The index was stamped with MODEL; opening it to serve with another
+    // model is refused before any query runs.
+    let result = Library::open(corpus_db, &lancedb_dir, Fixed, "other-model".to_string(), 5).await;
+    assert!(matches!(
+        result,
+        Err(bookrack_query::QueryError::Corpus(
+            bookrack_corpus::CorpusError::IndexStampMismatch { .. }
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn an_empty_index_is_served_without_stamps() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let lancedb_dir = dir.path().join("lancedb");
+
+    // No book ingested, no stamps written: an empty index has no provenance
+    // to check, so the facade opens it without complaint.
+    let library = Library::open(corpus_db, &lancedb_dir, Fixed, MODEL.to_string(), 5)
+        .await
+        .expect("open empty library");
+    assert_eq!(library.dimension(), DIM);
+    let hits = library.search("anything", None).await.expect("search");
+    assert!(hits.is_empty());
 }

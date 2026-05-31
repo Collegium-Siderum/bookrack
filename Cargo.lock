@@ -763,6 +763,7 @@ dependencies = [
 name = "bookrack-query"
 version = "0.1.0"
 dependencies = [
+ "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-embed",

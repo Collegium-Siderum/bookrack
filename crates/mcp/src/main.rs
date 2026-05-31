@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         cfg.corpus_db(),
         &cfg.lancedb_dir(),
         embedder,
+        embed_cfg.model.clone(),
         search_cfg.top_k,
     )
     .await

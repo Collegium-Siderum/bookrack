@@ -131,6 +131,16 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
     let store = ChunkStore::open(&cfg.lancedb_dir(), dim)
         .await
         .context("open vector store")?;
+    // Refuse to serve an index built with a different model or a stale
+    // algorithm version; an empty index has no provenance to check.
+    if store.count_rows().await.context("count vector rows")? > 0 {
+        corpus
+            .verify_index_stamps(&bookrack_ingest::current_index_stamps(
+                &embed_cfg.model,
+                dim as u32,
+            ))
+            .context("verify index stamps")?;
+    }
     let hits = search(text, &corpus, &store, &embedder, search_cfg.top_k)
         .await
         .context("run query")?;
