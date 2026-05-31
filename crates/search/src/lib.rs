@@ -20,6 +20,7 @@ use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
 use bookrack_vectors::ChunkStore;
+use serde::Serialize;
 
 /// Separator between breadcrumb segments.
 const BREADCRUMB_SEP: &str = " \u{203a} ";
@@ -49,7 +50,11 @@ pub enum SearchError {
 pub type Result<T> = std::result::Result<T, SearchError>;
 
 /// One search result: a passage and where to cite it from.
-#[derive(Debug, Clone)]
+///
+/// Derives `Serialize` so a query consumer (e.g. the MCP server) can
+/// emit it as JSON without redeclaring its fields; adding a field here
+/// flows through automatically.
+#[derive(Debug, Clone, Serialize)]
 pub struct Citation {
     /// The passage text to display.
     pub text: String,
@@ -183,6 +188,25 @@ mod tests {
             let n = texts.len();
             async move { Ok(vec![vector; n]) }
         }
+    }
+
+    #[test]
+    fn citation_serializes_with_node_id_as_bare_int() {
+        let citation = Citation {
+            text: "hello".to_string(),
+            breadcrumb: "Book \u{203a} Chapter".to_string(),
+            start_node_id: NodeId::new(100_000_001),
+            start_char_offset: 0,
+            end_node_id: NodeId::new(100_000_001),
+            end_char_offset: 5,
+            norm_chunk_sha256: "abc".to_string(),
+            distance: 0.25,
+        };
+        let value = serde_json::to_value(&citation).expect("serialize citation");
+        // The newtype id flattens to a bare integer, not a wrapper object.
+        assert_eq!(value["start_node_id"], serde_json::json!(100_000_001));
+        assert_eq!(value["text"], "hello");
+        assert_eq!(value["distance"], 0.25);
     }
 
     /// A one-chapter extraction; `title` becomes the biblio title.

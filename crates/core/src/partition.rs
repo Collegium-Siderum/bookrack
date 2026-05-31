@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 /// Size of each book's id block. A node id divided by this factor is
 /// its partition index; the remainder is its local offset.
 ///
@@ -28,7 +30,10 @@ pub const NODE_PARTITION_FACTOR: i64 = 100_000_000;
 pub const NODE_CAPACITY: i64 = NODE_PARTITION_FACTOR - 1;
 
 /// A node's global identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Serializes transparently as its bare `i64` (a newtype struct), so a
+/// query consumer sees `start_node_id: 12345`, not a wrapper object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct NodeId(i64);
 
 impl NodeId {
