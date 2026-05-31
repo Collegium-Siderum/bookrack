@@ -263,25 +263,26 @@ mod tests {
 
     #[test]
     fn an_existing_populated_database_is_adopted_and_backed_up() {
-        // A database with the current tables but user_version 0 — the
-        // pre-migration state — is adopted in place: backed up, then the
-        // idempotent baseline advances its user_version without touching
-        // the data.
+        // A database with the pre-framework tables but user_version 0 is
+        // adopted in place: backed up, then migrated forward — through the
+        // address migration — to the current revision.
         let dir = unique_dir("adopt");
         let path = dir.join("catalog.db");
         let backup_dir = dir.join("backup");
         {
-            let seeded = Catalog::open(&path).expect("seed");
+            // Build a genuine pre-address schema: migrate only to v2, the
+            // baseline plus the contributor index, so the node tables still
+            // carry the bare node_id the address migration later replaces.
+            let mut conn = Connection::open(&path).expect("seed connection");
+            migrations()
+                .to_version(&mut conn, 2)
+                .expect("seed to the pre-address revision");
             // Simulate a database created before the migration framework:
-            // the baseline tables, but without the index the first
-            // migration adds, and no recorded migration.
-            seeded
-                .conn
-                .execute_batch("DROP INDEX idx_contrib_node")
+            // drop the index the first migration added and clear the
+            // recorded version so adoption replays from the start.
+            conn.execute_batch("DROP INDEX idx_contrib_node")
                 .expect("drop the post-baseline index");
-            seeded
-                .conn
-                .pragma_update(None, "user_version", 0)
+            conn.pragma_update(None, "user_version", 0)
                 .expect("reset user_version");
         }
         {

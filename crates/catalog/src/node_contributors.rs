@@ -20,7 +20,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     comment: Some("Contributor roles (author / translator / editor / ...), many-to-many."),
     columns: &[
         ColumnSpec::int("contributor_id").pk_autoinc(),
-        ColumnSpec::int("node_id").not_null(),
+        ColumnSpec::int("intake_id").not_null(),
+        ColumnSpec::text("scope").not_null(),
         ColumnSpec::text("role").not_null(),
         ColumnSpec::int("ordinal").not_null(),
         ColumnSpec::text("origin")
@@ -31,21 +32,23 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::int("inheritable").not_null().default("1"),
     ],
     composite_pk: None,
-    uniques: &[&["node_id", "role", "ordinal", "origin"]],
+    uniques: &[&["intake_id", "scope", "role", "ordinal", "origin"]],
     table_checks: &[],
     indexes: &[
         IndexSpec::on("idx_contrib_role_name", &["role", "name"]),
-        // Covering index for the per-node read path: resolve a node's
-        // contributors ordered by role then ordinal. Added as the first
-        // real schema migration (migrate::CONTRIBUTOR_INDEX_DDL).
-        IndexSpec::on("idx_contrib_node", &["node_id", "role", "ordinal"]),
+        // Covering index for the per-address read path: resolve a node's
+        // contributors ordered by role then ordinal.
+        IndexSpec::on(
+            "idx_contrib_node",
+            &["intake_id", "scope", "role", "ordinal"],
+        ),
     ],
 };
 
 /// Insert one contributor and return its surrogate id.
 const INSERT_SQL: &str = "INSERT INTO node_contributors \
-     (node_id, role, ordinal, origin, name, nationality, inheritable) \
-     VALUES (:node_id, :role, :ordinal, :origin, :name, :nationality, :inheritable) \
+     (intake_id, scope, role, ordinal, origin, name, nationality, inheritable) \
+     VALUES (:intake_id, :scope, :role, :ordinal, :origin, :name, :nationality, :inheritable) \
      RETURNING contributor_id";
 
 /// A `SELECT` of every column with `tail` appended; column list from
@@ -62,8 +65,10 @@ fn select_sql(tail: &str) -> String {
 pub struct NodeContributor {
     /// Surrogate key, assigned by the database.
     pub contributor_id: i64,
-    /// The node this contributor is attributed to.
-    pub node_id: i64,
+    /// The book whose node this contributor is attributed to.
+    pub intake_id: i64,
+    /// The logical address of the node within the book's partition.
+    pub scope: String,
     /// The contribution role (`author`, `translator`, `editor`, ...).
     pub role: String,
     /// Position among the contributors sharing this node and role.
@@ -83,7 +88,8 @@ impl NodeContributor {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<NodeContributor> {
         Ok(NodeContributor {
             contributor_id: row.get("contributor_id")?,
-            node_id: row.get("node_id")?,
+            intake_id: row.get("intake_id")?,
+            scope: row.get("scope")?,
             role: row.get("role")?,
             ordinal: row.get("ordinal")?,
             origin: row.get("origin")?,
@@ -98,7 +104,8 @@ impl NodeContributor {
 /// assigned by the database and returned from [`Catalog::add_contributor`].
 #[derive(Debug, Clone)]
 pub struct NewContributor {
-    node_id: i64,
+    intake_id: i64,
+    scope: String,
     role: String,
     ordinal: i64,
     origin: String,
@@ -108,17 +115,20 @@ pub struct NewContributor {
 }
 
 impl NewContributor {
-    /// A contributor in `role` at `ordinal` on `node_id`, from `origin`.
-    /// Inheritable and nationality-free until the builder says otherwise.
+    /// A contributor in `role` at `ordinal` on the node at
+    /// `(intake_id, scope)`, from `origin`. Inheritable and
+    /// nationality-free until the builder says otherwise.
     pub fn new(
-        node_id: i64,
+        intake_id: i64,
+        scope: impl Into<String>,
         role: impl Into<String>,
         ordinal: i64,
         origin: impl Into<String>,
         name: impl Into<String>,
     ) -> NewContributor {
         NewContributor {
-            node_id,
+            intake_id,
+            scope: scope.into(),
             role: role.into(),
             ordinal,
             origin: origin.into(),
@@ -150,7 +160,8 @@ impl Catalog {
         let id = self.conn.query_row(
             INSERT_SQL,
             named_params! {
-                ":node_id": new.node_id,
+                ":intake_id": new.intake_id,
+                ":scope": new.scope,
                 ":role": new.role,
                 ":ordinal": new.ordinal,
                 ":origin": new.origin,
@@ -163,14 +174,19 @@ impl Catalog {
         Ok(id)
     }
 
-    /// Every contributor on `node_id`, ordered by role then ordinal.
-    pub fn contributors_for_node(&self, node_id: i64) -> Result<Vec<NodeContributor>> {
+    /// Every contributor on the node at `(intake_id, scope)`, ordered by
+    /// role then ordinal.
+    pub fn contributors_for_address(
+        &self,
+        intake_id: i64,
+        scope: &str,
+    ) -> Result<Vec<NodeContributor>> {
         let mut stmt = self.conn.prepare(&select_sql(
-            "WHERE node_id = :node_id ORDER BY role, ordinal",
+            "WHERE intake_id = :intake_id AND scope = :scope ORDER BY role, ordinal",
         ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":node_id": node_id },
+                named_params! { ":intake_id": intake_id, ":scope": scope },
                 NodeContributor::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeContributor>>>()?;
@@ -192,23 +208,27 @@ impl Catalog {
 mod tests {
     use super::*;
 
+    /// A logical address used throughout these tests.
+    const SCOPE: &str = "node:abc";
+
     #[test]
     fn a_contributor_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         let id = catalog
             .add_contributor(
-                &NewContributor::new(100_000_001, "translator", 0, "user", "A Translator")
+                &NewContributor::new(1, SCOPE, "translator", 0, "user", "A Translator")
                     .nationality("fr")
                     .inheritable(false),
             )
             .expect("add");
         assert!(id > 0);
 
-        let all = catalog.contributors_for_node(100_000_001).expect("read");
+        let all = catalog.contributors_for_address(1, SCOPE).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
         assert_eq!(row.contributor_id, id);
-        assert_eq!(row.node_id, 100_000_001);
+        assert_eq!(row.intake_id, 1);
+        assert_eq!(row.scope, SCOPE);
         assert_eq!(row.role, "translator");
         assert_eq!(row.ordinal, 0);
         assert_eq!(row.origin, "user");
@@ -223,7 +243,8 @@ mod tests {
         // Insert out of order to prove the query sorts.
         catalog
             .add_contributor(&NewContributor::new(
-                100_000_001,
+                1,
+                SCOPE,
                 "author",
                 1,
                 "extracted",
@@ -232,7 +253,8 @@ mod tests {
             .expect("add");
         catalog
             .add_contributor(&NewContributor::new(
-                100_000_001,
+                1,
+                SCOPE,
                 "author",
                 0,
                 "extracted",
@@ -240,7 +262,7 @@ mod tests {
             ))
             .expect("add");
         let names: Vec<String> = catalog
-            .contributors_for_node(100_000_001)
+            .contributors_for_address(1, SCOPE)
             .expect("read")
             .into_iter()
             .map(|c| c.name)
@@ -253,7 +275,8 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         let id = catalog
             .add_contributor(&NewContributor::new(
-                100_000_001,
+                1,
+                SCOPE,
                 "editor",
                 0,
                 "user",
@@ -263,7 +286,7 @@ mod tests {
         assert!(catalog.remove_contributor(id).expect("remove"));
         assert!(
             catalog
-                .contributors_for_node(100_000_001)
+                .contributors_for_address(1, SCOPE)
                 .expect("read")
                 .is_empty()
         );

@@ -22,7 +22,7 @@ use rusqlite_migration::{M, Migrations};
 /// The `user_version` a fully-migrated `catalog.db` carries: the number of
 /// migrations defined. The `catalog_meta.schema_version` mirror is kept
 /// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 2;
+pub(crate) const TARGET_VERSION: i64 = 3;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -277,16 +277,133 @@ CREATE TABLE IF NOT EXISTS toc_edits (
 const CONTRIBUTOR_INDEX_DDL: &str =
     "CREATE INDEX idx_contrib_node ON node_contributors(node_id, role, ordinal);";
 
+// `M[2]` — re-key the six node-curation tables from a bare physical
+// `node_id` to the content-stable logical address `(intake_id, scope)`.
+//
+// The general procedure is SQLite's 12-step table rebuild
+// (sqlite.org/lang_altertable), for when a future migration rebuilds a
+// table that *does* carry foreign keys, triggers, or views:
+//   1.  PRAGMA foreign_keys=OFF              (done once in from_connection)
+//   2.  BEGIN                                (rusqlite_migration wraps each M)
+//   3.  note dependent indexes/triggers/views
+//   4.  CREATE TABLE <t>_new (... new shape ...)
+//   5.  INSERT INTO <t>_new SELECT ... FROM <t>   <-- SKIPPED: tables empty
+//   6.  DROP TABLE <t>
+//   7.  ALTER TABLE <t>_new RENAME TO <t>
+//   8.  recreate indexes / triggers / views
+//   9.  recreate any views that referenced the table
+//   10. PRAGMA foreign_key_check
+//   11. COMMIT
+//   12. PRAGMA foreign_keys=ON               (done once in from_connection)
+//
+// These six tables carry no foreign keys and are empty (METADATA is not
+// yet live), so steps 5/9/10 drop out and each table reduces to 4/6/7/8.
+const NODE_ADDR_DDL: &str = r#"
+-- node_publication_attrs: single-column PK becomes composite.
+CREATE TABLE node_publication_attrs_new (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  title TEXT, subtitle TEXT, publisher TEXT, year TEXT,
+  publication_date TEXT, isbn TEXT, series TEXT, series_number TEXT,
+  edition TEXT, language TEXT, original_title TEXT, original_language TEXT,
+  source_format TEXT, source TEXT, confidence TEXT, enriched_by TEXT,
+  PRIMARY KEY (intake_id, scope)
+);
+DROP TABLE node_publication_attrs;
+ALTER TABLE node_publication_attrs_new RENAME TO node_publication_attrs;
+
+-- node_contributors: surrogate key kept; UNIQUE and covering index re-keyed.
+CREATE TABLE node_contributors_new (
+  contributor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  role TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  origin TEXT NOT NULL,
+  name TEXT NOT NULL,
+  nationality TEXT,
+  inheritable INTEGER NOT NULL DEFAULT 1,
+  UNIQUE (intake_id, scope, role, ordinal, origin)
+);
+DROP TABLE node_contributors;
+ALTER TABLE node_contributors_new RENAME TO node_contributors;
+-- Both indexes are recreated on the new shape; dropping the old table
+-- took idx_contrib_role_name (baseline) and idx_contrib_node (M[1]) with it.
+CREATE INDEX idx_contrib_role_name ON node_contributors(role, name);
+CREATE INDEX idx_contrib_node ON node_contributors(intake_id, scope, role, ordinal);
+
+-- node_overrides
+CREATE TABLE node_overrides_new (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value TEXT,
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  curated_at TEXT NOT NULL,
+  curated_by TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY (intake_id, scope, field)
+);
+DROP TABLE node_overrides;
+ALTER TABLE node_overrides_new RENAME TO node_overrides;
+
+-- node_role_takeovers
+CREATE TABLE node_role_takeovers_new (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  role TEXT NOT NULL,
+  curated_at TEXT NOT NULL,
+  curated_by TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY (intake_id, scope, role)
+);
+DROP TABLE node_role_takeovers;
+ALTER TABLE node_role_takeovers_new RENAME TO node_role_takeovers;
+
+-- node_categories
+CREATE TABLE node_categories_new (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  category TEXT NOT NULL,
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL,
+  confirmed INTEGER NOT NULL DEFAULT 0,
+  curated_at TEXT NOT NULL,
+  curated_by TEXT NOT NULL,
+  PRIMARY KEY (intake_id, scope, category)
+);
+DROP TABLE node_categories;
+ALTER TABLE node_categories_new RENAME TO node_categories;
+CREATE INDEX idx_cat_cat ON node_categories(category);
+
+-- node_reviews: single-column PK becomes composite.
+CREATE TABLE node_reviews_new (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  reviewed_by TEXT NOT NULL,
+  status TEXT NOT NULL,
+  notes TEXT,
+  PRIMARY KEY (intake_id, scope)
+);
+DROP TABLE node_reviews;
+ALTER TABLE node_reviews_new RENAME TO node_reviews;
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(BASELINE_DDL), M::up(CONTRIBUTOR_INDEX_DDL)])
+    Migrations::new(vec![
+        M::up(BASELINE_DDL),
+        M::up(CONTRIBUTOR_INDEX_DDL),
+        M::up(NODE_ADDR_DDL),
+    ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, named_params};
 
     #[test]
     fn the_migration_set_is_well_formed() {
@@ -311,5 +428,61 @@ mod tests {
         migrations().to_latest(&mut conn).expect("first apply");
         // Re-running against an already-migrated database is a no-op.
         migrations().to_latest(&mut conn).expect("second apply");
+    }
+
+    /// The set of column names on `table`.
+    fn columns_of(conn: &Connection, table: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table_info");
+        stmt.query_map([], |row| row.get::<_, String>("name"))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .expect("collect")
+    }
+
+    /// Whether an index of `name` exists.
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = :name",
+            named_params! { ":name": name },
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("query index")
+            > 0
+    }
+
+    #[test]
+    fn the_address_migration_rekeys_every_node_table() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations().to_latest(&mut conn).expect("apply");
+
+        // Each node-curation table now carries the logical address and no
+        // longer the bare physical node id.
+        for table in [
+            "node_publication_attrs",
+            "node_contributors",
+            "node_overrides",
+            "node_role_takeovers",
+            "node_categories",
+            "node_reviews",
+        ] {
+            let cols = columns_of(&conn, table);
+            assert!(
+                cols.iter().any(|c| c == "intake_id"),
+                "{table} keeps intake_id"
+            );
+            assert!(cols.iter().any(|c| c == "scope"), "{table} keeps scope");
+            assert!(
+                !cols.iter().any(|c| c == "node_id"),
+                "{table} drops node_id"
+            );
+        }
+
+        // The contributor indexes and the category index survive the
+        // rebuild that dropped the tables they hung on.
+        assert!(index_exists(&conn, "idx_contrib_node"));
+        assert!(index_exists(&conn, "idx_contrib_role_name"));
+        assert!(index_exists(&conn, "idx_cat_cat"));
     }
 }

@@ -5,7 +5,8 @@
 //! One row per node carrying the bibliographic attributes as extracted
 //! (or enriched). This is the *base* layer: user corrections live in
 //! `node_overrides` and are applied on top by the effective-metadata
-//! merge. The row is keyed by node id and rewritten as a unit.
+//! merge. The row is keyed by the logical address `(intake_id, scope)`
+//! and rewritten as a unit.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
@@ -18,9 +19,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     name: "node_publication_attrs",
     comment: Some("Extracted bibliographic attributes — the metadata base layer."),
     columns: &[
-        ColumnSpec::int("node_id")
-            .primary_key()
-            .comment("soft reference to corpus.nodes"),
+        ColumnSpec::int("intake_id").not_null(),
+        ColumnSpec::text("scope").not_null(),
         ColumnSpec::text("title"),
         ColumnSpec::text("subtitle"),
         ColumnSpec::text("publisher"),
@@ -40,21 +40,22 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("confidence").comment("high / medium / low"),
         ColumnSpec::text("enriched_by"),
     ],
-    composite_pk: None,
+    composite_pk: Some(&["intake_id", "scope"]),
     uniques: &[],
     table_checks: &[],
     indexes: &[],
 };
 
-/// Insert or replace a node's base-layer attributes, keyed by `node_id`.
+/// Insert or replace a node's base-layer attributes, keyed by the logical
+/// address `(intake_id, scope)`.
 const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
-     (node_id, title, subtitle, publisher, year, publication_date, isbn, series, \
+     (intake_id, scope, title, subtitle, publisher, year, publication_date, isbn, series, \
       series_number, edition, language, original_title, original_language, \
       source_format, source, confidence, enriched_by) \
-     VALUES (:node_id, :title, :subtitle, :publisher, :year, :publication_date, \
+     VALUES (:intake_id, :scope, :title, :subtitle, :publisher, :year, :publication_date, \
              :isbn, :series, :series_number, :edition, :language, :original_title, \
              :original_language, :source_format, :source, :confidence, :enriched_by) \
-     ON CONFLICT(node_id) DO UPDATE SET \
+     ON CONFLICT(intake_id, scope) DO UPDATE SET \
        title = excluded.title, \
        subtitle = excluded.subtitle, \
        publisher = excluded.publisher, \
@@ -85,8 +86,11 @@ fn select_sql(tail: &str) -> String {
 /// attributes. Every attribute is optional; a node need not carry them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationAttrs {
-    /// The node these attributes describe — a soft reference to `corpus.db`.
-    pub node_id: i64,
+    /// The book whose node these attributes describe — a soft reference
+    /// to the `intake` registry.
+    pub intake_id: i64,
+    /// The logical address of the node within the book's partition.
+    pub scope: String,
     /// Main title.
     pub title: Option<String>,
     /// Subtitle.
@@ -126,7 +130,8 @@ impl PublicationAttrs {
     /// column. Columns are read by name.
     fn from_row(row: &Row<'_>) -> rusqlite::Result<PublicationAttrs> {
         Ok(PublicationAttrs {
-            node_id: row.get("node_id")?,
+            intake_id: row.get("intake_id")?,
+            scope: row.get("scope")?,
             title: row.get("title")?,
             subtitle: row.get("subtitle")?,
             publisher: row.get("publisher")?,
@@ -155,8 +160,10 @@ impl PublicationAttrs {
 /// methods.
 #[derive(Debug, Clone)]
 pub struct NewPublicationAttrs {
-    /// The node these attributes describe.
-    pub node_id: i64,
+    /// The book whose node these attributes describe.
+    pub intake_id: i64,
+    /// The logical address of the node within the book's partition.
+    pub scope: String,
     /// Main title.
     pub title: Option<String>,
     /// Subtitle.
@@ -192,10 +199,12 @@ pub struct NewPublicationAttrs {
 }
 
 impl NewPublicationAttrs {
-    /// A record for `node_id` with every attribute absent.
-    pub fn new(node_id: i64) -> NewPublicationAttrs {
+    /// A record for the node at `(intake_id, scope)` with every attribute
+    /// absent.
+    pub fn new(intake_id: i64, scope: impl Into<String>) -> NewPublicationAttrs {
         NewPublicationAttrs {
-            node_id,
+            intake_id,
+            scope: scope.into(),
             title: None,
             subtitle: None,
             publisher: None,
@@ -222,7 +231,8 @@ impl Catalog {
         self.conn.execute(
             UPSERT_SQL,
             named_params! {
-                ":node_id": new.node_id,
+                ":intake_id": new.intake_id,
+                ":scope": new.scope,
                 ":title": new.title,
                 ":subtitle": new.subtitle,
                 ":publisher": new.publisher,
@@ -244,13 +254,18 @@ impl Catalog {
         Ok(())
     }
 
-    /// Fetch a node's base-layer attributes, or `None` if none exist.
-    pub fn publication_attrs(&self, node_id: i64) -> Result<Option<PublicationAttrs>> {
+    /// Fetch the base-layer attributes at `(intake_id, scope)`, or `None`
+    /// if none exist.
+    pub fn publication_attrs(
+        &self,
+        intake_id: i64,
+        scope: &str,
+    ) -> Result<Option<PublicationAttrs>> {
         let attrs = self
             .conn
             .query_row(
-                &select_sql("WHERE node_id = :node_id"),
-                named_params! { ":node_id": node_id },
+                &select_sql("WHERE intake_id = :intake_id AND scope = :scope"),
+                named_params! { ":intake_id": intake_id, ":scope": scope },
                 PublicationAttrs::from_row,
             )
             .optional()?;
@@ -262,11 +277,15 @@ impl Catalog {
 mod tests {
     use super::*;
 
+    /// A logical address used throughout these tests.
+    const SCOPE: &str = "book";
+
     /// A `NewPublicationAttrs` with every attribute set to a distinct
     /// value, so a dropped column or unbound parameter fails a test.
-    fn fully_populated(node_id: i64) -> NewPublicationAttrs {
+    fn fully_populated(intake_id: i64, scope: &str) -> NewPublicationAttrs {
         NewPublicationAttrs {
-            node_id,
+            intake_id,
+            scope: scope.into(),
             title: Some("Title".into()),
             subtitle: Some("Subtitle".into()),
             publisher: Some("Publisher".into()),
@@ -290,14 +309,15 @@ mod tests {
     fn publication_attrs_round_trip_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_publication_attrs(&fully_populated(100_000_001))
+            .upsert_publication_attrs(&fully_populated(1, SCOPE))
             .expect("write");
 
         let read = catalog
-            .publication_attrs(100_000_001)
+            .publication_attrs(1, SCOPE)
             .expect("read")
             .expect("present");
-        assert_eq!(read.node_id, 100_000_001);
+        assert_eq!(read.intake_id, 1);
+        assert_eq!(read.scope, SCOPE);
         assert_eq!(read.title.as_deref(), Some("Title"));
         assert_eq!(read.subtitle.as_deref(), Some("Subtitle"));
         assert_eq!(read.publisher.as_deref(), Some("Publisher"));
@@ -319,23 +339,28 @@ mod tests {
     #[test]
     fn a_missing_row_reads_as_none() {
         let catalog = Catalog::open_in_memory().expect("open");
-        assert!(catalog.publication_attrs(404).expect("read").is_none());
+        assert!(
+            catalog
+                .publication_attrs(404, SCOPE)
+                .expect("read")
+                .is_none()
+        );
     }
 
     #[test]
     fn upsert_overwrites_the_previous_attributes() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_publication_attrs(&fully_populated(100_000_001))
+            .upsert_publication_attrs(&fully_populated(1, SCOPE))
             .expect("first write");
-        let mut revised = NewPublicationAttrs::new(100_000_001);
+        let mut revised = NewPublicationAttrs::new(1, SCOPE);
         revised.title = Some("Revised".into());
         catalog
             .upsert_publication_attrs(&revised)
             .expect("second write");
 
         let read = catalog
-            .publication_attrs(100_000_001)
+            .publication_attrs(1, SCOPE)
             .expect("read")
             .expect("present");
         assert_eq!(read.title.as_deref(), Some("Revised"));

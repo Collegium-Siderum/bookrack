@@ -17,7 +17,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     name: "node_categories",
     comment: Some("Category tags, many-to-many."),
     columns: &[
-        ColumnSpec::int("node_id").not_null(),
+        ColumnSpec::int("intake_id").not_null(),
+        ColumnSpec::text("scope").not_null(),
         ColumnSpec::text("category").not_null(),
         ColumnSpec::int("is_primary").not_null().default("0"),
         ColumnSpec::text("source")
@@ -27,7 +28,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("curated_at").not_null(),
         ColumnSpec::text("curated_by").not_null(),
     ],
-    composite_pk: Some(&["node_id", "category"]),
+    composite_pk: Some(&["intake_id", "scope", "category"]),
     uniques: &[],
     table_checks: &[],
     indexes: &[IndexSpec::on("idx_cat_cat", &["category"])],
@@ -36,10 +37,10 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 /// Insert or replace one (node, category) tag. `curated_at` is generated
 /// by SQLite so the whole crate shares one timestamp source.
 const UPSERT_SQL: &str = "INSERT INTO node_categories \
-     (node_id, category, is_primary, source, confirmed, curated_at, curated_by) \
-     VALUES (:node_id, :category, :is_primary, :source, :confirmed, \
+     (intake_id, scope, category, is_primary, source, confirmed, curated_at, curated_by) \
+     VALUES (:intake_id, :scope, :category, :is_primary, :source, :confirmed, \
              strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), :curated_by) \
-     ON CONFLICT(node_id, category) DO UPDATE SET \
+     ON CONFLICT(intake_id, scope, category) DO UPDATE SET \
        is_primary = excluded.is_primary, \
        source = excluded.source, \
        confirmed = excluded.confirmed, \
@@ -55,8 +56,11 @@ fn select_sql(tail: &str) -> String {
 /// One `node_categories` row — one category tag on one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeCategory {
-    /// The tagged node.
-    pub node_id: i64,
+    /// The book whose node is tagged — a soft reference to the `intake`
+    /// registry.
+    pub intake_id: i64,
+    /// The logical address of the node within the book's partition.
+    pub scope: String,
     /// The category.
     pub category: String,
     /// Whether this is a primary category of the node.
@@ -75,7 +79,8 @@ impl NodeCategory {
     /// Build a [`NodeCategory`] from a row that includes every column.
     fn from_row(row: &Row<'_>) -> rusqlite::Result<NodeCategory> {
         Ok(NodeCategory {
-            node_id: row.get("node_id")?,
+            intake_id: row.get("intake_id")?,
+            scope: row.get("scope")?,
             category: row.get("category")?,
             is_primary: row.get("is_primary")?,
             source: row.get("source")?,
@@ -89,7 +94,8 @@ impl NodeCategory {
 /// A category tag about to be written.
 #[derive(Debug, Clone)]
 pub struct NewCategory {
-    node_id: i64,
+    intake_id: i64,
+    scope: String,
     category: String,
     is_primary: bool,
     source: String,
@@ -98,16 +104,19 @@ pub struct NewCategory {
 }
 
 impl NewCategory {
-    /// A tag of `category` on `node_id`, from `source`. Secondary and
-    /// unconfirmed until the builder methods say otherwise.
+    /// A tag of `category` on the node at `(intake_id, scope)`, from
+    /// `source`. Secondary and unconfirmed until the builder methods say
+    /// otherwise.
     pub fn new(
-        node_id: i64,
+        intake_id: i64,
+        scope: impl Into<String>,
         category: impl Into<String>,
         source: impl Into<String>,
         curated_by: impl Into<String>,
     ) -> NewCategory {
         NewCategory {
-            node_id,
+            intake_id,
+            scope: scope.into(),
             category: category.into(),
             is_primary: false,
             source: source.into(),
@@ -135,7 +144,8 @@ impl Catalog {
         self.conn.execute(
             UPSERT_SQL,
             named_params! {
-                ":node_id": new.node_id,
+                ":intake_id": new.intake_id,
+                ":scope": new.scope,
                 ":category": new.category,
                 ":is_primary": new.is_primary,
                 ":source": new.source,
@@ -146,14 +156,15 @@ impl Catalog {
         Ok(())
     }
 
-    /// Every category on `node_id`, ordered by category name.
-    pub fn categories_for_node(&self, node_id: i64) -> Result<Vec<NodeCategory>> {
-        let mut stmt = self
-            .conn
-            .prepare(&select_sql("WHERE node_id = :node_id ORDER BY category"))?;
+    /// Every category on the node at `(intake_id, scope)`, ordered by
+    /// category name.
+    pub fn categories_for_address(&self, intake_id: i64, scope: &str) -> Result<Vec<NodeCategory>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE intake_id = :intake_id AND scope = :scope ORDER BY category",
+        ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":node_id": node_id },
+                named_params! { ":intake_id": intake_id, ":scope": scope },
                 NodeCategory::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeCategory>>>()?;
@@ -161,10 +172,11 @@ impl Catalog {
     }
 
     /// Remove a category tag. Returns whether a row existed.
-    pub fn remove_category(&self, node_id: i64, category: &str) -> Result<bool> {
+    pub fn remove_category(&self, intake_id: i64, scope: &str, category: &str) -> Result<bool> {
         let affected = self.conn.execute(
-            "DELETE FROM node_categories WHERE node_id = :node_id AND category = :category",
-            named_params! { ":node_id": node_id, ":category": category },
+            "DELETE FROM node_categories \
+             WHERE intake_id = :intake_id AND scope = :scope AND category = :category",
+            named_params! { ":intake_id": intake_id, ":scope": scope, ":category": category },
         )?;
         Ok(affected > 0)
     }
@@ -174,21 +186,25 @@ impl Catalog {
 mod tests {
     use super::*;
 
+    /// A logical address used throughout these tests.
+    const SCOPE: &str = "book";
+
     #[test]
     fn a_category_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .add_category(
-                &NewCategory::new(100_000_001, "philosophy", "user", "human")
+                &NewCategory::new(1, SCOPE, "philosophy", "user", "human")
                     .primary(true)
                     .confirmed(true),
             )
             .expect("write");
 
-        let all = catalog.categories_for_node(100_000_001).expect("read");
+        let all = catalog.categories_for_address(1, SCOPE).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
-        assert_eq!(row.node_id, 100_000_001);
+        assert_eq!(row.intake_id, 1);
+        assert_eq!(row.scope, SCOPE);
         assert_eq!(row.category, "philosophy");
         assert!(row.is_primary);
         assert_eq!(row.source, "user");
@@ -202,22 +218,20 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .add_category(&NewCategory::new(
-                100_000_001,
-                "history",
-                "inferred",
-                "pipeline",
+                1, SCOPE, "history", "inferred", "pipeline",
             ))
             .expect("add");
         catalog
             .add_category(&NewCategory::new(
-                100_000_001,
+                1,
+                SCOPE,
                 "biography",
                 "llm_suggested",
                 "llm",
             ))
             .expect("add");
         let names: Vec<String> = catalog
-            .categories_for_node(100_000_001)
+            .categories_for_address(1, SCOPE)
             .expect("read")
             .into_iter()
             .map(|c| c.category)
@@ -226,20 +240,16 @@ mod tests {
 
         assert!(
             catalog
-                .remove_category(100_000_001, "history")
+                .remove_category(1, SCOPE, "history")
                 .expect("remove")
         );
         assert_eq!(
             catalog
-                .categories_for_node(100_000_001)
+                .categories_for_address(1, SCOPE)
                 .expect("read")
                 .len(),
             1
         );
-        assert!(
-            !catalog
-                .remove_category(100_000_001, "history")
-                .expect("miss")
-        );
+        assert!(!catalog.remove_category(1, SCOPE, "history").expect("miss"));
     }
 }

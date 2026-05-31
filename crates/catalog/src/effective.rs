@@ -33,8 +33,10 @@ const INHERITABLE_FIELDS: &[&str] = &["publisher", "series"];
 /// not distinguish them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAttrs {
-    /// The node these attributes describe.
-    pub node_id: i64,
+    /// The book whose node these attributes describe.
+    pub intake_id: i64,
+    /// The logical address of the node within the book's partition.
+    pub scope: String,
     /// Effective field values, keyed by field name.
     fields: BTreeMap<String, String>,
 }
@@ -79,7 +81,8 @@ impl EffectiveAttrs {
 /// name — the same name `node_overrides.field` would use to override it.
 fn base_pairs(attrs: &PublicationAttrs) -> Vec<(&'static str, String)> {
     let PublicationAttrs {
-        node_id: _,
+        intake_id: _,
+        scope: _,
         title,
         subtitle,
         publisher,
@@ -133,14 +136,18 @@ impl Catalog {
     /// This does *not* apply volume→set inheritance; compose
     /// [`EffectiveAttrs::inherit_from`] for that, since the parent is
     /// reached through the `corpus.db` tree the caller holds.
-    pub fn effective_publication_attrs(&self, node_id: i64) -> Result<EffectiveAttrs> {
+    pub fn effective_publication_attrs(
+        &self,
+        intake_id: i64,
+        scope: &str,
+    ) -> Result<EffectiveAttrs> {
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(base) = self.publication_attrs(node_id)? {
+        if let Some(base) = self.publication_attrs(intake_id, scope)? {
             for (name, value) in base_pairs(&base) {
                 fields.insert(name.to_string(), value);
             }
         }
-        for over in self.overrides_for_node(node_id)? {
+        for over in self.overrides_for_address(intake_id, scope)? {
             match over.value {
                 Some(value) => {
                     fields.insert(over.field, value);
@@ -150,7 +157,11 @@ impl Catalog {
                 }
             }
         }
-        Ok(EffectiveAttrs { node_id, fields })
+        Ok(EffectiveAttrs {
+            intake_id,
+            scope: scope.to_string(),
+            fields,
+        })
     }
 }
 
@@ -160,9 +171,14 @@ mod tests {
     use crate::node_overrides::NewOverride;
     use crate::node_publication_attrs::NewPublicationAttrs;
 
-    /// Write a base layer with a title and publisher for `node_id`.
-    fn seed_base(catalog: &Catalog, node_id: i64) {
-        let mut attrs = NewPublicationAttrs::new(node_id);
+    /// Two logical addresses in one book: a set and one of its volumes.
+    const INTAKE: i64 = 1;
+    const SET: &str = "work:set";
+    const VOL: &str = "work:vol";
+
+    /// Write a base layer with a title and publisher for `(intake, scope)`.
+    fn seed_base(catalog: &Catalog, intake_id: i64, scope: &str) {
+        let mut attrs = NewPublicationAttrs::new(intake_id, scope);
         attrs.title = Some("Base Title".into());
         attrs.publisher = Some("Base Publisher".into());
         catalog.upsert_publication_attrs(&attrs).expect("base");
@@ -171,10 +187,10 @@ mod tests {
     #[test]
     fn effective_is_the_base_layer_when_there_are_no_overrides() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, 100_000_001);
+        seed_base(&catalog, INTAKE, SET);
 
         let eff = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("effective");
         assert_eq!(eff.get("title"), Some("Base Title"));
         assert_eq!(eff.get("publisher"), Some("Base Publisher"));
@@ -187,10 +203,11 @@ mod tests {
     #[test]
     fn an_override_value_replaces_the_base_value() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, 100_000_001);
+        seed_base(&catalog, INTAKE, SET);
         catalog
             .set_override(&NewOverride::new(
-                100_000_001,
+                INTAKE,
+                SET,
                 "title",
                 Some("Override Title".into()),
                 "human",
@@ -198,7 +215,7 @@ mod tests {
             .expect("override");
 
         let eff = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("effective");
         assert_eq!(eff.get("title"), Some("Override Title"));
     }
@@ -206,13 +223,13 @@ mod tests {
     #[test]
     fn an_explicit_null_override_removes_the_field() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, 100_000_001);
+        seed_base(&catalog, INTAKE, SET);
         catalog
-            .set_override(&NewOverride::new(100_000_001, "publisher", None, "human"))
+            .set_override(&NewOverride::new(INTAKE, SET, "publisher", None, "human"))
             .expect("nullify");
 
         let eff = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("effective");
         assert_eq!(eff.get("publisher"), None);
         assert_eq!(eff.get("title"), Some("Base Title"));
@@ -221,12 +238,13 @@ mod tests {
     #[test]
     fn an_override_can_introduce_a_field_absent_from_the_base() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, 100_000_001);
+        seed_base(&catalog, INTAKE, SET);
         // `imprint` is not a node_publication_attrs column; it rides the
         // EAV override table and still surfaces in the effective view.
         catalog
             .set_override(&NewOverride::new(
-                100_000_001,
+                INTAKE,
+                SET,
                 "imprint",
                 Some("An Imprint".into()),
                 "human",
@@ -234,7 +252,7 @@ mod tests {
             .expect("override");
 
         let eff = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("effective");
         assert_eq!(eff.get("imprint"), Some("An Imprint"));
     }
@@ -243,24 +261,24 @@ mod tests {
     fn a_volume_inherits_only_the_inheritable_fields_from_its_set() {
         let catalog = Catalog::open_in_memory().expect("open");
         // The set carries publisher, series, and its own title and ISBN.
-        let mut set_attrs = NewPublicationAttrs::new(100_000_001);
+        let mut set_attrs = NewPublicationAttrs::new(INTAKE, SET);
         set_attrs.title = Some("The Whole Set".into());
         set_attrs.publisher = Some("Set Publisher".into());
         set_attrs.series = Some("Set Series".into());
         set_attrs.isbn = Some("set-isbn".into());
         catalog.upsert_publication_attrs(&set_attrs).expect("set");
         // The volume carries only its own title.
-        let mut vol_attrs = NewPublicationAttrs::new(100_000_002);
+        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, VOL);
         vol_attrs.title = Some("Volume One".into());
         catalog
             .upsert_publication_attrs(&vol_attrs)
             .expect("volume");
 
         let set = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("set effective");
         let volume = catalog
-            .effective_publication_attrs(100_000_002)
+            .effective_publication_attrs(INTAKE, VOL)
             .expect("volume effective");
         let merged = volume.inherit_from(&set);
 
@@ -276,20 +294,20 @@ mod tests {
     #[test]
     fn inheritance_does_not_overwrite_a_volumes_own_value() {
         let catalog = Catalog::open_in_memory().expect("open");
-        let mut set_attrs = NewPublicationAttrs::new(100_000_001);
+        let mut set_attrs = NewPublicationAttrs::new(INTAKE, SET);
         set_attrs.publisher = Some("Set Publisher".into());
         catalog.upsert_publication_attrs(&set_attrs).expect("set");
-        let mut vol_attrs = NewPublicationAttrs::new(100_000_002);
+        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, VOL);
         vol_attrs.publisher = Some("Volume Publisher".into());
         catalog
             .upsert_publication_attrs(&vol_attrs)
             .expect("volume");
 
         let set = catalog
-            .effective_publication_attrs(100_000_001)
+            .effective_publication_attrs(INTAKE, SET)
             .expect("set");
         let volume = catalog
-            .effective_publication_attrs(100_000_002)
+            .effective_publication_attrs(INTAKE, VOL)
             .expect("volume");
         assert_eq!(
             volume.inherit_from(&set).get("publisher"),
