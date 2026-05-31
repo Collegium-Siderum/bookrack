@@ -21,11 +21,13 @@ mod db;
 mod index_meta;
 mod node;
 mod partition;
+mod resolve;
 
-pub use bookrack_core::{NodeId, NodeType, PartitionIdx};
+pub use bookrack_core::{NodeId, NodeType, PartitionIdx, Scope};
 pub use db::{Corpus, SCHEMA_VERSION};
 pub use node::{NewNode, Node};
 pub use partition::Partition;
+pub use resolve::ResolveError;
 
 /// A fallible `corpus` operation.
 pub type Result<T> = std::result::Result<T, CorpusError>;
