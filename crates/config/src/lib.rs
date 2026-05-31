@@ -159,6 +159,14 @@ pub const DEFAULT_SEARCH_TOP_K: usize = 5;
 /// Environment variable overriding the search result count.
 pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
 
+/// Listen address the MCP server binds when [`McpConfig`] is left at its
+/// default. Loopback only: the server is a local query daemon, not a
+/// network service.
+pub const DEFAULT_MCP_ADDR: &str = "127.0.0.1:8765";
+
+/// Environment variable overriding the MCP server listen address.
+pub const MCP_ADDR_ENV: &str = "BOOKRACK_MCP_ADDR";
+
 /// Tunable parameters for the embedding subsystem.
 ///
 /// A single source of truth for the knobs the `embed` client and the
@@ -267,6 +275,38 @@ impl SearchConfig {
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> SearchConfig {
         SearchConfig {
             top_k: env_usize(get(SEARCH_TOP_K_ENV), DEFAULT_SEARCH_TOP_K),
+        }
+    }
+}
+
+/// MCP server knobs. Separate from the data-path config so the daemon
+/// entry point reads only what it needs.
+#[derive(Debug, Clone)]
+pub struct McpConfig {
+    /// Address the streamable-HTTP server binds, e.g. `127.0.0.1:8765`.
+    pub addr: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> McpConfig {
+        McpConfig {
+            addr: DEFAULT_MCP_ADDR.to_string(),
+        }
+    }
+}
+
+impl McpConfig {
+    /// Resolve from the environment, falling back to [`DEFAULT_MCP_ADDR`]
+    /// when the override is unset or blank.
+    pub fn from_env() -> McpConfig {
+        McpConfig::resolve_from(|key| std::env::var(key).ok())
+    }
+
+    /// Pure resolution, factored out so it can be tested without mutating
+    /// process-global environment variables.
+    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> McpConfig {
+        McpConfig {
+            addr: env_trimmed(get(MCP_ADDR_ENV)).unwrap_or_else(|| DEFAULT_MCP_ADDR.to_string()),
         }
     }
 }
@@ -483,6 +523,21 @@ mod tests {
         // A blank value falls back to the default.
         let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()));
         assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
+    }
+
+    #[test]
+    fn mcp_config_default_and_env_override() {
+        assert_eq!(McpConfig::default().addr, DEFAULT_MCP_ADDR);
+
+        let cfg = McpConfig::resolve_from(|key| match key {
+            MCP_ADDR_ENV => Some("0.0.0.0:9000".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.addr, "0.0.0.0:9000");
+
+        // A blank value falls back to the default.
+        let blank = McpConfig::resolve_from(|_| Some("  ".to_string()));
+        assert_eq!(blank.addr, DEFAULT_MCP_ADDR);
     }
 
     #[test]
