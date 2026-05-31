@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
-use bookrack_search::search as dense_search;
+use bookrack_search::{cite, retrieve};
 use bookrack_vectors::ChunkStore;
 
 // Re-exported so consumers name query results through this crate, not the
@@ -90,11 +90,18 @@ impl<E: Embedder> Library<E> {
 
     /// Search the library for passages matching `query`, nearest first.
     /// `top_k` falls back to the configured default when `None`.
+    ///
+    /// The async retrieval runs first, touching only the store and
+    /// embedder; the corpus is opened only afterwards, for the synchronous
+    /// citation step. The non-`Sync` corpus handle is thus never held
+    /// across an await, so this future is `Send` and can serve requests on
+    /// a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
         let top_k = top_k.unwrap_or(self.default_top_k);
+        let hits = retrieve(query, &self.store, &self.embedder, top_k).await?;
         let corpus = Corpus::open(&self.corpus_db)?;
-        let hits = dense_search(query, &corpus, &self.store, &self.embedder, top_k).await?;
-        Ok(hits)
+        let citations = cite(&corpus, hits)?;
+        Ok(citations)
     }
 }
 

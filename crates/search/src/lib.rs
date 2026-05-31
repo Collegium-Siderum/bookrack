@@ -19,7 +19,7 @@ use std::time::Instant;
 use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::{ChunkStore, SearchHit};
 use serde::Serialize;
 
 /// Separator between breadcrumb segments.
@@ -77,6 +77,13 @@ pub struct Citation {
 
 /// Retrieve the `top_k` passages nearest `query`, each with a citation
 /// breadcrumb resolved from `corpus`.
+///
+/// A convenience wrapper over [`retrieve`] then [`cite`]. It borrows
+/// `corpus` across the await in `retrieve`, so its future is `Send` only
+/// where `Corpus` is `Sync` — fine for a single-threaded caller like the
+/// CLI. A caller that needs a `Send` future (e.g. one serving requests on
+/// a multi-threaded runtime) should call [`retrieve`] and [`cite`]
+/// directly, opening the corpus only for the synchronous citation step.
 #[tracing::instrument(name = "search", skip_all, fields(top_k = top_k))]
 pub async fn search<E: Embedder>(
     query: &str,
@@ -85,6 +92,19 @@ pub async fn search<E: Embedder>(
     embedder: &E,
     top_k: usize,
 ) -> Result<Vec<Citation>> {
+    let hits = retrieve(query, store, embedder, top_k).await?;
+    cite(corpus, hits)
+}
+
+/// Embed `query` and recall the `top_k` nearest passages from the vector
+/// store. The async half of a search: it touches only the embedder and the
+/// store, never the corpus, so its future is `Send`.
+pub async fn retrieve<E: Embedder>(
+    query: &str,
+    store: &ChunkStore,
+    embedder: &E,
+    top_k: usize,
+) -> Result<Vec<SearchHit>> {
     let input = build_query_input(query);
     let embed_started = Instant::now();
     let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
@@ -101,7 +121,13 @@ pub async fn search<E: Embedder>(
         elapsed_ms = recall_started.elapsed().as_secs_f64() * 1e3,
         "recalled nearest passages"
     );
+    Ok(hits)
+}
 
+/// Resolve a citation breadcrumb for each hit from `corpus`. The
+/// synchronous half of a search: no awaits, so a caller can open a
+/// short-lived corpus handle here without holding it across an await.
+pub fn cite(corpus: &Corpus, hits: Vec<SearchHit>) -> Result<Vec<Citation>> {
     let breadcrumb_started = Instant::now();
     let mut citations = Vec::with_capacity(hits.len());
     for hit in hits {
