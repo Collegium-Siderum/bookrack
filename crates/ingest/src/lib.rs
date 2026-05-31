@@ -19,6 +19,7 @@ mod embed_run;
 pub mod sentences;
 mod structure;
 
+pub use bookrack_corpus::IndexStamps;
 pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
 pub use embed_run::embed_book_chunks;
 
@@ -34,6 +35,22 @@ use bookrack_embed::Embedder;
 use bookrack_extract::{ExtractOutcome, Extraction};
 use sha2::{Digest, Sha256};
 use tracing::Instrument;
+
+/// The index stamps this binary builds an index with.
+///
+/// The single assembly point for "what this build expects": the model and
+/// vector width are runtime values the caller supplies, while the chunk and
+/// normalize versions are this binary's compiled-in constants. Both the
+/// build-side gate (in [`embed_book_chunks`]) and the serve-side gate (in
+/// the query facade) compare against the [`IndexStamps`] this returns.
+pub fn current_index_stamps(embed_model: impl Into<String>, vector_dim: u32) -> IndexStamps {
+    IndexStamps {
+        embed_model: embed_model.into(),
+        vector_dim,
+        chunk_version: CHUNK_VERSION,
+        normalize_version: bookrack_normalize::NORMALIZE_VERSION,
+    }
+}
 
 /// Tuning parameters for STRUCTURE.
 #[derive(Debug, Clone)]
@@ -406,33 +423,34 @@ pub async fn ingest_book<E: Embedder>(
 
     // EMBED.
     let started = std::time::Instant::now();
-    let embed = match embed_run::embed_book_chunks(&plans, embedder, lancedb_dir, &params.embed)
-        .instrument(tracing::info_span!("operation", stage = "embed"))
-        .await
-    {
-        Ok(report) => report,
-        Err(e) => {
-            audit(
-                catalog,
-                &run_id,
-                &source_sha,
-                Some(book_root_id),
-                "embed",
-                "fail",
-                started,
-                None,
-                Some(&e.to_string()),
-            );
-            set_state(
-                catalog,
-                NewBookState::new(book_root_id, intake_id, "embed")
-                    .parsed_at(&parsed_at)
-                    .embed_model(&params.embed.model)
-                    .last_error(e.to_string()),
-            );
-            return Err(e);
-        }
-    };
+    let embed =
+        match embed_run::embed_book_chunks(&plans, embedder, corpus, lancedb_dir, &params.embed)
+            .instrument(tracing::info_span!("operation", stage = "embed"))
+            .await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                audit(
+                    catalog,
+                    &run_id,
+                    &source_sha,
+                    Some(book_root_id),
+                    "embed",
+                    "fail",
+                    started,
+                    None,
+                    Some(&e.to_string()),
+                );
+                set_state(
+                    catalog,
+                    NewBookState::new(book_root_id, intake_id, "embed")
+                        .parsed_at(&parsed_at)
+                        .embed_model(&params.embed.model)
+                        .last_error(e.to_string()),
+                );
+                return Err(e);
+            }
+        };
     let metric = format!(
         r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
         embed.chunks_written, embed.batches, embed.shrink_events, embed.total_chars
@@ -994,6 +1012,34 @@ mod book_pipeline_tests {
         assert_eq!(state.current_stage, "embed");
         assert!(state.embedded_at.is_some());
         assert!(state.last_error.is_none());
+
+        // The first embed stamps the index with the build parameters: the
+        // configured model, the probed vector width, and the two algorithm
+        // versions.
+        assert_eq!(
+            corpus
+                .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
+                .expect("get"),
+            Some(IngestParams::default().embed.model)
+        );
+        assert_eq!(
+            corpus
+                .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+                .expect("get"),
+            Some("8".to_string())
+        );
+        assert_eq!(
+            corpus
+                .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)
+                .expect("get"),
+            Some(CHUNK_VERSION.to_string())
+        );
+        assert_eq!(
+            corpus
+                .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)
+                .expect("get"),
+            Some(bookrack_normalize::NORMALIZE_VERSION.to_string())
+        );
 
         // Every rooted stage logged an ok row; the embed row carries its
         // batching metrics.

@@ -17,11 +17,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use bookrack_config::EmbedConfig;
+use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::{ChunkRow, ChunkStore};
 
 use crate::chunk::ChunkPlan;
-use crate::{IngestError, Result};
+use crate::{IngestError, Result, current_index_stamps};
 
 /// What one EMBED run produced — the row count plus the batching metrics
 /// that diagnose how the run behaved against the server.
@@ -46,6 +47,7 @@ pub struct EmbedRunReport {
 pub async fn embed_book_chunks<E: Embedder>(
     plans: &[ChunkPlan],
     embedder: &E,
+    corpus: &Corpus,
     lancedb_dir: &Path,
     cfg: &EmbedConfig,
 ) -> Result<EmbedRunReport> {
@@ -64,6 +66,11 @@ pub async fn embed_book_chunks<E: Embedder>(
         .map(Vec::len)
         .filter(|&d| d > 0)
         .ok_or(IngestError::EmptyEmbedding)?;
+
+    // Stamp the build parameters on a fresh index, or refuse a book whose
+    // model or algorithm version differs from the one the index was built
+    // with — before any vector is written, so the index is never mixed.
+    corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32))?;
 
     let store = ChunkStore::open(lancedb_dir, dim).await?;
     store
@@ -176,6 +183,7 @@ fn to_rows(plans: &[ChunkPlan], vectors: Vec<Vec<f32>>) -> Vec<ChunkRow> {
 mod tests {
     use super::*;
     use bookrack_core::NodeId;
+    use bookrack_corpus::CorpusError;
     use bookrack_embed::{EmbedError, Result as EmbedResult};
     use std::future::Future;
 
@@ -240,9 +248,11 @@ mod tests {
     async fn embeds_every_chunk_and_writes_one_row_each() {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some prose text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_book_chunks(
             &plans,
             &Fake { dim: 8 },
+            &corpus,
             dir.path(),
             &EmbedConfig::default(),
         )
@@ -260,9 +270,16 @@ mod tests {
     #[tokio::test]
     async fn empty_plans_write_nothing() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let report = embed_book_chunks(&[], &Fake { dim: 8 }, dir.path(), &EmbedConfig::default())
-            .await
-            .expect("embed");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let report = embed_book_chunks(
+            &[],
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
         assert_eq!(report, EmbedRunReport::default());
     }
 
@@ -271,10 +288,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
         let cfg = EmbedConfig::default();
-        embed_book_chunks(&plans, &Fake { dim: 8 }, dir.path(), &cfg)
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("first");
-        embed_book_chunks(&plans, &Fake { dim: 8 }, dir.path(), &cfg)
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
             .await
             .expect("second");
 
@@ -290,12 +308,14 @@ mod tests {
         // Many small chunks in one greedy batch; the embedder refuses any
         // batch above two, forcing repeated halving down to that size.
         let plans: Vec<ChunkPlan> = (1..=8).map(|i| plan(i, "x")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
         let report = embed_book_chunks(
             &plans,
             &Overloading {
                 dim: 4,
                 max_batch: 2,
             },
+            &corpus,
             dir.path(),
             &EmbedConfig::default(),
         )
@@ -305,5 +325,40 @@ mod tests {
         // The eight-chunk batch is halved until each piece is within the
         // server's limit, so the run records the shrinking it took.
         assert!(report.shrink_events > 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_stamps_the_index_and_then_refuses_a_different_model() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let first = EmbedConfig {
+            model: "model-a".to_string(),
+            ..EmbedConfig::default()
+        };
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
+            .await
+            .expect("first run stamps the index");
+        assert_eq!(
+            corpus
+                .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
+                .expect("get"),
+            Some("model-a".to_string())
+        );
+
+        // A second book embedded with a different model is refused before
+        // any vector is written, so the index is never mixed.
+        let second = EmbedConfig {
+            model: "model-b".to_string(),
+            ..EmbedConfig::default()
+        };
+        let err = embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
+            .await
+            .expect_err("a different model must be refused");
+        assert!(matches!(
+            err,
+            IngestError::Corpus(CorpusError::IndexStampMismatch { key, .. })
+                if key == bookrack_corpus::EMBED_MODEL_KEY
+        ));
     }
 }
