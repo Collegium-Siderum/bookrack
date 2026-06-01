@@ -77,6 +77,30 @@ pub struct StructureReport {
     pub nodes_written: usize,
     /// How many of those nodes are prose leaves.
     pub prose_leaves: usize,
+    /// TOC shape statistics, consumed by the metadata audit as a
+    /// warning-level signal. Never gates STRUCTURE itself.
+    pub toc_stats: TocStats,
+}
+
+/// Warning-level TOC shape statistics over one [`Extraction`].
+///
+/// Derived from the raw extract output, not from the planned tree, so
+/// the values describe the source's TOC as the extractor saw it (any
+/// unresolved or skewed entries included). Consumed downstream by the
+/// metadata audit; never used to gate STRUCTURE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TocStats {
+    /// `extraction.toc.entries.len()`.
+    pub total_toc_entries: usize,
+    /// TOC entries whose `start_block` could not be resolved.
+    pub unanchored_toc_entries: usize,
+    /// True when the TOC has enough entries to plausibly express a
+    /// hierarchy yet every entry sits at the same depth.
+    pub suspicious_flat: bool,
+    /// True when the TOC entry count and the heading-block count are
+    /// badly out of proportion, suggesting the TOC and the body
+    /// disagree about the book's structure.
+    pub heading_block_skew: bool,
 }
 
 /// Why an `ingest` operation failed.
@@ -154,6 +178,7 @@ pub fn ingest_structure(
     let plan = structure::plan_tree(book_root_type, extraction, params)?;
     let prose_leaves = plan.prose_leaves;
     let child_count = plan.child_count();
+    let toc_stats = structure::toc_stats(extraction);
 
     let idx = PartitionIdx::new(intake_id);
     corpus.drop_partition(idx)?;
@@ -168,6 +193,7 @@ pub fn ingest_structure(
         book_root_id: partition.book_root_id,
         nodes_written,
         prose_leaves,
+        toc_stats,
     })
 }
 
@@ -853,6 +879,76 @@ mod tests {
         )
         .expect_err("must reject");
         assert!(matches!(err, IngestError::EmptyExtraction));
+    }
+
+    #[test]
+    fn toc_stats_counts_entries_and_unanchored() {
+        let ex = extraction(
+            vec![
+                heading("Chapter One", 1, 0),
+                body("Body.", 0),
+                heading("Chapter Two", 1, 1),
+                body("Body.", 1),
+            ],
+            vec![
+                entry("Chapter One", 0, Some(0)),
+                entry("Chapter Two", 0, Some(2)),
+                entry("Phantom", 0, None),
+            ],
+            None,
+        );
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let stats = ingest(&mut corpus, 1, &ex).toc_stats;
+        assert_eq!(stats.total_toc_entries, 3);
+        assert_eq!(stats.unanchored_toc_entries, 1);
+        // Three entries below the flat-TOC minimum: do not flag.
+        assert!(!stats.suspicious_flat);
+    }
+
+    #[test]
+    fn toc_stats_flags_suspiciously_flat_toc() {
+        // Five entries all at depth 0 with a hierarchy that could have
+        // expressed nesting flags suspicious_flat.
+        let blocks: Vec<Block> = (0..5)
+            .map(|i| heading(&format!("Title {i}"), 1, i as u32))
+            .chain((0..5).map(|i| body(&format!("Body {i}."), i as u32)))
+            .collect();
+        let entries: Vec<TocEntry> = (0..5)
+            .map(|i| entry(&format!("Title {i}"), 0, Some(i)))
+            .collect();
+        let ex = extraction(blocks, entries, None);
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let stats = ingest(&mut corpus, 1, &ex).toc_stats;
+        assert!(stats.suspicious_flat);
+        // Five entries with five heading blocks: not skewed.
+        assert!(!stats.heading_block_skew);
+    }
+
+    #[test]
+    fn toc_stats_flags_heading_block_skew() {
+        // Six TOC entries but the body carries no heading blocks at all:
+        // the TOC and the body disagree about structure.
+        let blocks: Vec<Block> = (0..6).map(|i| body("Body.", i as u32)).collect();
+        let entries: Vec<TocEntry> = (0..6)
+            .map(|i| entry(&format!("Title {i}"), (i as u8) % 2, Some(i)))
+            .collect();
+        let ex = extraction(blocks, entries, None);
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let stats = ingest(&mut corpus, 1, &ex).toc_stats;
+        assert!(stats.heading_block_skew);
+        // Two alternating depths: not flat.
+        assert!(!stats.suspicious_flat);
+    }
+
+    #[test]
+    fn toc_stats_default_for_empty_toc() {
+        let ex = extraction(vec![body("Body.", 0)], Vec::new(), None);
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let stats = ingest(&mut corpus, 1, &ex).toc_stats;
+        assert_eq!(stats.total_toc_entries, 0);
+        assert_eq!(stats.unanchored_toc_entries, 0);
+        assert!(!stats.suspicious_flat);
+        assert!(!stats.heading_block_skew);
     }
 
     #[test]

@@ -33,7 +33,7 @@ use bookrack_extract::{BlockKind, Extraction};
 use bookrack_normalize::{norm_text_sha256, normalize};
 use sha2::{Digest, Sha256};
 
-use crate::{IngestError, StructureParams};
+use crate::{IngestError, StructureParams, TocStats};
 
 /// The vec index of the book root within a plan. The root is always the
 /// first planned node and is the only one with no parent.
@@ -374,6 +374,43 @@ pub(crate) fn plan_tree(
         prose_leaves,
     })
 }
+
+/// Warning-level TOC shape statistics over one [`Extraction`].
+///
+/// `suspicious_flat` fires when a TOC has at least
+/// [`FLAT_TOC_MIN_ENTRIES`] entries that all sit at one depth — enough
+/// rows that a hierarchy could have been expressed, yet none was.
+/// `heading_block_skew` fires when the TOC entry count and the body's
+/// heading-block count diverge by at least [`HEADING_SKEW_RATIO`] in
+/// either direction, once both sides clear [`HEADING_SKEW_MIN`].
+pub(crate) fn toc_stats(extraction: &Extraction) -> TocStats {
+    let entries = &extraction.toc.entries;
+    let total = entries.len();
+    let unanchored = entries.iter().filter(|e| e.start_block.is_none()).count();
+    let suspicious_flat =
+        total >= FLAT_TOC_MIN_ENTRIES && entries.iter().all(|e| e.depth == entries[0].depth);
+    let heading_blocks = extraction
+        .blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Heading { .. }))
+        .count();
+    let heading_block_skew = (total >= HEADING_SKEW_MIN || heading_blocks >= HEADING_SKEW_MIN)
+        && (total.saturating_mul(HEADING_SKEW_RATIO) < heading_blocks
+            || heading_blocks.saturating_mul(HEADING_SKEW_RATIO) < total);
+    TocStats {
+        total_toc_entries: total,
+        unanchored_toc_entries: unanchored,
+        suspicious_flat,
+        heading_block_skew,
+    }
+}
+
+/// Minimum TOC size at which `suspicious_flat` becomes meaningful.
+const FLAT_TOC_MIN_ENTRIES: usize = 5;
+/// Minimum side size at which `heading_block_skew` becomes meaningful.
+const HEADING_SKEW_MIN: usize = 5;
+/// Ratio threshold for `heading_block_skew`.
+const HEADING_SKEW_RATIO: usize = 4;
 
 /// The organizing type for a TOC entry at `toc_depth` (0 is topmost).
 fn org_type(toc_depth: u8) -> NodeType {
