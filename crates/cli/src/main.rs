@@ -16,11 +16,14 @@ mod render;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bookrack_catalog::Catalog;
+use bookrack_catalog::{ActorKind, Catalog, NewMetadataAudit, NewOverride, NewReview};
 use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, SearchConfig};
+use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::{IngestParams, ingest_book};
+use bookrack_metadata::{AuditInput, TocStats};
 use bookrack_search::search;
 use bookrack_vectors::ChunkStore;
 
@@ -55,11 +58,66 @@ enum Command {
     Ingest {
         /// Path to the source file to ingest.
         path: PathBuf,
+        /// Stop in the metadata stage when the audit verdict is
+        /// `needs_work` and wait for an operator. Off by default —
+        /// EMBED runs straight through and the audit verdict is
+        /// merely advisory. The actual stop is wired in a follow-up
+        /// commit; today the flag is parsed but otherwise inert.
+        #[arg(long)]
+        hold_for_metadata: bool,
     },
     /// Query the library and print cited passages.
     Query {
         /// The natural-language query.
         text: String,
+    },
+    /// Inspect and edit a book's metadata.
+    Metadata {
+        #[command(subcommand)]
+        action: MetadataAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum MetadataAction {
+    /// Show the metadata audit report for a book.
+    Show {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set (or change) one metadata field's value.
+    Set {
+        /// The intake id of the book.
+        book: i64,
+        /// The field column on `node_publication_attrs` to write
+        /// (e.g. `title`, `publisher`, `year`, `language`).
+        field: String,
+        /// The new value.
+        value: String,
+    },
+    /// Clear an override, falling back to the extracted base value.
+    Clear {
+        /// The intake id of the book.
+        book: i64,
+        /// The field whose override is removed.
+        field: String,
+    },
+    /// Acknowledge a metadata gap and let the book through, signing
+    /// the override with a reason for the audit trail.
+    Ack {
+        /// The intake id of the book.
+        book: i64,
+        /// Why the gap was accepted.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Resume CHUNK→EMBED for a book held at the metadata gate.
+    Advance {
+        /// The intake id of the book.
+        book: i64,
     },
 }
 
@@ -70,8 +128,12 @@ async fn main() -> Result<()> {
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     match cli.command {
-        Command::Ingest { path } => run_ingest(&cfg, &path).await,
+        Command::Ingest {
+            path,
+            hold_for_metadata,
+        } => run_ingest(&cfg, &path, hold_for_metadata).await,
         Command::Query { text } => run_query(&cfg, &text).await,
+        Command::Metadata { action } => run_metadata(&cfg, action),
     }
 }
 
@@ -87,7 +149,7 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
     .context("build embedding client")
 }
 
-async fn run_ingest(cfg: &Config, path: &Path) -> Result<()> {
+async fn run_ingest(cfg: &Config, path: &Path, _hold_for_metadata: bool) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
@@ -152,6 +214,137 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Logical address of the book root; the CLI's metadata commands only
+/// touch this scope, matching the audit and the ingest sub-step.
+const BOOK_SCOPE: &str = "book";
+
+fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    match action {
+        MetadataAction::Show { book, json } => run_metadata_show(&catalog, book, json),
+        MetadataAction::Set { book, field, value } => {
+            run_metadata_set(&catalog, book, &field, &value)
+        }
+        MetadataAction::Clear { book, field } => run_metadata_clear(&catalog, book, &field),
+        MetadataAction::Ack { book, reason } => run_metadata_ack(&catalog, book, &reason),
+        MetadataAction::Advance { book } => run_metadata_advance(book),
+    }
+}
+
+fn run_metadata_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
+    let effective = catalog
+        .effective_publication_attrs(book, BOOK_SCOPE)
+        .context("read effective metadata")?;
+    let attrs = catalog
+        .publication_attrs(book, BOOK_SCOPE)
+        .context("read publication attrs")?;
+    // The audit needs an adapter so its source-format prior can fire;
+    // reuse the one stamped on the base row at ingest time, falling
+    // back to a neutral marker when the row has not been written yet.
+    let adapter = attrs
+        .as_ref()
+        .and_then(|a| a.source_format.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let biblio = Biblio::default();
+    let provenance = Provenance {
+        adapter,
+        extractor_version: String::new(),
+        text_layer_quality: TextLayerQuality::BornDigital,
+        skipped_units: Vec::new(),
+    };
+    let toc_stats = TocStats::default();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &provenance,
+        effective: &effective,
+        toc_stats: &toc_stats,
+        body_sample: "",
+        total_blocks: 0,
+        source_stem: None,
+    };
+    let report = bookrack_metadata::audit(&input);
+    if json {
+        render::metadata_show_json(book, &report);
+    } else {
+        render::metadata_show(book, &report);
+    }
+    Ok(())
+}
+
+fn run_metadata_set(catalog: &Catalog, book: i64, field: &str, value: &str) -> Result<()> {
+    let effective = catalog
+        .effective_publication_attrs(book, BOOK_SCOPE)
+        .context("read effective metadata")?;
+    let old_value = effective.get(field).map(str::to_string);
+    catalog
+        .set_override(&NewOverride::new(
+            book,
+            BOOK_SCOPE,
+            field,
+            Some(value.to_string()),
+            "human",
+        ))
+        .context("write override")?;
+    let mut audit = NewMetadataAudit::new("node_publication_attrs", "update", ActorKind::Human);
+    audit.node_id = Some(PartitionIdx::new(book).root().get());
+    audit.field = Some(field.to_string());
+    audit.old_value = old_value;
+    audit.new_value = Some(value.to_string());
+    catalog
+        .record_metadata_audit(&audit)
+        .context("record metadata audit")?;
+    println!("Set {field} on book {book}.");
+    Ok(())
+}
+
+fn run_metadata_clear(catalog: &Catalog, book: i64, field: &str) -> Result<()> {
+    let effective = catalog
+        .effective_publication_attrs(book, BOOK_SCOPE)
+        .context("read effective metadata")?;
+    let old_value = effective.get(field).map(str::to_string);
+    let existed = catalog
+        .clear_override(book, BOOK_SCOPE, field)
+        .context("clear override")?;
+    if !existed {
+        println!("No override on {field} for book {book}; nothing to clear.");
+        return Ok(());
+    }
+    let mut audit = NewMetadataAudit::new("node_publication_attrs", "delete", ActorKind::Human);
+    audit.node_id = Some(PartitionIdx::new(book).root().get());
+    audit.field = Some(field.to_string());
+    audit.old_value = old_value;
+    catalog
+        .record_metadata_audit(&audit)
+        .context("record metadata audit")?;
+    println!("Cleared override on {field} for book {book}.");
+    Ok(())
+}
+
+fn run_metadata_ack(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
+    let mut audit = NewMetadataAudit::new("node_reviews", "acknowledge_gate", ActorKind::Human);
+    audit.node_id = Some(PartitionIdx::new(book).root().get());
+    audit.reason = Some(reason.to_string());
+    catalog
+        .record_metadata_audit(&audit)
+        .context("record metadata audit")?;
+    catalog
+        .upsert_review(&NewReview::new(book, BOOK_SCOPE, "human", "acknowledged"))
+        .context("upsert review")?;
+    println!("Acknowledged metadata gap on book {book}.");
+    Ok(())
+}
+
+fn run_metadata_advance(book: i64) -> Result<()> {
+    // The actual CHUNK→EMBED resume entry point arrives with the
+    // optional hold gate; today this is a stub so the help surface
+    // is stable.
+    anyhow::bail!(
+        "metadata advance for book {book} is not yet wired in this build; \
+         it arrives with the optional --hold-for-metadata gate"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +371,90 @@ mod tests {
         let selection = cli.selection();
         assert_eq!(selection.library.as_deref(), Some("test"));
         assert!(selection.data_dir.is_none());
+    }
+
+    #[test]
+    fn metadata_subcommands_parse() {
+        for argv in [
+            vec!["bookrack", "metadata", "show", "1"],
+            vec!["bookrack", "metadata", "show", "1", "--json"],
+            vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
+            vec!["bookrack", "metadata", "clear", "1", "title"],
+            vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
+            vec!["bookrack", "metadata", "advance", "1"],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn ingest_accepts_hold_for_metadata_flag() {
+        Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
+            .expect("the flag parses");
+    }
+
+    #[test]
+    fn metadata_set_records_the_override_and_an_update_audit_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_set(&catalog, 7, "title", "A New Title").expect("set");
+        let effective = catalog
+            .effective_publication_attrs(7, BOOK_SCOPE)
+            .expect("effective");
+        assert_eq!(effective.get("title"), Some("A New Title"));
+
+        let book_root_id = PartitionIdx::new(7).root().get();
+        let audit = catalog
+            .metadata_audit_for_node(book_root_id)
+            .expect("audit");
+        let update_row = audit
+            .iter()
+            .find(|r| r.action == "update")
+            .expect("an update row");
+        assert_eq!(update_row.field.as_deref(), Some("title"));
+        assert_eq!(update_row.new_value.as_deref(), Some("A New Title"));
+        assert!(update_row.old_value.is_none());
+    }
+
+    #[test]
+    fn metadata_clear_falls_back_to_base_and_records_a_delete() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        // Seed a base title, then add an override, then clear it.
+        let mut base = bookrack_catalog::NewPublicationAttrs::new(7, BOOK_SCOPE);
+        base.title = Some("Base Title".to_string());
+        catalog.upsert_publication_attrs(&base).expect("base");
+        run_metadata_set(&catalog, 7, "title", "Override Title").expect("set");
+        run_metadata_clear(&catalog, 7, "title").expect("clear");
+
+        let effective = catalog
+            .effective_publication_attrs(7, BOOK_SCOPE)
+            .expect("effective");
+        // The override is gone, so the base value is what remains.
+        assert_eq!(effective.get("title"), Some("Base Title"));
+
+        let book_root_id = PartitionIdx::new(7).root().get();
+        let audit = catalog
+            .metadata_audit_for_node(book_root_id)
+            .expect("audit");
+        assert!(audit.iter().any(|r| r.action == "delete"));
+    }
+
+    #[test]
+    fn metadata_ack_records_a_review_and_a_gate_audit_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_ack(&catalog, 11, "operator vetted").expect("ack");
+        let review = catalog
+            .review(11, BOOK_SCOPE)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, "acknowledged");
+        let book_root_id = PartitionIdx::new(11).root().get();
+        let audit = catalog
+            .metadata_audit_for_node(book_root_id)
+            .expect("audit");
+        assert!(
+            audit.iter().any(|r| r.action == "acknowledge_gate"),
+            "audit rows: {audit:?}"
+        );
     }
 }

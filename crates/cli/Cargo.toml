@@ -17,6 +17,9 @@ bookrack-search = { path = "../search" }
 bookrack-embed = { path = "../embed" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-catalog = { path = "../catalog" }
+bookrack-core = { path = "../core" }
+bookrack-extract = { path = "../extract" }
+bookrack-metadata = { path = "../metadata" }
 bookrack-vectors = { path = "../vectors" }
 clap.workspace = true
 tokio.workspace = true
