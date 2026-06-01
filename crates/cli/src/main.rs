@@ -22,7 +22,7 @@ use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
-use bookrack_ingest::{IngestParams, ingest_book};
+use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::{AuditInput, TocStats};
 use bookrack_search::search;
 use bookrack_vectors::ChunkStore;
@@ -61,8 +61,9 @@ enum Command {
         /// Stop in the metadata stage when the audit verdict is
         /// `needs_work` and wait for an operator. Off by default —
         /// EMBED runs straight through and the audit verdict is
-        /// merely advisory. The actual stop is wired in a follow-up
-        /// commit; today the flag is parsed but otherwise inert.
+        /// merely advisory. With the flag on, the held book resumes
+        /// through `bookrack metadata advance <book>` once an
+        /// operator has corrected the record.
         #[arg(long)]
         hold_for_metadata: bool,
     },
@@ -133,7 +134,7 @@ async fn main() -> Result<()> {
             hold_for_metadata,
         } => run_ingest(&cfg, &path, hold_for_metadata).await,
         Command::Query { text } => run_query(&cfg, &text).await,
-        Command::Metadata { action } => run_metadata(&cfg, action),
+        Command::Metadata { action } => run_metadata(&cfg, action).await,
     }
 }
 
@@ -149,7 +150,7 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
     .context("build embedding client")
 }
 
-async fn run_ingest(cfg: &Config, path: &Path, _hold_for_metadata: bool) -> Result<()> {
+async fn run_ingest(cfg: &Config, path: &Path, hold_for_metadata: bool) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
@@ -157,6 +158,7 @@ async fn run_ingest(cfg: &Config, path: &Path, _hold_for_metadata: bool) -> Resu
     let embedder = embedder(cfg, &embed_cfg)?;
     let params = IngestParams {
         embed: embed_cfg,
+        hold_for_metadata,
         ..Default::default()
     };
     let report = ingest_book(
@@ -218,7 +220,13 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
 /// touch this scope, matching the audit and the ingest sub-step.
 const BOOK_SCOPE: &str = "book";
 
-fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
+async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
+    // Advance opens its own corpus + catalog + embedder, since it
+    // runs CHUNK→EMBED rather than touching catalog alone. The
+    // other actions only need catalog and can share this handle.
+    if let MetadataAction::Advance { book } = action {
+        return run_metadata_advance(cfg, book).await;
+    }
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     match action {
@@ -228,7 +236,7 @@ fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
         }
         MetadataAction::Clear { book, field } => run_metadata_clear(&catalog, book, &field),
         MetadataAction::Ack { book, reason } => run_metadata_ack(&catalog, book, &reason),
-        MetadataAction::Advance { book } => run_metadata_advance(book),
+        MetadataAction::Advance { .. } => unreachable!("handled above"),
     }
 }
 
@@ -335,14 +343,56 @@ fn run_metadata_ack(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_metadata_advance(book: i64) -> Result<()> {
-    // The actual CHUNK→EMBED resume entry point arrives with the
-    // optional hold gate; today this is a stub so the help surface
-    // is stable.
-    anyhow::bail!(
-        "metadata advance for book {book} is not yet wired in this build; \
-         it arrives with the optional --hold-for-metadata gate"
+async fn run_metadata_advance(cfg: &Config, book: i64) -> Result<()> {
+    let embed_cfg = EmbedConfig::from_env();
+    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+
+    let book_root_id = PartitionIdx::new(book).root();
+    let intake = catalog
+        .intake_by_id(book)
+        .context("look up intake")?
+        .with_context(|| format!("no intake registered for book {book}"))?;
+    let state = catalog
+        .book_state(book_root_id.get())
+        .context("read book state")?
+        .with_context(|| format!("no book state for book {book}"))?;
+    let parsed_at = state
+        .parsed_at
+        .clone()
+        .with_context(|| format!("book {book} has no parsed_at; STRUCTURE has not run"))?;
+    // Mint a fresh run id so resume rows are distinguishable from the
+    // original ingest's; pin them to the same source_sha for traceability.
+    let run_id = format!(
+        "advance-{}-{book}",
+        &intake.source_sha256[..8.min(intake.source_sha256.len())]
     );
+    let params = IngestParams {
+        embed: embed_cfg,
+        ..Default::default()
+    };
+    let embedder = embedder(cfg, &params.embed)?;
+
+    let report = resume_from_chunk(
+        &mut corpus,
+        &mut catalog,
+        &cfg.lancedb_dir(),
+        &embedder,
+        &params,
+        book,
+        book_root_id,
+        &run_id,
+        &intake.source_sha256,
+        &parsed_at,
+    )
+    .await
+    .context("resume CHUNK→EMBED")?;
+    println!(
+        "Advanced book {book}: embedded {} chunks across {} batches.",
+        report.chunks_written, report.batches
+    );
+    Ok(())
 }
 
 #[cfg(test)]

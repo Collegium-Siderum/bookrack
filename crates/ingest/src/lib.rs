@@ -21,7 +21,7 @@ mod structure;
 
 pub use bookrack_corpus::IndexStamps;
 pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
-pub use embed_run::embed_book_chunks;
+pub use embed_run::{EmbedRunReport, embed_book_chunks};
 
 use std::path::Path;
 
@@ -218,6 +218,11 @@ pub struct IngestParams {
     pub chunk: ChunkParams,
     /// EMBED tuning (operational; see [`EmbedConfig::from_env`]).
     pub embed: EmbedConfig,
+    /// When true, an audit verdict of `needs_work` parks the book in
+    /// the metadata stage instead of running CHUNK and EMBED. The
+    /// caller resumes the run later with [`resume_from_chunk`].
+    /// Off by default: the audit is purely advisory.
+    pub hold_for_metadata: bool,
 }
 
 /// What one [`ingest_book`] run produced.
@@ -404,7 +409,7 @@ pub async fn ingest_book<E: Embedder>(
     // whose required fields are missing still chunks and embeds, with
     // `status="needs_work"` carried as a flag for a later edit pass.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
-    run_metadata_substep(
+    let verdict = run_metadata_substep(
         catalog,
         intake_id,
         book_root_id,
@@ -415,18 +420,94 @@ pub async fn ingest_book<E: Embedder>(
         &source_sha,
     );
 
+    // Optional hold gate: when the caller asked for it AND the audit
+    // flagged the record, park the book in the metadata stage and
+    // hand control back. CHUNK/EMBED run on a later `advance` call.
+    let needs_work = matches!(verdict, Some(bookrack_metadata::Verdict::NeedsWork));
+    if params.hold_for_metadata && needs_work {
+        set_state(
+            catalog,
+            NewBookState::new(book_root_id, intake_id, "metadata").parsed_at(&parsed_at),
+        );
+        tracing::info!(
+            intake_id,
+            "held at metadata: --hold-for-metadata is on and verdict is needs_work"
+        );
+        return Ok(IngestReport {
+            intake_id,
+            book_root_id: structure.book_root_id,
+            nodes_written: structure.nodes_written,
+            prose_leaves: structure.prose_leaves,
+            chunks_written: 0,
+            already_registered,
+        });
+    }
+
+    let embed = resume_from_chunk(
+        corpus,
+        catalog,
+        lancedb_dir,
+        embedder,
+        params,
+        intake_id,
+        structure.book_root_id,
+        &run_id,
+        &source_sha,
+        &parsed_at,
+    )
+    .await?;
+
+    Ok(IngestReport {
+        intake_id,
+        book_root_id: structure.book_root_id,
+        nodes_written: structure.nodes_written,
+        prose_leaves: structure.prose_leaves,
+        chunks_written: embed.chunks_written,
+        already_registered,
+    })
+}
+
+/// Run CHUNK and EMBED for a book whose corpus tree is already in
+/// place, then mark the intake `Embedded`. Shared by the steady-state
+/// [`ingest_book`] path and the `metadata advance` resume path, so a
+/// book held at the metadata gate finishes through the same
+/// CHUNK/EMBED code as a non-held book.
+///
+/// `parsed_at` is the timestamp [`ingest_book`] stamped on the book
+/// state when STRUCTURE completed; the resume preserves it rather
+/// than minting a new one.
+///
+/// The function does **not** rebuild the tree — it walks the existing
+/// prose leaves out of `corpus` and feeds them straight into the
+/// chunker. A book whose STRUCTURE never ran first cannot be advanced
+/// through this entry point.
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_from_chunk<E: Embedder>(
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    lancedb_dir: &Path,
+    embedder: &E,
+    params: &IngestParams,
+    intake_id: i64,
+    book_root_id: NodeId,
+    run_id: &str,
+    source_sha: &str,
+    parsed_at: &str,
+) -> Result<EmbedRunReport> {
+    let book_root_raw = book_root_id.get();
+
     // CHUNK.
     let started = std::time::Instant::now();
     let plans = match tracing::info_span!("operation", stage = "chunk")
-        .in_scope(|| plan_book_chunks(corpus, structure.book_root_id, &params.chunk))
+        .in_scope(|| plan_book_chunks(corpus, book_root_id, &params.chunk))
     {
         Ok(plans) => plans,
         Err(e) => {
             audit(
                 catalog,
-                &run_id,
-                &source_sha,
-                Some(book_root_id),
+                run_id,
+                source_sha,
+                Some(book_root_raw),
                 "chunk",
                 "chunk",
                 "fail",
@@ -436,8 +517,8 @@ pub async fn ingest_book<E: Embedder>(
             );
             set_state(
                 catalog,
-                NewBookState::new(book_root_id, intake_id, "chunk")
-                    .parsed_at(&parsed_at)
+                NewBookState::new(book_root_raw, intake_id, "chunk")
+                    .parsed_at(parsed_at)
                     .last_error(e.to_string()),
             );
             return Err(e);
@@ -445,9 +526,9 @@ pub async fn ingest_book<E: Embedder>(
     };
     audit(
         catalog,
-        &run_id,
-        &source_sha,
-        Some(book_root_id),
+        run_id,
+        source_sha,
+        Some(book_root_raw),
         "chunk",
         "chunk",
         "ok",
@@ -468,9 +549,9 @@ pub async fn ingest_book<E: Embedder>(
             Err(e) => {
                 audit(
                     catalog,
-                    &run_id,
-                    &source_sha,
-                    Some(book_root_id),
+                    run_id,
+                    source_sha,
+                    Some(book_root_raw),
                     "embed",
                     "embed",
                     "fail",
@@ -480,8 +561,8 @@ pub async fn ingest_book<E: Embedder>(
                 );
                 set_state(
                     catalog,
-                    NewBookState::new(book_root_id, intake_id, "embed")
-                        .parsed_at(&parsed_at)
+                    NewBookState::new(book_root_raw, intake_id, "embed")
+                        .parsed_at(parsed_at)
                         .embed_model(&params.embed.model)
                         .last_error(e.to_string()),
                 );
@@ -494,9 +575,9 @@ pub async fn ingest_book<E: Embedder>(
     );
     audit(
         catalog,
-        &run_id,
-        &source_sha,
-        Some(book_root_id),
+        run_id,
+        source_sha,
+        Some(book_root_raw),
         "embed",
         "embed",
         "ok",
@@ -515,20 +596,13 @@ pub async fn ingest_book<E: Embedder>(
     let embedded_at = catalog.now_iso()?;
     set_state(
         catalog,
-        NewBookState::new(book_root_id, intake_id, "embed")
+        NewBookState::new(book_root_raw, intake_id, "embed")
             .embed_model(&params.embed.model)
-            .parsed_at(&parsed_at)
+            .parsed_at(parsed_at)
             .embedded_at(&embedded_at),
     );
 
-    Ok(IngestReport {
-        intake_id,
-        book_root_id: structure.book_root_id,
-        nodes_written: structure.nodes_written,
-        prose_leaves: structure.prose_leaves,
-        chunks_written: embed.chunks_written,
-        already_registered,
-    })
+    Ok(embed)
 }
 
 /// Build a per-invocation pipeline run id: a short source-hash prefix for
@@ -583,9 +657,12 @@ const BOOK_SCOPE: &str = "book";
 /// verdict as an advisory `node_reviews` row plus one pipeline-audit
 /// row stamped `stage="metadata"`.
 ///
-/// Best-effort, like [`audit`]: a failure to persist the verdict is
-/// logged but does not abort the ingest, since the sub-step is
-/// consultative and EMBED is unconditional.
+/// Returns the audit verdict on success so the caller can decide
+/// whether to honour an opt-in metadata hold gate; returns `None` on
+/// any persistence failure, in which case the gate cannot trip and
+/// the run continues. Best-effort, like [`audit`]: a failure to
+/// persist the verdict is logged but does not abort the ingest, since
+/// the sub-step is consultative and EMBED is unconditional.
 #[allow(clippy::too_many_arguments)]
 fn run_metadata_substep(
     catalog: &Catalog,
@@ -596,7 +673,7 @@ fn run_metadata_substep(
     source_stem: Option<&str>,
     run_id: &str,
     source_sha: &str,
-) {
+) -> Option<bookrack_metadata::Verdict> {
     let started = std::time::Instant::now();
 
     let mut attrs = build_base_attrs(intake_id, extraction);
@@ -614,7 +691,7 @@ fn run_metadata_substep(
             None,
             Some(&e.to_string()),
         );
-        return;
+        return None;
     }
 
     let effective = match catalog.effective_publication_attrs(intake_id, BOOK_SCOPE) {
@@ -633,7 +710,7 @@ fn run_metadata_substep(
                 None,
                 Some(&e.to_string()),
             );
-            return;
+            return None;
         }
     };
 
@@ -693,6 +770,7 @@ fn run_metadata_substep(
         Some(metric),
         None,
     );
+    Some(report.verdict)
 }
 
 /// Build the base-layer record for the book root from the extracted
@@ -1446,6 +1524,99 @@ mod book_pipeline_tests {
         assert_eq!(attrs.source_format.as_deref(), Some("epub"));
         // Required + should-fill fields all Strong → confidence high.
         assert_eq!(attrs.confidence.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn hold_for_metadata_parks_a_bare_book_at_the_metadata_stage() {
+        // A bare .txt yields no biblio; with the hold gate on, ingest
+        // stops at metadata rather than chunking and embedding.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let params = IngestParams {
+            hold_for_metadata: true,
+            ..Default::default()
+        };
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &Fake { dim: 8 },
+            &params,
+        )
+        .await
+        .expect("ingest");
+        // The hold tripped: no chunks were embedded.
+        assert_eq!(report.chunks_written, 0);
+
+        let root = report.book_root_id.get();
+        let state = catalog.book_state(root).expect("state").expect("present");
+        assert_eq!(state.current_stage, "metadata");
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_ne!(intake.status, IntakeStatus::Embedded);
+
+        // Now satisfy the gate (clean title + language) and resume.
+        let mut attrs = bookrack_catalog::NewPublicationAttrs::new(report.intake_id, "book");
+        attrs.title = Some("A Title".to_string());
+        attrs.language = Some("en".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+        let resume = resume_from_chunk(
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &Fake { dim: 8 },
+            &params,
+            report.intake_id,
+            report.book_root_id,
+            "advance-test",
+            "test-sha",
+            state.parsed_at.as_deref().unwrap_or("now"),
+        )
+        .await
+        .expect("resume");
+        assert!(resume.chunks_written > 0);
+
+        // After resume the book is fully embedded.
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(intake.status, IntakeStatus::Embedded);
+        let state = catalog.book_state(root).expect("state").expect("present");
+        assert_eq!(state.current_stage, "embed");
+    }
+
+    #[tokio::test]
+    async fn hold_off_by_default_keeps_advisory_semantics() {
+        // Without the hold flag, a bare book still embeds even though
+        // its audit verdict is needs_work.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("ingest");
+        assert!(report.chunks_written > 0);
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(intake.status, IntakeStatus::Embedded);
     }
 
     #[tokio::test]
