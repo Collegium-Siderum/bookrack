@@ -630,9 +630,12 @@ dependencies = [
  "anyhow",
  "bookrack-catalog",
  "bookrack-config",
+ "bookrack-core",
  "bookrack-corpus",
  "bookrack-embed",
+ "bookrack-extract",
  "bookrack-ingest",
+ "bookrack-metadata",
  "bookrack-obs",
  "bookrack-search",
  "bookrack-vectors",
@@ -772,6 +775,7 @@ dependencies = [
 name = "bookrack-query"
 version = "0.1.0"
 dependencies = [
+ "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
@@ -790,6 +794,7 @@ dependencies = [
 name = "bookrack-search"
 version = "0.1.0"
 dependencies = [
+ "bookrack-catalog",
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-embed",
