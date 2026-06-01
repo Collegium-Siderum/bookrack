@@ -95,7 +95,7 @@ pub enum Flag {
     /// The PDF `/Info` year is more likely the file's creation date
     /// than the work's publication year.
     PdfYearLikelyFileDate,
-    /// The value is a placeholder (e.g. "Unknown" "Yi-min").
+    /// The value is a placeholder (e.g. "Unknown", "Anonymous").
     PlaceholderValue,
     /// The value equals the bare source filename.
     EqualsFilename,

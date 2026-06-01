@@ -27,6 +27,7 @@ use std::path::Path;
 
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState, NewIntake,
+    NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
@@ -277,6 +278,7 @@ pub async fn ingest_book<E: Embedder>(
                 &source_sha,
                 None,
                 "extract",
+                "extract",
                 "skipped",
                 started,
                 None,
@@ -290,6 +292,7 @@ pub async fn ingest_book<E: Embedder>(
                 &run_id,
                 &source_sha,
                 None,
+                "extract",
                 "extract",
                 "fail",
                 started,
@@ -305,6 +308,7 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
         None,
+        "extract",
         "extract",
         "ok",
         started,
@@ -333,6 +337,9 @@ pub async fn ingest_book<E: Embedder>(
         &extraction.provenance.adapter,
         &extraction.provenance.extractor_version,
     )?;
+    // The status track is `Pending` (set by `register_intake`) →
+    // `Extracted` here → `Embedded` after the embed run completes.
+    catalog.set_intake_status(intake_id, IntakeStatus::Extracted)?;
 
     // STRUCTURE.
     let started = std::time::Instant::now();
@@ -353,6 +360,7 @@ pub async fn ingest_book<E: Embedder>(
                 &source_sha,
                 None,
                 "structure",
+                "structure",
                 "fail",
                 started,
                 None,
@@ -372,6 +380,7 @@ pub async fn ingest_book<E: Embedder>(
         &source_sha,
         Some(book_root_id),
         "structure",
+        "structure",
         "ok",
         started,
         Some(metric),
@@ -388,6 +397,24 @@ pub async fn ingest_book<E: Embedder>(
         NewBookState::new(book_root_id, intake_id, "structure").parsed_at(&parsed_at),
     );
 
+    // METADATA (non-blocking): seed the publication-attrs base from the
+    // extracted biblio, run the deterministic audit over the resulting
+    // effective record, and persist the verdict as an advisory
+    // node_reviews row. The audit never gates the pipeline: a book
+    // whose required fields are missing still chunks and embeds, with
+    // `status="needs_work"` carried as a flag for a later edit pass.
+    let source_stem = file.file_stem().and_then(|s| s.to_str());
+    run_metadata_substep(
+        catalog,
+        intake_id,
+        book_root_id,
+        &extraction,
+        &structure.toc_stats,
+        source_stem,
+        &run_id,
+        &source_sha,
+    );
+
     // CHUNK.
     let started = std::time::Instant::now();
     let plans = match tracing::info_span!("operation", stage = "chunk")
@@ -400,6 +427,7 @@ pub async fn ingest_book<E: Embedder>(
                 &run_id,
                 &source_sha,
                 Some(book_root_id),
+                "chunk",
                 "chunk",
                 "fail",
                 started,
@@ -420,6 +448,7 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
         Some(book_root_id),
+        "chunk",
         "chunk",
         "ok",
         started,
@@ -442,6 +471,7 @@ pub async fn ingest_book<E: Embedder>(
                     &run_id,
                     &source_sha,
                     Some(book_root_id),
+                    "embed",
                     "embed",
                     "fail",
                     started,
@@ -467,6 +497,7 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
         Some(book_root_id),
+        "embed",
         "embed",
         "ok",
         started,
@@ -521,12 +552,13 @@ fn audit(
     source_sha: &str,
     book_root_id: Option<i64>,
     stage: &str,
+    sub_step: &str,
     outcome: &str,
     started: std::time::Instant,
     metric_summary: Option<String>,
     error_message: Option<&str>,
 ) {
-    let mut row = NewBookPipelineAudit::new(stage, stage, outcome, run_id, ActorKind::Pipeline);
+    let mut row = NewBookPipelineAudit::new(stage, sub_step, outcome, run_id, ActorKind::Pipeline);
     row.book_root_id = book_root_id;
     row.source_sha256 = Some(source_sha.to_string());
     row.metric_summary = metric_summary;
@@ -536,6 +568,190 @@ fn audit(
     if let Err(e) = catalog.record_pipeline_audit(&row) {
         tracing::warn!(error = %e, stage, "failed to record pipeline audit row");
     }
+}
+
+/// How many leading blocks contribute text to the audit's body sample.
+const METADATA_BODY_SAMPLE_BLOCKS: usize = 10;
+/// Maximum characters in the body sample carried into the audit.
+const METADATA_BODY_SAMPLE_CHARS: usize = 4096;
+/// Logical address of the book root; the v1 audit only writes here.
+const BOOK_SCOPE: &str = "book";
+
+/// Run the non-blocking metadata sub-step in place: seed the
+/// publication-attrs base from the extracted [`Biblio`], run the
+/// audit over the resulting effective record, and persist the
+/// verdict as an advisory `node_reviews` row plus one pipeline-audit
+/// row stamped `stage="metadata"`.
+///
+/// Best-effort, like [`audit`]: a failure to persist the verdict is
+/// logged but does not abort the ingest, since the sub-step is
+/// consultative and EMBED is unconditional.
+#[allow(clippy::too_many_arguments)]
+fn run_metadata_substep(
+    catalog: &Catalog,
+    intake_id: i64,
+    book_root_id: i64,
+    extraction: &Extraction,
+    toc_stats: &TocStats,
+    source_stem: Option<&str>,
+    run_id: &str,
+    source_sha: &str,
+) {
+    let started = std::time::Instant::now();
+
+    if let Err(e) = seed_publication_attrs(catalog, intake_id, extraction) {
+        tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
+        audit(
+            catalog,
+            run_id,
+            source_sha,
+            Some(book_root_id),
+            "metadata",
+            "seed",
+            "fail",
+            started,
+            None,
+            Some(&e.to_string()),
+        );
+        return;
+    }
+
+    let effective = match catalog.effective_publication_attrs(intake_id, BOOK_SCOPE) {
+        Ok(eff) => eff,
+        Err(e) => {
+            tracing::warn!(error = %e, "metadata: failed to read effective attrs");
+            audit(
+                catalog,
+                run_id,
+                source_sha,
+                Some(book_root_id),
+                "metadata",
+                "read_effective",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            return;
+        }
+    };
+
+    let body_sample = body_sample(extraction);
+    let input = bookrack_metadata::AuditInput {
+        biblio: &extraction.biblio,
+        provenance: &extraction.provenance,
+        effective: &effective,
+        toc_stats,
+        body_sample: &body_sample,
+        total_blocks: extraction.blocks.len(),
+        source_stem,
+    };
+    let report = bookrack_metadata::audit(&input);
+
+    let outcome = match report.verdict {
+        bookrack_metadata::Verdict::Clean => "ok",
+        bookrack_metadata::Verdict::NeedsWork => "partial",
+    };
+    let metric = audit_metric_summary(&report);
+
+    if let Err(e) = catalog.upsert_review(
+        &NewReview::new(
+            intake_id,
+            BOOK_SCOPE,
+            "pipeline",
+            report.verdict.as_status(),
+        )
+        .notes(report_notes(&report)),
+    ) {
+        tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
+    }
+
+    tracing::info!(
+        verdict = report.verdict.as_status(),
+        confidence = report.confidence.as_str(),
+        "metadata audit complete"
+    );
+
+    audit(
+        catalog,
+        run_id,
+        source_sha,
+        Some(book_root_id),
+        "metadata",
+        "audit",
+        outcome,
+        started,
+        Some(metric),
+        None,
+    );
+}
+
+/// Copy the extracted biblio into the publication-attrs base for the
+/// book scope. `source` is stamped `"extracted"` so a later override
+/// can tell where the row came from; `source_format` carries the
+/// adapter name so the audit's per-format prior can recompute.
+fn seed_publication_attrs(
+    catalog: &Catalog,
+    intake_id: i64,
+    extraction: &Extraction,
+) -> std::result::Result<(), bookrack_catalog::CatalogError> {
+    let biblio = &extraction.biblio;
+    let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+    attrs.title = biblio.title.clone();
+    attrs.subtitle = biblio.subtitle.clone();
+    attrs.publisher = biblio.publisher.clone();
+    attrs.year = biblio.year.map(|y| y.to_string());
+    attrs.isbn = biblio.isbn.clone();
+    attrs.series = biblio.series.clone();
+    attrs.language = biblio.language.clone();
+    attrs.source = Some("extracted".to_string());
+    attrs.source_format = Some(extraction.provenance.adapter.clone());
+    catalog.upsert_publication_attrs(&attrs)
+}
+
+/// Concatenate text from the first few blocks of the extraction,
+/// bounded by a character cap, for the audit's language signal.
+fn body_sample(extraction: &Extraction) -> String {
+    let mut out = String::new();
+    for block in extraction.blocks.iter().take(METADATA_BODY_SAMPLE_BLOCKS) {
+        for ch in block.text.chars() {
+            if out.chars().count() >= METADATA_BODY_SAMPLE_CHARS {
+                return out;
+            }
+            out.push(ch);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// A short, structured summary of the audit, written into
+/// `book_pipeline_audit.metric_summary` for diagnostics.
+fn audit_metric_summary(report: &bookrack_metadata::MetadataReport) -> String {
+    let flagged = report.fields.iter().filter(|f| !f.flags.is_empty()).count();
+    format!(
+        r#"{{"verdict":"{}","confidence":"{}","fields":{},"flagged":{}}}"#,
+        report.verdict.as_status(),
+        report.confidence.as_str(),
+        report.fields.len(),
+        flagged
+    )
+}
+
+/// A human-facing, comma-separated list of the flagged fields, for
+/// the `node_reviews.notes` column.
+fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
+    let mut flagged: Vec<String> = report
+        .fields
+        .iter()
+        .filter(|f| !f.flags.is_empty())
+        .map(|f| f.field.clone())
+        .collect();
+    if flagged.is_empty() {
+        return "all audited fields clean".to_string();
+    }
+    flagged.sort();
+    format!("flagged: {}", flagged.join(", "))
 }
 
 /// Upsert a book's pipeline state, best-effort for the same reason as
@@ -1118,15 +1334,100 @@ mod book_pipeline_tests {
             Some(bookrack_normalize::NORMALIZE_VERSION.to_string())
         );
 
-        // Every rooted stage logged an ok row; the embed row carries its
-        // batching metrics.
+        // Every rooted stage logged a row, with the non-blocking metadata
+        // sub-step sitting between structure and chunk; the embed row
+        // carries its batching metrics.
         let rows = catalog.pipeline_audit_for_book(root).expect("audit");
         let stages: Vec<&str> = rows.iter().map(|r| r.stage.as_str()).collect();
-        assert_eq!(stages, ["structure", "chunk", "embed"]);
-        assert!(rows.iter().all(|r| r.outcome == "ok"));
+        assert_eq!(stages, ["structure", "metadata", "chunk", "embed"]);
+        let metadata_row = rows
+            .iter()
+            .find(|r| r.stage == "metadata")
+            .expect("metadata row");
+        // A bare .txt yields no biblio, so the audit's verdict is
+        // `needs_work` and the metadata row outcome reads `partial`.
+        assert_eq!(metadata_row.outcome, "partial");
+        assert!(
+            rows.iter()
+                .filter(|r| r.stage != "metadata")
+                .all(|r| r.outcome == "ok")
+        );
         let embed = rows.iter().find(|r| r.stage == "embed").expect("embed row");
         let metric = embed.metric_summary.as_deref().unwrap_or_default();
         assert!(metric.contains("\"batches\""), "metric: {metric}");
+
+        // The advisory node_reviews row carries `needs_work` for the
+        // bare-text book, but the intake is still `Embedded` — the
+        // audit never gates EMBED.
+        let review = catalog
+            .review(report.intake_id, "book")
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, "needs_work");
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
+    }
+
+    #[tokio::test]
+    async fn a_book_with_complete_biblio_grades_clean() {
+        // Drive `run_metadata_substep` directly on a synthetic extraction
+        // whose biblio carries the required fields: the audit must mark
+        // the node_reviews row `clean`, and the pipeline-audit row's
+        // outcome must read `ok`.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("A Complete Book".to_string()),
+                language: Some("en".to_string()),
+                publisher: Some("Oxford University Press".to_string()),
+                year: Some(2010),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some("a-complete-book"),
+            "run-1",
+            "dummy-sha",
+        );
+        let review = catalog
+            .review(intake_id, "book")
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, "clean");
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.title.as_deref(), Some("A Complete Book"));
+        assert_eq!(attrs.year.as_deref(), Some("2010"));
+        assert_eq!(attrs.source.as_deref(), Some("extracted"));
+        assert_eq!(attrs.source_format.as_deref(), Some("epub"));
     }
 
     #[tokio::test]
