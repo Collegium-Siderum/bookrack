@@ -12,6 +12,7 @@ bookrack-extract = { path = "../extract" }
 bookrack-normalize = { path = "../normalize" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
+bookrack-metadata = { path = "../metadata" }
 bookrack-embed = { path = "../embed" }
 bookrack-vectors = { path = "../vectors" }
 text-splitter.workspace = true

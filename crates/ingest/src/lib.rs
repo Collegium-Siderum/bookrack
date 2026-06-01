@@ -82,26 +82,7 @@ pub struct StructureReport {
     pub toc_stats: TocStats,
 }
 
-/// Warning-level TOC shape statistics over one [`Extraction`].
-///
-/// Derived from the raw extract output, not from the planned tree, so
-/// the values describe the source's TOC as the extractor saw it (any
-/// unresolved or skewed entries included). Consumed downstream by the
-/// metadata audit; never used to gate STRUCTURE.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TocStats {
-    /// `extraction.toc.entries.len()`.
-    pub total_toc_entries: usize,
-    /// TOC entries whose `start_block` could not be resolved.
-    pub unanchored_toc_entries: usize,
-    /// True when the TOC has enough entries to plausibly express a
-    /// hierarchy yet every entry sits at the same depth.
-    pub suspicious_flat: bool,
-    /// True when the TOC entry count and the heading-block count are
-    /// badly out of proportion, suggesting the TOC and the body
-    /// disagree about the book's structure.
-    pub heading_block_skew: bool,
-}
+pub use bookrack_metadata::TocStats;
 
 /// Why an `ingest` operation failed.
 #[derive(Debug, thiserror::Error)]

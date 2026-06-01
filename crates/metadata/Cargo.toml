@@ -1,0 +1,10 @@
+[package]
+name = "bookrack-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bookrack-extract = { path = "../extract" }
+bookrack-catalog = { path = "../catalog" }

@@ -33,7 +33,9 @@ use bookrack_extract::{BlockKind, Extraction};
 use bookrack_normalize::{norm_text_sha256, normalize};
 use sha2::{Digest, Sha256};
 
-use crate::{IngestError, StructureParams, TocStats};
+use bookrack_metadata::TocStats;
+
+use crate::{IngestError, StructureParams};
 
 /// The vec index of the book root within a plan. The root is always the
 /// first planned node and is the only one with no parent.

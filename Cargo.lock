@@ -713,6 +713,7 @@ dependencies = [
  "bookrack-corpus",
  "bookrack-embed",
  "bookrack-extract",
+ "bookrack-metadata",
  "bookrack-normalize",
  "bookrack-vectors",
  "sha2 0.10.9",
@@ -739,6 +740,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bookrack-metadata"
+version = "0.1.0"
+dependencies = [
+ "bookrack-catalog",
+ "bookrack-extract",
 ]
 
 [[package]]
