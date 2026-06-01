@@ -72,6 +72,7 @@ fn extraction() -> Extraction {
 async fn search_returns_a_cited_passage_through_the_facade() {
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
 
     // Build a one-chapter book in an on-disk corpus.
@@ -119,9 +120,16 @@ async fn search_returns_a_cited_passage_through_the_facade() {
 
     // The facade probes the dimension, opens the store, and reopens a
     // read-only corpus per search call.
-    let library = Library::open(corpus_db, &lancedb_dir, Fixed, MODEL.to_string(), 5)
-        .await
-        .expect("open library");
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+    )
+    .await
+    .expect("open library");
     assert_eq!(library.dimension(), DIM);
 
     let hits = library.search("anything", None).await.expect("search");
@@ -172,12 +180,21 @@ async fn build_stamped_index(corpus_db: &std::path::Path, lancedb_dir: &std::pat
 async fn opening_with_a_different_model_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
     build_stamped_index(&corpus_db, &lancedb_dir).await;
 
     // The index was stamped with MODEL; opening it to serve with another
     // model is refused before any query runs.
-    let result = Library::open(corpus_db, &lancedb_dir, Fixed, "other-model".to_string(), 5).await;
+    let result = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        "other-model".to_string(),
+        5,
+    )
+    .await;
     assert!(matches!(
         result,
         Err(bookrack_query::QueryError::Corpus(
@@ -190,13 +207,21 @@ async fn opening_with_a_different_model_is_refused() {
 async fn an_empty_index_is_served_without_stamps() {
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
 
     // No book ingested, no stamps written: an empty index has no provenance
     // to check, so the facade opens it without complaint.
-    let library = Library::open(corpus_db, &lancedb_dir, Fixed, MODEL.to_string(), 5)
-        .await
-        .expect("open empty library");
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+    )
+    .await
+    .expect("open empty library");
     assert_eq!(library.dimension(), DIM);
     let hits = library.search("anything", None).await.expect("search");
     assert!(hits.is_empty());

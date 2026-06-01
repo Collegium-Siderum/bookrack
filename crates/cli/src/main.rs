@@ -115,6 +115,10 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let search_cfg = SearchConfig::from_env();
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    // The catalog handle is opened beside the corpus so the breadcrumb
+    // resolver can read the effective book title; it is used only
+    // synchronously for citation and dropped at the end of this scope.
+    let catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
 
     // The store's vector width is fixed at creation and must match the
@@ -141,7 +145,7 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
             ))
             .context("verify index stamps")?;
     }
-    let hits = search(text, &corpus, &store, &embedder, search_cfg.top_k)
+    let hits = search(text, &corpus, &catalog, &store, &embedder, search_cfg.top_k)
         .await
         .context("run query")?;
     render::citations(&hits);

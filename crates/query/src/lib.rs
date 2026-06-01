@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_catalog::Catalog;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_search::{cite, retrieve};
@@ -37,6 +38,10 @@ pub enum QueryError {
     #[error("corpus error: {0}")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
+    /// The catalog database could not be opened or queried.
+    #[error("catalog error: {0}")]
+    Catalog(#[from] bookrack_catalog::CatalogError),
+
     /// The underlying search operation failed.
     #[error("search error: {0}")]
     Search(#[from] bookrack_search::SearchError),
@@ -60,6 +65,7 @@ pub struct Library<E: Embedder> {
     store: ChunkStore,
     embedder: E,
     corpus_db: PathBuf,
+    catalog_db: PathBuf,
     default_top_k: usize,
 }
 
@@ -76,6 +82,7 @@ impl<E: Embedder> Library<E> {
     /// served without complaint.
     pub async fn open(
         corpus_db: PathBuf,
+        catalog_db: PathBuf,
         lancedb_dir: &Path,
         embedder: E,
         embed_model: String,
@@ -94,6 +101,7 @@ impl<E: Embedder> Library<E> {
             store,
             embedder,
             corpus_db,
+            catalog_db,
             default_top_k,
         })
     }
@@ -107,15 +115,16 @@ impl<E: Embedder> Library<E> {
     /// `top_k` falls back to the configured default when `None`.
     ///
     /// The async retrieval runs first, touching only the store and
-    /// embedder; the corpus is opened only afterwards, for the synchronous
-    /// citation step. The non-`Sync` corpus handle is thus never held
-    /// across an await, so this future is `Send` and can serve requests on
-    /// a multi-threaded runtime.
+    /// embedder; the corpus and catalog handles are opened only
+    /// afterwards, for the synchronous citation step. Neither
+    /// non-`Sync` handle is ever held across an await, so this future
+    /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
         let top_k = top_k.unwrap_or(self.default_top_k);
         let hits = retrieve(query, &self.store, &self.embedder, top_k).await?;
         let corpus = Corpus::open(&self.corpus_db)?;
-        let citations = cite(&corpus, hits)?;
+        let catalog = Catalog::open(&self.catalog_db)?;
+        let citations = cite(&corpus, &catalog, hits)?;
         Ok(citations)
     }
 }

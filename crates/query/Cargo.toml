@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-embed = { path = "../embed" }

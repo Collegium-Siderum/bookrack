@@ -16,6 +16,7 @@
 
 use std::time::Instant;
 
+use bookrack_catalog::Catalog;
 use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
@@ -32,6 +33,11 @@ pub enum SearchError {
     /// The corpus layer reported an error while building a breadcrumb.
     #[error("corpus error: {0}")]
     Corpus(#[from] bookrack_corpus::CorpusError),
+
+    /// The catalog layer reported an error while reading the effective
+    /// book title for a breadcrumb.
+    #[error("catalog error: {0}")]
+    Catalog(#[from] bookrack_catalog::CatalogError),
 
     /// The embed client failed to embed the query.
     #[error("embed error: {0}")]
@@ -76,24 +82,27 @@ pub struct Citation {
 }
 
 /// Retrieve the `top_k` passages nearest `query`, each with a citation
-/// breadcrumb resolved from `corpus`.
+/// breadcrumb resolved from `corpus` (structural ancestors) and
+/// `catalog` (the effective book title).
 ///
 /// A convenience wrapper over [`retrieve`] then [`cite`]. It borrows
 /// `corpus` across the await in `retrieve`, so its future is `Send` only
 /// where `Corpus` is `Sync` — fine for a single-threaded caller like the
 /// CLI. A caller that needs a `Send` future (e.g. one serving requests on
 /// a multi-threaded runtime) should call [`retrieve`] and [`cite`]
-/// directly, opening the corpus only for the synchronous citation step.
+/// directly, opening the corpus and catalog only for the synchronous
+/// citation step.
 #[tracing::instrument(name = "search", skip_all, fields(top_k = top_k))]
 pub async fn search<E: Embedder>(
     query: &str,
     corpus: &Corpus,
+    catalog: &Catalog,
     store: &ChunkStore,
     embedder: &E,
     top_k: usize,
 ) -> Result<Vec<Citation>> {
     let hits = retrieve(query, store, embedder, top_k).await?;
-    cite(corpus, hits)
+    cite(corpus, catalog, hits)
 }
 
 /// Embed `query` and recall the `top_k` nearest passages from the vector
@@ -124,15 +133,17 @@ pub async fn retrieve<E: Embedder>(
     Ok(hits)
 }
 
-/// Resolve a citation breadcrumb for each hit from `corpus`. The
-/// synchronous half of a search: no awaits, so a caller can open a
-/// short-lived corpus handle here without holding it across an await.
-pub fn cite(corpus: &Corpus, hits: Vec<SearchHit>) -> Result<Vec<Citation>> {
+/// Resolve a citation breadcrumb for each hit from `corpus` (the
+/// structural ancestors) and `catalog` (the effective book title).
+/// The synchronous half of a search: no awaits, so a caller can open
+/// short-lived corpus and catalog handles here without holding them
+/// across an await.
+pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<Vec<Citation>> {
     let breadcrumb_started = Instant::now();
     let mut citations = Vec::with_capacity(hits.len());
     for hit in hits {
         citations.push(Citation {
-            breadcrumb: breadcrumb(corpus, hit.start_node_id)?,
+            breadcrumb: breadcrumb(corpus, catalog, hit.start_node_id)?,
             text: hit.text,
             start_node_id: hit.start_node_id,
             start_char_offset: hit.start_char_offset,
@@ -153,11 +164,14 @@ pub fn cite(corpus: &Corpus, hits: Vec<SearchHit>) -> Result<Vec<Citation>> {
 /// Build the breadcrumb for a leaf by walking its organizing ancestors to
 /// the book root, collecting their titles top-down.
 ///
-/// The book root's title — the book title — is the top-most segment when
-/// present, so it appears once and is not duplicated. The conditional
-/// prefix only fires in the degenerate case where the walk does not
-/// already lead with the book title.
-fn breadcrumb(corpus: &Corpus, start_node_id: NodeId) -> Result<String> {
+/// The book root's title is read from `catalog`'s effective
+/// publication-attrs view — so a post-hoc `metadata set title <new>`
+/// reflects into the next breadcrumb without rebuilding the corpus —
+/// with the corpus's `node.title` as a fallback when the catalog has
+/// no row yet. Internal organizing nodes (chapter / section / …) keep
+/// reading from the corpus, since those titles are TOC structure, not
+/// publication metadata.
+fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<String> {
     let mut titles = Vec::new();
     let mut book_title = None;
     let mut current = Some(start_node_id);
@@ -166,9 +180,18 @@ fn breadcrumb(corpus: &Corpus, start_node_id: NodeId) -> Result<String> {
             break;
         };
         if node.parent_id.is_none() {
-            book_title = node.title.clone();
-        }
-        if node.node_type.is_organizing()
+            // The book partition is keyed by intake_id, so the root's
+            // partition index is the intake id we look up in catalog.
+            // The root's title is read here and not pushed into the
+            // structural titles below, so the leading segment always
+            // reflects the catalog's effective view.
+            let intake_id = id.partition().get();
+            let effective = catalog.effective_publication_attrs(intake_id, "book")?;
+            book_title = effective
+                .get("title")
+                .map(str::to_string)
+                .or_else(|| node.title.clone());
+        } else if node.node_type.is_organizing()
             && let Some(title) = &node.title
         {
             titles.push(title.clone());
@@ -189,6 +212,7 @@ fn breadcrumb(corpus: &Corpus, start_node_id: NodeId) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_catalog::{Catalog, NewOverride, NewPublicationAttrs};
     use bookrack_core::NodeType;
     use bookrack_embed::Result as EmbedResult;
     use bookrack_extract::{
@@ -285,15 +309,18 @@ mod tests {
 
     /// Ingest one synthetic book into an in-memory corpus and index its
     /// first prose leaf in a fresh store under a temp directory, returning
-    /// the pieces a search needs plus the indexed leaf id.
+    /// the pieces a search needs plus the indexed leaf id. The companion
+    /// catalog is opened in-memory and seeded with the book root's title
+    /// when one is supplied, mirroring the live ingest pipeline.
     async fn fixture(
         title: Option<&str>,
         with_chapter: bool,
-    ) -> (tempfile::TempDir, Corpus, ChunkStore, NodeId) {
+    ) -> (tempfile::TempDir, Corpus, Catalog, ChunkStore, NodeId) {
         let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 1i64;
         let report = ingest_structure(
             &mut corpus,
-            1,
+            intake_id,
             NodeType::Work,
             &extraction(title, with_chapter),
             &StructureParams::default(),
@@ -306,6 +333,15 @@ mod tests {
             .into_iter()
             .find(|n| n.node_type.is_prose_leaf())
             .expect("a prose leaf");
+
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        if let Some(t) = title {
+            let mut attrs = NewPublicationAttrs::new(intake_id, "book");
+            attrs.title = Some(t.to_string());
+            catalog
+                .upsert_publication_attrs(&attrs)
+                .expect("seed title");
+        }
 
         let dir = tempfile::tempdir().expect("temp dir");
         let store = ChunkStore::open(dir.path(), DIM).await.expect("store");
@@ -321,16 +357,16 @@ mod tests {
             }])
             .await
             .expect("append");
-        (dir, corpus, store, leaf.node_id)
+        (dir, corpus, catalog, store, leaf.node_id)
     }
 
     #[tokio::test]
     async fn breadcrumb_leads_with_the_book_title_once() {
-        let (_dir, corpus, store, leaf) = fixture(Some("A Test Book"), true).await;
+        let (_dir, corpus, catalog, store, leaf) = fixture(Some("A Test Book"), true).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
@@ -343,14 +379,38 @@ mod tests {
     async fn breadcrumb_is_empty_when_no_ancestor_has_a_title() {
         // No biblio title and no TOC: the leaf hangs directly off an
         // untitled root, so there is nothing to cite.
-        let (_dir, corpus, store, _leaf) = fixture(None, false).await;
+        let (_dir, corpus, catalog, store, _leaf) = fixture(None, false).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
         assert!(hits[0].breadcrumb.is_empty());
+    }
+
+    #[tokio::test]
+    async fn override_title_reflects_in_breadcrumb_without_corpus_rewrite() {
+        // The catalog's effective view is what the breadcrumb reads:
+        // setting an override title after ingest must show up on the
+        // very next query, and the corpus row stays untouched.
+        let (_dir, corpus, catalog, store, _leaf) = fixture(Some("Original"), true).await;
+        catalog
+            .set_override(&NewOverride::new(
+                1,
+                "book",
+                "title",
+                Some("Revised".to_string()),
+                "human",
+            ))
+            .expect("set override");
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+            .await
+            .expect("search");
+        assert_eq!(hits[0].breadcrumb, "Revised \u{203a} Chapter One");
     }
 }

@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     let search_cfg = SearchConfig::from_env();
     let library = Library::open(
         cfg.corpus_db(),
+        cfg.catalog_db(),
         &cfg.lancedb_dir(),
         embedder,
         embed_cfg.model.clone(),
