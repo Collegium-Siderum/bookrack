@@ -2,8 +2,17 @@
 
 //! The `node_reviews` table — per-node review status.
 //!
-//! One row per reviewed node, recording the outcome of a human review
-//! pass. The row is keyed by node id and rewritten on each review.
+//! One row per reviewed node, recording the outcome of one review
+//! pass. The row is keyed by `(intake_id, scope)` and rewritten on
+//! each pass. There is no DDL CHECK on `status`; the column carries
+//! one of four tokens by convention:
+//!
+//! - `clean` — every required field is present and clean.
+//! - `needs_work` — at least one required field is missing or
+//!   flagged. Advisory; does not gate the pipeline.
+//! - `acknowledged` — the gap is known and was deliberately let
+//!   through (a human signed off via the metadata-ack flow).
+//! - `rejected` — a human-level book-wide reject.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
@@ -22,7 +31,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("reviewed_by").not_null(),
         ColumnSpec::text("status")
             .not_null()
-            .comment("clean / needs_work / rejected"),
+            .comment("clean / needs_work / acknowledged / rejected"),
         ColumnSpec::text("notes"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),

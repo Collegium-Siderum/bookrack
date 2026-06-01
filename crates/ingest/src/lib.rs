@@ -599,7 +599,8 @@ fn run_metadata_substep(
 ) {
     let started = std::time::Instant::now();
 
-    if let Err(e) = seed_publication_attrs(catalog, intake_id, extraction) {
+    let mut attrs = build_base_attrs(intake_id, extraction);
+    if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
         tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
         audit(
             catalog,
@@ -648,6 +649,14 @@ fn run_metadata_substep(
     };
     let report = bookrack_metadata::audit(&input);
 
+    // Roll the audit's row-level confidence back into the base record.
+    // The upsert overwrites every column, so the biblio values seeded
+    // above are spelled out again to preserve them.
+    attrs.confidence = Some(report.confidence.as_str().to_string());
+    if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
+        tracing::warn!(error = %e, "metadata: failed to write confidence rollup");
+    }
+
     let outcome = match report.verdict {
         bookrack_metadata::Verdict::Clean => "ok",
         bookrack_metadata::Verdict::NeedsWork => "partial",
@@ -686,15 +695,16 @@ fn run_metadata_substep(
     );
 }
 
-/// Copy the extracted biblio into the publication-attrs base for the
-/// book scope. `source` is stamped `"extracted"` so a later override
-/// can tell where the row came from; `source_format` carries the
-/// adapter name so the audit's per-format prior can recompute.
-fn seed_publication_attrs(
-    catalog: &Catalog,
-    intake_id: i64,
-    extraction: &Extraction,
-) -> std::result::Result<(), bookrack_catalog::CatalogError> {
+/// Build the base-layer record for the book root from the extracted
+/// biblio. `source` is stamped `"extracted"` so a later override can
+/// tell where the row came from; `source_format` carries the adapter
+/// name so the audit's per-format prior can recompute.
+///
+/// The struct is returned rather than written so the caller can
+/// re-upsert it after the audit, this time carrying the confidence
+/// rollup — `upsert_publication_attrs` overwrites every column, so
+/// the biblio fields must be re-stated to be preserved.
+fn build_base_attrs(intake_id: i64, extraction: &Extraction) -> NewPublicationAttrs {
     let biblio = &extraction.biblio;
     let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
     attrs.title = biblio.title.clone();
@@ -706,7 +716,7 @@ fn seed_publication_attrs(
     attrs.language = biblio.language.clone();
     attrs.source = Some("extracted".to_string());
     attrs.source_format = Some(extraction.provenance.adapter.clone());
-    catalog.upsert_publication_attrs(&attrs)
+    attrs
 }
 
 /// Concatenate text from the first few blocks of the extraction,
@@ -1358,7 +1368,8 @@ mod book_pipeline_tests {
 
         // The advisory node_reviews row carries `needs_work` for the
         // bare-text book, but the intake is still `Embedded` — the
-        // audit never gates EMBED.
+        // audit never gates EMBED. The row-level confidence rolled
+        // back into node_publication_attrs records the same gap.
         let review = catalog
             .review(report.intake_id, "book")
             .expect("review")
@@ -1369,6 +1380,11 @@ mod book_pipeline_tests {
             .expect("intake")
             .expect("present");
         assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
+        let attrs = catalog
+            .publication_attrs(report.intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.confidence.as_deref(), Some("low"));
     }
 
     #[tokio::test]
@@ -1428,6 +1444,8 @@ mod book_pipeline_tests {
         assert_eq!(attrs.year.as_deref(), Some("2010"));
         assert_eq!(attrs.source.as_deref(), Some("extracted"));
         assert_eq!(attrs.source_format.as_deref(), Some("epub"));
+        // Required + should-fill fields all Strong → confidence high.
+        assert_eq!(attrs.confidence.as_deref(), Some("high"));
     }
 
     #[tokio::test]
