@@ -205,6 +205,22 @@ mod tests {
     }
 
     #[test]
+    fn the_pre_frbr_pub_place_and_original_year_columns_flow_through_the_view() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut attrs = NewPublicationAttrs::new(INTAKE, SET);
+        attrs.title = Some("Base Title".into());
+        attrs.pub_place = Some("New York".into());
+        attrs.original_year = Some("1949".into());
+        catalog.upsert_publication_attrs(&attrs).expect("base");
+
+        let eff = catalog
+            .effective_publication_attrs(INTAKE, SET)
+            .expect("effective");
+        assert_eq!(eff.get("pub_place"), Some("New York"));
+        assert_eq!(eff.get("original_year"), Some("1949"));
+    }
+
+    #[test]
     fn an_override_value_replaces_the_base_value() {
         let catalog = Catalog::open_in_memory().expect("open");
         seed_base(&catalog, INTAKE, SET);

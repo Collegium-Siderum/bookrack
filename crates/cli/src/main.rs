@@ -548,6 +548,8 @@ mod tests {
             vec!["bookrack", "metadata", "show", "1"],
             vec!["bookrack", "metadata", "show", "1", "--json"],
             vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
+            vec!["bookrack", "metadata", "set", "1", "pub_place", "New York"],
+            vec!["bookrack", "metadata", "set", "1", "original_year", "1949"],
             vec!["bookrack", "metadata", "clear", "1", "title"],
             vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
             vec!["bookrack", "metadata", "approve", "1"],
@@ -608,6 +610,20 @@ mod tests {
         assert_eq!(update_row.field.as_deref(), Some("title"));
         assert_eq!(update_row.new_value.as_deref(), Some("A New Title"));
         assert!(update_row.old_value.is_none());
+    }
+
+    #[test]
+    fn metadata_set_pub_place_and_original_year_flow_through_the_effective_view() {
+        // The two new schema columns are settable via the EAV override
+        // path even without a base row; the effective view returns both.
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_set(&catalog, 9, "pub_place", "New York").expect("set pub_place");
+        run_metadata_set(&catalog, 9, "original_year", "1949").expect("set original_year");
+        let effective = catalog
+            .effective_publication_attrs(9, BOOK_SCOPE)
+            .expect("effective");
+        assert_eq!(effective.get("pub_place"), Some("New York"));
+        assert_eq!(effective.get("original_year"), Some("1949"));
     }
 
     #[test]
