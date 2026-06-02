@@ -94,6 +94,17 @@ pub struct DryrunBookReport {
     /// attrs — `drop_invalid_isbn`, `drop_stale_year`, and per-field
     /// `filename_fallback:<field>`. Empty when nothing was touched.
     pub base_attrs_actions: Vec<String>,
+    /// The merged base-plus-overrides view the audit consumed. Carries
+    /// every field the effective view holds, alongside any override rows
+    /// that displaced a base value. In the in-memory dryrun catalog
+    /// `overrides_applied` is always empty; a future `--from-catalog`
+    /// path would seed it from real `node_overrides` rows.
+    pub effective: Option<EffectiveOut>,
+    /// Fields the volume→set inheritance rule (Q2-4.3) carried down from
+    /// a parent node. `None` while the dryrun does not walk a multi-volume
+    /// chain; reserved for the inherit-from path that lands with the
+    /// multi-volume metadata feature.
+    pub inherited_from_parent: Option<Vec<String>>,
     /// Per-field grades and flags from the metadata audit.
     pub audit_fields: Vec<FieldOut>,
     /// Aggregated audit verdict (`clean` / `needs_work`).
@@ -173,6 +184,28 @@ pub struct BaseAttrsOut {
     pub source: Option<String>,
 }
 
+/// The effective view a downstream consumer would see, surfaced for
+/// visibility so a JSONL diff can distinguish base values from
+/// override values.
+#[derive(Debug, Clone, Serialize)]
+pub struct EffectiveOut {
+    /// Effective field values keyed by field name. Mirrors what
+    /// `EffectiveAttrs::iter` exposes.
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// Each override that displaced a base value for a field. Empty in
+    /// the in-memory dryrun catalog; reserved for a future
+    /// `--from-catalog` path.
+    pub overrides_applied: Vec<OverrideApplied>,
+}
+
+/// One override the effective view carried over the base layer.
+#[derive(Debug, Clone, Serialize)]
+pub struct OverrideApplied {
+    pub field: String,
+    pub base_value: Option<String>,
+    pub override_value: Option<String>,
+}
+
 impl From<&bookrack_catalog::NewPublicationAttrs> for BaseAttrsOut {
     fn from(a: &bookrack_catalog::NewPublicationAttrs) -> BaseAttrsOut {
         BaseAttrsOut {
@@ -231,6 +264,11 @@ pub struct DryrunSummary {
     pub field_grades: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
     /// Per-field flag histogram (field → flag → count).
     pub flag_counts: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
+    /// Base-attrs action histogram (action token → count). Sourced from
+    /// [`DryrunBookReport::base_attrs_actions`]; the keys are stable
+    /// tokens like `drop_invalid_isbn`, `drop_stale_year`, and
+    /// `filename_fallback:<field>`.
+    pub base_attrs_action_counts: std::collections::BTreeMap<String, usize>,
 }
 
 /// Walk a path, dryrun every supported file under it, and accumulate a
@@ -272,6 +310,8 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         filename_biblio: None,
         base_attrs: None,
         base_attrs_actions: vec![],
+        effective: None,
+        inherited_from_parent: None,
         audit_fields: vec![],
         verdict: None,
         confidence: None,
@@ -378,6 +418,13 @@ fn run_pipeline(
     record.base_attrs_actions = outcome.actions.iter().map(|a| a.token()).collect();
     catalog.upsert_publication_attrs(&attrs)?;
     let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
+    record.effective = Some(EffectiveOut {
+        fields: effective
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        overrides_applied: Vec::new(),
+    });
     let body = body_sample(extraction);
     let report = audit(&AuditInput {
         biblio: &extraction.biblio,
@@ -486,6 +533,12 @@ pub fn summarize(books: &[DryrunBookReport]) -> DryrunSummary {
                     .entry(flag.clone())
                     .or_default() += 1;
             }
+        }
+        for action in &book.base_attrs_actions {
+            *summary
+                .base_attrs_action_counts
+                .entry(action.clone())
+                .or_default() += 1;
         }
     }
     summary
@@ -637,6 +690,23 @@ mod tests {
     }
 
     #[test]
+    fn the_effective_layer_mirrors_the_view_the_audit_consumed() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_html(dir.path(), "tiny.html", "Body.");
+        let rec = dryrun_book(&path, &DryrunParams::default());
+        let effective = rec.effective.expect("effective populated on success");
+        // The HTML adapter surfaces `<title>` as the title field, so the
+        // effective view carries at least that. The in-memory catalog
+        // has no overrides, so the trail stays empty.
+        assert_eq!(
+            effective.fields.get("title").map(String::as_str),
+            Some("A Title")
+        );
+        assert!(effective.overrides_applied.is_empty());
+        assert!(rec.inherited_from_parent.is_none());
+    }
+
+    #[test]
     fn dryrun_skips_chunking_on_request() {
         let dir = tempdir().expect("tempdir");
         let path = write_html(dir.path(), "tiny.html", "Some prose body.");
@@ -679,6 +749,39 @@ mod tests {
         // At least the title field shows up across both books.
         let title_grades = summary.field_grades.get("title").expect("title grades");
         assert_eq!(title_grades.values().sum::<usize>(), 2);
+        // The histogram exists, even if both books happened to record zero
+        // base-attrs actions on this fixture.
+        let _ = summary.base_attrs_action_counts;
+    }
+
+    #[test]
+    fn summarize_aggregates_base_attrs_action_counts() {
+        // One book triggers the filename fallback for several fields; a
+        // second book stays clean. The histogram should reflect both.
+        let dir = tempdir().expect("tempdir");
+        let triggered = write_html(
+            dir.path(),
+            "Alice Author - A Sample Title (2006, Sample Press).html",
+            "Body.",
+        );
+        let clean = write_html(dir.path(), "tiny.html", "Body.");
+        let reports = vec![
+            dryrun_book(&triggered, &DryrunParams::default()),
+            dryrun_book(&clean, &DryrunParams::default()),
+        ];
+        let summary = summarize(&reports);
+        let publisher_fallback = summary
+            .base_attrs_action_counts
+            .get("filename_fallback:publisher")
+            .copied()
+            .unwrap_or(0);
+        let year_fallback = summary
+            .base_attrs_action_counts
+            .get("filename_fallback:year")
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(publisher_fallback, 1);
+        assert_eq!(year_fallback, 1);
     }
 
     #[test]
