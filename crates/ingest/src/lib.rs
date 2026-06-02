@@ -323,10 +323,14 @@ pub async fn ingest_book<E: Embedder>(
     tracing::info!(adapter = %adapter, "extracted source file");
 
     // Register the file, keyed idempotently on its whole-file hash.
+    // `original_path` is recorded for forensics and for the search-layer
+    // breadcrumb fallback when no title is known; the column may be
+    // null on pre-existing rows.
     let registration = catalog.register_intake(
         &NewIntake::new(source_sha.clone())
             .format(adapter.clone())
-            .byte_size(bytes.len() as i64),
+            .byte_size(bytes.len() as i64)
+            .original_path(file.to_string_lossy().into_owned()),
     )?;
     let already_registered = !registration.is_new();
     let intake_id = registration.intake().intake_id;
@@ -409,6 +413,7 @@ pub async fn ingest_book<E: Embedder>(
     // whose required fields are missing still chunks and embeds, with
     // `status="needs_work"` carried as a flag for a later edit pass.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
+    let filename_biblio = source_stem.map(bookrack_metadata::parse_filename);
     let verdict = run_metadata_substep(
         catalog,
         intake_id,
@@ -416,6 +421,7 @@ pub async fn ingest_book<E: Embedder>(
         &extraction,
         &structure.toc_stats,
         source_stem,
+        filename_biblio.as_ref(),
         &run_id,
         &source_sha,
     );
@@ -671,12 +677,13 @@ fn run_metadata_substep(
     extraction: &Extraction,
     toc_stats: &TocStats,
     source_stem: Option<&str>,
+    filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
     run_id: &str,
     source_sha: &str,
 ) -> Option<bookrack_metadata::Verdict> {
     let started = std::time::Instant::now();
 
-    let mut attrs = build_base_attrs(intake_id, extraction);
+    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio);
     if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
         tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
         audit(
@@ -774,15 +781,27 @@ fn run_metadata_substep(
 }
 
 /// Build the base-layer record for the book root from the extracted
-/// biblio. `source` is stamped `"extracted"` so a later override can
-/// tell where the row came from; `source_format` carries the adapter
-/// name so the audit's per-format prior can recompute.
+/// biblio, with an optional filename-derived biblio as a strict
+/// fallback per field. `source_format` carries the adapter name so
+/// the audit's per-format prior can recompute. `source` is stamped
+/// `"extracted"` whenever any field came from the adapter, otherwise
+/// `"filename"` whenever any field came from the filename parser,
+/// otherwise `"extracted"` to match the legacy all-empty case.
+///
+/// Adapter values take precedence: a non-empty biblio field from
+/// extraction wins over the filename value, since the adapter is the
+/// authoritative source when it has anything at all to say. The
+/// filename only fills the per-field gaps the adapter left behind.
 ///
 /// The struct is returned rather than written so the caller can
 /// re-upsert it after the audit, this time carrying the confidence
 /// rollup — `upsert_publication_attrs` overwrites every column, so
 /// the biblio fields must be re-stated to be preserved.
-fn build_base_attrs(intake_id: i64, extraction: &Extraction) -> NewPublicationAttrs {
+fn build_base_attrs(
+    intake_id: i64,
+    extraction: &Extraction,
+    filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+) -> NewPublicationAttrs {
     let biblio = &extraction.biblio;
     let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
     attrs.title = biblio.title.clone();
@@ -792,9 +811,53 @@ fn build_base_attrs(intake_id: i64, extraction: &Extraction) -> NewPublicationAt
     attrs.isbn = biblio.isbn.clone();
     attrs.series = biblio.series.clone();
     attrs.language = biblio.language.clone();
-    attrs.source = Some("extracted".to_string());
+    let extracted_any = attrs.title.is_some()
+        || attrs.subtitle.is_some()
+        || attrs.publisher.is_some()
+        || attrs.year.is_some()
+        || attrs.isbn.is_some()
+        || attrs.series.is_some()
+        || attrs.language.is_some();
+    let mut filename_filled_any = false;
+    if let Some(fb) = filename_biblio {
+        merge_from_filename(
+            &mut attrs.title,
+            fb.title.as_ref(),
+            &mut filename_filled_any,
+        );
+        merge_from_filename(
+            &mut attrs.publisher,
+            fb.publisher.as_ref(),
+            &mut filename_filled_any,
+        );
+        merge_from_filename(&mut attrs.year, fb.year.as_ref(), &mut filename_filled_any);
+        merge_from_filename(&mut attrs.isbn, fb.isbn.as_ref(), &mut filename_filled_any);
+        merge_from_filename(
+            &mut attrs.series,
+            fb.series.as_ref(),
+            &mut filename_filled_any,
+        );
+    }
+    attrs.source = Some(if extracted_any || !filename_filled_any {
+        "extracted".to_string()
+    } else {
+        "filename".to_string()
+    });
     attrs.source_format = Some(extraction.provenance.adapter.clone());
     attrs
+}
+
+/// Copy `incoming` into `slot` only when `slot` is currently `None`.
+/// Records whether the slot was actually filled from the filename so
+/// the caller can pick the right `source` tag.
+fn merge_from_filename(slot: &mut Option<String>, incoming: Option<&String>, filled: &mut bool) {
+    if slot.is_some() {
+        return;
+    }
+    if let Some(v) = incoming {
+        *slot = Some(v.clone());
+        *filled = true;
+    }
 }
 
 /// Concatenate text from the first few blocks of the extraction,
@@ -1506,6 +1569,7 @@ mod book_pipeline_tests {
             &extraction,
             &TocStats::default(),
             Some("a-complete-book"),
+            None,
             "run-1",
             "dummy-sha",
         );
@@ -1524,6 +1588,114 @@ mod book_pipeline_tests {
         assert_eq!(attrs.source_format.as_deref(), Some("epub"));
         // Required + should-fill fields all Strong → confidence high.
         assert_eq!(attrs.confidence.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn a_bare_book_takes_publisher_and_year_from_the_filename() {
+        // The extractor returns an empty biblio but the input filename
+        // matches the `Author - Title (Year, Publisher)` template, so
+        // base attrs fill in from the filename parse with
+        // `source = "filename"`.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio::default(),
+            provenance: bookrack_extract::Provenance {
+                adapter: "txt".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        let stem = "Alice Author - A Sample Title (2003, Sample Press)";
+        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some(stem),
+            Some(&filename_biblio),
+            "run-1",
+            "dummy-sha",
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.title.as_deref(), Some("A Sample Title"));
+        assert_eq!(attrs.publisher.as_deref(), Some("Sample Press"));
+        assert_eq!(attrs.year.as_deref(), Some("2003"));
+        assert_eq!(attrs.source.as_deref(), Some("filename"));
+        assert_eq!(attrs.source_format.as_deref(), Some("txt"));
+    }
+
+    #[tokio::test]
+    async fn extracted_biblio_wins_over_filename_per_field() {
+        // The extractor provides a title; the filename also supplies a
+        // title and a publisher the extractor lacks. The extracted
+        // title wins; the publisher gap fills from the filename; the
+        // row still reads `source = "extracted"` because the adapter
+        // contributed at least one field.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("Extracted Title".to_string()),
+                language: Some("en".to_string()),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "pdf".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        let stem = "Alice Author - Filename Title (2003, Sample Press)";
+        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some(stem),
+            Some(&filename_biblio),
+            "run-1",
+            "dummy-sha",
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.title.as_deref(), Some("Extracted Title"));
+        assert_eq!(attrs.publisher.as_deref(), Some("Sample Press"));
+        assert_eq!(attrs.year.as_deref(), Some("2003"));
+        assert_eq!(attrs.source.as_deref(), Some("extracted"));
     }
 
     #[tokio::test]
