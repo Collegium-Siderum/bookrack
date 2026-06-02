@@ -11,6 +11,25 @@ cited search — runs from the CLI and over the MCP server. Pre-production
 hardening (schema migrations, approximate-nearest-neighbour indexing,
 metadata) is still in progress.
 
+## Running long ingestions
+
+Ingestion is restartable: when a host suspends mid-run the embedding
+step pauses with it and resumes once the host wakes, idempotently. The
+output is unchanged either way; only the wall-clock includes the time
+spent asleep, which makes a run that crossed an idle-sleep window read
+as far slower than it really was.
+
+On macOS the default idle-sleep policy will suspend a backgrounded
+shell. Wrap a long ingest to opt out of idle sleep for its duration:
+
+```
+caffeinate -i bookrack ingest <file>     # single book
+caffeinate -i bash bulk-ingest.sh        # batch driver
+```
+
+`-i` keeps the system from sleeping on idle without blocking display
+sleep, so an unattended overnight run finishes in its true wall-clock.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
