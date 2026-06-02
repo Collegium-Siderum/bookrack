@@ -136,6 +136,26 @@ enum MetadataAction {
         #[arg(long)]
         reason: String,
     },
+    /// Mark the record reviewed and correct. A human or LLM uses this
+    /// after confirming the metadata; the pipeline never writes this
+    /// status itself.
+    Approve {
+        /// The intake id of the book.
+        book: i64,
+        /// Optional note for the audit trail.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Reject the book outright (e.g. wrong source file, irrecoverable
+    /// metadata). The book stays ingested but downstream consumers can
+    /// filter on the rejected status.
+    Reject {
+        /// The intake id of the book.
+        book: i64,
+        /// Why the book was rejected.
+        #[arg(long)]
+        reason: String,
+    },
     /// Resume CHUNK→EMBED for a book held at the metadata gate.
     Advance {
         /// The intake id of the book.
@@ -263,6 +283,10 @@ async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
         }
         MetadataAction::Clear { book, field } => run_metadata_clear(&catalog, book, &field),
         MetadataAction::Ack { book, reason } => run_metadata_ack(&catalog, book, &reason),
+        MetadataAction::Approve { book, reason } => {
+            run_metadata_approve(&catalog, book, reason.as_deref())
+        }
+        MetadataAction::Reject { book, reason } => run_metadata_reject(&catalog, book, &reason),
         MetadataAction::Advance { .. } => unreachable!("handled above"),
     }
 }
@@ -274,6 +298,10 @@ fn run_metadata_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
     let attrs = catalog
         .publication_attrs(book, BOOK_SCOPE)
         .context("read publication attrs")?;
+    let review_status = catalog
+        .review(book, BOOK_SCOPE)
+        .context("read review row")?
+        .map(|r| r.status);
     // The audit needs an adapter so its source-format prior can fire;
     // reuse the one stamped on the base row at ingest time, falling
     // back to a neutral marker when the row has not been written yet.
@@ -300,9 +328,9 @@ fn run_metadata_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
     };
     let report = bookrack_metadata::audit(&input);
     if json {
-        render::metadata_show_json(book, &report);
+        render::metadata_show_json(book, &report, review_status.as_deref());
     } else {
-        render::metadata_show(book, &report);
+        render::metadata_show(book, &report, review_status.as_deref());
     }
     Ok(())
 }
@@ -364,9 +392,53 @@ fn run_metadata_ack(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
         .record_metadata_audit(&audit)
         .context("record metadata audit")?;
     catalog
-        .upsert_review(&NewReview::new(book, BOOK_SCOPE, "human", "acknowledged"))
+        .upsert_review(&NewReview::new(
+            book,
+            BOOK_SCOPE,
+            "human",
+            bookrack_catalog::STATUS_ACKNOWLEDGED,
+        ))
         .context("upsert review")?;
     println!("Acknowledged metadata gap on book {book}.");
+    Ok(())
+}
+
+/// Mark the record reviewed and correct. The operator (or an LLM acting
+/// on the operator's behalf) is asserting that the effective metadata
+/// matches the source; the audit's plausibility verdict is unchanged.
+fn run_metadata_approve(catalog: &Catalog, book: i64, reason: Option<&str>) -> Result<()> {
+    let mut audit = NewMetadataAudit::new("node_reviews", "approve", ActorKind::Human);
+    audit.node_id = Some(PartitionIdx::new(book).root().get());
+    audit.reason = reason.map(str::to_string);
+    catalog
+        .record_metadata_audit(&audit)
+        .context("record metadata audit")?;
+    let mut review = NewReview::new(book, BOOK_SCOPE, "human", bookrack_catalog::STATUS_APPROVED);
+    if let Some(r) = reason {
+        review = review.notes(r);
+    }
+    catalog.upsert_review(&review).context("upsert review")?;
+    println!("Approved metadata on book {book}.");
+    Ok(())
+}
+
+/// Reject the book. The pipeline rows stay in place so downstream
+/// consumers can filter on `rejected`; this records the human's
+/// rejection and the reason in the audit trail.
+fn run_metadata_reject(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
+    let mut audit = NewMetadataAudit::new("node_reviews", "reject", ActorKind::Human);
+    audit.node_id = Some(PartitionIdx::new(book).root().get());
+    audit.reason = Some(reason.to_string());
+    catalog
+        .record_metadata_audit(&audit)
+        .context("record metadata audit")?;
+    catalog
+        .upsert_review(
+            &NewReview::new(book, BOOK_SCOPE, "human", bookrack_catalog::STATUS_REJECTED)
+                .notes(reason),
+        )
+        .context("upsert review")?;
+    println!("Rejected book {book}.");
     Ok(())
 }
 
@@ -458,6 +530,18 @@ mod tests {
             vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
             vec!["bookrack", "metadata", "clear", "1", "title"],
             vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
+            vec!["bookrack", "metadata", "approve", "1"],
+            vec![
+                "bookrack", "metadata", "approve", "1", "--reason", "verified",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "reject",
+                "1",
+                "--reason",
+                "wrong file",
+            ],
             vec!["bookrack", "metadata", "advance", "1"],
         ] {
             Cli::try_parse_from(argv.iter().copied())
@@ -537,13 +621,66 @@ mod tests {
             .review(11, BOOK_SCOPE)
             .expect("review")
             .expect("present");
-        assert_eq!(review.status, "acknowledged");
+        assert_eq!(review.status, bookrack_catalog::STATUS_ACKNOWLEDGED);
         let book_root_id = PartitionIdx::new(11).root().get();
         let audit = catalog
             .metadata_audit_for_node(book_root_id)
             .expect("audit");
         assert!(
             audit.iter().any(|r| r.action == "acknowledge_gate"),
+            "audit rows: {audit:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_approve_records_a_review_and_an_approval_audit_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_approve(&catalog, 13, Some("checked against the printed copy"))
+            .expect("approve");
+        let review = catalog
+            .review(13, BOOK_SCOPE)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
+        assert_eq!(review.reviewed_by, "human");
+        let book_root_id = PartitionIdx::new(13).root().get();
+        let audit = catalog
+            .metadata_audit_for_node(book_root_id)
+            .expect("audit");
+        assert!(
+            audit.iter().any(|r| r.action == "approve"),
+            "audit rows: {audit:?}"
+        );
+    }
+
+    #[test]
+    fn metadata_approve_without_a_reason_still_records_the_audit_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_approve(&catalog, 17, None).expect("approve");
+        let review = catalog
+            .review(17, BOOK_SCOPE)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
+        assert_eq!(review.notes, None);
+    }
+
+    #[test]
+    fn metadata_reject_records_a_review_and_a_reject_audit_row() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        run_metadata_reject(&catalog, 19, "wrong source file").expect("reject");
+        let review = catalog
+            .review(19, BOOK_SCOPE)
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_REJECTED);
+        assert_eq!(review.notes.as_deref(), Some("wrong source file"));
+        let book_root_id = PartitionIdx::new(19).root().get();
+        let audit = catalog
+            .metadata_audit_for_node(book_root_id)
+            .expect("audit");
+        assert!(
+            audit.iter().any(|r| r.action == "reject"),
             "audit rows: {audit:?}"
         );
     }

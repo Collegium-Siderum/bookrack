@@ -37,11 +37,18 @@ pub fn ingest(report: &IngestReport) {
 }
 
 /// Print the metadata audit report for one book as a human-readable
-/// listing, leading with the verdict and the rolled-up confidence and
-/// then one line per field.
-pub fn metadata_show(book: i64, report: &MetadataReport) {
+/// listing, leading with the human/LLM review status and the audit's
+/// own plausibility verdict, then one line per field.
+///
+/// `review_status` is the value from `node_reviews.status` — `pending`
+/// until a human or LLM advances it — or `None` if the book has no
+/// review row at all. The audit verdict is kept on a separate line so
+/// the reader cannot mistake a `clean` audit for an `approved` review.
+pub fn metadata_show(book: i64, report: &MetadataReport, review_status: Option<&str>) {
+    let status = review_status.unwrap_or("(no review row)");
+    println!("Book {book}: review status {status}");
     println!(
-        "Book {book}: audit verdict {} (confidence {})",
+        "  audit verdict {} (confidence {})",
         report.verdict.as_token(),
         report.confidence.as_str()
     );
@@ -70,10 +77,12 @@ pub fn metadata_show(book: i64, report: &MetadataReport) {
 
 /// Print the same report as a single-line JSON object. Hand-emitted
 /// so the metadata crate stays free of a serde dependency.
-pub fn metadata_show_json(book: i64, report: &MetadataReport) {
+pub fn metadata_show_json(book: i64, report: &MetadataReport, review_status: Option<&str>) {
     let mut out = String::new();
     out.push('{');
-    write_string_field(&mut out, "verdict", report.verdict.as_token());
+    write_string_field(&mut out, "review_status", review_status.unwrap_or(""));
+    out.push(',');
+    write_string_field(&mut out, "audit_verdict", report.verdict.as_token());
     out.push(',');
     write_string_field(&mut out, "confidence", report.confidence.as_str());
     out.push(',');
