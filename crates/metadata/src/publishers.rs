@@ -189,6 +189,7 @@ const WHITELIST_SEED: &[&str] = &[
     "Princeton University Press",
     "Yale University Press",
     "Stanford University Press",
+    "University of Chicago Press",
     "MIT Press",
     "Penguin Random House",
     "Penguin Books",
@@ -199,6 +200,32 @@ const WHITELIST_SEED: &[&str] = &[
     "Elsevier",
     "Routledge",
     "Bloomsbury",
+    "Bloomsbury Academic",
+    "Faber and Faber",
+    "Standard Ebooks",
+    "Crossway",
+    "Eerdmans",
+    "IVP Academic",
+    // CJK imprints. Source bytes stay ASCII via `\u{...}` escapes.
+    // "shang wu yin shu guan" (Commercial Press).
+    "\u{5546}\u{52A1}\u{5370}\u{4E66}\u{9986}",
+    // "san lian shu dian" (SDX Joint Publishing).
+    "\u{4E09}\u{8054}\u{4E66}\u{5E97}",
+    // "bei jing da xue chu ban she" (Peking University Press).
+    "\u{5317}\u{4EAC}\u{5927}\u{5B66}\u{51FA}\u{7248}\u{793E}",
+    // "zhong xin chu ban she" (CITIC Press).
+    "\u{4E2D}\u{4FE1}\u{51FA}\u{7248}\u{793E}",
+    // "shang hai gu ji chu ban she" (Shanghai Ancient Books Press).
+    "\u{4E0A}\u{6D77}\u{53E4}\u{7C4D}\u{51FA}\u{7248}\u{793E}",
+    // "jiang su ren min chu ban she" (Jiangsu People's Press).
+    "\u{6C5F}\u{82CF}\u{4EBA}\u{6C11}\u{51FA}\u{7248}\u{793E}",
+    "KADOKAWA",
+    // "kabushiki kaisha KADOKAWA" — the corporate-style imprint string.
+    "\u{682A}\u{5F0F}\u{4F1A}\u{793E}KADOKAWA",
+    // "Kodansha" in traditional form.
+    "\u{8B1B}\u{8AC7}\u{793E}",
+    // "Iwanami Shoten".
+    "\u{5CA9}\u{6CE2}\u{66F8}\u{5E97}",
 ];
 
 #[cfg(test)]
@@ -257,6 +284,22 @@ mod tests {
         // "sao miao zhi zuo" — "scanned and produced by".
         let value = "\u{626B}\u{63CF}\u{5236}\u{4F5C}";
         assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn cjk_imprint_matches_whitelist() {
+        // "shang wu yin shu guan" — Commercial Press.
+        let value = "\u{5546}\u{52A1}\u{5370}\u{4E66}\u{9986}";
+        assert_eq!(evaluate(value), PublisherVerdict::Whitelisted);
+    }
+
+    #[test]
+    fn corporate_prefixed_jp_imprint_matches_whitelist() {
+        // "kabushiki kaisha KADOKAWA" — corporate-prefixed form.
+        let value = "\u{682A}\u{5F0F}\u{4F1A}\u{793E}KADOKAWA";
+        assert_eq!(evaluate(value), PublisherVerdict::Whitelisted);
+        // Bare "KADOKAWA" still matches its own seed.
+        assert_eq!(evaluate("KADOKAWA"), PublisherVerdict::Whitelisted);
     }
 
     #[test]
