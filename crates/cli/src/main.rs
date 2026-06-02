@@ -201,7 +201,7 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
 /// `cfg.audit_rules_dir()`. A missing directory or malformed file is
 /// logged and yields an empty set; the audit then treats every value
 /// as neutral.
-fn load_audit_rules(cfg: &Config) -> AuditRules {
+pub(crate) fn load_audit_rules(cfg: &Config) -> AuditRules {
     match AuditRules::load_from(&cfg.audit_rules_dir()) {
         Ok(rules) => rules,
         Err(e) => {

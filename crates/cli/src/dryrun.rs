@@ -44,6 +44,7 @@ pub fn run(
 
     let params = DryrunParams {
         skip_chunks: no_chunk,
+        audit_rules: crate::load_audit_rules(cfg),
         ..Default::default()
     };
 
