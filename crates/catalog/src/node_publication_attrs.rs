@@ -31,10 +31,14 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("series_number"),
         ColumnSpec::text("edition"),
         ColumnSpec::text("language"),
+        ColumnSpec::text("pub_place")
+            .comment("city of publication; the GB/T 7714 and Chicago bibliography styles need it"),
         ColumnSpec::text("original_title")
             .comment("pre-FRBR stopgap: a translation's original-language title"),
         ColumnSpec::text("original_language")
             .comment("pre-FRBR stopgap: the work's original language"),
+        ColumnSpec::text("original_year")
+            .comment("pre-FRBR stopgap: a translation's original-language publication year"),
         ColumnSpec::text("source_format"),
         ColumnSpec::text("source").comment("ocr_marker / extracted / web"),
         ColumnSpec::text("confidence").comment("high / medium / low"),
@@ -50,11 +54,12 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 /// address `(intake_id, scope)`.
 const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
      (intake_id, scope, title, subtitle, publisher, year, publication_date, isbn, series, \
-      series_number, edition, language, original_title, original_language, \
-      source_format, source, confidence, enriched_by) \
+      series_number, edition, language, pub_place, original_title, original_language, \
+      original_year, source_format, source, confidence, enriched_by) \
      VALUES (:intake_id, :scope, :title, :subtitle, :publisher, :year, :publication_date, \
-             :isbn, :series, :series_number, :edition, :language, :original_title, \
-             :original_language, :source_format, :source, :confidence, :enriched_by) \
+             :isbn, :series, :series_number, :edition, :language, :pub_place, \
+             :original_title, :original_language, :original_year, :source_format, :source, \
+             :confidence, :enriched_by) \
      ON CONFLICT(intake_id, scope) DO UPDATE SET \
        title = excluded.title, \
        subtitle = excluded.subtitle, \
@@ -66,8 +71,10 @@ const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
        series_number = excluded.series_number, \
        edition = excluded.edition, \
        language = excluded.language, \
+       pub_place = excluded.pub_place, \
        original_title = excluded.original_title, \
        original_language = excluded.original_language, \
+       original_year = excluded.original_year, \
        source_format = excluded.source_format, \
        source = excluded.source, \
        confidence = excluded.confidence, \
@@ -111,10 +118,14 @@ pub struct PublicationAttrs {
     pub edition: Option<String>,
     /// Language of this manifestation.
     pub language: Option<String>,
+    /// City of publication. Required by GB/T 7714 / Chicago bibliography styles.
+    pub pub_place: Option<String>,
     /// A translation's original-language title — a pre-FRBR stopgap.
     pub original_title: Option<String>,
     /// The work's original language — a pre-FRBR stopgap.
     pub original_language: Option<String>,
+    /// A translation's original-language publication year — a pre-FRBR stopgap.
+    pub original_year: Option<String>,
     /// Format of the source the attributes were drawn from.
     pub source_format: Option<String>,
     /// Where the attributes came from (`ocr_marker` / `extracted` / `web`).
@@ -142,8 +153,10 @@ impl PublicationAttrs {
             series_number: row.get("series_number")?,
             edition: row.get("edition")?,
             language: row.get("language")?,
+            pub_place: row.get("pub_place")?,
             original_title: row.get("original_title")?,
             original_language: row.get("original_language")?,
+            original_year: row.get("original_year")?,
             source_format: row.get("source_format")?,
             source: row.get("source")?,
             confidence: row.get("confidence")?,
@@ -184,10 +197,14 @@ pub struct NewPublicationAttrs {
     pub edition: Option<String>,
     /// Language of this manifestation.
     pub language: Option<String>,
+    /// City of publication.
+    pub pub_place: Option<String>,
     /// A translation's original-language title.
     pub original_title: Option<String>,
     /// The work's original language.
     pub original_language: Option<String>,
+    /// A translation's original-language publication year.
+    pub original_year: Option<String>,
     /// Format of the source.
     pub source_format: Option<String>,
     /// Where the attributes came from.
@@ -215,8 +232,10 @@ impl NewPublicationAttrs {
             series_number: None,
             edition: None,
             language: None,
+            pub_place: None,
             original_title: None,
             original_language: None,
+            original_year: None,
             source_format: None,
             source: None,
             confidence: None,
@@ -243,8 +262,10 @@ impl Catalog {
                 ":series_number": new.series_number,
                 ":edition": new.edition,
                 ":language": new.language,
+                ":pub_place": new.pub_place,
                 ":original_title": new.original_title,
                 ":original_language": new.original_language,
+                ":original_year": new.original_year,
                 ":source_format": new.source_format,
                 ":source": new.source,
                 ":confidence": new.confidence,
@@ -296,8 +317,10 @@ mod tests {
             series_number: Some("3".into()),
             edition: Some("2nd".into()),
             language: Some("en".into()),
+            pub_place: Some("New York".into()),
             original_title: Some("Original Title".into()),
             original_language: Some("fr".into()),
+            original_year: Some("1962".into()),
             source_format: Some("epub".into()),
             source: Some("extracted".into()),
             confidence: Some("high".into()),
@@ -328,8 +351,10 @@ mod tests {
         assert_eq!(read.series_number.as_deref(), Some("3"));
         assert_eq!(read.edition.as_deref(), Some("2nd"));
         assert_eq!(read.language.as_deref(), Some("en"));
+        assert_eq!(read.pub_place.as_deref(), Some("New York"));
         assert_eq!(read.original_title.as_deref(), Some("Original Title"));
         assert_eq!(read.original_language.as_deref(), Some("fr"));
+        assert_eq!(read.original_year.as_deref(), Some("1962"));
         assert_eq!(read.source_format.as_deref(), Some("epub"));
         assert_eq!(read.source.as_deref(), Some("extracted"));
         assert_eq!(read.confidence.as_deref(), Some("high"));

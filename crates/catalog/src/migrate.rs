@@ -22,7 +22,7 @@ use rusqlite_migration::{M, Migrations};
 /// The `user_version` a fully-migrated `catalog.db` carries: the number of
 /// migrations defined. The `catalog_meta.schema_version` mirror is kept
 /// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 3;
+pub(crate) const TARGET_VERSION: i64 = 4;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -390,6 +390,20 @@ DROP TABLE node_reviews;
 ALTER TABLE node_reviews_new RENAME TO node_reviews;
 "#;
 
+// `M[3]` — add two columns to `node_publication_attrs`:
+//
+//   * `pub_place`: city of publication, required by the GB/T 7714 and
+//     Chicago bibliography styles.
+//   * `original_year`: a translation's original-language publication
+//     year, a pre-FRBR stopgap matching the existing `original_title` /
+//     `original_language` columns.
+//
+// Pure additive: SQLite's `ALTER TABLE ... ADD COLUMN` is O(1) and
+// leaves existing rows with NULL in the new columns.
+const PUB_PLACE_ORIGINAL_YEAR_DDL: &str = "\
+ALTER TABLE node_publication_attrs ADD COLUMN pub_place TEXT;\n\
+ALTER TABLE node_publication_attrs ADD COLUMN original_year TEXT;\n";
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -397,6 +411,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(BASELINE_DDL),
         M::up(CONTRIBUTOR_INDEX_DDL),
         M::up(NODE_ADDR_DDL),
+        M::up(PUB_PLACE_ORIGINAL_YEAR_DDL),
     ])
 }
 
@@ -450,6 +465,21 @@ mod tests {
         )
         .expect("query index")
             > 0
+    }
+
+    #[test]
+    fn migration_m3_adds_pub_place_and_original_year_to_publication_attrs() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations().to_latest(&mut conn).expect("apply");
+        let cols = columns_of(&conn, "node_publication_attrs");
+        assert!(
+            cols.iter().any(|c| c == "pub_place"),
+            "expected pub_place column, got {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c == "original_year"),
+            "expected original_year column, got {cols:?}"
+        );
     }
 
     #[test]
