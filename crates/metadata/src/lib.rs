@@ -17,10 +17,12 @@
 //! never performs network I/O. Callers feed it inputs and persist
 //! its output as they see fit.
 
+mod filename;
 mod publishers;
 mod report;
 mod signals;
 
+pub use filename::{FilenameBiblio, parse as parse_filename};
 pub use report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
 };

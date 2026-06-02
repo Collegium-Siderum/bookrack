@@ -553,7 +553,7 @@ fn is_cjk(ch: char) -> bool {
 
 /// Validate an ISBN-10 or ISBN-13 by checksum. Hyphens and spaces are
 /// stripped first; any other character invalidates the value.
-fn is_valid_isbn(value: &str) -> bool {
+pub(crate) fn is_valid_isbn(value: &str) -> bool {
     let digits: Vec<char> = value
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')
