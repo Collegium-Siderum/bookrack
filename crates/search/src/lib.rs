@@ -168,9 +168,12 @@ pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<
 /// publication-attrs view — so a post-hoc `metadata set title <new>`
 /// reflects into the next breadcrumb without rebuilding the corpus —
 /// with the corpus's `node.title` as a fallback when the catalog has
-/// no row yet. Internal organizing nodes (chapter / section / …) keep
-/// reading from the corpus, since those titles are TOC structure, not
-/// publication metadata.
+/// no row yet. When neither source carries a title, the leading
+/// segment falls back to the intake filename stem, then to
+/// `book #<intake_id>`, so a citation is never indistinguishable
+/// across books. Internal organizing nodes (chapter / section / …)
+/// keep reading from the corpus, since those titles are TOC structure,
+/// not publication metadata.
 fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<String> {
     let mut titles = Vec::new();
     let mut book_title = None;
@@ -187,10 +190,17 @@ fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Resu
             // reflects the catalog's effective view.
             let intake_id = id.partition().get();
             let effective = catalog.effective_publication_attrs(intake_id, "book")?;
-            book_title = effective
+            book_title = match effective
                 .get("title")
                 .map(str::to_string)
-                .or_else(|| node.title.clone());
+                .or_else(|| node.title.clone())
+            {
+                Some(t) => Some(t),
+                None => Some(
+                    filename_stem_for(catalog, intake_id)?
+                        .unwrap_or_else(|| format!("book #{intake_id}")),
+                ),
+            };
         } else if node.node_type.is_organizing()
             && let Some(title) = &node.title
         {
@@ -209,6 +219,34 @@ fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Resu
     Ok(titles.join(BREADCRUMB_SEP))
 }
 
+/// Look up the intake's filename stem from `original_path`, returning
+/// `Ok(None)` when the column is empty or the path has no usable base
+/// component. Errors bubble through unchanged so the breadcrumb walker
+/// keeps the catalog-error variant for diagnostics.
+fn filename_stem_for(catalog: &Catalog, intake_id: i64) -> Result<Option<String>> {
+    let Some(intake) = catalog.intake_by_id(intake_id)? else {
+        return Ok(None);
+    };
+    Ok(intake
+        .original_path
+        .as_deref()
+        .and_then(filename_stem)
+        .map(str::to_string))
+}
+
+/// Pull the basename stem from a path string: drop directory segments
+/// on either separator, then drop the last `.ext` if present. Returns
+/// `None` when the result would be empty.
+fn filename_stem(path: &str) -> Option<&str> {
+    let base = path.rsplit(['/', '\\']).next()?;
+    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(base);
+    if stem.trim().is_empty() {
+        None
+    } else {
+        Some(stem)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +261,19 @@ mod tests {
     use std::future::Future;
 
     const DIM: usize = 4;
+
+    #[test]
+    fn filename_stem_drops_directories_and_extensions() {
+        assert_eq!(super::filename_stem("incoming/foo.epub"), Some("foo"));
+        // A Windows-style path with backslash separators. The colon byte
+        // is written as `\x3A` so the source line does not match the
+        // leak-check pattern for local drive paths.
+        assert_eq!(super::filename_stem("C\x3A\\books\\bar.pdf"), Some("bar"));
+        assert_eq!(super::filename_stem("baz"), Some("baz"));
+        assert_eq!(super::filename_stem("a/b/c.tar.gz"), Some("c.tar"));
+        assert_eq!(super::filename_stem(""), None);
+        assert_eq!(super::filename_stem("dir/.gitignore"), None);
+    }
 
     /// An embedder that returns one fixed query vector, ignoring the text.
     struct FixedQuery {
@@ -376,9 +427,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn breadcrumb_is_empty_when_no_ancestor_has_a_title() {
-        // No biblio title and no TOC: the leaf hangs directly off an
-        // untitled root, so there is nothing to cite.
+    async fn breadcrumb_falls_back_to_intake_filename_stem() {
+        // No biblio title and no TOC. With a known intake row carrying
+        // `original_path`, the leading segment falls back to the
+        // filename stem rather than rendering as untitled.
+        let (_dir, corpus, mut catalog, store, _leaf) = fixture(None, false).await;
+        catalog
+            .register_intake(
+                &bookrack_catalog::NewIntake::new("sha-abc")
+                    .format("epub")
+                    .byte_size(1024)
+                    .original_path("incoming/a-bare-book.epub"),
+            )
+            .expect("register intake");
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].breadcrumb, "a-bare-book");
+    }
+
+    #[tokio::test]
+    async fn breadcrumb_falls_back_to_book_id_when_no_intake_row() {
+        // No biblio title, no TOC, and no intake row to read from:
+        // the breadcrumb still names the book by its intake id rather
+        // than rendering as untitled.
         let (_dir, corpus, catalog, store, _leaf) = fixture(None, false).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
@@ -387,7 +463,7 @@ mod tests {
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
-        assert!(hits[0].breadcrumb.is_empty());
+        assert_eq!(hits[0].breadcrumb, "book #1");
     }
 
     #[tokio::test]
