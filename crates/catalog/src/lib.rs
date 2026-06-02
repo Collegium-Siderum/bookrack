@@ -51,7 +51,9 @@ pub use node_categories::{NewCategory, NodeCategory};
 pub use node_contributors::{NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
-pub use node_reviews::{NewReview, NodeReview};
+pub use node_reviews::{
+    NewReview, NodeReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED,
+};
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};

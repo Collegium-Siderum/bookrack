@@ -414,10 +414,11 @@ pub async fn ingest_book<E: Embedder>(
 
     // METADATA (non-blocking): seed the publication-attrs base from the
     // extracted biblio, run the deterministic audit over the resulting
-    // effective record, and persist the verdict as an advisory
-    // node_reviews row. The audit never gates the pipeline: a book
-    // whose required fields are missing still chunks and embeds, with
-    // `status="needs_work"` carried as a flag for a later edit pass.
+    // effective record, and persist a `pending` review row plus the
+    // confidence rollup. The audit never gates the pipeline and never
+    // marks a record reviewed: it only assesses how plausible the
+    // metadata looks. A human or LLM must `metadata approve`,
+    // `metadata ack`, or `metadata reject` to advance status.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
     let filename_biblio = source_stem.map(bookrack_metadata::parse_filename);
     let verdict = run_metadata_substep(
@@ -753,12 +754,16 @@ fn run_metadata_substep(
     };
     let metric = audit_metric_summary(&report);
 
+    // Review status reflects human/LLM confirmation, never the audit.
+    // The audit's plausibility verdict travels in the notes column for
+    // forensic context and through the `book_pipeline_audit` row below;
+    // status itself stays at `pending` until a human or LLM advances it.
     if let Err(e) = catalog.upsert_review(
         &NewReview::new(
             intake_id,
             BOOK_SCOPE,
             "pipeline",
-            report.verdict.as_status(),
+            bookrack_catalog::STATUS_PENDING,
         )
         .notes(report_notes(&report)),
     ) {
@@ -766,7 +771,7 @@ fn run_metadata_substep(
     }
 
     tracing::info!(
-        verdict = report.verdict.as_status(),
+        verdict = report.verdict.as_token(),
         confidence = report.confidence.as_str(),
         "metadata audit complete"
     );
@@ -888,15 +893,17 @@ fn audit_metric_summary(report: &bookrack_metadata::MetadataReport) -> String {
     let flagged = report.fields.iter().filter(|f| !f.flags.is_empty()).count();
     format!(
         r#"{{"verdict":"{}","confidence":"{}","fields":{},"flagged":{}}}"#,
-        report.verdict.as_status(),
+        report.verdict.as_token(),
         report.confidence.as_str(),
         report.fields.len(),
         flagged
     )
 }
 
-/// A human-facing, comma-separated list of the flagged fields, for
-/// the `node_reviews.notes` column.
+/// A human-facing note for the `node_reviews.notes` column. Carries the
+/// audit's plausibility verdict and a comma-separated list of any
+/// flagged fields, so a reviewer can see at a glance what the pipeline
+/// thought of the record without re-running the audit.
 fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
     let mut flagged: Vec<String> = report
         .fields
@@ -904,11 +911,12 @@ fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
         .filter(|f| !f.flags.is_empty())
         .map(|f| f.field.clone())
         .collect();
+    let verdict = report.verdict.as_token();
     if flagged.is_empty() {
-        return "all audited fields clean".to_string();
+        return format!("audit verdict={verdict}, all audited fields clean");
     }
     flagged.sort();
-    format!("flagged: {}", flagged.join(", "))
+    format!("audit verdict={verdict}, flagged: {}", flagged.join(", "))
 }
 
 /// Upsert a book's pipeline state, best-effort for the same reason as
@@ -1513,15 +1521,25 @@ mod book_pipeline_tests {
         let metric = embed.metric_summary.as_deref().unwrap_or_default();
         assert!(metric.contains("\"batches\""), "metric: {metric}");
 
-        // The advisory node_reviews row carries `needs_work` for the
-        // bare-text book, but the intake is still `Embedded` — the
-        // audit never gates EMBED. The row-level confidence rolled
-        // back into node_publication_attrs records the same gap.
+        // The advisory node_reviews row is `pending` for every fresh
+        // ingest — the audit never grants approval. The bare-text book
+        // still embeds: the audit never gates EMBED. The row-level
+        // confidence rolled back into node_publication_attrs records the
+        // audit's gap; the notes column carries the verdict token.
         let review = catalog
             .review(report.intake_id, "book")
             .expect("review")
             .expect("present");
-        assert_eq!(review.status, "needs_work");
+        assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
+        assert!(
+            review
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("verdict=needs_work"),
+            "notes must carry the audit verdict for forensics: {:?}",
+            review.notes
+        );
         let intake = catalog
             .intake_by_id(report.intake_id)
             .expect("intake")
@@ -1535,11 +1553,12 @@ mod book_pipeline_tests {
     }
 
     #[tokio::test]
-    async fn a_book_with_complete_biblio_grades_clean() {
+    async fn a_complete_biblio_still_lands_as_pending_with_a_clean_audit_verdict() {
         // Drive `run_metadata_substep` directly on a synthetic extraction
-        // whose biblio carries the required fields: the audit must mark
-        // the node_reviews row `clean`, and the pipeline-audit row's
-        // outcome must read `ok`.
+        // whose biblio carries the required fields: the node_reviews row
+        // stays `pending` (the pipeline never grants review approval),
+        // but the audit's own verdict in the notes column reads `clean`
+        // and the pipeline-audit row's outcome reads `ok`.
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let extraction = bookrack_extract::Extraction {
             blocks: vec![bookrack_extract::Block {
@@ -1583,7 +1602,7 @@ mod book_pipeline_tests {
             .review(intake_id, "book")
             .expect("review")
             .expect("present");
-        assert_eq!(review.status, "clean");
+        assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
         let attrs = catalog
             .publication_attrs(intake_id, "book")
             .expect("attrs")

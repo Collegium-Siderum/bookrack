@@ -303,14 +303,14 @@ fn run_pipeline(
             intake_id,
             BOOK_SCOPE,
             "pipeline",
-            report.verdict.as_status(),
+            bookrack_catalog::STATUS_PENDING,
         )
         .notes(String::new()),
     );
 
     record.biblio = Some(biblio_out(&extraction.biblio));
     record.audit_fields = report_fields(&report);
-    record.verdict = Some(report.verdict.as_status().to_string());
+    record.verdict = Some(report.verdict.as_token().to_string());
     record.confidence = Some(report.confidence.as_str().to_string());
 
     // CHUNK — the last pre-vector step. Skipped on request.

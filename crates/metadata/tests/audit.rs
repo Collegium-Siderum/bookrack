@@ -551,9 +551,9 @@ fn copyright_blocks_are_the_leading_indices() {
 }
 
 #[test]
-fn verdict_status_strings_round_trip() {
-    assert_eq!(Verdict::Clean.as_status(), "clean");
-    assert_eq!(Verdict::NeedsWork.as_status(), "needs_work");
+fn verdict_tokens_and_confidence_strings_round_trip() {
+    assert_eq!(Verdict::Clean.as_token(), "clean");
+    assert_eq!(Verdict::NeedsWork.as_token(), "needs_work");
     assert_eq!(Confidence::High.as_str(), "high");
     assert_eq!(Confidence::Medium.as_str(), "medium");
     assert_eq!(Confidence::Low.as_str(), "low");

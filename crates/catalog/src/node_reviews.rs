@@ -2,22 +2,52 @@
 
 //! The `node_reviews` table — per-node review status.
 //!
-//! One row per reviewed node, recording the outcome of one review
-//! pass. The row is keyed by `(intake_id, scope)` and rewritten on
-//! each pass. There is no DDL CHECK on `status`; the column carries
-//! one of four tokens by convention:
+//! One row per reviewed node, keyed by `(intake_id, scope)` and rewritten
+//! on each pass.
 //!
-//! - `clean` — every required field is present and clean.
-//! - `needs_work` — at least one required field is missing or
-//!   flagged. Advisory; does not gate the pipeline.
-//! - `acknowledged` — the gap is known and was deliberately let
-//!   through (a human signed off via the metadata-ack flow).
-//! - `rejected` — a human-level book-wide reject.
+//! Status is **strictly a human/LLM judgement**. The audit's plausibility
+//! verdict lives elsewhere (`node_publication_attrs.confidence` and the
+//! per-field grades returned from [`bookrack_metadata::audit`]). The
+//! audit can flag a record as `low` confidence, but it can never declare
+//! the record reviewed: only a human or an LLM acting on a human's
+//! behalf can advance status away from [`STATUS_PENDING`]. Metadata
+//! correctness is irreducibly a human concern — no extractor or
+//! heuristic can promise it — so the table keeps the two axes apart.
+//!
+//! There is no DDL CHECK on `status`; the column carries one of four
+//! tokens by convention:
+//!
+//! - [`STATUS_PENDING`] `pending` — the pipeline inserts this on every
+//!   fresh ingest. It means "no human/LLM has confirmed this record".
+//! - [`STATUS_APPROVED`] `approved` — a human/LLM read the record and
+//!   confirmed the metadata is correct.
+//! - [`STATUS_ACKNOWLEDGED`] `acknowledged` — a human/LLM looked at an
+//!   audit-flagged gap and decided to let it through anyway (the
+//!   `metadata ack` flow).
+//! - [`STATUS_REJECTED`] `rejected` — a human/LLM rejected the book
+//!   outright.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
 
 use crate::{Catalog, Result};
+
+/// `node_reviews.status` value the pipeline writes after a fresh ingest.
+/// Means "no human or LLM has confirmed this record". The pipeline never
+/// writes any other value.
+pub const STATUS_PENDING: &str = "pending";
+
+/// `node_reviews.status` value a human or LLM writes when the metadata
+/// has been read and confirmed correct.
+pub const STATUS_APPROVED: &str = "approved";
+
+/// `node_reviews.status` value a human or LLM writes when an audit gap
+/// is known and deliberately let through (the `metadata ack` flow).
+pub const STATUS_ACKNOWLEDGED: &str = "acknowledged";
+
+/// `node_reviews.status` value a human or LLM writes when the book is
+/// rejected outright.
+pub const STATUS_REJECTED: &str = "rejected";
 
 /// The single source of truth for the `node_reviews` table's schema. Its
 /// DDL is rendered from this spec.
@@ -31,7 +61,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("reviewed_by").not_null(),
         ColumnSpec::text("status")
             .not_null()
-            .comment("clean / needs_work / acknowledged / rejected"),
+            .comment("pending / approved / acknowledged / rejected"),
         ColumnSpec::text("notes"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),
@@ -70,7 +100,8 @@ pub struct NodeReview {
     pub reviewed_at: String,
     /// Who made the review.
     pub reviewed_by: String,
-    /// The review outcome (`clean` / `needs_work` / `rejected`).
+    /// The review outcome (`pending` / `approved` / `acknowledged` /
+    /// `rejected`). See the module-level documentation.
     pub status: String,
     /// Free-form notes.
     pub notes: Option<String>,
@@ -167,7 +198,9 @@ mod tests {
     fn a_review_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", "needs_work").notes("check the TOC"))
+            .upsert_review(
+                &NewReview::new(1, SCOPE, "human", STATUS_ACKNOWLEDGED).notes("check the TOC"),
+            )
             .expect("write");
 
         let read = catalog.review(1, SCOPE).expect("read").expect("present");
@@ -175,7 +208,7 @@ mod tests {
         assert_eq!(read.scope, SCOPE);
         assert!(!read.reviewed_at.is_empty());
         assert_eq!(read.reviewed_by, "human");
-        assert_eq!(read.status, "needs_work");
+        assert_eq!(read.status, STATUS_ACKNOWLEDGED);
         assert_eq!(read.notes.as_deref(), Some("check the TOC"));
     }
 
@@ -189,12 +222,12 @@ mod tests {
     fn upsert_overwrites_a_previous_review() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", "needs_work"))
+            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_PENDING))
             .expect("first review");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", "clean"))
+            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_APPROVED))
             .expect("second review");
         let read = catalog.review(1, SCOPE).expect("read").expect("present");
-        assert_eq!(read.status, "clean");
+        assert_eq!(read.status, STATUS_APPROVED);
     }
 }

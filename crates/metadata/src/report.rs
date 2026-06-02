@@ -25,10 +25,20 @@ pub enum FieldGrade {
     Strong,
 }
 
-/// The aggregated audit verdict over the required fields.
+/// The audit's binary "did anything required-field fire?" summary.
+///
+/// **This is a plausibility check, not a review status.** `Clean` means
+/// the deterministic signals did not weaken any required field below
+/// medium; it does *not* mean the metadata is correct, and the pipeline
+/// never derives `node_reviews.status` from it. Review status is a
+/// strictly human/LLM concern handled in `bookrack-catalog`; this enum
+/// is the audit's own internal summary, used (for example) by
+/// `--hold-for-metadata` to decide whether to park a book before
+/// embedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// Every required field is at [`FieldGrade::Medium`] or better.
+    /// The record *looks* plausible — not verified.
     Clean,
     /// At least one required field is [`FieldGrade::Missing`] or
     /// [`FieldGrade::Weak`].
@@ -36,8 +46,9 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// The string token used in `node_reviews.status`.
-    pub fn as_status(self) -> &'static str {
+    /// A short token for the verdict, suitable for logs and audit notes.
+    /// **Not** a `node_reviews.status` value — see the enum docs.
+    pub fn as_token(self) -> &'static str {
         match self {
             Verdict::Clean => "clean",
             Verdict::NeedsWork => "needs_work",

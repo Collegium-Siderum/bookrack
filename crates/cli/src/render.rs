@@ -41,8 +41,8 @@ pub fn ingest(report: &IngestReport) {
 /// then one line per field.
 pub fn metadata_show(book: i64, report: &MetadataReport) {
     println!(
-        "Book {book}: verdict {} (confidence {})",
-        report.verdict.as_status(),
+        "Book {book}: audit verdict {} (confidence {})",
+        report.verdict.as_token(),
         report.confidence.as_str()
     );
     for field in &report.fields {
@@ -73,7 +73,7 @@ pub fn metadata_show(book: i64, report: &MetadataReport) {
 pub fn metadata_show_json(book: i64, report: &MetadataReport) {
     let mut out = String::new();
     out.push('{');
-    write_string_field(&mut out, "verdict", report.verdict.as_status());
+    write_string_field(&mut out, "verdict", report.verdict.as_token());
     out.push(',');
     write_string_field(&mut out, "confidence", report.confidence.as_str());
     out.push(',');
