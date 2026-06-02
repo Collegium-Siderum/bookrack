@@ -15,12 +15,18 @@
 //! drops any prior tree for the intake, making the operation idempotent.
 
 mod chunk;
+mod dryrun;
 mod embed_run;
 pub mod sentences;
 mod structure;
 
 pub use bookrack_corpus::IndexStamps;
 pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
+pub use dryrun::{
+    BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
+    SUPPORTED_EXTENSIONS, StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path,
+    summarize,
+};
 pub use embed_run::{EmbedRunReport, embed_book_chunks};
 
 use std::path::Path;
