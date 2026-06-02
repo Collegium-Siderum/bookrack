@@ -100,7 +100,7 @@ fn year_came_from_raw_biblio(input: &AuditInput, effective_text: &str) -> bool {
 /// True when a date string carries a time component, the canonical
 /// shape EPUBs use for build/export timestamps rather than publication
 /// dates (`2011-09-29T16:00:00+00:00`, or any value containing `:`).
-fn looks_like_timestamp(raw: &str) -> bool {
+pub fn looks_like_timestamp(raw: &str) -> bool {
     raw.contains('T') || raw.contains(':')
 }
 
@@ -639,7 +639,7 @@ fn is_cjk(ch: char) -> bool {
 
 /// Validate an ISBN-10 or ISBN-13 by checksum. Hyphens and spaces are
 /// stripped first; any other character invalidates the value.
-pub(crate) fn is_valid_isbn(value: &str) -> bool {
+pub fn is_valid_isbn(value: &str) -> bool {
     let digits: Vec<char> = value
         .chars()
         .filter(|c| !c.is_whitespace() && *c != '-')

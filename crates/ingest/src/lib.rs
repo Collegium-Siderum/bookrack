@@ -829,6 +829,8 @@ fn build_base_attrs(
     attrs.isbn = biblio.isbn.clone();
     attrs.series = biblio.series.clone();
     attrs.language = biblio.language.clone();
+    drop_invalid_extracted_isbn(&mut attrs.isbn);
+    drop_stale_extracted_year(&mut attrs.year, biblio.year_raw.as_deref(), filename_biblio);
     let extracted_any = attrs.title.is_some()
         || attrs.subtitle.is_some()
         || attrs.publisher.is_some()
@@ -863,6 +865,49 @@ fn build_base_attrs(
     });
     attrs.source_format = Some(extraction.provenance.adapter.clone());
     attrs
+}
+
+/// Drop an extracted ISBN whose checksum does not validate. The most
+/// common shape this filter targets is the ten-digit purely numeric
+/// fallback identifier some EPUB toolchains stamp into `<dc:identifier>`
+/// when no real ISBN exists; leaving it in place blocks a valid
+/// filename-derived ISBN from filling the slot.
+fn drop_invalid_extracted_isbn(slot: &mut Option<String>) {
+    if let Some(value) = slot.as_deref()
+        && !bookrack_metadata::is_valid_isbn(value)
+    {
+        *slot = None;
+    }
+}
+
+/// Drop an extracted year when the raw date string is in timestamp
+/// shape (`YYYY-MM-DDThh:mm:ss...`) and the filename parser yields a
+/// different year. The timestamp shape is the canonical EPUB build /
+/// export-date sentinel, so when filename and `<dc:date>` disagree the
+/// filename year is the more conservative pick.
+fn drop_stale_extracted_year(
+    slot: &mut Option<String>,
+    year_raw: Option<&str>,
+    filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+) {
+    let Some(current) = slot.as_deref() else {
+        return;
+    };
+    let Some(raw) = year_raw else {
+        return;
+    };
+    if !bookrack_metadata::looks_like_timestamp(raw) {
+        return;
+    }
+    let Some(filename) = filename_biblio else {
+        return;
+    };
+    let Some(filename_year) = filename.year.as_deref() else {
+        return;
+    };
+    if filename_year != current {
+        *slot = None;
+    }
 }
 
 /// Copy `incoming` into `slot` only when `slot` is currently `None`.
@@ -1731,6 +1776,170 @@ mod book_pipeline_tests {
         assert_eq!(attrs.publisher.as_deref(), Some("Sample Press"));
         assert_eq!(attrs.year.as_deref(), Some("2003"));
         assert_eq!(attrs.source.as_deref(), Some("extracted"));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_extracted_isbn_yields_to_a_filename_isbn() {
+        // The adapter reads a ten-digit purely numeric value (the shape
+        // some EPUB toolchains stamp into `<dc:identifier>` when no real
+        // ISBN exists). The filename carries a real, checksum-valid
+        // ISBN-13. The base attrs drop the invalid extraction and let
+        // the filename ISBN take over.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("Extracted Title".to_string()),
+                isbn: Some("1742443234".to_string()),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        let stem = "Alice Author - A Sample Title -- isbn13 9780306406157";
+        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some(stem),
+            Some(&filename_biblio),
+            &bookrack_metadata::AuditRules::empty(),
+            "run-1",
+            "dummy-sha",
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.isbn.as_deref(), Some("9780306406157"));
+        assert_eq!(attrs.source.as_deref(), Some("extracted"));
+    }
+
+    #[tokio::test]
+    async fn an_extracted_timestamp_year_yields_to_a_disagreeing_filename_year() {
+        // The adapter parses a `<dc:date>` of `2019-04-01T00:00:00Z` —
+        // timestamp shape, often the EPUB build date rather than the
+        // publication year. The filename carries `(2006, ...)`. Since
+        // the two disagree and the extraction's raw date is in timestamp
+        // shape, the filename year wins.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("Extracted Title".to_string()),
+                year: Some(2019),
+                year_raw: Some("2019-04-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        let stem = "Alice Author - A Sample Title (2006, Sample Press)";
+        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some(stem),
+            Some(&filename_biblio),
+            &bookrack_metadata::AuditRules::empty(),
+            "run-1",
+            "dummy-sha",
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.year.as_deref(), Some("2006"));
+        assert_eq!(attrs.source.as_deref(), Some("extracted"));
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_year_matching_the_filename_year_is_kept() {
+        // Same timestamp shape, but the filename agrees on `2019`. The
+        // extracted year is retained — the filter fires only on a
+        // disagreement.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("Extracted Title".to_string()),
+                year: Some(2019),
+                year_raw: Some("2019-04-01T00:00:00Z".to_string()),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        let stem = "Alice Author - A Sample Title (2019, Sample Press)";
+        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some(stem),
+            Some(&filename_biblio),
+            &bookrack_metadata::AuditRules::empty(),
+            "run-1",
+            "dummy-sha",
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        assert_eq!(attrs.year.as_deref(), Some("2019"));
     }
 
     #[tokio::test]
