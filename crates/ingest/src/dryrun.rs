@@ -86,6 +86,14 @@ pub struct DryrunBookReport {
     /// matched; otherwise carries the parsed fields, any of which may be
     /// `None` on their own.
     pub filename_biblio: Option<FilenameBiblioOut>,
+    /// The base-layer attributes [`build_base_attrs`] assembled from the
+    /// extraction and the filename fallback, just before they are
+    /// written to `node_publication_attrs`.
+    pub base_attrs: Option<BaseAttrsOut>,
+    /// Program-level overrides applied while assembling the base
+    /// attrs — `drop_invalid_isbn`, `drop_stale_year`, and per-field
+    /// `filename_fallback:<field>`. Empty when nothing was touched.
+    pub base_attrs_actions: Vec<String>,
     /// Per-field grades and flags from the metadata audit.
     pub audit_fields: Vec<FieldOut>,
     /// Aggregated audit verdict (`clean` / `needs_work`).
@@ -142,6 +150,48 @@ pub struct FilenameBiblioOut {
     pub publisher: Option<String>,
     pub isbn: Option<String>,
     pub series: Option<String>,
+}
+
+/// The base-layer attributes the dryrun would have written to
+/// `node_publication_attrs`, surfaced for visibility into how the
+/// extracted biblio plus the filename fallback combined.
+#[derive(Debug, Clone, Serialize)]
+pub struct BaseAttrsOut {
+    pub title: Option<String>,
+    pub subtitle: Option<String>,
+    pub publisher: Option<String>,
+    pub year: Option<String>,
+    pub publication_date: Option<String>,
+    pub isbn: Option<String>,
+    pub series: Option<String>,
+    pub series_number: Option<String>,
+    pub edition: Option<String>,
+    pub language: Option<String>,
+    pub original_title: Option<String>,
+    pub original_language: Option<String>,
+    pub source_format: Option<String>,
+    pub source: Option<String>,
+}
+
+impl From<&bookrack_catalog::NewPublicationAttrs> for BaseAttrsOut {
+    fn from(a: &bookrack_catalog::NewPublicationAttrs) -> BaseAttrsOut {
+        BaseAttrsOut {
+            title: a.title.clone(),
+            subtitle: a.subtitle.clone(),
+            publisher: a.publisher.clone(),
+            year: a.year.clone(),
+            publication_date: a.publication_date.clone(),
+            isbn: a.isbn.clone(),
+            series: a.series.clone(),
+            series_number: a.series_number.clone(),
+            edition: a.edition.clone(),
+            language: a.language.clone(),
+            original_title: a.original_title.clone(),
+            original_language: a.original_language.clone(),
+            source_format: a.source_format.clone(),
+            source: a.source.clone(),
+        }
+    }
 }
 
 impl From<&FilenameBiblio> for FilenameBiblioOut {
@@ -220,6 +270,8 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         filename_template: None,
         biblio: None,
         filename_biblio: None,
+        base_attrs: None,
+        base_attrs_actions: vec![],
         audit_fields: vec![],
         verdict: None,
         confidence: None,
@@ -319,8 +371,11 @@ fn run_pipeline(
         .filename_template
         .is_some()
         .then(|| FilenameBiblioOut::from(&filename_biblio));
-    let mut attrs = build_base_attrs(intake_id, extraction, Some(&filename_biblio));
+    let outcome = build_base_attrs(intake_id, extraction, Some(&filename_biblio));
+    let mut attrs = outcome.attrs;
     record.source_tag = attrs.source.clone();
+    record.base_attrs = Some(BaseAttrsOut::from(&attrs));
+    record.base_attrs_actions = outcome.actions.iter().map(|a| a.token()).collect();
     catalog.upsert_publication_attrs(&attrs)?;
     let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
     let body = body_sample(extraction);

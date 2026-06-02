@@ -696,7 +696,8 @@ fn run_metadata_substep(
 ) -> Option<bookrack_metadata::Verdict> {
     let started = std::time::Instant::now();
 
-    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio);
+    // Real ingest discards the action trail; only the dryrun consumes it.
+    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio).attrs;
     if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
         tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
         audit(
@@ -819,9 +820,10 @@ fn build_base_attrs(
     intake_id: i64,
     extraction: &Extraction,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
-) -> NewPublicationAttrs {
+) -> BaseAttrsOutcome {
     let biblio = &extraction.biblio;
     let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+    let mut actions: Vec<BaseAttrsAction> = Vec::new();
     attrs.title = biblio.title.clone();
     attrs.subtitle = biblio.subtitle.clone();
     attrs.publisher = biblio.publisher.clone();
@@ -829,8 +831,13 @@ fn build_base_attrs(
     attrs.isbn = biblio.isbn.clone();
     attrs.series = biblio.series.clone();
     attrs.language = biblio.language.clone();
-    drop_invalid_extracted_isbn(&mut attrs.isbn);
-    drop_stale_extracted_year(&mut attrs.year, biblio.year_raw.as_deref(), filename_biblio);
+    drop_invalid_extracted_isbn(&mut attrs.isbn, &mut actions);
+    drop_stale_extracted_year(
+        &mut attrs.year,
+        biblio.year_raw.as_deref(),
+        filename_biblio,
+        &mut actions,
+    );
     let extracted_any = attrs.title.is_some()
         || attrs.subtitle.is_some()
         || attrs.publisher.is_some()
@@ -841,21 +848,39 @@ fn build_base_attrs(
     let mut filename_filled_any = false;
     if let Some(fb) = filename_biblio {
         merge_from_filename(
+            "title",
             &mut attrs.title,
             fb.title.as_ref(),
             &mut filename_filled_any,
+            &mut actions,
         );
         merge_from_filename(
+            "publisher",
             &mut attrs.publisher,
             fb.publisher.as_ref(),
             &mut filename_filled_any,
+            &mut actions,
         );
-        merge_from_filename(&mut attrs.year, fb.year.as_ref(), &mut filename_filled_any);
-        merge_from_filename(&mut attrs.isbn, fb.isbn.as_ref(), &mut filename_filled_any);
         merge_from_filename(
+            "year",
+            &mut attrs.year,
+            fb.year.as_ref(),
+            &mut filename_filled_any,
+            &mut actions,
+        );
+        merge_from_filename(
+            "isbn",
+            &mut attrs.isbn,
+            fb.isbn.as_ref(),
+            &mut filename_filled_any,
+            &mut actions,
+        );
+        merge_from_filename(
+            "series",
             &mut attrs.series,
             fb.series.as_ref(),
             &mut filename_filled_any,
+            &mut actions,
         );
     }
     attrs.source = Some(if extracted_any || !filename_filled_any {
@@ -864,7 +889,44 @@ fn build_base_attrs(
         "filename".to_string()
     });
     attrs.source_format = Some(extraction.provenance.adapter.clone());
-    attrs
+    BaseAttrsOutcome { attrs, actions }
+}
+
+/// The bundle [`build_base_attrs`] returns: the row that goes to
+/// `node_publication_attrs`, plus the trail of program-level overrides
+/// applied while assembling it. The real ingest path discards `actions`;
+/// the dryrun surfaces them so a JSONL consumer can see which fields
+/// were touched by which filter.
+pub(crate) struct BaseAttrsOutcome {
+    pub attrs: NewPublicationAttrs,
+    pub actions: Vec<BaseAttrsAction>,
+}
+
+/// A program-level override applied during base-attrs construction —
+/// distinct from the audit's per-field flags, which judge plausibility
+/// of the surviving values rather than describing how they got there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BaseAttrsAction {
+    /// `drop_invalid_extracted_isbn` rejected the adapter's ISBN.
+    DropInvalidIsbn,
+    /// `drop_stale_extracted_year` rejected the adapter's year as a
+    /// timestamp-shape build date.
+    DropStaleYear,
+    /// `merge_from_filename` filled an adapter-empty field from the
+    /// filename parser. The static string is the field name.
+    FilenameFallback(&'static str),
+}
+
+impl BaseAttrsAction {
+    /// A stable, filename-safe token suitable as a histogram key in
+    /// `DryrunSummary.base_attrs_action_counts`.
+    pub(crate) fn token(&self) -> String {
+        match self {
+            Self::DropInvalidIsbn => "drop_invalid_isbn".to_string(),
+            Self::DropStaleYear => "drop_stale_year".to_string(),
+            Self::FilenameFallback(field) => format!("filename_fallback:{field}"),
+        }
+    }
 }
 
 /// Drop an extracted ISBN whose checksum does not validate. The most
@@ -872,11 +934,12 @@ fn build_base_attrs(
 /// fallback identifier some EPUB toolchains stamp into `<dc:identifier>`
 /// when no real ISBN exists; leaving it in place blocks a valid
 /// filename-derived ISBN from filling the slot.
-fn drop_invalid_extracted_isbn(slot: &mut Option<String>) {
+fn drop_invalid_extracted_isbn(slot: &mut Option<String>, actions: &mut Vec<BaseAttrsAction>) {
     if let Some(value) = slot.as_deref()
         && !bookrack_metadata::is_valid_isbn(value)
     {
         *slot = None;
+        actions.push(BaseAttrsAction::DropInvalidIsbn);
     }
 }
 
@@ -889,6 +952,7 @@ fn drop_stale_extracted_year(
     slot: &mut Option<String>,
     year_raw: Option<&str>,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+    actions: &mut Vec<BaseAttrsAction>,
 ) {
     let Some(current) = slot.as_deref() else {
         return;
@@ -907,19 +971,29 @@ fn drop_stale_extracted_year(
     };
     if filename_year != current {
         *slot = None;
+        actions.push(BaseAttrsAction::DropStaleYear);
     }
 }
 
 /// Copy `incoming` into `slot` only when `slot` is currently `None`.
 /// Records whether the slot was actually filled from the filename so
-/// the caller can pick the right `source` tag.
-fn merge_from_filename(slot: &mut Option<String>, incoming: Option<&String>, filled: &mut bool) {
+/// the caller can pick the right `source` tag, and pushes a
+/// [`BaseAttrsAction::FilenameFallback`] tagged with the field name when
+/// the fill happens.
+fn merge_from_filename(
+    field: &'static str,
+    slot: &mut Option<String>,
+    incoming: Option<&String>,
+    filled: &mut bool,
+    actions: &mut Vec<BaseAttrsAction>,
+) {
     if slot.is_some() {
         return;
     }
     if let Some(v) = incoming {
         *slot = Some(v.clone());
         *filled = true;
+        actions.push(BaseAttrsAction::FilenameFallback(field));
     }
 }
 
@@ -2066,5 +2140,105 @@ mod book_pipeline_tests {
         let embed = rows.iter().find(|r| r.stage == "embed").expect("embed row");
         assert_eq!(embed.outcome, "fail");
         assert!(embed.error_message.is_some());
+    }
+
+    /// A synthetic `Extraction` parameterised on biblio fields so the
+    /// `build_base_attrs` tests below can vary them one at a time.
+    fn extraction_with_biblio(biblio: bookrack_extract::Biblio) -> bookrack_extract::Extraction {
+        bookrack_extract::Extraction {
+            blocks: Vec::new(),
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio,
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn build_base_attrs_emits_no_actions_on_a_clean_extraction() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Extracted Title".to_string()),
+            publisher: Some("Extracted Press".to_string()),
+            year: Some(2010),
+            year_raw: Some("2010".to_string()),
+            ..Default::default()
+        });
+        let outcome = super::build_base_attrs(1, &extraction, None);
+        assert!(
+            outcome.actions.is_empty(),
+            "expected no actions, got {:?}",
+            outcome.actions
+        );
+        assert_eq!(outcome.attrs.source.as_deref(), Some("extracted"));
+    }
+
+    #[test]
+    fn build_base_attrs_records_a_drop_invalid_isbn_action() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("T".to_string()),
+            // 10 digits that fail the ISBN-10 checksum (sum = 211, 211 % 11 = 2).
+            isbn: Some("1234567891".to_string()),
+            ..Default::default()
+        });
+        let outcome = super::build_base_attrs(1, &extraction, None);
+        assert!(outcome.attrs.isbn.is_none());
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_invalid_isbn".to_string()),
+            "expected drop_invalid_isbn in {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn build_base_attrs_records_a_drop_stale_year_action() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("T".to_string()),
+            year: Some(2019),
+            year_raw: Some("2019-04-01T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        let filename =
+            bookrack_metadata::parse_filename("Alice Author - A Sample Title (2006, Sample Press)");
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
+        // The stale 2019 was dropped, then the filename year filled in.
+        assert_eq!(outcome.attrs.year.as_deref(), Some("2006"));
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_stale_year".to_string()),
+            "expected drop_stale_year in {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&"filename_fallback:year".to_string()),
+            "expected filename_fallback:year in {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn build_base_attrs_records_filename_fallback_actions_per_field() {
+        // The adapter found nothing; the filename parser fills five fields.
+        // Every fill must surface as its own action so a JSONL consumer
+        // can attribute each value back to a layer.
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio::default());
+        let filename =
+            bookrack_metadata::parse_filename("Alice Author - A Sample Title (2006, Sample Press)");
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        for expected in [
+            "filename_fallback:title",
+            "filename_fallback:publisher",
+            "filename_fallback:year",
+        ] {
+            assert!(
+                tokens.contains(&expected.to_string()),
+                "expected {expected} in {tokens:?}"
+            );
+        }
+        assert_eq!(outcome.attrs.source.as_deref(), Some("filename"));
     }
 }
