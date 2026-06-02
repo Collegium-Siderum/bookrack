@@ -11,6 +11,7 @@
 //! command surface carries no tuning flags, so there is a single source of
 //! truth for every default.
 
+mod dryrun;
 mod render;
 
 use std::path::{Path, PathBuf};
@@ -77,6 +78,26 @@ enum Command {
         #[command(subcommand)]
         action: MetadataAction,
     },
+    /// Simulate an ingest up to (but not including) embedding, and write
+    /// a JSON report of what the metadata audit would have produced. The
+    /// real catalog, corpus, and vector store are not touched.
+    Dryrun {
+        /// Source file, or a directory the dryrun walks recursively.
+        path: PathBuf,
+        /// Write the per-book report to this path instead of the default
+        /// `<data_root>/dryruns/...` location. Implies the summary is
+        /// written alongside with a `.summary.json` suffix.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Write JSONL to stdout instead of to a file. The summary still
+        /// lands on stderr at the end of the run.
+        #[arg(long)]
+        stdout: bool,
+        /// Skip the CHUNK step. Saves seconds per large book when only
+        /// the audit verdict is wanted.
+        #[arg(long)]
+        no_chunk: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -135,6 +156,12 @@ async fn main() -> Result<()> {
         } => run_ingest(&cfg, &path, hold_for_metadata).await,
         Command::Query { text } => run_query(&cfg, &text).await,
         Command::Metadata { action } => run_metadata(&cfg, action).await,
+        Command::Dryrun {
+            path,
+            out,
+            stdout,
+            no_chunk,
+        } => dryrun::run(&cfg, &path, out.as_deref(), stdout, no_chunk),
     }
 }
 
@@ -442,6 +469,19 @@ mod tests {
     fn ingest_accepts_hold_for_metadata_flag() {
         Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
             .expect("the flag parses");
+    }
+
+    #[test]
+    fn dryrun_subcommand_parses() {
+        for argv in [
+            vec!["bookrack", "dryrun", "/x"],
+            vec!["bookrack", "dryrun", "/x", "--stdout"],
+            vec!["bookrack", "dryrun", "/x", "--no-chunk"],
+            vec!["bookrack", "dryrun", "/x", "--out", "/tmp/r.jsonl"],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
     }
 
     #[test]
