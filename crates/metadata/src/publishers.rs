@@ -70,6 +70,16 @@ fn looks_like_watermark(value: &str) -> bool {
             return true;
         }
     }
+    // CJK watermark / distribution-channel tokens. Matched against the
+    // original value because `to_lowercase()` leaves CJK code points
+    // unchanged but the substring check stays valid either way; we use
+    // `value` so the encoded constants read against the same bytes the
+    // input carries.
+    for token in WATERMARK_CJK_TOKENS {
+        if value.contains(token) {
+            return true;
+        }
+    }
     false
 }
 
@@ -86,6 +96,31 @@ const PROMO_TOKENS: &[&str] = &[
     "scanned by",
     "ripped by",
     "uploaded by",
+];
+
+/// CJK fragments that mark distribution channels, pirate site brands,
+/// or production-credit verbs occupying a publisher field. Source bytes
+/// stay ASCII via `\u{...}` escapes per the leak-check rule; matching
+/// is substring on the raw value.
+const WATERMARK_CJK_TOKENS: &[&str] = &[
+    // "placeholder watermark example" — a known pirate-distribution brand.
+    "\u{7532}\u{4E59}\u{4E19}\u{4E01}",
+    // "dian zi shu ku" — generic "e-book library" channel tag.
+    "\u{7535}\u{5B50}\u{4E66}\u{5E93}",
+    // "sao miao" — "scanned by".
+    "\u{626B}\u{63CF}",
+    // "jiao dui" — "proofread by".
+    "\u{6821}\u{5BF9}",
+    // "zhi zuo" — "produced by".
+    "\u{5236}\u{4F5C}",
+    // "zheng li" — "compiled by".
+    "\u{6574}\u{7406}",
+    // "zhuan huan" — "converted by".
+    "\u{8F6C}\u{6362}",
+    // "po jie" — "cracked by".
+    "\u{7834}\u{89E3}",
+    // "dao ban" — "pirated edition".
+    "\u{76D7}\u{7248}",
 ];
 
 /// True when the value, after normalisation, matches the curated
@@ -207,6 +242,21 @@ mod tests {
     #[test]
     fn promo_verb_flagged_as_watermark() {
         assert_eq!(evaluate("free ebook download"), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn cjk_brand_token_flagged_as_watermark() {
+        // "placeholder epub watermark example" — a pirate brand wrapped around
+        // an ASCII prefix, the form observed in real EPUB metadata.
+        let value = "epub\u{7532}\u{4E59}\u{4E19}\u{4E01}";
+        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn cjk_production_verb_flagged_as_watermark() {
+        // "sao miao zhi zuo" — "scanned and produced by".
+        let value = "\u{626B}\u{63CF}\u{5236}\u{4F5C}";
+        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
     }
 
     #[test]

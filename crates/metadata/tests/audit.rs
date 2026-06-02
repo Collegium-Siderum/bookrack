@@ -340,6 +340,47 @@ fn watermark_publisher_is_flagged() {
 }
 
 #[test]
+fn cjk_watermark_publisher_is_flagged() {
+    let catalog = Catalog::open_in_memory().expect("open");
+    // "placeholder epub watermark example" — pirate brand observed verbatim
+    // in real EPUB metadata.
+    let watermark = "epub\u{7532}\u{4E59}\u{4E19}\u{4E01}";
+    seed_base(
+        &catalog,
+        Some("A Book"),
+        Some(watermark),
+        None,
+        None,
+        Some("zh"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "Sample body.",
+        total_blocks: 10,
+        source_stem: None,
+    };
+    let report = audit(&input);
+    assert!(
+        field(&report, "publisher")
+            .flags
+            .contains(&Flag::SourceWatermark)
+    );
+    assert!(matches!(
+        field(&report, "publisher").grade,
+        FieldGrade::Weak | FieldGrade::Missing
+    ));
+}
+
+#[test]
 fn doubtful_text_layer_downgrades_present_fields() {
     let catalog = Catalog::open_in_memory().expect("open");
     seed_base(
