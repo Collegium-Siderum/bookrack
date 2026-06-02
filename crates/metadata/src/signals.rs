@@ -83,6 +83,27 @@ fn pdf_year_unreliable(adapter: &str) -> bool {
     matches!(adapter, "pdf")
 }
 
+/// True when the effective year still matches the raw biblio's year
+/// — i.e. no override has changed it. Only then does it make sense to
+/// inspect `biblio.year_raw` for shape signals: an override comes from
+/// a human and should not be downgraded by extract-side heuristics.
+fn year_came_from_raw_biblio(input: &AuditInput, effective_text: &str) -> bool {
+    let Some(raw_year) = input.biblio.year else {
+        return false;
+    };
+    let Ok(effective_year) = effective_text.trim().parse::<i32>() else {
+        return false;
+    };
+    raw_year == effective_year
+}
+
+/// True when a date string carries a time component, the canonical
+/// shape EPUBs use for build/export timestamps rather than publication
+/// dates (`2011-09-29T16:00:00+00:00`, or any value containing `:`).
+fn looks_like_timestamp(raw: &str) -> bool {
+    raw.contains('T') || raw.contains(':')
+}
+
 fn audit_title(input: &AuditInput, prior: SourcePrior, doubtful: bool) -> FieldReport {
     let value = input.effective.get("title");
     let mut grade;
@@ -266,6 +287,13 @@ fn audit_year(input: &AuditInput, prior: SourcePrior, doubtful: bool) -> FieldRe
             if pdf_year_unreliable(&input.provenance.adapter) {
                 weaken(&mut grade);
                 flags.push(Flag::PdfYearLikelyFileDate);
+            }
+            if year_came_from_raw_biblio(input, text)
+                && let Some(raw) = input.biblio.year_raw.as_deref()
+                && looks_like_timestamp(raw)
+            {
+                weaken(&mut grade);
+                flags.push(Flag::DateLooksLikeTimestamp);
             }
         }
     }
@@ -741,5 +769,15 @@ mod tests {
         // with parentheses, not a series-tagged title.
         assert!(!has_bracketed_segment("(everything inside)"));
         assert!(!has_bracketed_segment("[everything inside]"));
+    }
+
+    #[test]
+    fn timestamp_shape_detection() {
+        assert!(looks_like_timestamp("2011-09-29T16:00:00+00:00"));
+        assert!(looks_like_timestamp("2009-09-28T00:00:00Z"));
+        assert!(looks_like_timestamp("2019-07-25 14:30:00"));
+        assert!(!looks_like_timestamp("2010"));
+        assert!(!looks_like_timestamp("2010-05"));
+        assert!(!looks_like_timestamp("2010-05-15"));
     }
 }

@@ -108,6 +108,142 @@ fn epub_with_complete_record_grades_clean_and_high() {
 }
 
 #[test]
+fn epub_year_from_timestamp_shaped_dc_date_is_downgraded() {
+    // A real-world EPUB shape: `dc:date` carries a build/export
+    // timestamp. The extractor parses out 2011 as the year, but the
+    // raw string ends with `T16:00:00+00:00` — a strong hint that this
+    // is the production date, not the publication year. The audit must
+    // weaken the year grade and raise `DateLooksLikeTimestamp`.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2011"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = Biblio {
+        year: Some(2011),
+        year_raw: Some("2011-09-29T16:00:00+00:00".to_string()),
+        ..Biblio::default()
+    };
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+    };
+    let report = audit(&input);
+    assert_eq!(field(&report, "year").grade, FieldGrade::Medium);
+    assert!(
+        field(&report, "year")
+            .flags
+            .contains(&Flag::DateLooksLikeTimestamp)
+    );
+}
+
+#[test]
+fn epub_year_from_a_plain_year_string_stays_strong() {
+    // The dc:date carried a bare year — no time component, so the
+    // timestamp signal must not fire.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2011"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = Biblio {
+        year: Some(2011),
+        year_raw: Some("2011".to_string()),
+        ..Biblio::default()
+    };
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+    };
+    let report = audit(&input);
+    assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
+    assert!(
+        !field(&report, "year")
+            .flags
+            .contains(&Flag::DateLooksLikeTimestamp)
+    );
+}
+
+#[test]
+fn user_override_year_skips_the_timestamp_shape_signal() {
+    // The raw biblio carries a timestamp-shaped date, but the user
+    // overrode the year. The override wins and the timestamp signal
+    // must not fire — the year value no longer came from the file.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2011"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "year",
+            Some("1990".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = Biblio {
+        year: Some(2011),
+        year_raw: Some("2011-09-29T16:00:00+00:00".to_string()),
+        ..Biblio::default()
+    };
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+    };
+    let report = audit(&input);
+    assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
+    assert!(
+        !field(&report, "year")
+            .flags
+            .contains(&Flag::DateLooksLikeTimestamp)
+    );
+}
+
+#[test]
 fn empty_record_grades_needs_work_and_low() {
     let catalog = Catalog::open_in_memory().expect("open");
     // No base row at all.

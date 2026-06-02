@@ -147,7 +147,8 @@ fn build_biblio(epub: &Epub) -> Biblio {
         .find(|t| t.kind().is_collection())
         .map(|t| t.value().to_string());
     let publisher = md.publishers().next().map(|p| p.value().to_string());
-    let year = md.published_entry().and_then(|e| parse_year(e.value()));
+    let year_entry = md.published_entry().map(|e| e.value().to_string());
+    let year = year_entry.as_deref().and_then(parse_year);
     let language = md.language().map(|l| l.value().to_string());
     let isbn = md.identifiers().find_map(|id| as_isbn(id.value()));
 
@@ -177,6 +178,7 @@ fn build_biblio(epub: &Epub) -> Biblio {
         subtitle,
         publisher,
         year,
+        year_raw: year_entry,
         isbn,
         series,
         language,

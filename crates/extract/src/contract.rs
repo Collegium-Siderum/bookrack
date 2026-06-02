@@ -126,6 +126,13 @@ pub struct Biblio {
     pub subtitle: Option<String>,
     pub publisher: Option<String>,
     pub year: Option<i32>,
+    /// The raw date string the adapter read, before any year extraction.
+    /// EPUBs in particular often store a build-time `<dc:date>` whose
+    /// shape (`YYYY-MM-DDThh:mm:ss...`) is a strong hint that the year
+    /// is the file's production date rather than the work's publication
+    /// year. Kept verbatim so the audit can inspect it; absent when the
+    /// adapter never saw a date string (PDF /Info, HTML, TXT).
+    pub year_raw: Option<String>,
     pub isbn: Option<String>,
     pub series: Option<String>,
     pub language: Option<String>,

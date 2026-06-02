@@ -121,6 +121,10 @@ pub enum Flag {
     /// the title. Auditors do not strip it: they flag the value so a
     /// reviewer can decide.
     TitleHasBracketedContent,
+    /// The raw date string carried a time component (e.g. `T...:...`),
+    /// which strongly suggests the year came from the file's
+    /// production timestamp rather than a publication-date field.
+    DateLooksLikeTimestamp,
 }
 
 impl Flag {
@@ -142,6 +146,7 @@ impl Flag {
             Flag::Empty => "empty",
             Flag::PurelyNumeric => "purely_numeric",
             Flag::TitleHasBracketedContent => "title_has_bracketed_content",
+            Flag::DateLooksLikeTimestamp => "date_looks_like_timestamp",
         }
     }
 }
