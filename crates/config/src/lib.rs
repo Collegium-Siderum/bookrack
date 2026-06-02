@@ -222,8 +222,8 @@ pub const LOG_ENV: &str = "BOOKRACK_LOG";
 /// volume of `info` events — manifest loads, plan runs, file audits — that
 /// would otherwise bury the pipeline's own diagnostics. Override the whole
 /// directive with [`LOG_ENV`] to see them.
-pub const DEFAULT_LOG: &str =
-    "info,lance=warn,lance_namespace_impls=warn,lance_table=warn,datafusion=warn";
+pub const DEFAULT_LOG: &str = "info,lance=warn,lance_namespace_impls=warn,lance_table=warn,\
+     datafusion=warn,rusqlite_migration=warn";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
