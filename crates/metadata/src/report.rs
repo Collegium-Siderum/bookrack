@@ -116,6 +116,11 @@ pub enum Flag {
     Empty,
     /// The value is entirely numeric where it should not be.
     PurelyNumeric,
+    /// The title carries a leading or trailing bracketed segment — a
+    /// series tag, a collection marker, or a marketing block bled into
+    /// the title. Auditors do not strip it: they flag the value so a
+    /// reviewer can decide.
+    TitleHasBracketedContent,
 }
 
 impl Flag {
@@ -136,6 +141,7 @@ impl Flag {
             Flag::EqualsPublisher => "equals_publisher",
             Flag::Empty => "empty",
             Flag::PurelyNumeric => "purely_numeric",
+            Flag::TitleHasBracketedContent => "title_has_bracketed_content",
         }
     }
 }

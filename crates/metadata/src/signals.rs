@@ -119,6 +119,10 @@ fn audit_title(input: &AuditInput, prior: SourcePrior, doubtful: bool) -> FieldR
                     weaken(&mut grade);
                     flags.push(Flag::EqualsPublisher);
                 }
+                if has_bracketed_segment(trimmed) {
+                    weaken(&mut grade);
+                    flags.push(Flag::TitleHasBracketedContent);
+                }
             }
         }
     }
@@ -479,6 +483,60 @@ fn is_placeholder(value: &str) -> bool {
     )
 }
 
+/// True when the title carries a leading or trailing bracketed segment
+/// long enough to suggest a series tag, collection marker, or marketing
+/// block bled into the value. The check is permissive on purpose: any
+/// match downgrades the title's grade so a reviewer sees it, while
+/// short bracketed fragments (`Foo (v2)`, `Bar [Vol.1]`) are tolerated.
+///
+/// Pairs recognised: ASCII `()` / `[]`, fullwidth `（）` / `［］`, and
+/// CJK lenticular `【】`. The opening at byte 0 and the closing at the
+/// last char (after trimming) are checked — a bracket in the middle of
+/// a title is left alone.
+fn has_bracketed_segment(trimmed: &str) -> bool {
+    const PAIRS: &[(char, char)] = &[
+        ('(', ')'),
+        ('\u{FF08}', '\u{FF09}'),
+        ('[', ']'),
+        ('\u{FF3B}', '\u{FF3D}'),
+        ('\u{3010}', '\u{3011}'),
+    ];
+    const MIN_CONTENT_CHARS: usize = 3;
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.is_empty() {
+        return false;
+    }
+    let first = chars[0];
+    let last = chars[chars.len() - 1];
+
+    for &(open, close) in PAIRS {
+        // Leading bracket: starts with `open`, has a matching `close`
+        // somewhere later, and something follows the closing bracket.
+        if first == open
+            && let Some(end_idx) = chars.iter().skip(1).position(|&c| c == close)
+        {
+            let inner_len = end_idx;
+            let trailing_chars = chars.len().saturating_sub(end_idx + 2);
+            if inner_len >= MIN_CONTENT_CHARS && trailing_chars > 0 {
+                return true;
+            }
+        }
+        // Trailing bracket: ends with `close`, has a matching `open`
+        // somewhere earlier, and something precedes the opening bracket.
+        if last == close
+            && let Some(start_offset) = chars.iter().rev().skip(1).position(|&c| c == open)
+        {
+            let inner_len = start_offset;
+            let leading_chars = chars.len().saturating_sub(start_offset + 2);
+            if inner_len >= MIN_CONTENT_CHARS && leading_chars > 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Light BCP-47 syntactic check: a primary subtag plus an optional
 /// region or script subtag. Not a full registry validation.
 fn is_bcp47(tag: &str) -> bool {
@@ -627,5 +685,61 @@ mod tests {
         assert!(!is_bcp47("english"));
         assert!(!is_bcp47("z"));
         assert!(!is_bcp47("zh--"));
+    }
+
+    #[test]
+    fn bracketed_segment_detects_trailing_series_suffix() {
+        // "placeholder series example"
+        // — a trailing CJK series-marker block.
+        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1} \
+                     (\u{5E9A}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{4E11}\u{5BC5}\u{536F}\u{8FB0}\u{5DF3})";
+        assert!(has_bracketed_segment(title));
+    }
+
+    #[test]
+    fn bracketed_segment_detects_fullwidth_collection_marker() {
+        // "placeholder volume example".
+        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1}\u{5E9A}\
+                     \u{FF08}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{518C}\u{FF09}";
+        assert!(has_bracketed_segment(title));
+    }
+
+    #[test]
+    fn bracketed_segment_detects_lenticular_marketing_block() {
+        // A title with a leading-line break of marketing copy in lenticular
+        // brackets — `Title【...】`.
+        let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\u{6CB3}\
+                     \u{3010}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{3011}";
+        assert!(has_bracketed_segment(title));
+    }
+
+    #[test]
+    fn bracketed_segment_detects_leading_series_prefix() {
+        // "placeholder aggregator example" — a leading series prefix followed by
+        // more title content.
+        let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{5408}\u{96C6}";
+        assert!(has_bracketed_segment(title));
+    }
+
+    #[test]
+    fn bracketed_segment_tolerates_short_trailing_marker() {
+        // `Foo (v2)` — short bracketed content is left alone.
+        assert!(!has_bracketed_segment("Foo (v2)"));
+        // `A Book` — no brackets at all.
+        assert!(!has_bracketed_segment("A Book"));
+    }
+
+    #[test]
+    fn bracketed_segment_ignores_brackets_in_the_middle() {
+        // A bracketed phrase in the middle is not a series tag.
+        assert!(!has_bracketed_segment("Foo (1990) Bar"));
+    }
+
+    #[test]
+    fn bracketed_segment_requires_text_outside_the_brackets() {
+        // A title that is entirely a bracketed block is just a value
+        // with parentheses, not a series-tagged title.
+        assert!(!has_bracketed_segment("(everything inside)"));
+        assert!(!has_bracketed_segment("[everything inside]"));
     }
 }
