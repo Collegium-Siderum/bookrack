@@ -81,6 +81,11 @@ pub struct DryrunBookReport {
     pub filename_template: Option<String>,
     /// Extracted biblio fields, mirrored for quick comparison.
     pub biblio: Option<BiblioOut>,
+    /// Per-field values the filename parser recovered, separate from the
+    /// label in [`Self::filename_template`]. `None` when no template
+    /// matched; otherwise carries the parsed fields, any of which may be
+    /// `None` on their own.
+    pub filename_biblio: Option<FilenameBiblioOut>,
     /// Per-field grades and flags from the metadata audit.
     pub audit_fields: Vec<FieldOut>,
     /// Aggregated audit verdict (`clean` / `needs_work`).
@@ -124,6 +129,32 @@ pub struct BiblioOut {
     pub isbn: Option<String>,
     pub language: Option<String>,
     pub series: Option<String>,
+}
+
+/// Fields the filename parser recovered for one book. Every field is
+/// optional: a template match leaves the report `Some(..)` even when only
+/// part of the shape filled in.
+#[derive(Debug, Clone, Serialize)]
+pub struct FilenameBiblioOut {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub year: Option<String>,
+    pub publisher: Option<String>,
+    pub isbn: Option<String>,
+    pub series: Option<String>,
+}
+
+impl From<&FilenameBiblio> for FilenameBiblioOut {
+    fn from(b: &FilenameBiblio) -> FilenameBiblioOut {
+        FilenameBiblioOut {
+            title: b.title.clone(),
+            author: b.author.clone(),
+            year: b.year.clone(),
+            publisher: b.publisher.clone(),
+            isbn: b.isbn.clone(),
+            series: b.series.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,6 +219,7 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         source_tag: None,
         filename_template: None,
         biblio: None,
+        filename_biblio: None,
         audit_fields: vec![],
         verdict: None,
         confidence: None,
@@ -283,6 +315,10 @@ fn run_pipeline(
     // METADATA — seed base attrs, then audit over the effective view.
     let filename_biblio = parse_filename(stem);
     record.filename_template = filename_template_label(&filename_biblio);
+    record.filename_biblio = record
+        .filename_template
+        .is_some()
+        .then(|| FilenameBiblioOut::from(&filename_biblio));
     let mut attrs = build_base_attrs(intake_id, extraction, Some(&filename_biblio));
     record.source_tag = attrs.source.clone();
     catalog.upsert_publication_attrs(&attrs)?;
@@ -511,6 +547,38 @@ mod tests {
         assert!(!rec.audit_fields.is_empty());
         assert!(rec.verdict.is_some());
         assert!(rec.confidence.is_some());
+    }
+
+    #[test]
+    fn a_calibre_template_filename_populates_the_filename_biblio_layer() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_html(
+            dir.path(),
+            "An Author - A Title (2020, A Publisher).html",
+            "Body.",
+        );
+        let rec = dryrun_book(&path, &DryrunParams::default());
+        assert_eq!(rec.extract_outcome, "extracted");
+        assert_eq!(rec.filename_template.as_deref(), Some("calibre"));
+        let fb = rec
+            .filename_biblio
+            .expect("filename_biblio populated when the filename template matched");
+        assert_eq!(fb.title.as_deref(), Some("A Title"));
+        assert_eq!(fb.author.as_deref(), Some("An Author"));
+        assert_eq!(fb.year.as_deref(), Some("2020"));
+        assert_eq!(fb.publisher.as_deref(), Some("A Publisher"));
+        assert_eq!(fb.isbn, None);
+        assert_eq!(fb.series, None);
+    }
+
+    #[test]
+    fn a_non_calibre_filename_leaves_the_filename_biblio_layer_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = write_html(dir.path(), "tiny.html", "Body.");
+        let rec = dryrun_book(&path, &DryrunParams::default());
+        assert_eq!(rec.extract_outcome, "extracted");
+        assert!(rec.filename_template.is_none());
+        assert!(rec.filename_biblio.is_none());
     }
 
     #[test]
