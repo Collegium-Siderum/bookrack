@@ -70,6 +70,12 @@ fn looks_like_watermark(value: &str) -> bool {
             return true;
         }
     }
+    // ASCII handles of known distribution channels.
+    for token in ASCII_DISTRIBUTION_TOKENS {
+        if lower.contains(token) {
+            return true;
+        }
+    }
     // CJK watermark / distribution-channel tokens. Matched against the
     // original value because `to_lowercase()` leaves CJK code points
     // unchanged but the substring check stays valid either way; we use
@@ -98,6 +104,11 @@ const PROMO_TOKENS: &[&str] = &[
     "uploaded by",
 ];
 
+/// ASCII handles of known distribution channels. These are noun-form
+/// brand identifiers rather than promotional verbs, so they live in
+/// their own list; matching is case-insensitive substring.
+const ASCII_DISTRIBUTION_TOKENS: &[&str] = &["cj5"];
+
 /// CJK fragments that mark distribution channels, pirate site brands,
 /// or production-credit verbs occupying a publisher field. Source bytes
 /// stay ASCII via `\u{...}` escapes per the leak-check rule; matching
@@ -121,6 +132,12 @@ const WATERMARK_CJK_TOKENS: &[&str] = &[
     "\u{7834}\u{89E3}",
     // "dao ban" — "pirated edition".
     "\u{76D7}\u{7248}",
+    // "mian fei xia zai" — "free download" promo phrase.
+    "\u{514D}\u{8D39}\u{4E0B}\u{8F7D}",
+    // "jiang huo ru hua" — a known CJK distribution channel brand.
+    "\u{6C5F}\u{706B}\u{5982}\u{753B}",
+    // "qing zhi guo du" — a light-novel translation channel brand.
+    "\u{8F7B}\u{4E4B}\u{56FD}\u{5EA6}",
 ];
 
 /// True when the value, after normalisation, matches the curated
@@ -284,6 +301,33 @@ mod tests {
         // "sao miao zhi zuo" — "scanned and produced by".
         let value = "\u{626B}\u{63CF}\u{5236}\u{4F5C}";
         assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn cjk_distribution_brand_flagged_as_watermark() {
+        // "jiang huo ru hua" — a known distribution channel brand.
+        let value = "\u{6C5F}\u{706B}\u{5982}\u{753B}";
+        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+        // "qing zhi guo du" — light-novel translation channel brand.
+        let value = "\u{8F7B}\u{4E4B}\u{56FD}\u{5EA6}";
+        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn cjk_free_download_phrase_flagged_as_watermark() {
+        // A real-world publisher field carrying a free-download tag.
+        // "...hai liang dian zi shu mian fei xia zai" — "...huge ebook
+        // free download".
+        let value =
+            "chenjin5 \u{6D77}\u{91CF}\u{7535}\u{5B50}\u{4E66}\u{514D}\u{8D39}\u{4E0B}\u{8F7D}";
+        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn ascii_distribution_handle_flagged_as_watermark() {
+        assert_eq!(evaluate("cj5"), PublisherVerdict::Watermark);
+        // Matches case-insensitively.
+        assert_eq!(evaluate("CJ5"), PublisherVerdict::Watermark);
     }
 
     #[test]
