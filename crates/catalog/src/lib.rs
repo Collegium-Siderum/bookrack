@@ -35,6 +35,7 @@ mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
 mod retrieval_issues;
+mod toc_edits;
 mod works;
 
 pub use actor::ActorKind;

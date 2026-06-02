@@ -30,8 +30,7 @@ const BACKUP_KEEP: usize = 5;
 /// stable order. The live schema is conformance-checked against these
 /// specs on every open; they are the source of truth for the *current*
 /// schema shape, while the migration baseline in [`crate::migrate`] is the
-/// historical one. `toc_edits` has no spec yet (it is created by the
-/// migration baseline) and so is not covered here.
+/// historical one.
 const SPECS: &[&TableSpec] = &[
     &crate::catalog_meta::SPEC,
     &crate::intake::SPEC,
@@ -48,6 +47,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::expressions::SPEC,
     &crate::mcp_tool_calls::SPEC,
     &crate::retrieval_issues::SPEC,
+    &crate::toc_edits::SPEC,
 ];
 
 /// A handle to one `catalog.db` database.
@@ -129,8 +129,7 @@ impl Catalog {
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
         // Acceptance gate, run on every open: `rusqlite_migration` advances
-        // `user_version` but does not check the resulting schema shape. The
-        // pending tables carry no spec yet and so are not covered.
+        // `user_version` but does not check the resulting schema shape.
         bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
 
         let catalog = Catalog {
