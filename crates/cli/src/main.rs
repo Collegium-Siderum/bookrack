@@ -24,7 +24,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
-use bookrack_metadata::{AuditInput, TocStats};
+use bookrack_metadata::{AuditInput, AuditRules, TocStats};
 use bookrack_search::search;
 use bookrack_vectors::ChunkStore;
 
@@ -197,15 +197,31 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
     .context("build embedding client")
 }
 
+/// Load the metadata audit's runtime rule set from
+/// `cfg.audit_rules_dir()`. A missing directory or malformed file is
+/// logged and yields an empty set; the audit then treats every value
+/// as neutral.
+fn load_audit_rules(cfg: &Config) -> AuditRules {
+    match AuditRules::load_from(&cfg.audit_rules_dir()) {
+        Ok(rules) => rules,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load audit rules; using empty set");
+            AuditRules::empty()
+        }
+    }
+}
+
 async fn run_ingest(cfg: &Config, path: &Path, hold_for_metadata: bool) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
+    let audit_rules = load_audit_rules(cfg);
     let params = IngestParams {
         embed: embed_cfg,
         hold_for_metadata,
+        audit_rules,
         ..Default::default()
     };
     let report = ingest_book(
@@ -276,8 +292,11 @@ async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
     }
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let audit_rules = load_audit_rules(cfg);
     match action {
-        MetadataAction::Show { book, json } => run_metadata_show(&catalog, book, json),
+        MetadataAction::Show { book, json } => {
+            run_metadata_show(&catalog, book, json, &audit_rules)
+        }
         MetadataAction::Set { book, field, value } => {
             run_metadata_set(&catalog, book, &field, &value)
         }
@@ -291,7 +310,7 @@ async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
     }
 }
 
-fn run_metadata_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
+fn run_metadata_show(catalog: &Catalog, book: i64, json: bool, rules: &AuditRules) -> Result<()> {
     let effective = catalog
         .effective_publication_attrs(book, BOOK_SCOPE)
         .context("read effective metadata")?;
@@ -325,6 +344,7 @@ fn run_metadata_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
         body_sample: "",
         total_blocks: 0,
         source_stem: None,
+        rules,
     };
     let report = bookrack_metadata::audit(&input);
     if json {

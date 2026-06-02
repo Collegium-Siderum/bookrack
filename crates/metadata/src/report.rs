@@ -226,4 +226,7 @@ pub struct AuditInput<'a> {
     /// The source file's stem (no extension). Used to flag a title
     /// that merely echoes the filename.
     pub source_stem: Option<&'a str>,
+    /// Runtime-loaded rule set the publisher signal consults. Pass
+    /// [`crate::AuditRules::empty()`] to disable both lists.
+    pub rules: &'a crate::AuditRules,
 }

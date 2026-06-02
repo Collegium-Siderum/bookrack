@@ -8,3 +8,9 @@ repository.workspace = true
 [dependencies]
 bookrack-extract = { path = "../extract" }
 bookrack-catalog = { path = "../catalog" }
+serde.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -178,6 +178,13 @@ impl Config {
         self.data_dir.join("logs")
     }
 
+    /// Directory holding the audit's runtime-loaded rule files
+    /// (`publishers.toml`, `watermarks.toml`). Missing files yield
+    /// empty rules; the engine treats every value as neutral.
+    pub fn audit_rules_dir(&self) -> PathBuf {
+        self.data_dir.join("audit-rules")
+    }
+
     /// Directory database backups are written to before a schema
     /// migration. The [`BACKUP_DIR_ENV`] override wins when set;
     /// otherwise `<data_dir>/backup`, beside the database files it

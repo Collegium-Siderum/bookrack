@@ -4,16 +4,21 @@
 //!
 //! Two independent signals, each addressed by audit's publisher row:
 //!
-//! - **Whitelist**: a curated list of reputable imprints, matched after
-//!   light normalisation (case, punctuation, common abbreviations).
-//!   v1 ships the *mechanism*; the data list is intentionally a tiny
-//!   seed and grows in dedicated data PRs without changing the engine.
-//!   A miss is always neutral — long-tail publishers stay uncovered.
+//! - **Whitelist**: a curated list of reputable imprints, matched
+//!   after light normalisation (case, punctuation, common
+//!   abbreviations). The list itself is data, loaded at runtime from
+//!   `publishers.toml` via [`crate::rules::AuditRules`]. A miss is
+//!   always neutral — long-tail and unconfigured publishers stay
+//!   uncovered.
 //!
 //! - **Shape sniff**: rejects values that look structurally like
-//!   distribution watermarks rather than publisher names — anything
-//!   carrying URLs, contact tokens, or promotional verbs. Closed-form
-//!   patterns, no list to maintain; effective day one.
+//!   distribution watermarks rather than publisher names. The
+//!   closed-form patterns (URLs, emails, common TLDs) live in this
+//!   module; the token lists (contact handles, promo verbs, channel
+//!   brands, CJK fragments) are data, loaded alongside the
+//!   whitelist.
+
+use crate::rules::AuditRules;
 
 /// Decision the publisher evaluator returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,24 +31,25 @@ pub enum PublisherVerdict {
     Neutral,
 }
 
-/// Evaluate one publisher value.
-pub fn evaluate(value: &str) -> PublisherVerdict {
+/// Evaluate one publisher value against the loaded rule set.
+pub fn evaluate(value: &str, rules: &AuditRules) -> PublisherVerdict {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return PublisherVerdict::Neutral;
     }
-    if looks_like_watermark(trimmed) {
+    if looks_like_watermark(trimmed, rules) {
         return PublisherVerdict::Watermark;
     }
-    if is_whitelisted(trimmed) {
+    if is_whitelisted(trimmed, rules) {
         return PublisherVerdict::Whitelisted;
     }
     PublisherVerdict::Neutral
 }
 
-/// True when the value carries any of the watermark/contact/promo
-/// patterns. Each pattern is structural and pre-decided, not data.
-fn looks_like_watermark(value: &str) -> bool {
+/// True when the value carries any watermark / contact / promo
+/// pattern. The structural patterns (URL, email, TLD suffixes) are
+/// pre-decided here; the token lists are read from `rules`.
+fn looks_like_watermark(value: &str, rules: &AuditRules) -> bool {
     let lower: String = value.to_lowercase();
     if lower.contains("http://")
         || lower.contains("https://")
@@ -58,93 +64,39 @@ fn looks_like_watermark(value: &str) -> bool {
     if lower.contains('@') {
         return true;
     }
-    // Contact / chat tokens.
-    for token in CONTACT_TOKENS {
-        if lower.contains(token) {
+    for token in &rules.contact_tokens {
+        if lower.contains(&token.to_lowercase()) {
             return true;
         }
     }
-    // Promotional verbs.
-    for token in PROMO_TOKENS {
-        if lower.contains(token) {
+    for token in &rules.promo_tokens {
+        if lower.contains(&token.to_lowercase()) {
             return true;
         }
     }
-    // ASCII handles of known distribution channels.
-    for token in ASCII_DISTRIBUTION_TOKENS {
-        if lower.contains(token) {
+    for token in &rules.ascii_distribution_tokens {
+        if lower.contains(&token.to_lowercase()) {
             return true;
         }
     }
-    // CJK watermark / distribution-channel tokens. Matched against the
-    // original value because `to_lowercase()` leaves CJK code points
-    // unchanged but the substring check stays valid either way; we use
-    // `value` so the encoded constants read against the same bytes the
-    // input carries.
-    for token in WATERMARK_CJK_TOKENS {
-        if value.contains(token) {
+    // CJK tokens match against the original value because
+    // `to_lowercase()` would leave them unchanged anyway and we want
+    // the substring check to run against the same bytes the user
+    // configured.
+    for token in &rules.watermark_cjk_tokens {
+        if value.contains(token.as_str()) {
             return true;
         }
     }
     false
 }
 
-/// Common contact-channel tokens. ASCII lower-case fragments only;
-/// matching is substring, so the patterns hit case-insensitively.
-const CONTACT_TOKENS: &[&str] = &["qq:", "qq ", "wechat", "weixin", "telegram", "skype:"];
-
-/// Common promotional verbs that indicate a distribution channel.
-const PROMO_TOKENS: &[&str] = &[
-    "download",
-    "free ebook",
-    "free book",
-    "ebook download",
-    "scanned by",
-    "ripped by",
-    "uploaded by",
-];
-
-/// ASCII handles of known distribution channels. These are noun-form
-/// brand identifiers rather than promotional verbs, so they live in
-/// their own list; matching is case-insensitive substring.
-const ASCII_DISTRIBUTION_TOKENS: &[&str] = &["cj5"];
-
-/// CJK fragments that mark distribution channels, pirate site brands,
-/// or production-credit verbs occupying a publisher field. Source bytes
-/// stay ASCII via `\u{...}` escapes per the leak-check rule; matching
-/// is substring on the raw value.
-const WATERMARK_CJK_TOKENS: &[&str] = &[
-    // "placeholder watermark example" — a known pirate-distribution brand.
-    "\u{7532}\u{4E59}\u{4E19}\u{4E01}",
-    // "dian zi shu ku" — generic "e-book library" channel tag.
-    "\u{7535}\u{5B50}\u{4E66}\u{5E93}",
-    // "sao miao" — "scanned by".
-    "\u{626B}\u{63CF}",
-    // "jiao dui" — "proofread by".
-    "\u{6821}\u{5BF9}",
-    // "zhi zuo" — "produced by".
-    "\u{5236}\u{4F5C}",
-    // "zheng li" — "compiled by".
-    "\u{6574}\u{7406}",
-    // "zhuan huan" — "converted by".
-    "\u{8F6C}\u{6362}",
-    // "po jie" — "cracked by".
-    "\u{7834}\u{89E3}",
-    // "dao ban" — "pirated edition".
-    "\u{76D7}\u{7248}",
-    // "mian fei xia zai" — "free download" promo phrase.
-    "\u{514D}\u{8D39}\u{4E0B}\u{8F7D}",
-    // "jiang huo ru hua" — a known CJK distribution channel brand.
-    "\u{6C5F}\u{706B}\u{5982}\u{753B}",
-    // "qing zhi guo du" — a light-novel translation channel brand.
-    "\u{8F7B}\u{4E4B}\u{56FD}\u{5EA6}",
-];
-
-/// True when the value, after normalisation, matches the curated
+/// True when the value, after normalisation, matches the loaded
 /// whitelist.
-fn is_whitelisted(value: &str) -> bool {
+fn is_whitelisted(value: &str, rules: &AuditRules) -> bool {
     let normalised = normalise(value);
-    WHITELIST_SEED
+    rules
+        .publisher_whitelist
         .iter()
         .any(|candidate| normalise(candidate) == normalised)
 }
@@ -177,7 +129,7 @@ fn normalise(value: &str) -> String {
 }
 
 /// Expand a short, hand-picked list of abbreviations whose absence
-/// would create false misses against the seed list.
+/// would create false misses against typical whitelist entries.
 fn expand_abbreviations(value: &str) -> String {
     let mut tokens: Vec<String> = value.split_whitespace().map(str::to_string).collect();
     for token in &mut tokens {
@@ -194,170 +146,137 @@ fn expand_abbreviations(value: &str) -> String {
     tokens.join(" ")
 }
 
-/// The curated seed list of reputable imprints. Held as a constant
-/// rather than read from a file: the data is public, evolves through
-/// pull requests, and a static constant compiles into the engine
-/// without an extra I/O surface. Empty / tiny is fine: a miss is
-/// always neutral by design.
-const WHITELIST_SEED: &[&str] = &[
-    "Oxford University Press",
-    "Cambridge University Press",
-    "Harvard University Press",
-    "Princeton University Press",
-    "Yale University Press",
-    "Stanford University Press",
-    "University of Chicago Press",
-    "MIT Press",
-    "Penguin Random House",
-    "Penguin Books",
-    "Random House",
-    "Springer",
-    "Springer Nature",
-    "Wiley",
-    "Elsevier",
-    "Routledge",
-    "Bloomsbury",
-    "Bloomsbury Academic",
-    "Faber and Faber",
-    "Standard Ebooks",
-    "Crossway",
-    "Eerdmans",
-    "IVP Academic",
-    // CJK imprints. Source bytes stay ASCII via `\u{...}` escapes.
-    // "shang wu yin shu guan" (Commercial Press).
-    "\u{5546}\u{52A1}\u{5370}\u{4E66}\u{9986}",
-    // "san lian shu dian" (SDX Joint Publishing).
-    "\u{4E09}\u{8054}\u{4E66}\u{5E97}",
-    // "bei jing da xue chu ban she" (Peking University Press).
-    "\u{5317}\u{4EAC}\u{5927}\u{5B66}\u{51FA}\u{7248}\u{793E}",
-    // "zhong xin chu ban she" (CITIC Press).
-    "\u{4E2D}\u{4FE1}\u{51FA}\u{7248}\u{793E}",
-    // "shang hai gu ji chu ban she" (Shanghai Ancient Books Press).
-    "\u{4E0A}\u{6D77}\u{53E4}\u{7C4D}\u{51FA}\u{7248}\u{793E}",
-    // "jiang su ren min chu ban she" (Jiangsu People's Press).
-    "\u{6C5F}\u{82CF}\u{4EBA}\u{6C11}\u{51FA}\u{7248}\u{793E}",
-    "KADOKAWA",
-    // "kabushiki kaisha KADOKAWA" — the corporate-style imprint string.
-    "\u{682A}\u{5F0F}\u{4F1A}\u{793E}KADOKAWA",
-    // "Kodansha" in traditional form.
-    "\u{8B1B}\u{8AC7}\u{793E}",
-    // "Iwanami Shoten".
-    "\u{5CA9}\u{6CE2}\u{66F8}\u{5E97}",
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn rules_with_whitelist(entries: &[&str]) -> AuditRules {
+        AuditRules {
+            publisher_whitelist: entries.iter().map(|s| (*s).to_string()).collect(),
+            ..AuditRules::empty()
+        }
+    }
+
+    fn rules_with_contact(tokens: &[&str]) -> AuditRules {
+        AuditRules {
+            contact_tokens: tokens.iter().map(|s| (*s).to_string()).collect(),
+            ..AuditRules::empty()
+        }
+    }
+
+    fn rules_with_promo(tokens: &[&str]) -> AuditRules {
+        AuditRules {
+            promo_tokens: tokens.iter().map(|s| (*s).to_string()).collect(),
+            ..AuditRules::empty()
+        }
+    }
+
+    fn rules_with_ascii_distribution(tokens: &[&str]) -> AuditRules {
+        AuditRules {
+            ascii_distribution_tokens: tokens.iter().map(|s| (*s).to_string()).collect(),
+            ..AuditRules::empty()
+        }
+    }
+
+    fn rules_with_cjk(tokens: &[&str]) -> AuditRules {
+        AuditRules {
+            watermark_cjk_tokens: tokens.iter().map(|s| (*s).to_string()).collect(),
+            ..AuditRules::empty()
+        }
+    }
+
     #[test]
     fn whitelist_matches_with_punctuation_and_case() {
+        let rules = rules_with_whitelist(&["Oxford University Press", "MIT Press"]);
         assert_eq!(
-            evaluate("oxford university press"),
+            evaluate("oxford university press", &rules),
             PublisherVerdict::Whitelisted
         );
         assert_eq!(
-            evaluate("Oxford Univ. Press"),
+            evaluate("Oxford Univ. Press", &rules),
             PublisherVerdict::Whitelisted
         );
-        assert_eq!(evaluate("M.I.T. Press"), PublisherVerdict::Whitelisted);
+        assert_eq!(
+            evaluate("M.I.T. Press", &rules),
+            PublisherVerdict::Whitelisted
+        );
     }
 
     #[test]
     fn url_value_flagged_as_watermark() {
+        let rules = AuditRules::empty();
         assert_eq!(
-            evaluate("https://example.com/free-ebooks"),
+            evaluate("https://example.com/free-ebooks", &rules),
             PublisherVerdict::Watermark
         );
-        assert_eq!(evaluate("www.example.net"), PublisherVerdict::Watermark);
+        assert_eq!(
+            evaluate("www.example.net", &rules),
+            PublisherVerdict::Watermark
+        );
+    }
+
+    #[test]
+    fn email_value_flagged_as_watermark() {
+        let rules = AuditRules::empty();
+        assert_eq!(
+            evaluate("contact: test@example.net", &rules),
+            PublisherVerdict::Watermark
+        );
     }
 
     #[test]
     fn contact_token_flagged_as_watermark() {
+        let rules = rules_with_contact(&["qq:"]);
         assert_eq!(
-            evaluate("scanned by anon, qq: 1234"),
-            PublisherVerdict::Watermark
-        );
-        assert_eq!(
-            evaluate("contact: test@example.com"),
+            evaluate("scanned by anon, qq: 1234", &rules),
             PublisherVerdict::Watermark
         );
     }
 
     #[test]
     fn promo_verb_flagged_as_watermark() {
-        assert_eq!(evaluate("free ebook download"), PublisherVerdict::Watermark);
-    }
-
-    #[test]
-    fn cjk_brand_token_flagged_as_watermark() {
-        // "placeholder epub watermark example" — a pirate brand wrapped around
-        // an ASCII prefix, the form observed in real EPUB metadata.
-        let value = "epub\u{7532}\u{4E59}\u{4E19}\u{4E01}";
-        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
-    }
-
-    #[test]
-    fn cjk_production_verb_flagged_as_watermark() {
-        // "sao miao zhi zuo" — "scanned and produced by".
-        let value = "\u{626B}\u{63CF}\u{5236}\u{4F5C}";
-        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
-    }
-
-    #[test]
-    fn cjk_distribution_brand_flagged_as_watermark() {
-        // "jiang huo ru hua" — a known distribution channel brand.
-        let value = "\u{6C5F}\u{706B}\u{5982}\u{753B}";
-        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
-        // "qing zhi guo du" — light-novel translation channel brand.
-        let value = "\u{8F7B}\u{4E4B}\u{56FD}\u{5EA6}";
-        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
-    }
-
-    #[test]
-    fn cjk_free_download_phrase_flagged_as_watermark() {
-        // A real-world publisher field carrying a free-download tag.
-        // "...hai liang dian zi shu mian fei xia zai" — "...huge ebook
-        // free download".
-        let value =
-            "chenjin5 \u{6D77}\u{91CF}\u{7535}\u{5B50}\u{4E66}\u{514D}\u{8D39}\u{4E0B}\u{8F7D}";
-        assert_eq!(evaluate(value), PublisherVerdict::Watermark);
+        let rules = rules_with_promo(&["free ebook"]);
+        assert_eq!(
+            evaluate("free ebook download", &rules),
+            PublisherVerdict::Watermark
+        );
     }
 
     #[test]
     fn ascii_distribution_handle_flagged_as_watermark() {
-        assert_eq!(evaluate("cj5"), PublisherVerdict::Watermark);
-        // Matches case-insensitively.
-        assert_eq!(evaluate("CJ5"), PublisherVerdict::Watermark);
-    }
-
-    #[test]
-    fn cjk_imprint_matches_whitelist() {
-        // "shang wu yin shu guan" — Commercial Press.
-        let value = "\u{5546}\u{52A1}\u{5370}\u{4E66}\u{9986}";
-        assert_eq!(evaluate(value), PublisherVerdict::Whitelisted);
-    }
-
-    #[test]
-    fn corporate_prefixed_jp_imprint_matches_whitelist() {
-        // "kabushiki kaisha KADOKAWA" — corporate-prefixed form.
-        let value = "\u{682A}\u{5F0F}\u{4F1A}\u{793E}KADOKAWA";
-        assert_eq!(evaluate(value), PublisherVerdict::Whitelisted);
-        // Bare "KADOKAWA" still matches its own seed.
-        assert_eq!(evaluate("KADOKAWA"), PublisherVerdict::Whitelisted);
-    }
-
-    #[test]
-    fn long_tail_value_stays_neutral() {
-        // A plausible small-press name that is not on the seed list.
+        let rules = rules_with_ascii_distribution(&["acme-rip"]);
+        assert_eq!(evaluate("acme-rip", &rules), PublisherVerdict::Watermark);
+        // Case-insensitive substring.
         assert_eq!(
-            evaluate("Independent Curiosities Press"),
+            evaluate("ACME-RIP edition", &rules),
+            PublisherVerdict::Watermark
+        );
+    }
+
+    #[test]
+    fn cjk_token_flagged_as_watermark() {
+        // "ce shi" (test placeholder) — never a real watermark token,
+        // but exercises the CJK substring path. `\u{...}` escapes keep
+        // the source bytes ASCII per repo policy.
+        let token = "\u{6D4B}\u{8BD5}";
+        let rules = rules_with_cjk(&[token]);
+        let input = format!("prefix {token} suffix");
+        assert_eq!(evaluate(&input, &rules), PublisherVerdict::Watermark);
+    }
+
+    #[test]
+    fn long_tail_value_stays_neutral_with_empty_rules() {
+        let rules = AuditRules::empty();
+        assert_eq!(
+            evaluate("Independent Curiosities Press", &rules),
             PublisherVerdict::Neutral
         );
     }
 
     #[test]
     fn empty_value_is_neutral() {
-        assert_eq!(evaluate(""), PublisherVerdict::Neutral);
-        assert_eq!(evaluate("   "), PublisherVerdict::Neutral);
+        let rules = AuditRules::empty();
+        assert_eq!(evaluate("", &rules), PublisherVerdict::Neutral);
+        assert_eq!(evaluate("   ", &rules), PublisherVerdict::Neutral);
     }
 }

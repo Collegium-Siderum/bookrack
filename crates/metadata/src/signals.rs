@@ -220,7 +220,7 @@ fn audit_publisher(input: &AuditInput, prior: SourcePrior, doubtful: bool) -> Fi
                 grade = FieldGrade::Missing;
                 flags.push(Flag::Empty);
             } else {
-                match publishers::evaluate(trimmed) {
+                match publishers::evaluate(trimmed, input.rules) {
                     PublisherVerdict::Watermark => {
                         // Two notches: watermark is structurally not a
                         // publisher.

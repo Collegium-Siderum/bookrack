@@ -229,6 +229,10 @@ pub struct IngestParams {
     /// caller resumes the run later with [`resume_from_chunk`].
     /// Off by default: the audit is purely advisory.
     pub hold_for_metadata: bool,
+    /// Runtime-loaded rule set the metadata audit consults. Defaults
+    /// to an empty set; load real rules from
+    /// `Config::audit_rules_dir()` and assign.
+    pub audit_rules: bookrack_metadata::AuditRules,
 }
 
 /// What one [`ingest_book`] run produced.
@@ -429,6 +433,7 @@ pub async fn ingest_book<E: Embedder>(
         &structure.toc_stats,
         source_stem,
         filename_biblio.as_ref(),
+        &params.audit_rules,
         &run_id,
         &source_sha,
     );
@@ -685,6 +690,7 @@ fn run_metadata_substep(
     toc_stats: &TocStats,
     source_stem: Option<&str>,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+    audit_rules: &bookrack_metadata::AuditRules,
     run_id: &str,
     source_sha: &str,
 ) -> Option<bookrack_metadata::Verdict> {
@@ -737,6 +743,7 @@ fn run_metadata_substep(
         body_sample: &body_sample,
         total_blocks: extraction.blocks.len(),
         source_stem,
+        rules: audit_rules,
     };
     let report = bookrack_metadata::audit(&input);
 
@@ -1595,6 +1602,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some("a-complete-book"),
             None,
+            &bookrack_metadata::AuditRules::empty(),
             "run-1",
             "dummy-sha",
         );
@@ -1653,6 +1661,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
+            &bookrack_metadata::AuditRules::empty(),
             "run-1",
             "dummy-sha",
         );
@@ -1710,6 +1719,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
+            &bookrack_metadata::AuditRules::empty(),
             "run-1",
             "dummy-sha",
         );

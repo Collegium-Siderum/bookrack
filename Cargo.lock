@@ -756,6 +756,10 @@ version = "0.1.0"
 dependencies = [
  "bookrack-catalog",
  "bookrack-extract",
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

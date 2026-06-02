@@ -8,8 +8,26 @@
 use bookrack_catalog::{Catalog, EffectiveAttrs, NewPublicationAttrs};
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
-    AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict, audit,
+    AuditInput, AuditRules, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats,
+    Verdict, audit,
 };
+
+/// Shared rule set the audit tests use: one whitelist entry that the
+/// "Oxford University Press" cases depend on, plus the CJK
+/// distribution-brand token the watermark test exercises.
+fn test_rules() -> &'static AuditRules {
+    use std::sync::OnceLock;
+    static RULES: OnceLock<AuditRules> = OnceLock::new();
+    RULES.get_or_init(|| AuditRules {
+        publisher_whitelist: vec!["Oxford University Press".to_string()],
+        contact_tokens: Vec::new(),
+        promo_tokens: Vec::new(),
+        ascii_distribution_tokens: Vec::new(),
+        // "placeholder watermark example" — pirate brand observed verbatim in
+        // real EPUB metadata. Encoded with `\u{...}` per repo policy.
+        watermark_cjk_tokens: vec!["\u{7532}\u{4E59}\u{4E19}\u{4E01}".to_string()],
+    })
+}
 
 const INTAKE: i64 = 1;
 const SCOPE: &str = "book";
@@ -93,6 +111,7 @@ fn epub_with_complete_record_grades_clean_and_high() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(report.verdict, Verdict::Clean);
@@ -141,6 +160,7 @@ fn epub_year_from_timestamp_shaped_dc_date_is_downgraded() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(field(&report, "year").grade, FieldGrade::Medium);
@@ -182,6 +202,7 @@ fn epub_year_from_a_plain_year_string_stays_strong() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -233,6 +254,7 @@ fn user_override_year_skips_the_timestamp_shape_signal() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -259,6 +281,7 @@ fn empty_record_grades_needs_work_and_low() {
         body_sample: "",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(report.verdict, Verdict::NeedsWork);
@@ -293,6 +316,7 @@ fn title_equal_to_filename_is_flagged() {
         body_sample: "Sample English body text.",
         total_blocks: 10,
         source_stem: Some("the-source-stem"),
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -328,6 +352,7 @@ fn placeholder_title_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -364,6 +389,7 @@ fn invalid_isbn_checksum_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -398,6 +424,7 @@ fn year_outside_range_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(field(&report, "year").flags.contains(&Flag::YearOutOfRange));
@@ -428,6 +455,7 @@ fn pdf_year_is_flagged_as_likely_file_date() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -462,6 +490,7 @@ fn watermark_publisher_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -503,6 +532,7 @@ fn cjk_watermark_publisher_is_flagged() {
         body_sample: "Sample body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -541,6 +571,7 @@ fn doubtful_text_layer_downgrades_present_fields() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -581,6 +612,7 @@ fn language_disagreeing_with_body_is_flagged() {
         body_sample: body,
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -617,6 +649,7 @@ fn cjk_body_agrees_with_zh_language() {
         body_sample: body,
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(
@@ -651,6 +684,7 @@ fn non_bcp47_language_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert!(field(&report, "language").flags.contains(&Flag::NonBcp47));
@@ -681,6 +715,7 @@ fn copyright_blocks_are_the_leading_indices() {
         body_sample: "Some English body.",
         total_blocks: 3,
         source_stem: None,
+        rules: test_rules(),
     };
     let report = audit(&input);
     assert_eq!(report.copyright_blocks, vec![0, 1, 2]);

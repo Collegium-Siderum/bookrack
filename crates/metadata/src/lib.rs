@@ -20,12 +20,14 @@
 mod filename;
 mod publishers;
 mod report;
+mod rules;
 mod signals;
 
 pub use filename::{FilenameBiblio, parse as parse_filename};
 pub use report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
 };
+pub use rules::{AuditRules, LoadError as RulesLoadError};
 
 /// Run the audit over one prepared input set.
 pub fn audit(input: &AuditInput) -> MetadataReport {

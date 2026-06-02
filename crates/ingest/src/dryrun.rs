@@ -44,6 +44,10 @@ pub struct DryrunParams {
     /// When true, the CHUNK step is skipped and `chunks` stays `None` in
     /// every book report. Useful if a caller only needs the audit verdict.
     pub skip_chunks: bool,
+    /// Runtime-loaded rule set the metadata audit consults. Defaults
+    /// to an empty set; load real rules from
+    /// `Config::audit_rules_dir()` and assign.
+    pub audit_rules: bookrack_metadata::AuditRules,
 }
 
 /// One book's dryrun outcome.
@@ -292,6 +296,7 @@ fn run_pipeline(
         body_sample: &body,
         total_blocks: extraction.blocks.len(),
         source_stem: Some(stem),
+        rules: &params.audit_rules,
     });
     // Re-write the row with the confidence rollup, like ingest does, so
     // any downstream caller that opens the in-memory catalog sees the
