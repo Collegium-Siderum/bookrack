@@ -19,6 +19,10 @@
 //! brute-force [`ChunkStore::search`] is both exact and fast, and the
 //! index is only worth building past tens of thousands of rows.
 
+pub mod meta;
+
+pub use meta::{DEFAULT_INDEX_NAME, META_FILENAME, SCHEMA_VERSION, VectorsMeta};
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -66,6 +70,16 @@ pub enum VectorsError {
     /// unexpected type — a schema the store did not write.
     #[error("chunks query result is missing or mistyped the {0:?} column")]
     BadColumn(&'static str),
+
+    /// IO failure on the `vectors_meta.json` sidecar — read, write, or
+    /// rename.
+    #[error("vectors_meta IO error: {0}")]
+    MetaIo(#[from] std::io::Error),
+
+    /// `vectors_meta.json` was unparseable: malformed JSON, an unknown
+    /// `kind`, or a field whose type does not match the schema.
+    #[error("vectors_meta parse error: {0}")]
+    MetaParse(#[from] serde_json::Error),
 }
 
 /// A fallible `vectors` operation.
