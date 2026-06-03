@@ -196,6 +196,35 @@ pub async fn retrieve_with<E: Embedder>(
     Ok(hits)
 }
 
+/// Read per-query overrides from `BOOKRACK_VECTORS_*` environment
+/// variables. Used by daemons that cannot pass per-call flags through
+/// their request surface; CLI callers usually merge this on top of
+/// their command-line overrides, with the command line winning.
+///
+/// Recognised variables:
+///
+/// * `BOOKRACK_VECTORS_BYPASS_ANN` — `"1"` / `"true"` / `"yes"` →
+///   force brute-force.
+/// * `BOOKRACK_VECTORS_NPROBES` — integer; sets `nprobes`.
+/// * `BOOKRACK_VECTORS_REFINE_FACTOR` — integer; sets
+///   `refine_factor`.
+pub fn env_overrides() -> SearchOptions {
+    let bypass_index = std::env::var("BOOKRACK_VECTORS_BYPASS_ANN")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let nprobes = std::env::var("BOOKRACK_VECTORS_NPROBES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    let refine_factor = std::env::var("BOOKRACK_VECTORS_REFINE_FACTOR")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
+    SearchOptions {
+        nprobes,
+        refine_factor,
+        bypass_index,
+    }
+}
+
 /// Build [`SearchOptions`] from the persisted [`AnnConfig`] at
 /// `<lancedb_dir>/vectors_meta.json`. No meta file or `kind =
 /// "brute-force"` returns `SearchOptions::default()` — lancedb already

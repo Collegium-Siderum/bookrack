@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::Catalog;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
-use bookrack_search::{cite, retrieve};
+use bookrack_search::{cite, env_overrides, retrieve_with};
 use bookrack_vectors::ChunkStore;
 
 // Re-exported so consumers name query results through this crate, not the
@@ -123,7 +123,15 @@ impl<E: Embedder> Library<E> {
     /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
         let top_k = top_k.unwrap_or(self.default_top_k);
-        let hits = retrieve(query, &self.store, &self.embedder, &self.lancedb_dir, top_k).await?;
+        let hits = retrieve_with(
+            query,
+            &self.store,
+            &self.embedder,
+            &self.lancedb_dir,
+            env_overrides(),
+            top_k,
+        )
+        .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits)?;

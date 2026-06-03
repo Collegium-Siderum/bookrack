@@ -580,10 +580,13 @@ async fn run_query(
             ))
             .context("verify index stamps")?;
     }
+    // CLI flags win over env, which wins over meta defaults inside
+    // retrieve_with.
+    let env = bookrack_search::env_overrides();
     let overrides = bookrack_vectors::SearchOptions {
-        bypass_index: bypass_ann,
-        nprobes,
-        refine_factor,
+        bypass_index: bypass_ann || env.bypass_index,
+        nprobes: nprobes.or(env.nprobes),
+        refine_factor: refine_factor.or(env.refine_factor),
     };
     let hits = bookrack_search::search_with(
         text,
