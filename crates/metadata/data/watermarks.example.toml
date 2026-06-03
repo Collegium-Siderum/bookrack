@@ -7,8 +7,10 @@
 #
 # The sniffer also catches closed-form patterns that need no list:
 # URLs, email addresses, and common top-level domain suffixes. Those
-# stay hard-coded in the engine; this file is for token lists that
-# evolve with the long tail of distribution channels.
+# patterns are gated by `audit_profile.publisher.url_watermark` in
+# `crates/audit-profile/data/audit_profile.toml`; the four lists below
+# are always consulted regardless of the toggle. This file is for
+# token lists that evolve with the long tail of distribution channels.
 #
 # Matching against all four lists is case-insensitive substring on the
 # input value. Use `\uXXXX` escapes (TOML basic strings) or natural

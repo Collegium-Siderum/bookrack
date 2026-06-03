@@ -30,6 +30,42 @@ caffeinate -i bash bulk-ingest.sh        # batch driver
 `-i` keeps the system from sleeping on idle without blocking display
 sleep, so an unattended overnight run finishes in its true wall-clock.
 
+## Audit profile
+
+The metadata audit, the filename parser, and the EPUB / TXT half-rules
+read every toggle and threshold from an audit profile. Three built-in
+presets ship with the binary:
+
+- `default` — the previous hard-coded behaviour, expressed as
+  toggles. Year range 1450–2100, every per-field signal active, every
+  TOC shape signal active.
+- `trust-source` — every toggle off. The audit substep is skipped
+  entirely. The pipeline still seeds the base attrs and writes a
+  `pending` review row stamped `bookrack-ingest:trust-source`, but no
+  signal weakens or strengthens any field. Use this when you want
+  bookrack to ingest "whatever the source says" and defer every
+  quality call to a human or downstream LLM reviewer.
+- `strict` — same toggle set as `default`; reserved for future
+  upgrades that promote selected signals to higher severities.
+
+The active preset is selected per command with the global flag:
+
+```
+bookrack --audit-profile trust-source ingest <file>
+bookrack --audit-profile strict dryrun <dir>
+```
+
+Without the flag, the shipped `default` profile is merged with an
+optional overlay at `<data_root>/audit-rules/audit_profile.local.toml`
+so a deployment can adjust individual thresholds without recompiling.
+Two existing list-typed inputs continue to load from the same
+directory: `<data_root>/audit-rules/publishers.toml` carries the
+reputable-imprint whitelist (see
+[publishers.example.toml](crates/metadata/data/publishers.example.toml))
+and `watermarks.toml` carries the four watermark token lists (see
+[watermarks.example.toml](crates/metadata/data/watermarks.example.toml)).
+Both files are user-supplied; bookrack ships only the examples.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).

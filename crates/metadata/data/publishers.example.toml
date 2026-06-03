@@ -2,7 +2,10 @@
 #
 # Copy this file to `$BOOKRACK_DATA_DIR/audit-rules/publishers.toml`
 # and edit in place. Bookrack does not ship a default list; matches
-# strengthen the publisher field's grade, misses stay neutral.
+# strengthen the publisher field's grade, misses stay neutral. The
+# whitelist is only consulted while `audit_profile.publisher`'s
+# `whitelist_normalize_abbreviations` toggle is on; see the
+# `crates/audit-profile/data/audit_profile.toml` schema for the gate.
 #
 # Matching is case-insensitive after a light normalisation pass that
 # drops punctuation and expands a few common abbreviations
