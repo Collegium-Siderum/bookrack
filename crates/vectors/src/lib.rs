@@ -80,10 +80,178 @@ pub enum VectorsError {
     /// `kind`, or a field whose type does not match the schema.
     #[error("vectors_meta parse error: {0}")]
     MetaParse(#[from] serde_json::Error),
+
+    /// `vectors_meta.json` carried a `kind` string this build does not
+    /// recognise. Likely a meta file written by a newer crate version.
+    #[error("vectors_meta has unknown kind {0:?}")]
+    UnknownAnnKind(String),
 }
 
 /// A fallible `vectors` operation.
 pub type Result<T> = std::result::Result<T, VectorsError>;
+
+/// The ANN index family attached to the chunks table. `BruteForce` is
+/// the explicit "no index" state — distinct from "no meta file yet,"
+/// which [`ChunkStore`] surfaces as `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnKind {
+    /// IVF with no quantization. Default — C1 recommendation.
+    IvfFlat,
+    /// IVF with 8-bit scalar quantization. ~2× faster than IvfFlat with
+    /// <1% recall loss on L2-normalized vectors.
+    IvfSq,
+    /// IVF with product quantization. Higher compression, but `nsv` must
+    /// be tuned to the embedding dimension (see [`AnnConfig::default_for`]).
+    IvfPq,
+    /// IVF with an HNSW sub-graph in each partition; raw vectors.
+    /// Unstable on lancedb 0.30 — see upstream issue 1428.
+    IvfHnswFlat,
+    /// IVF + HNSW + scalar quantization. Reserved for future CLI rebuild.
+    IvfHnswSq,
+    /// IVF + HNSW + product quantization. Reserved for future CLI rebuild.
+    IvfHnswPq,
+    /// No ANN index attached; queries scan the table directly.
+    BruteForce,
+}
+
+impl AnnKind {
+    /// The kebab-case label this kind serializes as in
+    /// `vectors_meta.json::kind`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AnnKind::IvfFlat => "ivf-flat",
+            AnnKind::IvfSq => "ivf-sq",
+            AnnKind::IvfPq => "ivf-pq",
+            AnnKind::IvfHnswFlat => "ivf-hnsw-flat",
+            AnnKind::IvfHnswSq => "ivf-hnsw-sq",
+            AnnKind::IvfHnswPq => "ivf-hnsw-pq",
+            AnnKind::BruteForce => "brute-force",
+        }
+    }
+}
+
+impl std::str::FromStr for AnnKind {
+    type Err = VectorsError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "ivf-flat" => Ok(AnnKind::IvfFlat),
+            "ivf-sq" => Ok(AnnKind::IvfSq),
+            "ivf-pq" => Ok(AnnKind::IvfPq),
+            "ivf-hnsw-flat" => Ok(AnnKind::IvfHnswFlat),
+            "ivf-hnsw-sq" => Ok(AnnKind::IvfHnswSq),
+            "ivf-hnsw-pq" => Ok(AnnKind::IvfHnswPq),
+            "brute-force" => Ok(AnnKind::BruteForce),
+            _ => Err(VectorsError::UnknownAnnKind(s.to_string())),
+        }
+    }
+}
+
+/// In-memory view of an ANN configuration. The `nprobes` /
+/// `refine_factor` fields here drive query behaviour; build-time
+/// parameters (`num_partitions`, `num_sub_vectors`, `num_bits`) come
+/// from the same struct so the same value can be passed to
+/// `build_ann_index` and consulted at query time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnConfig {
+    /// Which IVF family.
+    pub kind: AnnKind,
+    /// `k` for the IVF k-means quantizer. Ignored for `BruteForce`.
+    pub num_partitions: u32,
+    /// PQ sub-vector count; only meaningful for the `IvfPq*` kinds.
+    pub num_sub_vectors: Option<u32>,
+    /// PQ code width in bits per sub-vector; only meaningful for the
+    /// `IvfPq*` kinds.
+    pub num_bits: Option<u32>,
+    /// Query-time partition fan-out.
+    pub nprobes: u32,
+    /// Query-time refinement multiplier; primarily for PQ and HNSW.
+    pub refine_factor: Option<u32>,
+}
+
+impl AnnConfig {
+    /// The recommended default configuration for a given kind on the
+    /// current corpus. IvfFlat and IvfSq use `num_partitions = 64` and
+    /// `nprobes = 40` — both cleared the C1 recall threshold on the
+    /// 66.7K-chunk corpus. IvfPq uses the LanceDB-recommended
+    /// `num_sub_vectors = dim / 8 = 128` and `num_bits = 8`; the
+    /// alternative `nsv = 64` was shown insufficient under
+    /// `dim = 1024`.
+    pub fn default_for(kind: AnnKind) -> AnnConfig {
+        match kind {
+            AnnKind::IvfFlat | AnnKind::IvfSq => AnnConfig {
+                kind,
+                num_partitions: 64,
+                num_sub_vectors: None,
+                num_bits: None,
+                nprobes: 40,
+                refine_factor: None,
+            },
+            AnnKind::IvfPq => AnnConfig {
+                kind,
+                num_partitions: 64,
+                num_sub_vectors: Some(128),
+                num_bits: Some(8),
+                nprobes: 40,
+                refine_factor: None,
+            },
+            AnnKind::IvfHnswFlat | AnnKind::IvfHnswSq | AnnKind::IvfHnswPq => AnnConfig {
+                kind,
+                num_partitions: 64,
+                num_sub_vectors: None,
+                num_bits: None,
+                nprobes: 40,
+                refine_factor: Some(5),
+            },
+            AnnKind::BruteForce => AnnConfig {
+                kind,
+                num_partitions: 0,
+                num_sub_vectors: None,
+                num_bits: None,
+                nprobes: 0,
+                refine_factor: None,
+            },
+        }
+    }
+
+    /// Decode a persisted [`VectorsMeta`] into an [`AnnConfig`].
+    pub fn from_meta(meta: &VectorsMeta) -> Result<AnnConfig> {
+        let kind: AnnKind = meta.kind.parse()?;
+        Ok(AnnConfig {
+            kind,
+            num_partitions: meta.num_partitions,
+            num_sub_vectors: meta.num_sub_vectors,
+            num_bits: meta.num_bits,
+            nprobes: meta.default_nprobes,
+            refine_factor: meta.default_refine_factor,
+        })
+    }
+
+    /// Stamp this config into a fresh [`VectorsMeta`] for persisting.
+    /// `built_at` is RFC 3339 (the caller owns the clock so this module
+    /// stays deterministic).
+    pub fn to_meta(
+        &self,
+        built_at: String,
+        built_at_chunk_count: u64,
+        churn_since_rebuild: u64,
+        lance_index_name: String,
+    ) -> VectorsMeta {
+        VectorsMeta {
+            schema_version: SCHEMA_VERSION,
+            kind: self.kind.as_str().to_string(),
+            num_partitions: self.num_partitions,
+            num_sub_vectors: self.num_sub_vectors,
+            num_bits: self.num_bits,
+            default_nprobes: self.nprobes,
+            default_refine_factor: self.refine_factor,
+            built_at,
+            built_at_chunk_count,
+            churn_since_rebuild,
+            lance_index_name,
+        }
+    }
+}
 
 /// One chunk row about to be written to the store.
 ///
@@ -417,6 +585,79 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
         (dir, store)
+    }
+
+    #[test]
+    fn default_for_ivf_flat_matches_c1_recommendation() {
+        let cfg = AnnConfig::default_for(AnnKind::IvfFlat);
+        assert_eq!(cfg.num_partitions, 64);
+        assert_eq!(cfg.nprobes, 40);
+        assert!(cfg.refine_factor.is_none());
+        assert!(cfg.num_sub_vectors.is_none());
+    }
+
+    #[test]
+    fn default_for_ivf_pq_uses_lance_recommended_nsv() {
+        let cfg = AnnConfig::default_for(AnnKind::IvfPq);
+        assert_eq!(cfg.num_sub_vectors, Some(128));
+        assert_eq!(cfg.num_bits, Some(8));
+    }
+
+    #[test]
+    fn default_for_brute_force_clears_ivf_params() {
+        let cfg = AnnConfig::default_for(AnnKind::BruteForce);
+        assert_eq!(cfg.num_partitions, 0);
+        assert_eq!(cfg.nprobes, 0);
+        assert!(cfg.num_sub_vectors.is_none());
+        assert!(cfg.refine_factor.is_none());
+    }
+
+    #[test]
+    fn ann_kind_as_str_round_trips_through_from_str() {
+        for kind in [
+            AnnKind::IvfFlat,
+            AnnKind::IvfSq,
+            AnnKind::IvfPq,
+            AnnKind::IvfHnswFlat,
+            AnnKind::IvfHnswSq,
+            AnnKind::IvfHnswPq,
+            AnnKind::BruteForce,
+        ] {
+            let parsed: AnnKind = kind.as_str().parse().expect("kebab parses");
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_kind() {
+        let err = "ivf-quantum".parse::<AnnKind>().unwrap_err();
+        assert!(matches!(err, VectorsError::UnknownAnnKind(s) if s == "ivf-quantum"));
+    }
+
+    #[test]
+    fn meta_round_trip_preserves_config() {
+        let cfg = AnnConfig::default_for(AnnKind::IvfPq);
+        let meta = cfg.clone().to_meta(
+            "2026-06-03T17:47:00Z".to_string(),
+            66_703,
+            0,
+            crate::DEFAULT_INDEX_NAME.to_string(),
+        );
+        let decoded = AnnConfig::from_meta(&meta).expect("from_meta");
+        assert_eq!(decoded, cfg);
+    }
+
+    #[test]
+    fn from_meta_propagates_unknown_kind() {
+        let mut meta = AnnConfig::default_for(AnnKind::IvfFlat).to_meta(
+            "2026-06-03T00:00:00Z".to_string(),
+            0,
+            0,
+            crate::DEFAULT_INDEX_NAME.to_string(),
+        );
+        meta.kind = "ivf-warpdrive".to_string();
+        let err = AnnConfig::from_meta(&meta).unwrap_err();
+        assert!(matches!(err, VectorsError::UnknownAnnKind(_)));
     }
 
     #[tokio::test]
