@@ -107,6 +107,11 @@ pub struct DryrunBookReport {
     pub inherited_from_parent: Option<Vec<String>>,
     /// Per-field grades and flags from the metadata audit.
     pub audit_fields: Vec<FieldOut>,
+    /// Shape-level flag tokens the audit raised against the TOC. Held
+    /// separately from [`Self::audit_fields`] so the seven publication-
+    /// field histograms downstream consumers count are unchanged. Each
+    /// token carries a `toc:` prefix.
+    pub audit_shape_flags: Vec<String>,
     /// Aggregated audit verdict (`clean` / `needs_work`).
     pub verdict: Option<String>,
     /// Row-level confidence (`high` / `medium` / `low`).
@@ -269,6 +274,11 @@ pub struct DryrunSummary {
     /// tokens like `drop_invalid_isbn`, `drop_stale_year`, and
     /// `filename_fallback:<field>`.
     pub base_attrs_action_counts: std::collections::BTreeMap<String, usize>,
+    /// TOC anomaly histogram (shape-flag token -> count). Sourced from
+    /// [`DryrunBookReport::audit_shape_flags`]; keys carry a `toc:`
+    /// prefix and stay on a separate axis from the per-field flag
+    /// histogram in [`Self::flag_counts`].
+    pub toc_anomaly_counts: std::collections::BTreeMap<String, usize>,
 }
 
 /// Walk a path, dryrun every supported file under it, and accumulate a
@@ -313,6 +323,7 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         effective: None,
         inherited_from_parent: None,
         audit_fields: vec![],
+        audit_shape_flags: vec![],
         verdict: None,
         confidence: None,
         elapsed_ms: 0,
@@ -453,6 +464,11 @@ fn run_pipeline(
 
     record.biblio = Some(biblio_out(&extraction.biblio));
     record.audit_fields = report_fields(&report);
+    record.audit_shape_flags = report
+        .shape_flags
+        .iter()
+        .map(|f| f.token().to_string())
+        .collect();
     record.verdict = Some(report.verdict.as_token().to_string());
     record.confidence = Some(report.confidence.as_str().to_string());
 
@@ -539,6 +555,9 @@ pub fn summarize(books: &[DryrunBookReport]) -> DryrunSummary {
                 .base_attrs_action_counts
                 .entry(action.clone())
                 .or_default() += 1;
+        }
+        for token in &book.audit_shape_flags {
+            *summary.toc_anomaly_counts.entry(token.clone()).or_default() += 1;
         }
     }
     summary
@@ -655,6 +674,10 @@ mod tests {
         assert!(!rec.audit_fields.is_empty());
         assert!(rec.verdict.is_some());
         assert!(rec.confidence.is_some());
+        // A tiny HTML fixture cannot raise a TOC shape signal: HTML
+        // headings are anchored by construction and the body is too
+        // short to trip the large-body bit.
+        assert!(rec.audit_shape_flags.is_empty());
     }
 
     #[test]
@@ -752,6 +775,67 @@ mod tests {
         // The histogram exists, even if both books happened to record zero
         // base-attrs actions on this fixture.
         let _ = summary.base_attrs_action_counts;
+        // Two clean synthetic HTML books cannot raise TOC anomaly
+        // tokens, so the histogram stays empty here.
+        assert!(summary.toc_anomaly_counts.is_empty());
+    }
+
+    #[test]
+    fn summarize_counts_toc_anomalies() {
+        // The synthetic HTML extractor cannot trigger TOC shape signals,
+        // so seed two `DryrunBookReport`s directly to drive the
+        // histogram. One book raises two shape tokens; the second stays
+        // clean.
+        let raised = DryrunBookReport {
+            stem: "raised".to_string(),
+            format: "epub".to_string(),
+            bytes: 0,
+            extract_outcome: "extracted".to_string(),
+            adapter: Some("epub".to_string()),
+            blocks: Some(200),
+            toc_stats: None,
+            structure: None,
+            chunks: None,
+            source_tag: None,
+            filename_template: None,
+            biblio: None,
+            filename_biblio: None,
+            base_attrs: None,
+            base_attrs_actions: vec![],
+            effective: None,
+            inherited_from_parent: None,
+            audit_fields: vec![],
+            audit_shape_flags: vec![
+                "toc:unanchored_some".to_string(),
+                "toc:unanchored_half".to_string(),
+            ],
+            verdict: Some("needs_work".to_string()),
+            confidence: Some("low".to_string()),
+            elapsed_ms: 0,
+            error: None,
+        };
+        let mut clean = raised.clone();
+        clean.stem = "clean".to_string();
+        clean.audit_shape_flags = vec![];
+        clean.verdict = Some("clean".to_string());
+        clean.confidence = Some("high".to_string());
+
+        let summary = summarize(&[raised, clean]);
+        assert_eq!(
+            summary
+                .toc_anomaly_counts
+                .get("toc:unanchored_some")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .toc_anomaly_counts
+                .get("toc:unanchored_half")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(summary.toc_anomaly_counts.len(), 2);
     }
 
     #[test]
