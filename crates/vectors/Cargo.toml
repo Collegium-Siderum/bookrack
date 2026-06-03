@@ -12,6 +12,7 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 futures.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 # A tokio runtime to drive the async tests, and a temp dir per test so

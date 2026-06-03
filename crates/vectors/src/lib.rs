@@ -209,7 +209,22 @@ impl ChunkStore {
     /// and unindexed rows behind; running this at the end of each book
     /// keeps that churn from accumulating.
     pub async fn optimize(&self) -> Result<()> {
-        self.table.optimize(OptimizeAction::All).await?;
+        let started = std::time::Instant::now();
+        let stats = self.table.optimize(OptimizeAction::All).await?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        let compaction = stats.compaction.as_ref();
+        let prune = stats.prune.as_ref();
+        tracing::info!(
+            elapsed_ms,
+            fragments_added = compaction.map(|c| c.fragments_added).unwrap_or(0),
+            fragments_removed = compaction.map(|c| c.fragments_removed).unwrap_or(0),
+            files_added = compaction.map(|c| c.files_added).unwrap_or(0),
+            files_removed = compaction.map(|c| c.files_removed).unwrap_or(0),
+            old_versions_pruned = prune.map(|p| p.old_versions).unwrap_or(0),
+            bytes_pruned = prune.map(|p| p.bytes_removed).unwrap_or(0),
+            deletion_files_pruned = prune.map(|p| p.deletion_files_removed).unwrap_or(0),
+            "optimized chunks table"
+        );
         Ok(())
     }
 
