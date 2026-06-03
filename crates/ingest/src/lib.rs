@@ -27,7 +27,7 @@ pub use dryrun::{
     SUPPORTED_EXTENSIONS, StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path,
     summarize,
 };
-pub use embed_run::{EmbedRunReport, embed_book_chunks};
+pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
 
 use std::path::Path;
 

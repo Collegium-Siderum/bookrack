@@ -116,6 +116,27 @@ enum Command {
 enum VectorsAction {
     /// Print table size, ANN index state, and the persisted ANN config.
     Status,
+    /// Build or rebuild the ANN index from explicit parameters. Without
+    /// any flag, reads the persisted config from `vectors_meta.json` and
+    /// rebuilds from that — useful after corpus growth has exceeded the
+    /// L2 churn threshold.
+    Rebuild {
+        /// IVF family — `ivf-flat`, `ivf-sq`, `ivf-pq`, `ivf-hnsw-flat`,
+        /// `ivf-hnsw-sq`, `ivf-hnsw-pq`. Defaults to whatever the meta
+        /// holds, or `ivf-flat` for a fresh library.
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        num_partitions: Option<u32>,
+        #[arg(long)]
+        num_sub_vectors: Option<u32>,
+        #[arg(long)]
+        num_bits: Option<u32>,
+        #[arg(long)]
+        nprobes: Option<u32>,
+        #[arg(long)]
+        refine_factor: Option<u32>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -210,6 +231,25 @@ async fn main() -> Result<()> {
         ),
         Command::Vectors { action } => match action {
             VectorsAction::Status => run_vectors_status(&cfg).await,
+            VectorsAction::Rebuild {
+                kind,
+                num_partitions,
+                num_sub_vectors,
+                num_bits,
+                nprobes,
+                refine_factor,
+            } => {
+                run_vectors_rebuild(
+                    &cfg,
+                    kind.as_deref(),
+                    num_partitions,
+                    num_sub_vectors,
+                    num_bits,
+                    nprobes,
+                    refine_factor,
+                )
+                .await
+            }
         },
     }
 }
@@ -302,6 +342,72 @@ async fn print_status(
             m.churn_since_rebuild
         ),
     }
+    Ok(())
+}
+
+/// Render `bookrack vectors rebuild` — build or rebuild the ANN index
+/// from CLI flags, falling back to the persisted meta or the C1
+/// recommended default for any flag not supplied.
+#[allow(clippy::too_many_arguments)]
+async fn run_vectors_rebuild(
+    cfg: &Config,
+    kind_str: Option<&str>,
+    num_partitions: Option<u32>,
+    num_sub_vectors: Option<u32>,
+    num_bits: Option<u32>,
+    nprobes: Option<u32>,
+    refine_factor: Option<u32>,
+) -> Result<()> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let dim = corpus
+        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+        .context("read vector_dim stamp")?
+        .ok_or_else(|| {
+            anyhow::anyhow!("library has no ingested chunks yet; ingest a book before rebuild")
+        })?
+        .parse::<usize>()
+        .context("parse vector_dim stamp")?;
+    let store = ChunkStore::open(&lancedb_dir, dim)
+        .await
+        .context("open vector store")?;
+    // Pick the baseline: explicit kind > existing meta > default IvfFlat.
+    let mut base = if let Some(s) = kind_str {
+        let kind: bookrack_vectors::AnnKind =
+            s.parse().with_context(|| format!("parse --kind {s:?}"))?;
+        bookrack_vectors::AnnConfig::default_for(kind)
+    } else if let Some(c) = store
+        .current_ann_cfg(&lancedb_dir)
+        .context("read ann config")?
+    {
+        c
+    } else {
+        bookrack_vectors::AnnConfig::default_for(bookrack_vectors::AnnKind::IvfFlat)
+    };
+    if let Some(v) = num_partitions {
+        base.num_partitions = v;
+    }
+    if let Some(v) = num_sub_vectors {
+        base.num_sub_vectors = Some(v);
+    }
+    if let Some(v) = num_bits {
+        base.num_bits = Some(v);
+    }
+    if let Some(v) = nprobes {
+        base.nprobes = v;
+    }
+    if let Some(v) = refine_factor {
+        base.refine_factor = Some(v);
+    }
+    store
+        .build_ann_index(&base, &lancedb_dir, bookrack_ingest::now_rfc3339())
+        .await
+        .context("build ann index")?;
+    println!(
+        "rebuilt: kind={} np={}",
+        base.kind.as_str(),
+        base.num_partitions
+    );
     Ok(())
 }
 

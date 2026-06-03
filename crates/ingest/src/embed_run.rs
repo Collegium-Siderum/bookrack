@@ -212,7 +212,7 @@ fn scale_to_corpus(mut cfg: AnnConfig, chunk_count: u64) -> AnnConfig {
 /// Current wall-clock time as an RFC 3339 UTC string. Implemented
 /// inline to avoid pulling in chrono — uses Howard Hinnant's civil
 /// calendar algorithm to turn epoch seconds into a Y/M/D triple.
-fn now_rfc3339() -> String {
+pub fn now_rfc3339() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
