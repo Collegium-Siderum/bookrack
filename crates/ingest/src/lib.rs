@@ -424,7 +424,9 @@ pub async fn ingest_book<E: Embedder>(
     // metadata looks. A human or LLM must `metadata approve`,
     // `metadata ack`, or `metadata reject` to advance status.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
-    let filename_biblio = source_stem.map(bookrack_metadata::parse_filename);
+    let filename_toggles = bookrack_metadata::AuditProfile::default().filename_parser;
+    let filename_biblio =
+        source_stem.map(|stem| bookrack_metadata::parse_filename(stem, &filename_toggles));
     let verdict = run_metadata_substep(
         catalog,
         intake_id,
@@ -1771,7 +1773,10 @@ mod book_pipeline_tests {
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2003, Sample Press)";
-        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        let filename_biblio = bookrack_metadata::parse_filename(
+            stem,
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         super::run_metadata_substep(
             &catalog,
             intake_id,
@@ -1829,7 +1834,10 @@ mod book_pipeline_tests {
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - Filename Title (2003, Sample Press)";
-        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        let filename_biblio = bookrack_metadata::parse_filename(
+            stem,
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         super::run_metadata_substep(
             &catalog,
             intake_id,
@@ -1886,7 +1894,10 @@ mod book_pipeline_tests {
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title -- isbn13 9780306406157";
-        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        let filename_biblio = bookrack_metadata::parse_filename(
+            stem,
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         super::run_metadata_substep(
             &catalog,
             intake_id,
@@ -1942,7 +1953,10 @@ mod book_pipeline_tests {
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2006, Sample Press)";
-        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        let filename_biblio = bookrack_metadata::parse_filename(
+            stem,
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         super::run_metadata_substep(
             &catalog,
             intake_id,
@@ -1996,7 +2010,10 @@ mod book_pipeline_tests {
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2019, Sample Press)";
-        let filename_biblio = bookrack_metadata::parse_filename(stem);
+        let filename_biblio = bookrack_metadata::parse_filename(
+            stem,
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         super::run_metadata_substep(
             &catalog,
             intake_id,
@@ -2203,8 +2220,10 @@ mod book_pipeline_tests {
             year_raw: Some("2019-04-01T00:00:00Z".to_string()),
             ..Default::default()
         });
-        let filename =
-            bookrack_metadata::parse_filename("Alice Author - A Sample Title (2006, Sample Press)");
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
         // The stale 2019 was dropped, then the filename year filled in.
         assert_eq!(outcome.attrs.year.as_deref(), Some("2006"));
@@ -2225,8 +2244,10 @@ mod book_pipeline_tests {
         // Every fill must surface as its own action so a JSONL consumer
         // can attribute each value back to a layer.
         let extraction = extraction_with_biblio(bookrack_extract::Biblio::default());
-        let filename =
-            bookrack_metadata::parse_filename("Alice Author - A Sample Title (2006, Sample Press)");
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &bookrack_metadata::AuditProfile::default().filename_parser,
+        );
         let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         for expected in [

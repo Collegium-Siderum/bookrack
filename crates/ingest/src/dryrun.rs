@@ -416,7 +416,10 @@ fn run_pipeline(
     });
 
     // METADATA — seed base attrs, then audit over the effective view.
-    let filename_biblio = parse_filename(stem);
+    let filename_biblio = parse_filename(
+        stem,
+        &bookrack_metadata::AuditProfile::default().filename_parser,
+    );
     record.filename_template = filename_template_label(&filename_biblio);
     record.filename_biblio = record
         .filename_template

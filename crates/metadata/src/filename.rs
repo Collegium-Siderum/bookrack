@@ -22,6 +22,8 @@
 //! the ISBN-10 / ISBN-13 checksum so that a Unix-timestamp masquerading
 //! as an identifier never reaches base attrs.
 
+use bookrack_audit_profile::FilenameParserToggles;
+
 use crate::signals::is_valid_isbn;
 
 /// Fields the filename parser may recover. Every field is `Option` so
@@ -53,23 +55,28 @@ impl FilenameBiblio {
 
 /// Try each template against `stem`, returning the first match. An
 /// empty input or one that matches no template returns the default
-/// (all-`None`) value rather than an error.
-pub fn parse(stem: &str) -> FilenameBiblio {
+/// (all-`None`) value rather than an error. The toggle bag gates the
+/// parser as a whole (`enabled`) and the accepted year range
+/// (`year_min` / `year_max`).
+pub fn parse(stem: &str, toggles: &FilenameParserToggles) -> FilenameBiblio {
+    if !toggles.enabled {
+        return FilenameBiblio::default();
+    }
     let trimmed = stem.trim();
     if trimmed.is_empty() {
         return FilenameBiblio::default();
     }
-    if let Some(b) = parse_bracketed_series(trimmed)
+    if let Some(b) = parse_bracketed_series(trimmed, toggles)
         && !b.is_empty()
     {
         return b;
     }
-    if let Some(b) = parse_author_title_paren(trimmed)
+    if let Some(b) = parse_author_title_paren(trimmed, toggles)
         && !b.is_empty()
     {
         return b;
     }
-    if let Some(b) = parse_double_dash(trimmed)
+    if let Some(b) = parse_double_dash(trimmed, toggles)
         && !b.is_empty()
     {
         return b;
@@ -80,7 +87,7 @@ pub fn parse(stem: &str) -> FilenameBiblio {
 /// Template 1: `[Series] <Author - Title (Year, Publisher)>`. The
 /// inner part is delegated to template 2; the series segment is
 /// attached on success.
-fn parse_bracketed_series(stem: &str) -> Option<FilenameBiblio> {
+fn parse_bracketed_series(stem: &str, toggles: &FilenameParserToggles) -> Option<FilenameBiblio> {
     let rest = stem.strip_prefix('[')?;
     let close = rest.find(']')?;
     let series = rest[..close].trim();
@@ -88,7 +95,7 @@ fn parse_bracketed_series(stem: &str) -> Option<FilenameBiblio> {
     if series.is_empty() || tail.is_empty() {
         return None;
     }
-    let mut inner = parse_author_title_paren(tail)?;
+    let mut inner = parse_author_title_paren(tail, toggles)?;
     inner.series = Some(series.to_string());
     Some(inner)
 }
@@ -96,14 +103,14 @@ fn parse_bracketed_series(stem: &str) -> Option<FilenameBiblio> {
 /// Template 2: `Author - Title (Year, Publisher)`. The trailing
 /// parenthesis is the anchor: without it the stem is rejected so the
 /// double-dash template gets a chance.
-fn parse_author_title_paren(stem: &str) -> Option<FilenameBiblio> {
+fn parse_author_title_paren(stem: &str, toggles: &FilenameParserToggles) -> Option<FilenameBiblio> {
     let without_close = stem.strip_suffix(')')?;
     let open_idx = without_close.rfind('(')?;
     let inside = &without_close[open_idx + 1..];
     let before = without_close[..open_idx].trim_end();
 
     let (year_part, publisher_part) = inside.split_once(", ")?;
-    let year = parse_year(year_part.trim())?;
+    let year = parse_year(year_part.trim(), toggles)?;
     let publisher = publisher_part.trim();
     if publisher.is_empty() {
         return None;
@@ -129,7 +136,7 @@ fn parse_author_title_paren(stem: &str) -> Option<FilenameBiblio> {
 /// the second (if non-empty) as the author, and later segments are
 /// scanned for an ISBN payload. Year inside a trailing parenthesis on
 /// any segment is captured opportunistically.
-fn parse_double_dash(stem: &str) -> Option<FilenameBiblio> {
+fn parse_double_dash(stem: &str, toggles: &FilenameParserToggles) -> Option<FilenameBiblio> {
     if !stem.contains(" -- ") {
         return None;
     }
@@ -150,7 +157,7 @@ fn parse_double_dash(stem: &str) -> Option<FilenameBiblio> {
             isbn = Some(value);
         }
         if year.is_none()
-            && let Some(value) = extract_year_anywhere(seg)
+            && let Some(value) = extract_year_anywhere(seg, toggles)
         {
             year = Some(value.to_string());
         }
@@ -169,13 +176,14 @@ fn parse_double_dash(stem: &str) -> Option<FilenameBiblio> {
     })
 }
 
-/// Accept four ASCII digits in `1500..=2100`; reject anything else.
-fn parse_year(s: &str) -> Option<&str> {
+/// Accept four ASCII digits in `[year_min, year_max]`; reject anything
+/// else. Bounds come from the active filename-parser toggle bag.
+fn parse_year<'a>(s: &'a str, toggles: &FilenameParserToggles) -> Option<&'a str> {
     if s.len() != 4 || !s.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     let n: u32 = s.parse().ok()?;
-    if (1500..=2100).contains(&n) {
+    if (toggles.year_min..=toggles.year_max).contains(&n) {
         Some(s)
     } else {
         None
@@ -183,9 +191,9 @@ fn parse_year(s: &str) -> Option<&str> {
 }
 
 /// Scan a segment for any four-digit token that parses as a year.
-fn extract_year_anywhere(seg: &str) -> Option<&str> {
+fn extract_year_anywhere<'a>(seg: &'a str, toggles: &FilenameParserToggles) -> Option<&'a str> {
     seg.split(|c: char| !c.is_ascii_digit())
-        .find(|tok| parse_year(tok).is_some())
+        .find(|tok| parse_year(tok, toggles).is_some())
 }
 
 /// Pull an ISBN out of a segment. Recognised prefixes are `isbn13`,
@@ -224,9 +232,13 @@ fn nonempty(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn parse_default(stem: &str) -> FilenameBiblio {
+        parse(stem, &FilenameParserToggles::default())
+    }
+
     #[test]
     fn template_simple_paren_picks_apart_author_title_year_publisher() {
-        let b = parse("Alice Author - A Title (2003, Sample Press)");
+        let b = parse_default("Alice Author - A Title (2003, Sample Press)");
         assert_eq!(b.title.as_deref(), Some("A Title"));
         assert_eq!(b.author.as_deref(), Some("Alice Author"));
         assert_eq!(b.year.as_deref(), Some("2003"));
@@ -237,7 +249,7 @@ mod tests {
 
     #[test]
     fn template_bracketed_series_extracts_series_then_recurses() {
-        let b = parse("[A Series] Alice Author - A Title (1999, Sample Press)");
+        let b = parse_default("[A Series] Alice Author - A Title (1999, Sample Press)");
         assert_eq!(b.series.as_deref(), Some("A Series"));
         assert_eq!(b.author.as_deref(), Some("Alice Author"));
         assert_eq!(b.title.as_deref(), Some("A Title"));
@@ -248,7 +260,7 @@ mod tests {
     #[test]
     fn template_double_dash_recovers_title_author_year_and_isbn() {
         // 9780306406157 is a valid ISBN-13 (transformed from 0-306-40615-2).
-        let b = parse("A Title -- Alice Author -- 1989 -- isbn13 9780306406157");
+        let b = parse_default("A Title -- Alice Author -- 1989 -- isbn13 9780306406157");
         assert_eq!(b.title.as_deref(), Some("A Title"));
         assert_eq!(b.author.as_deref(), Some("Alice Author"));
         assert_eq!(b.year.as_deref(), Some("1989"));
@@ -259,7 +271,7 @@ mod tests {
     #[test]
     fn double_dash_drops_isbn_that_fails_checksum() {
         // A bare ten-digit timestamp masquerading as ISBN-10.
-        let b = parse("A Title -- Alice Author -- isbn 1742443234");
+        let b = parse_default("A Title -- Alice Author -- isbn 1742443234");
         assert!(b.isbn.is_none());
         assert_eq!(b.title.as_deref(), Some("A Title"));
     }
@@ -267,29 +279,52 @@ mod tests {
     #[test]
     fn year_must_be_four_digits_in_range() {
         // Year out of accepted range — template 2 rejects, falls through.
-        let b = parse("Author - Title (1234, Press)");
+        let b = parse_default("Author - Title (1234, Press)");
         assert!(b.is_empty());
         // Non-four-digit year also rejects.
-        let b = parse("Author - Title (99, Press)");
+        let b = parse_default("Author - Title (99, Press)");
         assert!(b.is_empty());
     }
 
     #[test]
     fn empty_stem_returns_default() {
-        assert!(parse("").is_empty());
-        assert!(parse("   ").is_empty());
+        assert!(parse_default("").is_empty());
+        assert!(parse_default("   ").is_empty());
+    }
+
+    #[test]
+    fn disabled_toggle_returns_empty_biblio() {
+        let toggles = FilenameParserToggles {
+            enabled: false,
+            ..FilenameParserToggles::default()
+        };
+        let b = parse("Alice Author - A Title (2003, Sample Press)", &toggles);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn year_bounds_from_toggles_are_honoured() {
+        // Default `[1500, 2100]` rejects 1234; narrowing to `[1000, 2200]`
+        // accepts it.
+        let toggles = FilenameParserToggles {
+            year_min: 1000,
+            year_max: 2200,
+            ..FilenameParserToggles::default()
+        };
+        let b = parse("Author - Title (1234, Press)", &toggles);
+        assert_eq!(b.year.as_deref(), Some("1234"));
     }
 
     #[test]
     fn unmatched_stem_returns_default() {
         // No anchor: no parens, no ` -- `.
-        let b = parse("just a bare name with no markers");
+        let b = parse_default("just a bare name with no markers");
         assert!(b.is_empty());
     }
 
     #[test]
     fn isbn10_with_dashes_is_accepted() {
-        let b = parse("A Title -- Alice -- ISBN: 0-306-40615-2");
+        let b = parse_default("A Title -- Alice -- ISBN: 0-306-40615-2");
         assert_eq!(b.isbn.as_deref(), Some("0306406152"));
     }
 }
