@@ -18,6 +18,7 @@ mod chunk;
 mod dryrun;
 mod embed_run;
 pub mod envelope;
+pub mod rebuild;
 pub mod reembed;
 pub mod sentences;
 mod structure;
