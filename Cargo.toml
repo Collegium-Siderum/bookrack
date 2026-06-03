@@ -90,6 +90,11 @@ unicode-normalization = "0.1"
 dotenvy = "0.15"
 # Temp directories for tests that need an on-disk store (e.g. LanceDB).
 tempfile = "3"
+# The audit-profile crate, pinned at the workspace level so every
+# downstream member crate (`metadata`, `extract`, `ingest`) consumes
+# the same surface. Houses the toggle and threshold set the metadata
+# audit and upstream half-rules read at evaluation time.
+bookrack-audit-profile = { path = "crates/audit-profile" }
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
 zip = "8"

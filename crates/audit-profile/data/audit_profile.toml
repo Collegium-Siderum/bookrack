@@ -1,0 +1,89 @@
+# Default audit profile shipped with bookrack.
+#
+# Schema-locked: every value is either a public constant or a boolean.
+# The defaults reproduce the previous hard-coded audit behaviour
+# exactly, so an install with no `audit_profile.local.toml` overlay
+# sees no change from the pre-profile pipeline.
+#
+# A runtime overlay at `<data_root>/audit-rules/audit_profile.local.toml`
+# is merged on top: any field present there overrides the default,
+# missing fields fall through to the value declared here.
+#
+# This file is loaded through `include_str!` at build time. Do not
+# remove fields; downstream code reads every key.
+
+schema_version = 1
+
+# Master switch. When false, the audit substep is skipped entirely:
+# `node_reviews` is still written as `pending`, but no `MetadataReport`
+# is produced and no audit-derived columns are filled.
+audit_enabled = true
+
+[year]
+range_check = true
+min = 1450
+max = 2100
+pdf_likely_file_date = true
+timestamp_form = true
+# B1 cross-field reservation: when true, a filename-derived year overrides
+# a doubtful biblio year. Wired in stage 2 only if the corresponding
+# detector lands; currently inert.
+cross_field_filename_override = false
+
+[title]
+placeholder_check = true
+purely_numeric = true
+# R-09 split into four named sub-rules. Each gates one detection path
+# against the trimmed title; the current implementation routes all four
+# through one combined detector pending the B1 §3.2 split.
+series_paren = true
+marketing_block = true
+aggregator_marker = true
+volume_marker = true
+bracketed_min_chars = 3
+
+[language]
+bcp47_check = true
+body_script_match = true
+
+[publisher]
+url_watermark = true
+whitelist_normalize_abbreviations = true
+# B1 reservation: when true, a 10-digit numeric ISBN that fails the
+# checksum is dropped from base attrs. Currently inert.
+drop_10digit_isbn_to_filename = false
+
+[toc_shape]
+suspicious_flat = true
+flat_min_entries = 5
+flat_severe_min_entries = 10
+heading_block_skew = true
+skew_min = 5
+skew_ratio = 4
+empty_large_body = true
+large_body_min_blocks = 100
+
+[source_prior]
+enabled = true
+
+[copyright_blocks]
+enabled = true
+count = 6
+
+[filename_parser]
+enabled = true
+year_min = 1500
+year_max = 2100
+
+[extract]
+# H-01: validate EPUB published-date year falls in `[year_min, year_max]`.
+epub_year_range_check = true
+epub_year_min = 1000
+epub_year_max = 2200
+# H-02: recognise ISBN inside dc:identifier and require 10/13 digits.
+epub_isbn_recognition = true
+# H-04: map MARC role codes (aut/trl/trc/edt) onto contributor roles.
+# When false every contributor lands under `Other`.
+marc_role_mapping = true
+# H-05: emit Chinese chapter/volume markers as heading blocks.
+txt_toc_enabled = true
