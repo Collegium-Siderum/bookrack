@@ -25,7 +25,6 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::{AuditInput, AuditRules, TocStats};
-use bookrack_search::search;
 use bookrack_vectors::ChunkStore;
 
 #[derive(clap::Parser)]
@@ -79,6 +78,16 @@ enum Command {
     Query {
         /// The natural-language query.
         text: String,
+        /// Force a brute-force scan for this query, ignoring any ANN
+        /// index. Useful for ground-truth checks.
+        #[arg(long)]
+        bypass_ann: bool,
+        /// Override the IVF probe count for this query only.
+        #[arg(long)]
+        nprobes: Option<usize>,
+        /// Override the IVF-PQ refinement multiplier for this query only.
+        #[arg(long)]
+        refine_factor: Option<u32>,
     },
     /// Inspect and edit a book's metadata.
     Metadata {
@@ -217,7 +226,12 @@ async fn main() -> Result<()> {
             path,
             hold_for_metadata,
         } => run_ingest(&cfg, &path, hold_for_metadata, profile_name.as_deref()).await,
-        Command::Query { text } => run_query(&cfg, &text).await,
+        Command::Query {
+            text,
+            bypass_ann,
+            nprobes,
+            refine_factor,
+        } => run_query(&cfg, &text, bypass_ann, nprobes, refine_factor).await,
         Command::Metadata { action } => run_metadata(&cfg, action, profile_name.as_deref()).await,
         Command::Dryrun {
             path,
@@ -526,7 +540,13 @@ async fn run_ingest(
     Ok(())
 }
 
-async fn run_query(cfg: &Config, text: &str) -> Result<()> {
+async fn run_query(
+    cfg: &Config,
+    text: &str,
+    bypass_ann: bool,
+    nprobes: Option<usize>,
+    refine_factor: Option<u32>,
+) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let search_cfg = SearchConfig::from_env();
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
@@ -560,13 +580,19 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
             ))
             .context("verify index stamps")?;
     }
-    let hits = search(
+    let overrides = bookrack_vectors::SearchOptions {
+        bypass_index: bypass_ann,
+        nprobes,
+        refine_factor,
+    };
+    let hits = bookrack_search::search_with(
         text,
         &corpus,
         &catalog,
         &store,
         &embedder,
         &cfg.lancedb_dir(),
+        overrides,
         search_cfg.top_k,
     )
     .await

@@ -21,7 +21,9 @@ use bookrack_catalog::Catalog;
 use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
-use bookrack_vectors::{AnnKind, ChunkStore, SearchHit, SearchOptions};
+pub use bookrack_vectors::SearchOptions;
+
+use bookrack_vectors::{AnnKind, ChunkStore, SearchHit};
 use serde::Serialize;
 
 /// Separator between breadcrumb segments.
@@ -103,7 +105,33 @@ pub async fn search<E: Embedder>(
     lancedb_dir: &Path,
     top_k: usize,
 ) -> Result<Vec<Citation>> {
-    let hits = retrieve(query, store, embedder, lancedb_dir, top_k).await?;
+    search_with(
+        query,
+        corpus,
+        catalog,
+        store,
+        embedder,
+        lancedb_dir,
+        SearchOptions::default(),
+        top_k,
+    )
+    .await
+}
+
+/// Variant of [`search`] that applies per-call overrides over the
+/// persisted meta defaults — see [`retrieve_with`] for the merge order.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_with<E: Embedder>(
+    query: &str,
+    corpus: &Corpus,
+    catalog: &Catalog,
+    store: &ChunkStore,
+    embedder: &E,
+    lancedb_dir: &Path,
+    overrides: SearchOptions,
+    top_k: usize,
+) -> Result<Vec<Citation>> {
+    let hits = retrieve_with(query, store, embedder, lancedb_dir, overrides, top_k).await?;
     cite(corpus, catalog, hits)
 }
 
@@ -117,6 +145,32 @@ pub async fn retrieve<E: Embedder>(
     lancedb_dir: &Path,
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
+    retrieve_with(
+        query,
+        store,
+        embedder,
+        lancedb_dir,
+        SearchOptions::default(),
+        top_k,
+    )
+    .await
+}
+
+/// Variant of [`retrieve`] that lets a caller layer per-call overrides
+/// on top of the persisted meta defaults.
+///
+/// Merge order: `overrides.nprobes` / `overrides.refine_factor` win
+/// when set; otherwise the meta default applies. `overrides.bypass_
+/// index = true` is sticky — it forces a brute-force scan regardless
+/// of meta.
+pub async fn retrieve_with<E: Embedder>(
+    query: &str,
+    store: &ChunkStore,
+    embedder: &E,
+    lancedb_dir: &Path,
+    overrides: SearchOptions,
+    top_k: usize,
+) -> Result<Vec<SearchHit>> {
     let input = build_query_input(query);
     let embed_started = Instant::now();
     let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
@@ -126,7 +180,12 @@ pub async fn retrieve<E: Embedder>(
         "embedded query"
     );
 
-    let opts = options_from_meta(store, lancedb_dir)?;
+    let base = options_from_meta(store, lancedb_dir)?;
+    let opts = SearchOptions {
+        nprobes: overrides.nprobes.or(base.nprobes),
+        refine_factor: overrides.refine_factor.or(base.refine_factor),
+        bypass_index: overrides.bypass_index || base.bypass_index,
+    };
     let recall_started = Instant::now();
     let hits = store.search_with(query_vector, top_k, opts).await?;
     tracing::debug!(
