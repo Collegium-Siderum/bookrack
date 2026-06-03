@@ -137,6 +137,9 @@ enum VectorsAction {
         #[arg(long)]
         refine_factor: Option<u32>,
     },
+    /// Drop the ANN index and mark the meta as brute-force. Search
+    /// falls back to a full scan on the next query.
+    Drop,
 }
 
 #[derive(clap::Subcommand)]
@@ -250,6 +253,7 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            VectorsAction::Drop => run_vectors_drop(&cfg).await,
         },
     }
 }
@@ -408,6 +412,28 @@ async fn run_vectors_rebuild(
         base.kind.as_str(),
         base.num_partitions
     );
+    Ok(())
+}
+
+/// Render `bookrack vectors drop` — drop any ANN index and stamp the
+/// meta as `kind = brute-force`. Search falls back to a full scan.
+async fn run_vectors_drop(cfg: &Config) -> Result<()> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let dim = corpus
+        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+        .context("read vector_dim stamp")?
+        .ok_or_else(|| anyhow::anyhow!("library has no ingested chunks yet; nothing to drop"))?
+        .parse::<usize>()
+        .context("parse vector_dim stamp")?;
+    let store = ChunkStore::open(&lancedb_dir, dim)
+        .await
+        .context("open vector store")?;
+    store
+        .drop_ann_index(&lancedb_dir, bookrack_ingest::now_rfc3339())
+        .await
+        .context("drop ann index")?;
+    println!("dropped: kind=brute-force");
     Ok(())
 }
 
