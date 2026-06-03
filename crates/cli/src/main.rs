@@ -546,6 +546,7 @@ async fn run_ingest(
         &mut corpus,
         &mut catalog,
         &cfg.lancedb_dir(),
+        &cfg.books_dir(),
         &embedder,
         &params,
     )

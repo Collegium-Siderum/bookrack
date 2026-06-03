@@ -281,6 +281,7 @@ pub async fn ingest_book<E: Embedder>(
     corpus: &mut Corpus,
     catalog: &mut Catalog,
     lancedb_dir: &Path,
+    books_dir: &Path,
     embedder: &E,
     params: &IngestParams,
 ) -> Result<IngestReport> {
@@ -369,6 +370,32 @@ pub async fn ingest_book<E: Embedder>(
     // The status track is `Pending` (set by `register_intake`) →
     // `Extracted` here → `Embedded` after the embed run completes.
     catalog.set_intake_status(intake_id, IntakeStatus::Extracted)?;
+
+    // Cache the post-EXTRACT Extraction as a v1 envelope in the opaque
+    // store and record its path in `intake.stored_path`. Failure is
+    // logged but not fatal: the envelope is a rebuild cache, not the
+    // source of truth.
+    let envelope_path = books_dir.join(envelope::envelope_filename(intake_id));
+    match envelope::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
+        Ok(()) => {
+            if let Err(err) =
+                catalog.set_stored_path(intake_id, envelope_path.to_string_lossy().as_ref())
+            {
+                tracing::warn!(
+                    intake_id,
+                    error = %err,
+                    "failed to record stored_path; rebuild path unavailable for this intake"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                intake_id,
+                error = %err,
+                "failed to write extraction envelope; rebuild path unavailable for this intake"
+            );
+        }
+    }
 
     // STRUCTURE.
     let started = std::time::Instant::now();
@@ -1643,6 +1670,7 @@ mod book_pipeline_tests {
             &mut corpus,
             &mut catalog,
             dir.path(),
+            dir.path(),
             &Fake { dim: 8 },
             &IngestParams::default(),
         )
@@ -1735,6 +1763,81 @@ mod book_pipeline_tests {
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.confidence.as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn ingest_writes_envelope_and_records_stored_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let books_dir = dir.path().join("books");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &books_dir,
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("ingest");
+
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        let stored_path = intake
+            .stored_path
+            .clone()
+            .expect("stored_path must be recorded after a successful ingest");
+        let envelope_path = std::path::PathBuf::from(&stored_path);
+        assert_eq!(
+            envelope_path.file_name().and_then(|n| n.to_str()),
+            Some(envelope_filename(report.intake_id).as_str())
+        );
+
+        let envelope = read_envelope(&envelope_path).expect("read envelope");
+        assert_eq!(envelope.schema_version, ENVELOPE_SCHEMA_VERSION);
+        assert_eq!(envelope.intake_id, report.intake_id);
+        assert!(!envelope.source_sha256.is_empty());
+        assert!(!envelope.extraction.blocks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn envelope_write_failure_does_not_abort_ingest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A regular file at the books_dir path: write_envelope's
+        // create_dir_all then fails, exercising the warn-on-fail path.
+        let books_dir = dir.path().join("books-as-file");
+        std::fs::write(&books_dir, b"not a directory").expect("write");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            &books_dir,
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("ingest must succeed even when envelope write fails");
+        assert!(report.chunks_written > 0);
+
+        let intake = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake")
+            .expect("present");
+        assert!(
+            intake.stored_path.is_none(),
+            "stored_path must stay null when the envelope write fails"
+        );
     }
 
     #[tokio::test]
@@ -2186,6 +2289,7 @@ mod book_pipeline_tests {
             &mut corpus,
             &mut catalog,
             dir.path(),
+            dir.path(),
             &Fake { dim: 8 },
             &params,
         )
@@ -2248,6 +2352,7 @@ mod book_pipeline_tests {
             &mut corpus,
             &mut catalog,
             dir.path(),
+            dir.path(),
             &Fake { dim: 8 },
             &IngestParams::default(),
         )
@@ -2272,6 +2377,7 @@ mod book_pipeline_tests {
             &file,
             &mut corpus,
             &mut catalog,
+            dir.path(),
             dir.path(),
             &Offline,
             &IngestParams::default(),
