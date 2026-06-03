@@ -444,6 +444,31 @@ impl ChunkStore {
         Ok(self.table.count_rows(None).await?)
     }
 
+    /// Read every chunk row of one book back, vectors included.
+    ///
+    /// The partition is named by [`PartitionIdx`]; the filter mirrors
+    /// [`Self::delete_partition`] so the same `start_node_id` range that
+    /// would clear the partition's rows scans them. Rows are returned in
+    /// whatever order LanceDB walks the underlying fragments — callers
+    /// that care about a deterministic order must sort themselves.
+    pub async fn scan_partition(&self, partition: PartitionIdx) -> Result<Vec<ChunkRow>> {
+        let lo = partition.root().get();
+        let hi = partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY;
+        let batches: Vec<RecordBatch> = self
+            .table
+            .query()
+            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"))
+            .execute()
+            .await?
+            .try_collect()
+            .await?;
+        let mut rows = Vec::new();
+        for batch in &batches {
+            read_chunk_rows(batch, self.dim, &mut rows)?;
+        }
+        Ok(rows)
+    }
+
     /// Run table-level maintenance: compact small fragments, prune
     /// versions older than the LanceDB default retention, and absorb any
     /// freshly-appended rows into existing indices.
@@ -772,6 +797,46 @@ fn build_batch(rows: &[ChunkRow], dim: usize) -> Result<RecordBatch> {
         ],
     )?;
     Ok(batch)
+}
+
+/// Read every row of a plain (non-vector-search) batch into `out`,
+/// reconstructing the vector column into `Vec<f32>`.
+fn read_chunk_rows(batch: &RecordBatch, dim: usize, out: &mut Vec<ChunkRow>) -> Result<()> {
+    let vector_col = batch
+        .column_by_name("vector")
+        .and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>())
+        .ok_or(VectorsError::BadColumn("vector"))?;
+    let text = string_column(batch, "text")?;
+    let start_node = i64_column(batch, "start_node_id")?;
+    let start_off = i32_column(batch, "start_char_offset")?;
+    let end_node = i64_column(batch, "end_node_id")?;
+    let end_off = i32_column(batch, "end_char_offset")?;
+    let sha = string_column(batch, "norm_chunk_sha256")?;
+
+    for i in 0..batch.num_rows() {
+        let inner = vector_col.value(i);
+        let f32_arr = inner
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .ok_or(VectorsError::BadColumn("vector"))?;
+        if f32_arr.len() != dim {
+            return Err(VectorsError::DimensionMismatch {
+                got: f32_arr.len(),
+                expected: dim,
+            });
+        }
+        let vector: Vec<f32> = (0..dim).map(|j| f32_arr.value(j)).collect();
+        out.push(ChunkRow {
+            vector,
+            text: text.value(i).to_string(),
+            start_node_id: NodeId::new(start_node.value(i)),
+            start_char_offset: start_off.value(i),
+            end_node_id: NodeId::new(end_node.value(i)),
+            end_char_offset: end_off.value(i),
+            norm_chunk_sha256: sha.value(i).to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Read every row of a search-result batch into `out`.
@@ -1207,6 +1272,52 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_partition_on_an_empty_store_returns_no_rows() {
+        let (_dir, store) = fresh_store().await;
+        let rows = store
+            .scan_partition(PartitionIdx::new(7))
+            .await
+            .expect("scan");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_partition_returns_only_rows_of_that_book_with_vectors() {
+        let (_dir, store) = fresh_store().await;
+        let written = [
+            row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+            row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+            row(1, 3, [0.0, 0.0, 1.0, 0.0]),
+            row(2, 1, [0.0, 0.0, 0.0, 1.0]),
+        ];
+        store.append(&written).await.expect("append");
+
+        let mut rows = store
+            .scan_partition(PartitionIdx::new(1))
+            .await
+            .expect("scan");
+        assert_eq!(rows.len(), 3);
+        // Order is LanceDB-defined; sort by offset for a stable assertion.
+        rows.sort_by_key(|r| r.start_node_id.get());
+        for (got, expected) in rows.iter().zip(written.iter().take(3)) {
+            assert_eq!(got.vector, expected.vector);
+            assert_eq!(got.text, expected.text);
+            assert_eq!(got.start_node_id, expected.start_node_id);
+            assert_eq!(got.start_char_offset, expected.start_char_offset);
+            assert_eq!(got.end_node_id, expected.end_node_id);
+            assert_eq!(got.end_char_offset, expected.end_char_offset);
+            assert_eq!(got.norm_chunk_sha256, expected.norm_chunk_sha256);
+        }
+
+        let other = store
+            .scan_partition(PartitionIdx::new(2))
+            .await
+            .expect("scan");
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].vector, written[3].vector);
     }
 
     #[tokio::test]
