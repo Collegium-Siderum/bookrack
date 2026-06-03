@@ -723,6 +723,43 @@ fn run_metadata_substep(
         return None;
     }
 
+    // trust-source short-circuit: when the profile disables the audit,
+    // record the substep as skipped and write a `pending` review row
+    // with a profile-stamped reviewer so a downstream query can tell a
+    // "no audit ran" pending from a "audit flagged" pending. No
+    // MetadataReport is produced and no audit-derived columns are
+    // written.
+    if !audit_profile.audit_enabled {
+        let reviewer = format!("bookrack-ingest:{}", audit_profile.name);
+        if let Err(e) = catalog.upsert_review(
+            &NewReview::new(
+                intake_id,
+                BOOK_SCOPE,
+                &reviewer,
+                bookrack_catalog::STATUS_PENDING,
+            )
+            .notes(format!(
+                "audit skipped: {} profile disables the metadata audit",
+                audit_profile.name,
+            )),
+        ) {
+            tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
+        }
+        audit(
+            catalog,
+            run_id,
+            source_sha,
+            Some(book_root_id),
+            "metadata",
+            "audit",
+            "skipped",
+            started,
+            None,
+            None,
+        );
+        return None;
+    }
+
     let effective = match catalog.effective_publication_attrs(intake_id, BOOK_SCOPE) {
         Ok(eff) => eff,
         Err(e) => {
@@ -1749,6 +1786,78 @@ mod book_pipeline_tests {
         assert_eq!(attrs.source_format.as_deref(), Some("epub"));
         // Required + should-fill fields all Strong → confidence high.
         assert_eq!(attrs.confidence.as_deref(), Some("high"));
+    }
+
+    #[tokio::test]
+    async fn trust_source_profile_writes_pending_review_and_skips_audit() {
+        // Same fixture as the default-profile case above, but driven by
+        // the trust-source profile: the audit substep is short-circuited.
+        // The review row still lands at `pending`, the reviewed_by carries
+        // the profile name, and `node_publication_attrs.confidence` is
+        // never written because no MetadataReport is produced.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = bookrack_extract::Extraction {
+            blocks: vec![bookrack_extract::Block {
+                kind: bookrack_extract::BlockKind::Body,
+                text: "A short English body sample for the audit.".to_string(),
+                source_unit: 0,
+            }],
+            toc: bookrack_extract::Toc {
+                entries: Vec::new(),
+            },
+            biblio: bookrack_extract::Biblio {
+                title: Some("A Complete Book".to_string()),
+                language: Some("en".to_string()),
+                publisher: Some("Oxford University Press".to_string()),
+                year: Some(2010),
+                ..Default::default()
+            },
+            provenance: bookrack_extract::Provenance {
+                adapter: "epub".to_string(),
+                extractor_version: "test-1".to_string(),
+                text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
+                skipped_units: Vec::new(),
+            },
+        };
+        let intake = catalog
+            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .expect("register");
+        let intake_id = intake.intake().intake_id;
+        super::run_metadata_substep(
+            &catalog,
+            intake_id,
+            42,
+            &extraction,
+            &TocStats::default(),
+            Some("a-complete-book"),
+            None,
+            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::trust_source(),
+            "run-1",
+            "dummy-sha",
+        );
+        let review = catalog
+            .review(intake_id, "book")
+            .expect("review")
+            .expect("present");
+        assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
+        assert_eq!(review.reviewed_by, "bookrack-ingest:trust-source");
+        assert!(
+            review
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("audit skipped"),
+            "trust-source review row must note the skip in the notes column: {:?}",
+            review.notes,
+        );
+        let attrs = catalog
+            .publication_attrs(intake_id, "book")
+            .expect("attrs")
+            .expect("present");
+        // Base attrs are still seeded; the audit-derived confidence is not.
+        assert_eq!(attrs.title.as_deref(), Some("A Complete Book"));
+        assert!(attrs.confidence.is_none());
     }
 
     #[tokio::test]
