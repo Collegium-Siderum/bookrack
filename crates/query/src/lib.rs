@@ -66,6 +66,7 @@ pub struct Library<E: Embedder> {
     embedder: E,
     corpus_db: PathBuf,
     catalog_db: PathBuf,
+    lancedb_dir: PathBuf,
     default_top_k: usize,
 }
 
@@ -102,6 +103,7 @@ impl<E: Embedder> Library<E> {
             embedder,
             corpus_db,
             catalog_db,
+            lancedb_dir: lancedb_dir.to_path_buf(),
             default_top_k,
         })
     }
@@ -121,7 +123,7 @@ impl<E: Embedder> Library<E> {
     /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
         let top_k = top_k.unwrap_or(self.default_top_k);
-        let hits = retrieve(query, &self.store, &self.embedder, top_k).await?;
+        let hits = retrieve(query, &self.store, &self.embedder, &self.lancedb_dir, top_k).await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits)?;

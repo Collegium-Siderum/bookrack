@@ -323,9 +323,17 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
             ))
             .context("verify index stamps")?;
     }
-    let hits = search(text, &corpus, &catalog, &store, &embedder, search_cfg.top_k)
-        .await
-        .context("run query")?;
+    let hits = search(
+        text,
+        &corpus,
+        &catalog,
+        &store,
+        &embedder,
+        &cfg.lancedb_dir(),
+        search_cfg.top_k,
+    )
+    .await
+    .context("run query")?;
     render::citations(&hits);
     Ok(())
 }

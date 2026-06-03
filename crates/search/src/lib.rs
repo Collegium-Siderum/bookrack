@@ -14,13 +14,14 @@
 //! It is added only when the walk does not already lead with it. Hybrid
 //! retrieval (BM25 / full-text) and an approximate index are deferred.
 
+use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::Catalog;
 use bookrack_core::NodeId;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
-use bookrack_vectors::{ChunkStore, SearchHit};
+use bookrack_vectors::{AnnKind, ChunkStore, SearchHit, SearchOptions};
 use serde::Serialize;
 
 /// Separator between breadcrumb segments.
@@ -99,9 +100,10 @@ pub async fn search<E: Embedder>(
     catalog: &Catalog,
     store: &ChunkStore,
     embedder: &E,
+    lancedb_dir: &Path,
     top_k: usize,
 ) -> Result<Vec<Citation>> {
-    let hits = retrieve(query, store, embedder, top_k).await?;
+    let hits = retrieve(query, store, embedder, lancedb_dir, top_k).await?;
     cite(corpus, catalog, hits)
 }
 
@@ -112,6 +114,7 @@ pub async fn retrieve<E: Embedder>(
     query: &str,
     store: &ChunkStore,
     embedder: &E,
+    lancedb_dir: &Path,
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
     let input = build_query_input(query);
@@ -123,14 +126,32 @@ pub async fn retrieve<E: Embedder>(
         "embedded query"
     );
 
+    let opts = options_from_meta(store, lancedb_dir)?;
     let recall_started = Instant::now();
-    let hits = store.search(query_vector, top_k).await?;
+    let hits = store.search_with(query_vector, top_k, opts).await?;
     tracing::debug!(
         hits = hits.len(),
         elapsed_ms = recall_started.elapsed().as_secs_f64() * 1e3,
         "recalled nearest passages"
     );
     Ok(hits)
+}
+
+/// Build [`SearchOptions`] from the persisted [`AnnConfig`] at
+/// `<lancedb_dir>/vectors_meta.json`. No meta file or `kind =
+/// "brute-force"` returns `SearchOptions::default()` — lancedb already
+/// runs brute-force when no index is present, and the explicit
+/// brute-force kind has no useful overrides.
+fn options_from_meta(store: &ChunkStore, lancedb_dir: &Path) -> Result<SearchOptions> {
+    let cfg = match store.current_ann_cfg(lancedb_dir)? {
+        Some(c) if c.kind != AnnKind::BruteForce => c,
+        _ => return Ok(SearchOptions::default()),
+    };
+    Ok(SearchOptions {
+        nprobes: Some(cfg.nprobes as usize),
+        refine_factor: cfg.refine_factor,
+        bypass_index: false,
+    })
 }
 
 /// Resolve a citation breadcrumb for each hit from `corpus` (the
@@ -413,11 +434,11 @@ mod tests {
 
     #[tokio::test]
     async fn breadcrumb_leads_with_the_book_title_once() {
-        let (_dir, corpus, catalog, store, leaf) = fixture(Some("A Test Book"), true).await;
+        let (dir, corpus, catalog, store, leaf) = fixture(Some("A Test Book"), true).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
@@ -431,7 +452,7 @@ mod tests {
         // No biblio title and no TOC. With a known intake row carrying
         // `original_path`, the leading segment falls back to the
         // filename stem rather than rendering as untitled.
-        let (_dir, corpus, mut catalog, store, _leaf) = fixture(None, false).await;
+        let (dir, corpus, mut catalog, store, _leaf) = fixture(None, false).await;
         catalog
             .register_intake(
                 &bookrack_catalog::NewIntake::new("sha-abc")
@@ -443,7 +464,7 @@ mod tests {
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
@@ -455,11 +476,11 @@ mod tests {
         // No biblio title, no TOC, and no intake row to read from:
         // the breadcrumb still names the book by its intake id rather
         // than rendering as untitled.
-        let (_dir, corpus, catalog, store, _leaf) = fixture(None, false).await;
+        let (dir, corpus, catalog, store, _leaf) = fixture(None, false).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
             .await
             .expect("search");
         assert_eq!(hits.len(), 1);
@@ -467,11 +488,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn options_from_meta_returns_default_when_no_meta() {
+        let (dir, _corpus, _catalog, store, _leaf) = fixture(Some("Any"), true).await;
+        let opts = options_from_meta(&store, dir.path()).expect("options_from_meta");
+        assert_eq!(opts.nprobes, None);
+        assert_eq!(opts.refine_factor, None);
+        assert!(!opts.bypass_index);
+    }
+
+    #[tokio::test]
+    async fn options_from_meta_carries_overrides_from_meta_file() {
+        let (dir, _corpus, _catalog, store, _leaf) = fixture(Some("Any"), true).await;
+        // Stamp a meta file directly to simulate a built IvfFlat index.
+        let cfg = bookrack_vectors::AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 64,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 20,
+            refine_factor: Some(3),
+        };
+        let meta = cfg.to_meta(
+            "2026-06-03T00:00:00Z".to_string(),
+            10,
+            0,
+            bookrack_vectors::DEFAULT_INDEX_NAME.to_string(),
+        );
+        bookrack_vectors::meta::store(dir.path(), &meta).expect("write meta");
+        let opts = options_from_meta(&store, dir.path()).expect("options_from_meta");
+        assert_eq!(opts.nprobes, Some(20));
+        assert_eq!(opts.refine_factor, Some(3));
+        assert!(!opts.bypass_index);
+    }
+
+    #[tokio::test]
+    async fn options_from_meta_returns_default_for_brute_force_kind() {
+        let (dir, _corpus, _catalog, store, _leaf) = fixture(Some("Any"), true).await;
+        let cfg = bookrack_vectors::AnnConfig::default_for(AnnKind::BruteForce);
+        let meta = cfg.to_meta(
+            "2026-06-03T00:00:00Z".to_string(),
+            10,
+            0,
+            bookrack_vectors::DEFAULT_INDEX_NAME.to_string(),
+        );
+        bookrack_vectors::meta::store(dir.path(), &meta).expect("write meta");
+        let opts = options_from_meta(&store, dir.path()).expect("options_from_meta");
+        assert_eq!(opts.nprobes, None);
+        assert!(!opts.bypass_index);
+    }
+
+    #[tokio::test]
     async fn override_title_reflects_in_breadcrumb_without_corpus_rewrite() {
         // The catalog's effective view is what the breadcrumb reads:
         // setting an override title after ingest must show up on the
         // very next query, and the corpus row stays untouched.
-        let (_dir, corpus, catalog, store, _leaf) = fixture(Some("Original"), true).await;
+        let (dir, corpus, catalog, store, _leaf) = fixture(Some("Original"), true).await;
         catalog
             .set_override(&NewOverride::new(
                 1,
@@ -484,7 +555,7 @@ mod tests {
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let hits = search("anything", &corpus, &catalog, &store, &query, 5)
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
             .await
             .expect("search");
         assert_eq!(hits[0].breadcrumb, "Revised \u{203a} Chapter One");
