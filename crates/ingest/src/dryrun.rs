@@ -459,11 +459,12 @@ fn run_pipeline(
     // post-audit value.
     attrs.confidence = Some(report.confidence.as_str().to_string());
     catalog.upsert_publication_attrs(&attrs)?;
+    let reviewer = format!("bookrack-ingest:{}", params.audit_profile.name);
     let _ = catalog.upsert_review(
         &NewReview::new(
             intake_id,
             BOOK_SCOPE,
-            "pipeline",
+            &reviewer,
             bookrack_catalog::STATUS_PENDING,
         )
         .notes(String::new()),

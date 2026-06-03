@@ -811,11 +811,15 @@ fn run_metadata_substep(
     // The audit's plausibility verdict travels in the notes column for
     // forensic context and through the `book_pipeline_audit` row below;
     // status itself stays at `pending` until a human or LLM advances it.
+    // The reviewed_by string carries the active profile name so a query
+    // can tell `default` flavour pending from a `strict`-flavour pending
+    // or from the audit-skipped `trust-source` flavour written above.
+    let reviewer = format!("bookrack-ingest:{}", audit_profile.name);
     if let Err(e) = catalog.upsert_review(
         &NewReview::new(
             intake_id,
             BOOK_SCOPE,
-            "pipeline",
+            &reviewer,
             bookrack_catalog::STATUS_PENDING,
         )
         .notes(report_notes(&report)),

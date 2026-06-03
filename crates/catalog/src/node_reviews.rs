@@ -14,6 +14,13 @@
 //! correctness is irreducibly a human concern — no extractor or
 //! heuristic can promise it — so the table keeps the two axes apart.
 //!
+//! `reviewed_by` carries a `<namespace>:<id>` token by convention. The
+//! ingest pipeline writes `bookrack-ingest:<profile-name>` (e.g.
+//! `bookrack-ingest:default` or `bookrack-ingest:trust-source`) so a
+//! query can tell apart the audit-profile flavours of a `pending` row.
+//! Human and LLM advancers overwrite this column with their own
+//! namespaced token (`human:<email>`, `llm:<model>@<version>`).
+//!
 //! There is no DDL CHECK on `status`; the column carries one of four
 //! tokens by convention:
 //!
