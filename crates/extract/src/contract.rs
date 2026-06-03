@@ -13,7 +13,7 @@
 //! invariant (same source file => byte-identical `Extraction`) reduces
 //! to a plain `==` check.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// What extraction yielded for one source file — the deliverable of an
 /// adapter.
@@ -35,7 +35,7 @@ use serde::Serialize;
 // consumed one at a time, never held in bulk — boxing would only add an
 // allocation to the hot path for no aggregate-memory gain.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExtractOutcome {
     /// A usable text layer was extracted.
     Extracted(Extraction),
@@ -45,7 +45,7 @@ pub enum ExtractOutcome {
 }
 
 /// One source file, fully extracted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Extraction {
     /// Content blocks in reading order.
     pub blocks: Vec<Block>,
@@ -65,7 +65,7 @@ pub struct Extraction {
 /// only to resolve TOC hrefs onto blocks; once [`TocEntry::start_block`]
 /// is computed they serve no downstream purpose, and a single block can
 /// carry several ids that one field could not represent anyway.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
     /// Coarse extraction-time classification.
     pub kind: BlockKind,
@@ -82,7 +82,7 @@ pub struct Block {
 /// Coarse block classification. Deliberately fewer values than the
 /// downstream `NodeType`s — extract labels only what the source can
 /// give reliably, and STRUCTURE refines with whole-tree context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BlockKind {
     /// Running prose. The overwhelming majority.
@@ -98,13 +98,13 @@ pub enum BlockKind {
 }
 
 /// The table of contents: flattened, depth-tagged entries in order.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Toc {
     pub entries: Vec<TocEntry>,
 }
 
 /// One TOC entry, anchored to the block where its content begins.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TocEntry {
     pub label: String,
     /// 0 = topmost.
@@ -120,7 +120,7 @@ pub struct TocEntry {
 /// There is no full publication date here: a file's own metadata yields
 /// at most a year, and extract transcribes only what the file carries.
 /// Month/day precision is supplied later, by the METADATA stage.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Biblio {
     pub title: Option<String>,
     pub subtitle: Option<String>,
@@ -140,13 +140,13 @@ pub struct Biblio {
 }
 
 /// One named contributor with the role the file assigned.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contributor {
     pub name: String,
     pub role: ContributorRole,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContributorRole {
     Author,
@@ -157,7 +157,7 @@ pub enum ContributorRole {
 }
 
 /// One source sub-unit that extraction skipped rather than aborting on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedUnit {
     /// 0-based index of the skipped sub-unit — for PDF, the page index.
     pub index: u32,
@@ -167,7 +167,7 @@ pub struct SkippedUnit {
 
 /// How the file was extracted, plus the boundary verdict on its text
 /// layer (the extract / OCR seam).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// Which adapter produced this — `"epub"`, `"html"`, `"txt"`, …
     pub adapter: String,
@@ -189,7 +189,7 @@ pub struct Provenance {
 /// an [`Extraction`] at all — it yields [`ExtractOutcome::NeedsOcr`] —
 /// so by the time a `TextLayerQuality` is stamped, the text is already
 /// known to be worth keeping; the grade only says how much to trust it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextLayerQuality {
     /// Structured, born-digital text (EPUB / HTML / TXT). Always usable.
@@ -234,4 +234,69 @@ pub enum ExtractError {
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_extraction() -> Extraction {
+        Extraction {
+            blocks: vec![
+                Block {
+                    kind: BlockKind::Heading { level: 1 },
+                    text: "Chapter One".into(),
+                    source_unit: 0,
+                },
+                Block {
+                    kind: BlockKind::Body,
+                    text: "Some prose here.".into(),
+                    source_unit: 0,
+                },
+                Block {
+                    kind: BlockKind::Footnote,
+                    text: "A footnote body.".into(),
+                    source_unit: 1,
+                },
+            ],
+            toc: Toc {
+                entries: vec![TocEntry {
+                    label: "Chapter One".into(),
+                    depth: 0,
+                    start_block: Some(0),
+                }],
+            },
+            biblio: Biblio {
+                title: Some("Sample".into()),
+                subtitle: None,
+                publisher: Some("Acme Press".into()),
+                year: Some(2020),
+                year_raw: Some("2020-01-15T00:00:00Z".into()),
+                isbn: Some("978-0-00-000000-0".into()),
+                series: None,
+                language: Some("en".into()),
+                contributors: vec![Contributor {
+                    name: "A. Author".into(),
+                    role: ContributorRole::Author,
+                }],
+            },
+            provenance: Provenance {
+                adapter: "epub".into(),
+                extractor_version: "rbook=0.7;normalize=v3".into(),
+                text_layer_quality: TextLayerQuality::BornDigital,
+                skipped_units: vec![SkippedUnit {
+                    index: 3,
+                    reason: "empty spine document".into(),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn extraction_round_trips_through_serde_json() {
+        let original = sample_extraction();
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        let parsed: Extraction = serde_json::from_slice(&bytes).expect("deserialize");
+        assert_eq!(parsed, original);
+    }
 }

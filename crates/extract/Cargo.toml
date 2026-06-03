@@ -19,5 +19,6 @@ thiserror.workspace = true
 # Also a normal dependency above; the TXT test re-encodes a fixture to
 # GB18030 to exercise the legacy-encoding decode path.
 encoding_rs.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 zip.workspace = true

@@ -716,6 +716,7 @@ dependencies = [
  "rbook",
  "scraper",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "zip",
@@ -839,9 +840,12 @@ dependencies = [
  "bookrack-core",
  "futures",
  "lancedb",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
