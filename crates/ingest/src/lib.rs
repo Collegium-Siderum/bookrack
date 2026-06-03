@@ -746,7 +746,7 @@ fn run_metadata_substep(
         source_stem,
         rules: audit_rules,
     };
-    let report = bookrack_metadata::audit(&input);
+    let report = bookrack_metadata::audit(&input, &bookrack_metadata::AuditProfile::default());
 
     // Roll the audit's row-level confidence back into the base record.
     // The upsert overwrites every column, so the biblio values seeded

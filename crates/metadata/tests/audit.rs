@@ -8,8 +8,8 @@
 use bookrack_catalog::{Catalog, EffectiveAttrs, NewPublicationAttrs};
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
-    AuditInput, AuditRules, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats,
-    Verdict, audit,
+    AuditInput, AuditProfile, AuditRules, Confidence, FieldGrade, FieldReport, Flag,
+    MetadataReport, TocStats, Verdict, audit,
 };
 
 /// Shared rule set the audit tests use: one whitelist entry that the
@@ -113,7 +113,7 @@ fn epub_with_complete_record_grades_clean_and_high() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::Clean);
     assert_eq!(report.confidence, Confidence::High);
     assert_eq!(field(&report, "title").grade, FieldGrade::Strong);
@@ -162,7 +162,7 @@ fn epub_year_from_timestamp_shaped_dc_date_is_downgraded() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Medium);
     assert!(
         field(&report, "year")
@@ -204,7 +204,7 @@ fn epub_year_from_a_plain_year_string_stays_strong() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
     assert!(
         !field(&report, "year")
@@ -256,7 +256,7 @@ fn user_override_year_skips_the_timestamp_shape_signal() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
     assert!(
         !field(&report, "year")
@@ -283,7 +283,7 @@ fn empty_record_grades_needs_work_and_low() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::NeedsWork);
     assert_eq!(report.confidence, Confidence::Low);
     assert_eq!(field(&report, "title").grade, FieldGrade::Missing);
@@ -318,7 +318,7 @@ fn title_equal_to_filename_is_flagged() {
         source_stem: Some("the-source-stem"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "title")
             .flags
@@ -354,7 +354,7 @@ fn placeholder_title_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "title")
             .flags
@@ -391,7 +391,7 @@ fn invalid_isbn_checksum_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "isbn")
             .flags
@@ -426,7 +426,7 @@ fn year_outside_range_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "year").flags.contains(&Flag::YearOutOfRange));
 }
 
@@ -457,7 +457,7 @@ fn pdf_year_is_flagged_as_likely_file_date() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "year")
             .flags
@@ -492,7 +492,7 @@ fn watermark_publisher_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "publisher")
             .flags
@@ -534,7 +534,7 @@ fn cjk_watermark_publisher_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "publisher")
             .flags
@@ -573,7 +573,7 @@ fn doubtful_text_layer_downgrades_present_fields() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "title")
             .flags
@@ -614,7 +614,7 @@ fn language_disagreeing_with_body_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         field(&report, "language")
             .flags
@@ -651,7 +651,7 @@ fn cjk_body_agrees_with_zh_language() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(
         !field(&report, "language")
             .flags
@@ -686,7 +686,7 @@ fn non_bcp47_language_is_flagged() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "language").flags.contains(&Flag::NonBcp47));
 }
 
@@ -717,7 +717,7 @@ fn copyright_blocks_are_the_leading_indices() {
         source_stem: None,
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.copyright_blocks, vec![0, 1, 2]);
 }
 
@@ -765,7 +765,7 @@ fn audit_toc_shape_clean_yields_no_flags() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.is_empty());
     assert_eq!(report.verdict, Verdict::Clean);
     assert_eq!(report.confidence, Confidence::High);
@@ -793,7 +793,7 @@ fn audit_toc_shape_severe_pulls_verdict_and_confidence_down() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.contains(&Flag::TocUnanchoredSome));
     assert!(report.shape_flags.contains(&Flag::TocUnanchoredHalf));
     assert_eq!(report.verdict, Verdict::NeedsWork);
@@ -825,7 +825,7 @@ fn audit_toc_shape_mild_caps_confidence_at_medium() {
         source_stem: Some("a-test-book"),
         rules: test_rules(),
     };
-    let report = audit(&input);
+    let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.shape_flags, vec![Flag::TocSuspiciousFlat]);
     assert_eq!(report.verdict, Verdict::Clean);
     assert_eq!(report.confidence, Confidence::Medium);
@@ -854,7 +854,7 @@ fn audit_toc_shape_never_strengthens() {
             source_stem: None,
             rules: test_rules(),
         };
-        audit(&input)
+        audit(&input, &AuditProfile::default())
     };
     assert_eq!(baseline.verdict, Verdict::NeedsWork);
     assert_eq!(baseline.confidence, Confidence::Low);
@@ -900,7 +900,7 @@ fn audit_toc_shape_never_strengthens() {
             source_stem: None,
             rules: test_rules(),
         };
-        let report = audit(&input);
+        let report = audit(&input, &AuditProfile::default());
         assert_eq!(
             report.verdict,
             Verdict::NeedsWork,
@@ -947,4 +947,190 @@ fn audit_input_carries_no_review_status_field() {
         source_stem: _,
         rules: _,
     } = input;
+}
+
+/// Build a stock `AuditInput` against an in-memory catalog seeded with
+/// the spelled-out fields. Helper used by the toggle-off tests below.
+fn run_with(
+    profile: &AuditProfile,
+    title: Option<&str>,
+    publisher: Option<&str>,
+    year: Option<&str>,
+    language: Option<&str>,
+    body_sample: &str,
+    adapter: &str,
+) -> MetadataReport {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(&catalog, title, publisher, year, None, language, None, None);
+    let effective = effective_of(&catalog);
+    let prov = provenance(adapter, TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample,
+        total_blocks: 0,
+        source_stem: None,
+        rules: test_rules(),
+    };
+    audit(&input, profile)
+}
+
+#[test]
+fn toggle_off_year_range_check_suppresses_out_of_range_flag() {
+    let mut profile = AuditProfile::default();
+    profile.year.range_check = false;
+    let report = run_with(
+        &profile,
+        Some("T"),
+        None,
+        Some("9999"),
+        Some("en"),
+        "",
+        "epub",
+    );
+    let year = field(&report, "year");
+    assert!(!year.flags.contains(&Flag::YearOutOfRange));
+}
+
+#[test]
+fn toggle_off_pdf_year_likely_file_date_suppresses_flag() {
+    let mut profile = AuditProfile::default();
+    profile.year.pdf_likely_file_date = false;
+    let report = run_with(
+        &profile,
+        Some("T"),
+        None,
+        Some("2005"),
+        Some("en"),
+        "",
+        "pdf",
+    );
+    let year = field(&report, "year");
+    assert!(!year.flags.contains(&Flag::PdfYearLikelyFileDate));
+}
+
+#[test]
+fn toggle_off_language_bcp47_check_suppresses_flag() {
+    let mut profile = AuditProfile::default();
+    profile.language.bcp47_check = false;
+    let report = run_with(&profile, Some("T"), None, None, Some("english"), "", "epub");
+    let lang = field(&report, "language");
+    assert!(!lang.flags.contains(&Flag::NonBcp47));
+}
+
+#[test]
+fn toggle_off_publisher_url_watermark_suppresses_flag() {
+    let mut profile = AuditProfile::default();
+    profile.publisher.url_watermark = false;
+    let report = run_with(
+        &profile,
+        Some("T"),
+        Some("https://example.com/free-ebooks"),
+        None,
+        Some("en"),
+        "",
+        "epub",
+    );
+    let publisher = field(&report, "publisher");
+    assert!(!publisher.flags.contains(&Flag::SourceWatermark));
+}
+
+#[test]
+fn toggle_off_source_prior_keeps_pdf_field_strong() {
+    let mut profile = AuditProfile::default();
+    profile.source_prior.enabled = false;
+    profile.year.pdf_likely_file_date = false;
+    let report = run_with(
+        &profile,
+        Some("Plausible Title"),
+        Some("Sample Press"),
+        Some("2010"),
+        Some("en"),
+        "The quick brown fox jumps over the lazy dog.",
+        "pdf",
+    );
+    assert_eq!(report.confidence, Confidence::High);
+    for f in &report.fields {
+        assert!(
+            !f.flags.contains(&Flag::SourcePriorWeak),
+            "source_prior disabled but {} still carries the flag",
+            f.field
+        );
+    }
+}
+
+#[test]
+fn toggle_off_copyright_blocks_yields_empty_window() {
+    let mut profile = AuditProfile::default();
+    profile.copyright_blocks.enabled = false;
+    let report = run_with(
+        &profile,
+        Some("Plausible Title"),
+        Some("Sample Press"),
+        Some("2010"),
+        Some("en"),
+        "",
+        "epub",
+    );
+    assert!(report.copyright_blocks.is_empty());
+}
+
+#[test]
+fn toggle_off_title_bracketed_suppresses_flag() {
+    let mut profile = AuditProfile::default();
+    profile.title.series_paren = false;
+    profile.title.marketing_block = false;
+    profile.title.aggregator_marker = false;
+    profile.title.volume_marker = false;
+    let title_with_brackets = "A Real Title (Translated Series Marker)";
+    let report = run_with(
+        &profile,
+        Some(title_with_brackets),
+        None,
+        None,
+        Some("en"),
+        "",
+        "epub",
+    );
+    let title = field(&report, "title");
+    assert!(!title.flags.contains(&Flag::TitleHasBracketedContent));
+}
+
+#[test]
+fn toggle_off_toc_shape_suppresses_empty_large_body_flag() {
+    let mut profile = AuditProfile::default();
+    profile.toc_shape.empty_large_body = false;
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("T"),
+        None,
+        Some("2010"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = TocStats::default();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "",
+        // Above the default large_body_min_blocks (100); without the
+        // toggle disabled this would emit Flag::TocEmptyLargeBody.
+        total_blocks: 500,
+        source_stem: None,
+        rules: test_rules(),
+    };
+    let report = audit(&input, &profile);
+    assert!(!report.shape_flags.contains(&Flag::TocEmptyLargeBody));
 }

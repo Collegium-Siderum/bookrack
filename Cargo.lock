@@ -614,6 +614,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-audit-profile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "bookrack-catalog"
 version = "0.1.0"
 dependencies = [
@@ -754,6 +764,7 @@ dependencies = [
 name = "bookrack-metadata"
 version = "0.1.0"
 dependencies = [
+ "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-extract",
  "serde",

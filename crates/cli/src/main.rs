@@ -346,7 +346,7 @@ fn run_metadata_show(catalog: &Catalog, book: i64, json: bool, rules: &AuditRule
         source_stem: None,
         rules,
     };
-    let report = bookrack_metadata::audit(&input);
+    let report = bookrack_metadata::audit(&input, &bookrack_metadata::AuditProfile::default());
     if json {
         render::metadata_show_json(book, &report, review_status.as_deref());
     } else {

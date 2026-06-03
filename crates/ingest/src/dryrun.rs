@@ -437,16 +437,19 @@ fn run_pipeline(
         overrides_applied: Vec::new(),
     });
     let body = body_sample(extraction);
-    let report = audit(&AuditInput {
-        biblio: &extraction.biblio,
-        provenance: &extraction.provenance,
-        effective: &effective,
-        toc_stats: &structure_report.toc_stats,
-        body_sample: &body,
-        total_blocks: extraction.blocks.len(),
-        source_stem: Some(stem),
-        rules: &params.audit_rules,
-    });
+    let report = audit(
+        &AuditInput {
+            biblio: &extraction.biblio,
+            provenance: &extraction.provenance,
+            effective: &effective,
+            toc_stats: &structure_report.toc_stats,
+            body_sample: &body,
+            total_blocks: extraction.blocks.len(),
+            source_stem: Some(stem),
+            rules: &params.audit_rules,
+        },
+        &bookrack_metadata::AuditProfile::default(),
+    );
     // Re-write the row with the confidence rollup, like ingest does, so
     // any downstream caller that opens the in-memory catalog sees the
     // post-audit value.

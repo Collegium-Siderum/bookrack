@@ -32,15 +32,25 @@ pub enum PublisherVerdict {
 }
 
 /// Evaluate one publisher value against the loaded rule set.
-pub fn evaluate(value: &str, rules: &AuditRules) -> PublisherVerdict {
+///
+/// `url_watermark` gates the closed-form URL / email shape sniff
+/// (R-18). `normalise_abbreviations` gates the abbreviation expansion
+/// step in whitelist matching (R-19). Token lists in `rules` are
+/// orthogonal — they are pure data and are always consulted.
+pub fn evaluate(
+    value: &str,
+    rules: &AuditRules,
+    url_watermark: bool,
+    normalise_abbreviations: bool,
+) -> PublisherVerdict {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return PublisherVerdict::Neutral;
     }
-    if looks_like_watermark(trimmed, rules) {
+    if looks_like_watermark(trimmed, rules, url_watermark) {
         return PublisherVerdict::Watermark;
     }
-    if is_whitelisted(trimmed, rules) {
+    if is_whitelisted(trimmed, rules, normalise_abbreviations) {
         return PublisherVerdict::Whitelisted;
     }
     PublisherVerdict::Neutral
@@ -48,21 +58,24 @@ pub fn evaluate(value: &str, rules: &AuditRules) -> PublisherVerdict {
 
 /// True when the value carries any watermark / contact / promo
 /// pattern. The structural patterns (URL, email, TLD suffixes) are
-/// pre-decided here; the token lists are read from `rules`.
-fn looks_like_watermark(value: &str, rules: &AuditRules) -> bool {
+/// pre-decided here and gated by `url_watermark`; the token lists are
+/// read from `rules` and always consulted.
+fn looks_like_watermark(value: &str, rules: &AuditRules, url_watermark: bool) -> bool {
     let lower: String = value.to_lowercase();
-    if lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("www.")
-        || lower.contains(".com")
-        || lower.contains(".net")
-        || lower.contains(".org")
-        || lower.contains(".cn")
-    {
-        return true;
-    }
-    if lower.contains('@') {
-        return true;
+    if url_watermark {
+        if lower.contains("http://")
+            || lower.contains("https://")
+            || lower.contains("www.")
+            || lower.contains(".com")
+            || lower.contains(".net")
+            || lower.contains(".org")
+            || lower.contains(".cn")
+        {
+            return true;
+        }
+        if lower.contains('@') {
+            return true;
+        }
     }
     for token in &rules.contact_tokens {
         if lower.contains(&token.to_lowercase()) {
@@ -92,23 +105,24 @@ fn looks_like_watermark(value: &str, rules: &AuditRules) -> bool {
 }
 
 /// True when the value, after normalisation, matches the loaded
-/// whitelist.
-fn is_whitelisted(value: &str, rules: &AuditRules) -> bool {
-    let normalised = normalise(value);
+/// whitelist. `expand_abbrev` controls whether the abbreviation pass
+/// runs on both sides of the comparison.
+fn is_whitelisted(value: &str, rules: &AuditRules, expand_abbrev: bool) -> bool {
+    let normalised = normalise(value, expand_abbrev);
     rules
         .publisher_whitelist
         .iter()
-        .any(|candidate| normalise(candidate) == normalised)
+        .any(|candidate| normalise(candidate, expand_abbrev) == normalised)
 }
 
 /// Normalise a publisher name for whitelist comparison: lowercase,
-/// drop punctuation silently, expand a small set of common
+/// drop punctuation silently, optionally expand a small set of common
 /// abbreviations, collapse runs of whitespace.
 ///
 /// Punctuation is dropped without inserting a space so that the dotted
 /// form (`M.I.T.`) and the run-together form (`MIT`) normalise
 /// identically. Whitespace is the only token-splitter.
-fn normalise(value: &str) -> String {
+fn normalise(value: &str, expand_abbrev: bool) -> String {
     let mut out = String::with_capacity(value.len());
     let mut last_space = true;
     for ch in value.chars() {
@@ -125,7 +139,11 @@ fn normalise(value: &str) -> String {
     if out.ends_with(' ') {
         out.pop();
     }
-    expand_abbreviations(&out)
+    if expand_abbrev {
+        expand_abbreviations(&out)
+    } else {
+        out
+    }
 }
 
 /// Expand a short, hand-picked list of abbreviations whose absence
@@ -189,15 +207,15 @@ mod tests {
     fn whitelist_matches_with_punctuation_and_case() {
         let rules = rules_with_whitelist(&["Oxford University Press", "MIT Press"]);
         assert_eq!(
-            evaluate("oxford university press", &rules),
+            evaluate("oxford university press", &rules, true, true),
             PublisherVerdict::Whitelisted
         );
         assert_eq!(
-            evaluate("Oxford Univ. Press", &rules),
+            evaluate("Oxford Univ. Press", &rules, true, true),
             PublisherVerdict::Whitelisted
         );
         assert_eq!(
-            evaluate("M.I.T. Press", &rules),
+            evaluate("M.I.T. Press", &rules, true, true),
             PublisherVerdict::Whitelisted
         );
     }
@@ -206,11 +224,11 @@ mod tests {
     fn url_value_flagged_as_watermark() {
         let rules = AuditRules::empty();
         assert_eq!(
-            evaluate("https://example.com/free-ebooks", &rules),
+            evaluate("https://example.com/free-ebooks", &rules, true, true),
             PublisherVerdict::Watermark
         );
         assert_eq!(
-            evaluate("www.example.net", &rules),
+            evaluate("www.example.net", &rules, true, true),
             PublisherVerdict::Watermark
         );
     }
@@ -219,7 +237,7 @@ mod tests {
     fn email_value_flagged_as_watermark() {
         let rules = AuditRules::empty();
         assert_eq!(
-            evaluate("contact: test@example.net", &rules),
+            evaluate("contact: test@example.net", &rules, true, true),
             PublisherVerdict::Watermark
         );
     }
@@ -228,7 +246,7 @@ mod tests {
     fn contact_token_flagged_as_watermark() {
         let rules = rules_with_contact(&["qq:"]);
         assert_eq!(
-            evaluate("scanned by anon, qq: 1234", &rules),
+            evaluate("scanned by anon, qq: 1234", &rules, true, true),
             PublisherVerdict::Watermark
         );
     }
@@ -237,7 +255,7 @@ mod tests {
     fn promo_verb_flagged_as_watermark() {
         let rules = rules_with_promo(&["free ebook"]);
         assert_eq!(
-            evaluate("free ebook download", &rules),
+            evaluate("free ebook download", &rules, true, true),
             PublisherVerdict::Watermark
         );
     }
@@ -245,10 +263,13 @@ mod tests {
     #[test]
     fn ascii_distribution_handle_flagged_as_watermark() {
         let rules = rules_with_ascii_distribution(&["acme-rip"]);
-        assert_eq!(evaluate("acme-rip", &rules), PublisherVerdict::Watermark);
+        assert_eq!(
+            evaluate("acme-rip", &rules, true, true),
+            PublisherVerdict::Watermark
+        );
         // Case-insensitive substring.
         assert_eq!(
-            evaluate("ACME-RIP edition", &rules),
+            evaluate("ACME-RIP edition", &rules, true, true),
             PublisherVerdict::Watermark
         );
     }
@@ -261,14 +282,17 @@ mod tests {
         let token = "\u{6D4B}\u{8BD5}";
         let rules = rules_with_cjk(&[token]);
         let input = format!("prefix {token} suffix");
-        assert_eq!(evaluate(&input, &rules), PublisherVerdict::Watermark);
+        assert_eq!(
+            evaluate(&input, &rules, true, true),
+            PublisherVerdict::Watermark
+        );
     }
 
     #[test]
     fn long_tail_value_stays_neutral_with_empty_rules() {
         let rules = AuditRules::empty();
         assert_eq!(
-            evaluate("Independent Curiosities Press", &rules),
+            evaluate("Independent Curiosities Press", &rules, true, true),
             PublisherVerdict::Neutral
         );
     }
@@ -276,7 +300,10 @@ mod tests {
     #[test]
     fn empty_value_is_neutral() {
         let rules = AuditRules::empty();
-        assert_eq!(evaluate("", &rules), PublisherVerdict::Neutral);
-        assert_eq!(evaluate("   ", &rules), PublisherVerdict::Neutral);
+        assert_eq!(evaluate("", &rules, true, true), PublisherVerdict::Neutral);
+        assert_eq!(
+            evaluate("   ", &rules, true, true),
+            PublisherVerdict::Neutral
+        );
     }
 }

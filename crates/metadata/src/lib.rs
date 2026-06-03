@@ -23,6 +23,7 @@ mod report;
 mod rules;
 mod signals;
 
+pub use bookrack_audit_profile::AuditProfile;
 pub use filename::{FilenameBiblio, parse as parse_filename};
 pub use report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
@@ -32,7 +33,7 @@ pub use signals::{
     FLAT_TOC_MIN_ENTRIES, HEADING_SKEW_MIN, HEADING_SKEW_RATIO, is_valid_isbn, looks_like_timestamp,
 };
 
-/// Run the audit over one prepared input set.
-pub fn audit(input: &AuditInput) -> MetadataReport {
-    signals::run(input)
+/// Run the audit over one prepared input set under the given profile.
+pub fn audit(input: &AuditInput, profile: &AuditProfile) -> MetadataReport {
+    signals::run(input, profile)
 }
