@@ -105,6 +105,17 @@ enum Command {
         #[arg(long)]
         no_chunk: bool,
     },
+    /// Manage the vector store's ANN index — inspect, rebuild, drop.
+    Vectors {
+        #[command(subcommand)]
+        action: VectorsAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum VectorsAction {
+    /// Print table size, ANN index state, and the persisted ANN config.
+    Status,
 }
 
 #[derive(clap::Subcommand)]
@@ -197,7 +208,101 @@ async fn main() -> Result<()> {
             no_chunk,
             profile_name.as_deref(),
         ),
+        Command::Vectors { action } => match action {
+            VectorsAction::Status => run_vectors_status(&cfg).await,
+        },
     }
+}
+
+/// Render `bookrack vectors status` — a read-only summary of the
+/// table, the LanceDB index it carries, and the persisted ANN config.
+async fn run_vectors_status(cfg: &Config) -> Result<()> {
+    // Read the vector dimension from corpus stamps. Absent stamps mean
+    // the library has never been ingested into; the vector table will
+    // not exist on disk either, so the output is the "empty" form.
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let dim = match corpus
+        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+        .context("read vector_dim stamp")?
+    {
+        Some(s) => s.parse::<usize>().context("parse vector_dim stamp")?,
+        None => {
+            println!("table:           (empty — no chunks ingested yet)");
+            println!("ann index:       (none)");
+            println!("ann config:      (no meta)");
+            println!("churn:           n/a");
+            return Ok(());
+        }
+    };
+    let lancedb_dir = cfg.lancedb_dir();
+    let store = ChunkStore::open(&lancedb_dir, dim)
+        .await
+        .context("open vector store")?;
+    let row_count = store.count_rows().await.context("count rows")?;
+    let indices = store.list_indices().await.context("list indices")?;
+    let ann_cfg = store
+        .current_ann_cfg(&lancedb_dir)
+        .context("read ann config")?;
+    let meta = bookrack_vectors::meta::load(&lancedb_dir).context("load vectors_meta")?;
+    print_status(row_count, &indices, &store, &ann_cfg, &meta).await?;
+    Ok(())
+}
+
+/// Write the status output to stdout. Split out so a future test can
+/// drive the renderer with a fixed `StatusInputs` and assert against
+/// the string — for now the command exercises it end-to-end.
+async fn print_status(
+    row_count: usize,
+    indices: &[String],
+    store: &ChunkStore,
+    ann_cfg: &Option<bookrack_vectors::AnnConfig>,
+    meta: &Option<bookrack_vectors::VectorsMeta>,
+) -> Result<()> {
+    println!("table:           {row_count} rows");
+    if indices.is_empty() {
+        println!("ann index:       (none — brute-force)");
+    } else {
+        for name in indices {
+            println!("ann index:       {name}");
+            let stats = store
+                .index_stats(name)
+                .await
+                .with_context(|| format!("index_stats({name})"))?;
+            if let Some(s) = stats {
+                println!("  type:          {:?}", s.index_type);
+                println!("  num_indexed:   {}", s.num_indexed_rows);
+                println!("  num_unindexed: {}", s.num_unindexed_rows);
+                if let Some(ni) = s.num_indices {
+                    println!("  num_indices:   {ni}");
+                }
+                if let Some(loss) = s.loss {
+                    println!("  loss:          {loss}");
+                } else {
+                    println!("  loss:          n/a");
+                }
+            }
+        }
+    }
+    match ann_cfg {
+        None => println!("ann config:      (no meta)"),
+        Some(c) => println!(
+            "ann config:      {} / np={} / nprobes={} / refine={}",
+            c.kind.as_str(),
+            c.num_partitions,
+            c.nprobes,
+            c.refine_factor
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        ),
+    }
+    match meta {
+        None => println!("churn:           n/a"),
+        Some(m) => println!(
+            "churn:           {} since last rebuild",
+            m.churn_since_rebuild
+        ),
+    }
+    Ok(())
 }
 
 /// Build the embedding client from the environment-resolved knobs.
