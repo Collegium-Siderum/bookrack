@@ -26,6 +26,44 @@ const YEAR_MAX: i32 = 2100;
 /// copyright pages.
 const COPYRIGHT_CANDIDATE_BLOCKS: usize = 6;
 
+/// Minimum TOC size at which a single-depth nav becomes a meaningful
+/// `suspicious_flat` signal. Re-exported through [`crate`] so the
+/// ingest STRUCTURE step that computes the bit shares the threshold.
+pub const FLAT_TOC_MIN_ENTRIES: usize = 5;
+/// Minimum side size at which `heading_block_skew` becomes meaningful.
+pub const HEADING_SKEW_MIN: usize = 5;
+/// Ratio threshold for `heading_block_skew` divergence.
+pub const HEADING_SKEW_RATIO: usize = 4;
+/// Minimum body block count at which an empty TOC is treated as a
+/// severe shape signal rather than ignored.
+pub(crate) const LARGE_BODY_NO_TOC_MIN_BLOCKS: usize = 100;
+/// Minimum TOC entry count above which a `suspicious_flat` bit is
+/// promoted from a mild to a severe shape signal.
+pub(crate) const SUSPICIOUS_FLAT_SEVERE_MIN_ENTRIES: usize = 10;
+/// Minimum TOC entry count above which a `heading_block_skew` bit is
+/// promoted from a mild to a severe shape signal.
+pub(crate) const HEADING_SKEW_SEVERE_MIN_ENTRIES: usize = 20;
+
+/// How a TOC's shape audit lands on the verdict / confidence dial.
+///
+/// The shape signals are a separate channel from the per-field grades:
+/// they can only push the verdict toward [`Verdict::NeedsWork`] and the
+/// confidence toward [`Confidence::Low`], never the other direction.
+/// This invariant is enforced by [`apply_shape_to_verdict_and_confidence`]
+/// and covered by a 32-combination table-driven test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShapeSeverity {
+    /// No shape flags fired; verdict and confidence stay where the
+    /// per-field rollup left them.
+    Clean,
+    /// At least one shape flag fired but none crossed the severe
+    /// threshold; confidence is capped at [`Confidence::Medium`].
+    Mild,
+    /// A strong shape signal fired; verdict is forced to
+    /// [`Verdict::NeedsWork`] and confidence to [`Confidence::Low`].
+    Severe,
+}
+
 /// Run the audit over the prepared input.
 pub(crate) fn run(input: &AuditInput) -> MetadataReport {
     let prior = source_prior(&input.provenance.adapter);
@@ -44,8 +82,11 @@ pub(crate) fn run(input: &AuditInput) -> MetadataReport {
         audit_series(input, prior, doubtful),
     ];
 
-    let verdict = compute_verdict(&fields);
-    let confidence = rollup_confidence(&fields);
+    let mut verdict = compute_verdict(&fields);
+    let mut confidence = rollup_confidence(&fields);
+    let shape_flags = audit_toc_shape(input);
+    let severity = shape_severity(&shape_flags, input.toc_stats.total_toc_entries);
+    apply_shape_to_verdict_and_confidence(&mut verdict, &mut confidence, severity);
     let copyright_blocks = (0..input.total_blocks.min(COPYRIGHT_CANDIDATE_BLOCKS)).collect();
 
     MetadataReport {
@@ -53,6 +94,83 @@ pub(crate) fn run(input: &AuditInput) -> MetadataReport {
         verdict,
         confidence,
         copyright_blocks,
+        shape_flags,
+    }
+}
+
+/// Audit the TOC shape. Emits at most five flags in a fixed order so
+/// the resulting `Vec<Flag>` is byte-stable across runs over the same
+/// [`TocStats`]:
+///
+/// 1. [`Flag::TocEmptyLargeBody`]
+/// 2. [`Flag::TocUnanchoredSome`]
+/// 3. [`Flag::TocUnanchoredHalf`]
+/// 4. [`Flag::TocSuspiciousFlat`]
+/// 5. [`Flag::TocHeadingBlockSkew`]
+pub(crate) fn audit_toc_shape(input: &AuditInput) -> Vec<Flag> {
+    let stats = input.toc_stats;
+    let mut flags = Vec::new();
+    if stats.total_toc_entries == 0 && input.total_blocks > LARGE_BODY_NO_TOC_MIN_BLOCKS {
+        flags.push(Flag::TocEmptyLargeBody);
+    }
+    if stats.unanchored_toc_entries > 0 {
+        flags.push(Flag::TocUnanchoredSome);
+    }
+    if stats.total_toc_entries > 0
+        && stats
+            .unanchored_toc_entries
+            .saturating_mul(2)
+            .gt(&stats.total_toc_entries)
+    {
+        flags.push(Flag::TocUnanchoredHalf);
+    }
+    if stats.suspicious_flat {
+        flags.push(Flag::TocSuspiciousFlat);
+    }
+    if stats.heading_block_skew {
+        flags.push(Flag::TocHeadingBlockSkew);
+    }
+    flags
+}
+
+/// Classify a TOC shape into a severity band. Severe outranks mild
+/// outranks clean.
+pub(crate) fn shape_severity(flags: &[Flag], total_entries: usize) -> ShapeSeverity {
+    let severe = flags.contains(&Flag::TocUnanchoredHalf)
+        || flags.contains(&Flag::TocEmptyLargeBody)
+        || (flags.contains(&Flag::TocSuspiciousFlat)
+            && total_entries > SUSPICIOUS_FLAT_SEVERE_MIN_ENTRIES)
+        || (flags.contains(&Flag::TocHeadingBlockSkew)
+            && total_entries > HEADING_SKEW_SEVERE_MIN_ENTRIES);
+    if severe {
+        ShapeSeverity::Severe
+    } else if flags.is_empty() {
+        ShapeSeverity::Clean
+    } else {
+        ShapeSeverity::Mild
+    }
+}
+
+/// Apply the down-only shape dampening to the per-field verdict and
+/// confidence rollup. The verdict can only move toward
+/// [`Verdict::NeedsWork`]; the confidence can only move toward
+/// [`Confidence::Low`].
+fn apply_shape_to_verdict_and_confidence(
+    verdict: &mut Verdict,
+    confidence: &mut Confidence,
+    severity: ShapeSeverity,
+) {
+    match severity {
+        ShapeSeverity::Severe => {
+            *verdict = Verdict::NeedsWork;
+            *confidence = Confidence::Low;
+        }
+        ShapeSeverity::Mild => {
+            if matches!(*confidence, Confidence::High) {
+                *confidence = Confidence::Medium;
+            }
+        }
+        ShapeSeverity::Clean => {}
     }
 }
 

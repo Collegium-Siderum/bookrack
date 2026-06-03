@@ -33,7 +33,7 @@ use bookrack_extract::{BlockKind, Extraction};
 use bookrack_normalize::{norm_text_sha256, normalize};
 use sha2::{Digest, Sha256};
 
-use bookrack_metadata::TocStats;
+use bookrack_metadata::{FLAT_TOC_MIN_ENTRIES, HEADING_SKEW_MIN, HEADING_SKEW_RATIO, TocStats};
 
 use crate::{IngestError, StructureParams};
 
@@ -406,13 +406,6 @@ pub(crate) fn toc_stats(extraction: &Extraction) -> TocStats {
         heading_block_skew,
     }
 }
-
-/// Minimum TOC size at which `suspicious_flat` becomes meaningful.
-const FLAT_TOC_MIN_ENTRIES: usize = 5;
-/// Minimum side size at which `heading_block_skew` becomes meaningful.
-const HEADING_SKEW_MIN: usize = 5;
-/// Ratio threshold for `heading_block_skew`.
-const HEADING_SKEW_RATIO: usize = 4;
 
 /// The organizing type for a TOC entry at `toc_depth` (0 is topmost).
 fn org_type(toc_depth: u8) -> NodeType {

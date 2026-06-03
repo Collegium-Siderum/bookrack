@@ -729,3 +729,222 @@ fn verdict_tokens_and_confidence_strings_round_trip() {
     assert_eq!(Confidence::Medium.as_str(), "medium");
     assert_eq!(Confidence::Low.as_str(), "low");
 }
+
+/// Build a [`Catalog`] seeded with a complete-record book that grades
+/// `Clean` + `High` at the per-field rollup — the baseline against
+/// which TOC shape signals are checked.
+fn clean_high_catalog() -> Catalog {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+}
+
+#[test]
+fn audit_toc_shape_clean_yields_no_flags() {
+    let catalog = clean_high_catalog();
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 50,
+        source_stem: Some("a-test-book"),
+        rules: test_rules(),
+    };
+    let report = audit(&input);
+    assert!(report.shape_flags.is_empty());
+    assert_eq!(report.verdict, Verdict::Clean);
+    assert_eq!(report.confidence, Confidence::High);
+}
+
+#[test]
+fn audit_toc_shape_severe_pulls_verdict_and_confidence_down() {
+    let catalog = clean_high_catalog();
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = TocStats {
+        total_toc_entries: 10,
+        unanchored_toc_entries: 6,
+        suspicious_flat: false,
+        heading_block_skew: false,
+    };
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 200,
+        source_stem: Some("a-test-book"),
+        rules: test_rules(),
+    };
+    let report = audit(&input);
+    assert!(report.shape_flags.contains(&Flag::TocUnanchoredSome));
+    assert!(report.shape_flags.contains(&Flag::TocUnanchoredHalf));
+    assert_eq!(report.verdict, Verdict::NeedsWork);
+    assert_eq!(report.confidence, Confidence::Low);
+}
+
+#[test]
+fn audit_toc_shape_mild_caps_confidence_at_medium() {
+    let catalog = clean_high_catalog();
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    // suspicious_flat with only 6 entries stays under the severe
+    // promotion threshold; mild caps confidence at Medium without
+    // moving the verdict.
+    let stats = TocStats {
+        total_toc_entries: 6,
+        unanchored_toc_entries: 0,
+        suspicious_flat: true,
+        heading_block_skew: false,
+    };
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 80,
+        source_stem: Some("a-test-book"),
+        rules: test_rules(),
+    };
+    let report = audit(&input);
+    assert_eq!(report.shape_flags, vec![Flag::TocSuspiciousFlat]);
+    assert_eq!(report.verdict, Verdict::Clean);
+    assert_eq!(report.confidence, Confidence::Medium);
+}
+
+#[test]
+fn audit_toc_shape_never_strengthens() {
+    // Table-driven direction invariant. Start from the all-empty
+    // record's `NeedsWork` + `Low` baseline and walk every 5-bit
+    // combination of the inputs `audit_toc_shape` reads. No
+    // combination is allowed to push the verdict back to `Clean` or
+    // the confidence above `Low`.
+    let catalog = Catalog::open_in_memory().expect("open");
+    let effective = effective_of(&catalog);
+    let prov = provenance("txt", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let baseline = {
+        let stats = TocStats::default();
+        let input = AuditInput {
+            biblio: &biblio,
+            provenance: &prov,
+            effective: &effective,
+            toc_stats: &stats,
+            body_sample: "",
+            total_blocks: 10,
+            source_stem: None,
+            rules: test_rules(),
+        };
+        audit(&input)
+    };
+    assert_eq!(baseline.verdict, Verdict::NeedsWork);
+    assert_eq!(baseline.confidence, Confidence::Low);
+
+    for mask in 0u8..32 {
+        let empty_large = mask & 0b00001 != 0;
+        let unanchored_some = mask & 0b00010 != 0;
+        let unanchored_half = mask & 0b00100 != 0;
+        let suspicious_flat = mask & 0b01000 != 0;
+        let heading_skew = mask & 0b10000 != 0;
+        let total = if unanchored_half { 10 } else { 4 };
+        let unanchored = if unanchored_half {
+            6
+        } else if unanchored_some {
+            1
+        } else {
+            0
+        };
+        let stats = TocStats {
+            total_toc_entries: total,
+            unanchored_toc_entries: unanchored,
+            suspicious_flat,
+            heading_block_skew: heading_skew,
+        };
+        let blocks = if empty_large { 200 } else { 10 };
+        let stats_with_empty = if empty_large {
+            TocStats {
+                total_toc_entries: 0,
+                unanchored_toc_entries: 0,
+                suspicious_flat,
+                heading_block_skew: heading_skew,
+            }
+        } else {
+            stats
+        };
+        let input = AuditInput {
+            biblio: &biblio,
+            provenance: &prov,
+            effective: &effective,
+            toc_stats: &stats_with_empty,
+            body_sample: "",
+            total_blocks: blocks,
+            source_stem: None,
+            rules: test_rules(),
+        };
+        let report = audit(&input);
+        assert_eq!(
+            report.verdict,
+            Verdict::NeedsWork,
+            "mask {mask:05b} flipped verdict back to Clean"
+        );
+        assert_eq!(
+            report.confidence,
+            Confidence::Low,
+            "mask {mask:05b} pushed confidence above Low"
+        );
+    }
+}
+
+#[test]
+fn audit_input_carries_no_review_status_field() {
+    // Compile-time guard: destructuring `AuditInput` exhaustively below
+    // breaks the build if a future contributor adds any field — a
+    // review-status field in particular. The audit must stay a pure
+    // function of extract plus catalog base/override state; the
+    // review status channel is strictly outside its surface (see
+    // `crates/catalog/src/node_reviews.rs:8-15`).
+    let catalog = Catalog::open_in_memory().expect("open");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "",
+        total_blocks: 0,
+        source_stem: None,
+        rules: test_rules(),
+    };
+    let AuditInput {
+        biblio: _,
+        provenance: _,
+        effective: _,
+        toc_stats: _,
+        body_sample: _,
+        total_blocks: _,
+        source_stem: _,
+        rules: _,
+    } = input;
+}

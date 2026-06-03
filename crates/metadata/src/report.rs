@@ -125,6 +125,26 @@ pub enum Flag {
     /// which strongly suggests the year came from the file's
     /// production timestamp rather than a publication-date field.
     DateLooksLikeTimestamp,
+    /// At least one TOC entry's `start_block` did not resolve. EPUB
+    /// hrefs to missing spine documents and PDF outline targets past
+    /// the last page both land here. HTML / TXT cannot trigger this.
+    TocUnanchoredSome,
+    /// More than half the TOC entries are unanchored, a stronger form
+    /// of [`Flag::TocUnanchoredSome`] that promotes the shape to the
+    /// `severe` severity band.
+    TocUnanchoredHalf,
+    /// The TOC has enough entries to plausibly express a hierarchy yet
+    /// every entry sits at the same depth — likely a flattened or
+    /// truncated nav.
+    TocSuspiciousFlat,
+    /// The TOC entry count and the body's heading-block count diverge
+    /// by a wide ratio, suggesting the nav and the prose disagree on
+    /// the document's structure.
+    TocHeadingBlockSkew,
+    /// The TOC is empty and the body has enough blocks for one to be
+    /// expected. Treats a substantial book with no nav as a strong
+    /// shape signal.
+    TocEmptyLargeBody,
 }
 
 impl Flag {
@@ -147,6 +167,11 @@ impl Flag {
             Flag::PurelyNumeric => "purely_numeric",
             Flag::TitleHasBracketedContent => "title_has_bracketed_content",
             Flag::DateLooksLikeTimestamp => "date_looks_like_timestamp",
+            Flag::TocUnanchoredSome => "toc:unanchored_some",
+            Flag::TocUnanchoredHalf => "toc:unanchored_half",
+            Flag::TocSuspiciousFlat => "toc:suspicious_flat",
+            Flag::TocHeadingBlockSkew => "toc:heading_block_skew",
+            Flag::TocEmptyLargeBody => "toc:empty_large_body",
         }
     }
 }
@@ -177,6 +202,13 @@ pub struct MetadataReport {
     /// Block indices that may contain a copyright page — candidates
     /// for a downstream cross-check, not asserted matches.
     pub copyright_blocks: Vec<usize>,
+    /// TOC-shape flags from the warning-level shape audit. Held on a
+    /// separate track from [`Self::fields`] so the seven publication-
+    /// field histograms downstream consumers count are unchanged. The
+    /// shape audit can only push [`Self::verdict`] toward `NeedsWork`
+    /// and [`Self::confidence`] toward `Low`; it never strengthens
+    /// either.
+    pub shape_flags: Vec<Flag>,
 }
 
 /// Warning-level TOC shape statistics over one [`bookrack_extract::Extraction`].
