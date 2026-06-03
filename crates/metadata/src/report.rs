@@ -116,11 +116,21 @@ pub enum Flag {
     Empty,
     /// The value is entirely numeric where it should not be.
     PurelyNumeric,
-    /// The title carries a leading or trailing bracketed segment — a
-    /// series tag, a collection marker, or a marketing block bled into
-    /// the title. Auditors do not strip it: they flag the value so a
-    /// reviewer can decide.
-    TitleHasBracketedContent,
+    /// The title carries a leading or trailing bracketed segment whose
+    /// inner content looks like a series name (no sentence-end
+    /// punctuation, no aggregator / volume marker shape).
+    TitleSeriesParen,
+    /// The title carries a bracketed marketing block: either lenticular
+    /// brackets at the tail, or any bracket pair whose inner content
+    /// contains sentence-end punctuation.
+    TitleMarketingBlock,
+    /// The title carries a leading aggregator marker — `[xxx]` or
+    /// `\u{3010}xxx\u{3011}` at the head, typical of repackaged uploads.
+    TitleAggregatorMarker,
+    /// The title carries a volume / edition marker — bracketed content
+    /// like `xxx\u{518C}` (volume), `xxx\u{7248}` (edition), or `Indexed`.
+    /// Flagged for observability but does not weaken the grade.
+    TitleVolumeMarker,
     /// The raw date string carried a time component (e.g. `T...:...`),
     /// which strongly suggests the year came from the file's
     /// production timestamp rather than a publication-date field.
@@ -165,7 +175,10 @@ impl Flag {
             Flag::EqualsPublisher => "equals_publisher",
             Flag::Empty => "empty",
             Flag::PurelyNumeric => "purely_numeric",
-            Flag::TitleHasBracketedContent => "title_has_bracketed_content",
+            Flag::TitleSeriesParen => "title_series_paren",
+            Flag::TitleMarketingBlock => "title_marketing_block",
+            Flag::TitleAggregatorMarker => "title_aggregator_marker",
+            Flag::TitleVolumeMarker => "title_volume_marker",
             Flag::DateLooksLikeTimestamp => "date_looks_like_timestamp",
             Flag::TocUnanchoredSome => "toc:unanchored_some",
             Flag::TocUnanchoredHalf => "toc:unanchored_half",

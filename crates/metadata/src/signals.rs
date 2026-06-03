@@ -274,10 +274,37 @@ fn audit_title(
                     flags.push(Flag::EqualsPublisher);
                 }
                 if profile.title.any_bracketed_enabled()
-                    && has_bracketed_segment(trimmed, profile.title.bracketed_min_chars)
+                    && let Some(sub) =
+                        classify_bracketed_segment(trimmed, profile.title.bracketed_min_chars)
                 {
-                    weaken(&mut grade);
-                    flags.push(Flag::TitleHasBracketedContent);
+                    let toggle = match sub {
+                        BracketSubtype::Series => profile.title.series_paren,
+                        BracketSubtype::Marketing => profile.title.marketing_block,
+                        BracketSubtype::Aggregator => profile.title.aggregator_marker,
+                        BracketSubtype::Volume => profile.title.volume_marker,
+                    };
+                    if toggle {
+                        match sub {
+                            BracketSubtype::Series => {
+                                weaken(&mut grade);
+                                flags.push(Flag::TitleSeriesParen);
+                            }
+                            BracketSubtype::Marketing => {
+                                weaken(&mut grade);
+                                flags.push(Flag::TitleMarketingBlock);
+                            }
+                            BracketSubtype::Aggregator => {
+                                weaken(&mut grade);
+                                flags.push(Flag::TitleAggregatorMarker);
+                            }
+                            BracketSubtype::Volume => {
+                                // Volume / edition markers are notes,
+                                // not weaknesses; flag for visibility
+                                // without touching the grade.
+                                flags.push(Flag::TitleVolumeMarker);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -683,42 +710,90 @@ fn is_placeholder(value: &str) -> bool {
     )
 }
 
-/// True when the title carries a leading or trailing bracketed segment
-/// long enough to suggest a series tag, collection marker, or marketing
-/// block bled into the value. The check is permissive on purpose: any
-/// match downgrades the title's grade so a reviewer sees it, while
-/// short bracketed fragments (`Foo (v2)`, `Bar [Vol.1]`) are tolerated.
+/// Bracket subtype the title classifier resolves a leading or trailing
+/// bracketed segment into. Each variant maps onto one [`Flag`] and one
+/// toggle in [`AuditProfile::title`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BracketSubtype {
+    /// Plain bracketed content that reads as a series name (no
+    /// sentence-end punctuation, not a volume marker, not an aggregator
+    /// header).
+    Series,
+    /// Marketing copy: lenticular brackets at the tail, or any bracket
+    /// whose inner content carries sentence-end punctuation.
+    Marketing,
+    /// Aggregator / upload marker at the head, in square or lenticular
+    /// brackets.
+    Aggregator,
+    /// Volume or edition marker — bracketed content like `xxx\u{518C}`,
+    /// `xxx\u{7248}`, `\u{56FE}\u{6587}\u{7248}`, `\u{5168}xxx\u{672C}`,
+    /// or the ASCII token `Indexed`.
+    Volume,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BracketPair {
+    AsciiParen,
+    FullwidthParen,
+    Square,
+    FullwidthSquare,
+    Lenticular,
+}
+
+impl BracketPair {
+    fn delimiters(self) -> (char, char) {
+        match self {
+            BracketPair::AsciiParen => ('(', ')'),
+            BracketPair::FullwidthParen => ('\u{FF08}', '\u{FF09}'),
+            BracketPair::Square => ('[', ']'),
+            BracketPair::FullwidthSquare => ('\u{FF3B}', '\u{FF3D}'),
+            BracketPair::Lenticular => ('\u{3010}', '\u{3011}'),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BracketPosition {
+    Head,
+    Tail,
+}
+
+/// Classify a leading or trailing bracketed segment, returning the
+/// subtype so [`audit_title`] can route it to the right toggle and
+/// flag. Returns `None` when the title has no qualifying segment.
 ///
 /// Pairs recognised: ASCII `()` / `[]`, fullwidth `（）` / `［］`, and
-/// CJK lenticular `【】`. The opening at byte 0 and the closing at the
-/// last char (after trimming) are checked — a bracket in the middle of
-/// a title is left alone.
-fn has_bracketed_segment(trimmed: &str, min_content_chars: usize) -> bool {
-    const PAIRS: &[(char, char)] = &[
-        ('(', ')'),
-        ('\u{FF08}', '\u{FF09}'),
-        ('[', ']'),
-        ('\u{FF3B}', '\u{FF3D}'),
-        ('\u{3010}', '\u{3011}'),
+/// CJK lenticular `\u{3010}\u{3011}`. The opening at byte 0 and the
+/// closing at the last char (after trimming) are checked — a bracket
+/// in the middle of a title is left alone. Short bracketed fragments
+/// (`Foo (v2)`) are tolerated through `min_content_chars`.
+fn classify_bracketed_segment(trimmed: &str, min_content_chars: usize) -> Option<BracketSubtype> {
+    const PAIRS: &[BracketPair] = &[
+        BracketPair::AsciiParen,
+        BracketPair::FullwidthParen,
+        BracketPair::Square,
+        BracketPair::FullwidthSquare,
+        BracketPair::Lenticular,
     ];
 
     let chars: Vec<char> = trimmed.chars().collect();
     if chars.is_empty() {
-        return false;
+        return None;
     }
     let first = chars[0];
     let last = chars[chars.len() - 1];
 
-    for &(open, close) in PAIRS {
+    for &pair in PAIRS {
+        let (open, close) = pair.delimiters();
         // Leading bracket: starts with `open`, has a matching `close`
         // somewhere later, and something follows the closing bracket.
         if first == open
             && let Some(end_idx) = chars.iter().skip(1).position(|&c| c == close)
         {
-            let inner_len = end_idx;
+            let inner: String = chars[1..1 + end_idx].iter().collect();
             let trailing_chars = chars.len().saturating_sub(end_idx + 2);
-            if inner_len >= min_content_chars && trailing_chars > 0 {
-                return true;
+            if end_idx >= min_content_chars && trailing_chars > 0 {
+                return Some(subtype_for(pair, BracketPosition::Head, &inner));
             }
         }
         // Trailing bracket: ends with `close`, has a matching `open`
@@ -726,14 +801,72 @@ fn has_bracketed_segment(trimmed: &str, min_content_chars: usize) -> bool {
         if last == close
             && let Some(start_offset) = chars.iter().rev().skip(1).position(|&c| c == open)
         {
-            let inner_len = start_offset;
-            let leading_chars = chars.len().saturating_sub(start_offset + 2);
-            if inner_len >= min_content_chars && leading_chars > 0 {
-                return true;
+            let open_idx = chars.len() - 2 - start_offset;
+            let inner: String = chars[open_idx + 1..chars.len() - 1].iter().collect();
+            let leading_chars = open_idx;
+            if start_offset >= min_content_chars && leading_chars > 0 {
+                return Some(subtype_for(pair, BracketPosition::Tail, &inner));
             }
         }
     }
-    false
+    None
+}
+
+/// Pick a [`BracketSubtype`] for one bracketed segment.
+///
+/// Priority: volume / edition marker first (regardless of bracket
+/// shape), then aggregator (square or lenticular at the head), then
+/// marketing (lenticular at the tail, or any inner content carrying
+/// sentence-end punctuation), else series as the default.
+fn subtype_for(pair: BracketPair, pos: BracketPosition, inner: &str) -> BracketSubtype {
+    if is_volume_marker(inner) {
+        return BracketSubtype::Volume;
+    }
+    if pos == BracketPosition::Head
+        && matches!(
+            pair,
+            BracketPair::Square | BracketPair::FullwidthSquare | BracketPair::Lenticular
+        )
+    {
+        return BracketSubtype::Aggregator;
+    }
+    if pos == BracketPosition::Tail && matches!(pair, BracketPair::Lenticular) {
+        return BracketSubtype::Marketing;
+    }
+    if inner.chars().any(is_sentence_terminator) {
+        return BracketSubtype::Marketing;
+    }
+    BracketSubtype::Series
+}
+
+/// Recognise volume / edition markers inside a bracketed segment.
+/// Matches CJK suffixes `\u{518C}` (volume) / `\u{7248}` (edition) /
+/// `\u{672C}` (printing) and the ASCII token `Indexed` used by some
+/// English-language indexes.
+fn is_volume_marker(inner: &str) -> bool {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.eq_ignore_ascii_case("indexed") {
+        return true;
+    }
+    let mut chars = trimmed.chars();
+    let last = match chars.next_back() {
+        Some(c) => c,
+        None => return false,
+    };
+    matches!(last, '\u{518C}' | '\u{7248}' | '\u{672C}')
+}
+
+/// Sentence-end punctuation used to spot marketing copy: CJK fullwidth
+/// `\u{3002}` / `\u{FF01}` / `\u{FF1F}` / `\u{2026}` and the ASCII
+/// equivalents `.` / `!` / `?`.
+fn is_sentence_terminator(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{2026}' | '!' | '?'
+    )
 }
 
 /// Light BCP-47 syntactic check: a primary subtag plus an optional
@@ -889,68 +1022,107 @@ mod tests {
     }
 
     #[test]
-    fn bracketed_segment_detects_trailing_series_suffix() {
+    fn bracketed_segment_classifies_trailing_series_suffix() {
         // "placeholder series example"
-        // — a trailing CJK series-marker block.
+        // — a trailing parenthetical series-marker block without a
+        // volume suffix and without sentence-end punctuation.
         let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1} \
                      (\u{5E9A}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{4E11}\u{5BC5}\u{536F}\u{8FB0}\u{5DF3})";
-        assert!(has_bracketed_segment(title, DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Series)
+        );
     }
 
     #[test]
-    fn bracketed_segment_detects_fullwidth_collection_marker() {
-        // "placeholder volume example".
+    fn bracketed_segment_classifies_fullwidth_volume_marker() {
+        // "placeholder volume example" —
+        // ends with the CJK volume suffix `ce`, so the segment is a
+        // volume marker rather than a series name.
         let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1}\u{5E9A}\
                      \u{FF08}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{518C}\u{FF09}";
-        assert!(has_bracketed_segment(title, DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Volume)
+        );
     }
 
     #[test]
-    fn bracketed_segment_detects_lenticular_marketing_block() {
-        // A title with a leading-line break of marketing copy in lenticular
-        // brackets — `Title【...】`.
+    fn bracketed_segment_classifies_lenticular_trailing_marketing_block() {
+        // `Title\u{3010}xxx\u{3011}` — lenticular brackets at the
+        // tail are read as marketing copy.
         let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\u{6CB3}\
                      \u{3010}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{3011}";
-        assert!(has_bracketed_segment(title, DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Marketing)
+        );
     }
 
     #[test]
-    fn bracketed_segment_detects_leading_series_prefix() {
-        // "placeholder aggregator example" — a leading series prefix followed by
-        // more title content.
+    fn bracketed_segment_classifies_square_aggregator_head() {
+        // `[xxx]yyy` — leading square brackets read as an aggregator
+        // header.
         let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{5408}\u{96C6}";
-        assert!(has_bracketed_segment(title, DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Aggregator)
+        );
+    }
+
+    #[test]
+    fn bracketed_segment_classifies_marketing_by_sentence_punctuation() {
+        // A trailing parenthetical block carrying CJK sentence-end
+        // punctuation reads as marketing copy, not a series name.
+        let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\
+                     \u{FF08}\u{5C71}\u{5DDD}\u{6CB3}\u{6D77}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{5DE6}\u{53F3}\u{FF1F}\u{FF09}";
+        assert_eq!(
+            classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Marketing)
+        );
     }
 
     #[test]
     fn bracketed_segment_tolerates_short_trailing_marker() {
         // `Foo (v2)` — short bracketed content is left alone.
-        assert!(!has_bracketed_segment("Foo (v2)", DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment("Foo (v2)", DEFAULT_BRACKETED_MIN),
+            None
+        );
         // `A Book` — no brackets at all.
-        assert!(!has_bracketed_segment("A Book", DEFAULT_BRACKETED_MIN));
+        assert_eq!(
+            classify_bracketed_segment("A Book", DEFAULT_BRACKETED_MIN),
+            None
+        );
     }
 
     #[test]
     fn bracketed_segment_ignores_brackets_in_the_middle() {
-        // A bracketed phrase in the middle is not a series tag.
-        assert!(!has_bracketed_segment(
-            "Foo (1990) Bar",
-            DEFAULT_BRACKETED_MIN
-        ));
+        assert_eq!(
+            classify_bracketed_segment("Foo (1990) Bar", DEFAULT_BRACKETED_MIN),
+            None
+        );
     }
 
     #[test]
     fn bracketed_segment_requires_text_outside_the_brackets() {
-        // A title that is entirely a bracketed block is just a value
-        // with parentheses, not a series-tagged title.
-        assert!(!has_bracketed_segment(
-            "(everything inside)",
-            DEFAULT_BRACKETED_MIN
-        ));
-        assert!(!has_bracketed_segment(
-            "[everything inside]",
-            DEFAULT_BRACKETED_MIN
-        ));
+        assert_eq!(
+            classify_bracketed_segment("(everything inside)", DEFAULT_BRACKETED_MIN),
+            None
+        );
+        assert_eq!(
+            classify_bracketed_segment("[everything inside]", DEFAULT_BRACKETED_MIN),
+            None
+        );
+    }
+
+    #[test]
+    fn bracketed_segment_classifies_ascii_indexed_volume_marker() {
+        // `Long Title (Indexed)` — ASCII volume marker.
+        assert_eq!(
+            classify_bracketed_segment("A Long Title (Indexed)", DEFAULT_BRACKETED_MIN),
+            Some(BracketSubtype::Volume)
+        );
     }
 
     #[test]
