@@ -73,9 +73,12 @@ pub async fn embed_book_chunks<E: Embedder>(
     corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32))?;
 
     let store = ChunkStore::open(lancedb_dir, dim).await?;
+    let rows_before_delete = store.count_rows().await?;
     store
         .delete_partition(plans[0].start_node_id.partition())
         .await?;
+    let rows_after_delete = store.count_rows().await?;
+    let deleted = rows_before_delete.saturating_sub(rows_after_delete);
 
     let mut report = EmbedRunReport::default();
     let mut start = 0usize;
@@ -111,7 +114,31 @@ pub async fn embed_book_chunks<E: Embedder>(
         tracing::warn!(error = ?e, "lancedb optimize failed; continuing");
     }
 
+    // Bump the churn counter in vectors_meta.json if a meta file is
+    // present. Skip when none — that's the "ANN not yet adopted" state,
+    // handled by the cold-start path in X4.2. Failures here are
+    // non-fatal: the next run will recompute against the new state.
+    let churn_delta = (deleted + report.chunks_written) as u64;
+    if churn_delta > 0
+        && let Err(e) = bump_churn(lancedb_dir, churn_delta)
+    {
+        tracing::warn!(error = ?e, "failed to update vectors_meta churn counter; continuing");
+    }
+
     Ok(report)
+}
+
+/// Add `delta` to `vectors_meta::churn_since_rebuild` if a meta file is
+/// present. Absent meta is a no-op (returns Ok) — the cold-start path
+/// owns the first build.
+fn bump_churn(lancedb_dir: &Path, delta: u64) -> Result<()> {
+    let Some(mut meta) = bookrack_vectors::meta::load(lancedb_dir).map_err(IngestError::Vectors)?
+    else {
+        return Ok(());
+    };
+    meta.churn_since_rebuild = meta.churn_since_rebuild.saturating_add(delta);
+    bookrack_vectors::meta::store(lancedb_dir, &meta).map_err(IngestError::Vectors)?;
+    Ok(())
 }
 
 /// Find the end of the greedy batch starting at `start`: grow while the
@@ -274,6 +301,84 @@ mod tests {
 
         let store = ChunkStore::open(dir.path(), 8).await.expect("reopen");
         assert_eq!(store.count_rows().await.expect("count"), 5);
+    }
+
+    #[tokio::test]
+    async fn churn_is_not_recorded_when_no_meta_file_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        embed_book_chunks(
+            &plans,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        let meta = bookrack_vectors::meta::load(dir.path()).expect("load meta");
+        assert!(meta.is_none());
+    }
+
+    #[tokio::test]
+    async fn churn_grows_by_inserted_rows_on_first_book_when_meta_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Seed a meta file claiming an index was already built at 0 rows.
+        let seed = bookrack_vectors::AnnConfig::default_for(bookrack_vectors::AnnKind::IvfFlat)
+            .to_meta(
+                "2026-06-03T00:00:00Z".to_string(),
+                0,
+                0,
+                bookrack_vectors::DEFAULT_INDEX_NAME.to_string(),
+            );
+        bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
+
+        let plans: Vec<ChunkPlan> = (1..=5).map(|i| plan(i, "some text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        embed_book_chunks(
+            &plans,
+            &Fake { dim: 8 },
+            &corpus,
+            dir.path(),
+            &EmbedConfig::default(),
+        )
+        .await
+        .expect("embed");
+        let meta = bookrack_vectors::meta::load(dir.path())
+            .expect("load meta")
+            .expect("meta present");
+        // First book: 0 deleted + 5 inserted = 5 churn.
+        assert_eq!(meta.churn_since_rebuild, 5);
+    }
+
+    #[tokio::test]
+    async fn re_embedding_the_same_book_accumulates_delete_and_append_churn() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let seed = bookrack_vectors::AnnConfig::default_for(bookrack_vectors::AnnKind::IvfFlat)
+            .to_meta(
+                "2026-06-03T00:00:00Z".to_string(),
+                0,
+                0,
+                bookrack_vectors::DEFAULT_INDEX_NAME.to_string(),
+            );
+        bookrack_vectors::meta::store(dir.path(), &seed).expect("seed meta");
+
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "text")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let cfg = EmbedConfig::default();
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("first embed");
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("second embed");
+        let meta = bookrack_vectors::meta::load(dir.path())
+            .expect("load meta")
+            .expect("meta present");
+        // First run: 0 + 3 = 3. Second run: 3 deleted + 3 inserted = 6.
+        // Cumulative: 3 + 6 = 9.
+        assert_eq!(meta.churn_since_rebuild, 9);
     }
 
     #[tokio::test]
