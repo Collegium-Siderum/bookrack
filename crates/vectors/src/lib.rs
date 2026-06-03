@@ -21,6 +21,7 @@
 
 pub mod meta;
 
+pub use lancedb::index::IndexStatistics;
 pub use meta::{DEFAULT_INDEX_NAME, META_FILENAME, SCHEMA_VERSION, VectorsMeta};
 
 use std::path::Path;
@@ -582,6 +583,29 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Names of all indices LanceDB has on the chunks table. Empty for
+    /// a freshly opened, brute-force store.
+    pub async fn list_indices(&self) -> Result<Vec<String>> {
+        Ok(self
+            .table
+            .list_indices()
+            .await?
+            .into_iter()
+            .map(|cfg| cfg.name)
+            .collect())
+    }
+
+    /// Statistics for the named index, or `None` if no index by that
+    /// name exists.
+    ///
+    /// The headline field is [`IndexStatistics::num_unindexed_rows`]:
+    /// the count of rows the table holds that are not yet covered by
+    /// the index. When `> 0` the index is "behind" and a call to
+    /// [`Self::optimize`] will catch it up.
+    pub async fn index_stats(&self, name: &str) -> Result<Option<IndexStatistics>> {
+        Ok(self.table.index_stats(name).await?)
+    }
+
     /// Read the persisted [`AnnConfig`] from
     /// `<lancedb_dir>/vectors_meta.json`. Returns `Ok(None)` when no
     /// meta file is present — the "legacy / fresh library" state — and
@@ -983,6 +1007,58 @@ mod tests {
             .expect("second drop");
         let meta = meta::load(dir.path()).expect("load").expect("meta present");
         assert_eq!(meta.kind, "brute-force");
+    }
+
+    #[tokio::test]
+    async fn list_indices_on_an_empty_table_is_empty() {
+        let (_dir, store) = fresh_store().await;
+        let names = store.list_indices().await.expect("list_indices");
+        assert!(names.is_empty(), "got {names:?}");
+    }
+
+    #[tokio::test]
+    async fn index_stats_for_an_unknown_name_returns_none() {
+        let (_dir, store) = fresh_store().await;
+        let stats = store
+            .index_stats("nonexistent_index")
+            .await
+            .expect("index_stats");
+        assert!(stats.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_indices_includes_vector_idx_after_build() {
+        let (dir, store) = fresh_store().await;
+        let rows: Vec<ChunkRow> = (0..300)
+            .map(|i| {
+                let v = i as f32 / 300.0;
+                row(1, i + 1, [v, 1.0 - v, 0.5, 0.25])
+            })
+            .collect();
+        store.append(&rows).await.expect("append");
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 1,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 1,
+            refine_factor: None,
+        };
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("build");
+        let names = store.list_indices().await.expect("list_indices");
+        assert!(
+            names.contains(&DEFAULT_INDEX_NAME.to_string()),
+            "got {names:?}"
+        );
+        let stats = store
+            .index_stats(DEFAULT_INDEX_NAME)
+            .await
+            .expect("index_stats")
+            .expect("stats present");
+        assert_eq!(stats.num_unindexed_rows, 0);
     }
 
     #[tokio::test]
