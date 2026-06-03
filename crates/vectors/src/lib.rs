@@ -25,7 +25,7 @@ pub use lancedb::index::IndexStatistics;
 pub use meta::{DEFAULT_INDEX_NAME, META_FILENAME, SCHEMA_VERSION, VectorsMeta};
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float32Type, Int32Type, Int64Type};
@@ -43,6 +43,25 @@ use bookrack_core::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 
 /// Name of the single table this crate manages.
 const TABLE: &str = "chunks";
+
+/// One-shot init of process-global environment lancedb consults.
+/// Reads this once on first [`ChunkStore::open`] call and never again.
+static LANCE_ENV_INIT: OnceLock<()> = OnceLock::new();
+
+/// Set the environment variables lancedb honours at startup. Today
+/// just `LANCE_INCLUDE_VECTOR_CENTROIDS=false`, which silences a noisy
+/// per-`list_indices` warning on lancedb 0.30 about an upcoming
+/// default change.
+fn ensure_lance_env() {
+    LANCE_ENV_INIT.get_or_init(|| {
+        // SAFETY: env is mutated exactly once, before any background
+        // task could observe it. `OnceLock::get_or_init` guarantees
+        // the closure runs at most once across all threads.
+        unsafe {
+            std::env::set_var("LANCE_INCLUDE_VECTOR_CENTROIDS", "false");
+        }
+    });
+}
 
 /// Why a `vectors` operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -361,6 +380,7 @@ impl ChunkStore {
     /// than its rows were written with will fail later, on write or
     /// read — a directory must be reused only with one embedding model.
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
+        ensure_lance_env();
         let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
             .execute()
             .await?;
