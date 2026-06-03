@@ -31,6 +31,7 @@ pub fn run(
     out: Option<&Path>,
     stdout: bool,
     no_chunk: bool,
+    profile_name: Option<&str>,
 ) -> Result<()> {
     let files = collect_files(path);
     if files.is_empty() {
@@ -45,6 +46,7 @@ pub fn run(
     let params = DryrunParams {
         skip_chunks: no_chunk,
         audit_rules: crate::load_audit_rules(cfg),
+        audit_profile: crate::load_audit_profile(cfg, profile_name),
         ..Default::default()
     };
 

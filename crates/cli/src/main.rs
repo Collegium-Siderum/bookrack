@@ -39,6 +39,13 @@ struct Cli {
     /// BOOKRACK_REGISTRY). Mutually exclusive with `--data-dir`.
     #[arg(long, global = true)]
     library: Option<String>,
+    /// Select an audit profile by name. Built-in names are
+    /// `default`, `trust-source`, and `strict`. Without this flag the
+    /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
+    /// merged onto the shipped default; with it the overlay is
+    /// bypassed and the named preset wins.
+    #[arg(long, global = true, value_name = "NAME")]
+    audit_profile: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -169,19 +176,27 @@ async fn main() -> Result<()> {
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
+    let profile_name = cli.audit_profile.clone();
     match cli.command {
         Command::Ingest {
             path,
             hold_for_metadata,
-        } => run_ingest(&cfg, &path, hold_for_metadata).await,
+        } => run_ingest(&cfg, &path, hold_for_metadata, profile_name.as_deref()).await,
         Command::Query { text } => run_query(&cfg, &text).await,
-        Command::Metadata { action } => run_metadata(&cfg, action).await,
+        Command::Metadata { action } => run_metadata(&cfg, action, profile_name.as_deref()).await,
         Command::Dryrun {
             path,
             out,
             stdout,
             no_chunk,
-        } => dryrun::run(&cfg, &path, out.as_deref(), stdout, no_chunk),
+        } => dryrun::run(
+            &cfg,
+            &path,
+            out.as_deref(),
+            stdout,
+            no_chunk,
+            profile_name.as_deref(),
+        ),
     }
 }
 
@@ -211,17 +226,53 @@ pub(crate) fn load_audit_rules(cfg: &Config) -> AuditRules {
     }
 }
 
-async fn run_ingest(cfg: &Config, path: &Path, hold_for_metadata: bool) -> Result<()> {
+/// Resolve the active audit profile.
+///
+/// When `name` is `Some`, the named built-in (`default` /
+/// `trust-source` / `strict`) is returned; an unknown name falls
+/// through to the overlay path. When `name` is `None`, the shipped
+/// default is loaded and merged with any
+/// `<data_root>/audit-rules/audit_profile.local.toml` overlay. A
+/// malformed overlay is logged and the in-repo default is used as-is.
+pub(crate) fn load_audit_profile(
+    cfg: &Config,
+    name: Option<&str>,
+) -> bookrack_metadata::AuditProfile {
+    if let Some(label) = name
+        && let Some(named) = bookrack_metadata::AuditProfile::from_named(label)
+    {
+        return named;
+    }
+    match bookrack_metadata::AuditProfile::load_from(&cfg.audit_rules_dir()) {
+        Ok(profile) => profile,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to load audit profile overlay; using shipped default",
+            );
+            bookrack_metadata::AuditProfile::default_profile()
+        }
+    }
+}
+
+async fn run_ingest(
+    cfg: &Config,
+    path: &Path,
+    hold_for_metadata: bool,
+    profile_name: Option<&str>,
+) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
     let audit_rules = load_audit_rules(cfg);
+    let audit_profile = load_audit_profile(cfg, profile_name);
     let params = IngestParams {
         embed: embed_cfg,
         hold_for_metadata,
         audit_rules,
+        audit_profile,
         ..Default::default()
     };
     let report = ingest_book(
@@ -283,19 +334,24 @@ async fn run_query(cfg: &Config, text: &str) -> Result<()> {
 /// touch this scope, matching the audit and the ingest sub-step.
 const BOOK_SCOPE: &str = "book";
 
-async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
+async fn run_metadata(
+    cfg: &Config,
+    action: MetadataAction,
+    profile_name: Option<&str>,
+) -> Result<()> {
     // Advance opens its own corpus + catalog + embedder, since it
     // runs CHUNK→EMBED rather than touching catalog alone. The
     // other actions only need catalog and can share this handle.
     if let MetadataAction::Advance { book } = action {
-        return run_metadata_advance(cfg, book).await;
+        return run_metadata_advance(cfg, book, profile_name).await;
     }
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let audit_rules = load_audit_rules(cfg);
+    let audit_profile = load_audit_profile(cfg, profile_name);
     match action {
         MetadataAction::Show { book, json } => {
-            run_metadata_show(&catalog, book, json, &audit_rules)
+            run_metadata_show(&catalog, book, json, &audit_rules, &audit_profile)
         }
         MetadataAction::Set { book, field, value } => {
             run_metadata_set(&catalog, book, &field, &value)
@@ -310,7 +366,13 @@ async fn run_metadata(cfg: &Config, action: MetadataAction) -> Result<()> {
     }
 }
 
-fn run_metadata_show(catalog: &Catalog, book: i64, json: bool, rules: &AuditRules) -> Result<()> {
+fn run_metadata_show(
+    catalog: &Catalog,
+    book: i64,
+    json: bool,
+    rules: &AuditRules,
+    profile: &bookrack_metadata::AuditProfile,
+) -> Result<()> {
     let effective = catalog
         .effective_publication_attrs(book, BOOK_SCOPE)
         .context("read effective metadata")?;
@@ -346,7 +408,7 @@ fn run_metadata_show(catalog: &Catalog, book: i64, json: bool, rules: &AuditRule
         source_stem: None,
         rules,
     };
-    let report = bookrack_metadata::audit(&input, &bookrack_metadata::AuditProfile::default());
+    let report = bookrack_metadata::audit(&input, profile);
     if json {
         render::metadata_show_json(book, &report, review_status.as_deref());
     } else {
@@ -462,11 +524,12 @@ fn run_metadata_reject(catalog: &Catalog, book: i64, reason: &str) -> Result<()>
     Ok(())
 }
 
-async fn run_metadata_advance(cfg: &Config, book: i64) -> Result<()> {
+async fn run_metadata_advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let audit_profile = load_audit_profile(cfg, profile_name);
 
     let book_root_id = PartitionIdx::new(book).root();
     let intake = catalog
@@ -489,6 +552,7 @@ async fn run_metadata_advance(cfg: &Config, book: i64) -> Result<()> {
     );
     let params = IngestParams {
         embed: embed_cfg,
+        audit_profile,
         ..Default::default()
     };
     let embedder = embedder(cfg, &params.embed)?;

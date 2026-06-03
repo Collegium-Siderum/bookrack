@@ -233,6 +233,11 @@ pub struct IngestParams {
     /// to an empty set; load real rules from
     /// `Config::audit_rules_dir()` and assign.
     pub audit_rules: bookrack_metadata::AuditRules,
+    /// Active audit profile. Drives the toggle and threshold reads in
+    /// the EPUB / TXT half-rules, the filename parser, and the
+    /// downstream audit. Defaults to the shipped profile so an
+    /// embedder that does not set it sees the pre-profile behaviour.
+    pub audit_profile: bookrack_metadata::AuditProfile,
 }
 
 /// What one [`ingest_book`] run produced.
@@ -282,9 +287,8 @@ pub async fn ingest_book<E: Embedder>(
 
     // EXTRACT.
     let started = std::time::Instant::now();
-    let extracted = tracing::info_span!("operation", stage = "extract").in_scope(|| {
-        bookrack_extract::extract(file, &bookrack_metadata::AuditProfile::default().extract)
-    });
+    let extracted = tracing::info_span!("operation", stage = "extract")
+        .in_scope(|| bookrack_extract::extract(file, &params.audit_profile.extract));
     let extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
@@ -425,9 +429,8 @@ pub async fn ingest_book<E: Embedder>(
     // metadata looks. A human or LLM must `metadata approve`,
     // `metadata ack`, or `metadata reject` to advance status.
     let source_stem = file.file_stem().and_then(|s| s.to_str());
-    let filename_toggles = bookrack_metadata::AuditProfile::default().filename_parser;
-    let filename_biblio =
-        source_stem.map(|stem| bookrack_metadata::parse_filename(stem, &filename_toggles));
+    let filename_biblio = source_stem
+        .map(|stem| bookrack_metadata::parse_filename(stem, &params.audit_profile.filename_parser));
     let verdict = run_metadata_substep(
         catalog,
         intake_id,
@@ -437,6 +440,7 @@ pub async fn ingest_book<E: Embedder>(
         source_stem,
         filename_biblio.as_ref(),
         &params.audit_rules,
+        &params.audit_profile,
         &run_id,
         &source_sha,
     );
@@ -694,6 +698,7 @@ fn run_metadata_substep(
     source_stem: Option<&str>,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
     audit_rules: &bookrack_metadata::AuditRules,
+    audit_profile: &bookrack_metadata::AuditProfile,
     run_id: &str,
     source_sha: &str,
 ) -> Option<bookrack_metadata::Verdict> {
@@ -749,7 +754,7 @@ fn run_metadata_substep(
         source_stem,
         rules: audit_rules,
     };
-    let report = bookrack_metadata::audit(&input, &bookrack_metadata::AuditProfile::default());
+    let report = bookrack_metadata::audit(&input, audit_profile);
 
     // Roll the audit's row-level confidence back into the base record.
     // The upsert overwrites every column, so the biblio values seeded
@@ -1725,6 +1730,7 @@ mod book_pipeline_tests {
             Some("a-complete-book"),
             None,
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );
@@ -1787,6 +1793,7 @@ mod book_pipeline_tests {
             Some(stem),
             Some(&filename_biblio),
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );
@@ -1848,6 +1855,7 @@ mod book_pipeline_tests {
             Some(stem),
             Some(&filename_biblio),
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );
@@ -1908,6 +1916,7 @@ mod book_pipeline_tests {
             Some(stem),
             Some(&filename_biblio),
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );
@@ -1967,6 +1976,7 @@ mod book_pipeline_tests {
             Some(stem),
             Some(&filename_biblio),
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );
@@ -2024,6 +2034,7 @@ mod book_pipeline_tests {
             Some(stem),
             Some(&filename_biblio),
             &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
         );

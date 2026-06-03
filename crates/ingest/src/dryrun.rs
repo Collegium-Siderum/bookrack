@@ -48,6 +48,10 @@ pub struct DryrunParams {
     /// to an empty set; load real rules from
     /// `Config::audit_rules_dir()` and assign.
     pub audit_rules: bookrack_metadata::AuditRules,
+    /// Active audit profile. Drives the toggle and threshold reads in
+    /// the EPUB / TXT half-rules, the filename parser, and the
+    /// downstream audit. Defaults to the shipped profile.
+    pub audit_profile: bookrack_metadata::AuditProfile,
 }
 
 /// One book's dryrun outcome.
@@ -330,7 +334,7 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         error: None,
     };
 
-    let extraction = match extract(path, &bookrack_metadata::AuditProfile::default().extract) {
+    let extraction = match extract(path, &params.audit_profile.extract) {
         Ok(ExtractOutcome::Extracted(e)) => e,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             record.extract_outcome = "needs_ocr".to_string();
@@ -416,10 +420,7 @@ fn run_pipeline(
     });
 
     // METADATA — seed base attrs, then audit over the effective view.
-    let filename_biblio = parse_filename(
-        stem,
-        &bookrack_metadata::AuditProfile::default().filename_parser,
-    );
+    let filename_biblio = parse_filename(stem, &params.audit_profile.filename_parser);
     record.filename_template = filename_template_label(&filename_biblio);
     record.filename_biblio = record
         .filename_template
@@ -451,7 +452,7 @@ fn run_pipeline(
             source_stem: Some(stem),
             rules: &params.audit_rules,
         },
-        &bookrack_metadata::AuditProfile::default(),
+        &params.audit_profile,
     );
     // Re-write the row with the confidence rollup, like ingest does, so
     // any downstream caller that opens the in-memory catalog sees the
