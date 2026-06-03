@@ -109,13 +109,22 @@ pub struct DryrunBookReport {
     /// chain; reserved for the inherit-from path that lands with the
     /// multi-volume metadata feature.
     pub inherited_from_parent: Option<Vec<String>>,
-    /// Per-field grades and flags from the metadata audit.
-    pub audit_fields: Vec<FieldOut>,
+    /// The active audit profile's name. Mirrored on every report so a
+    /// mixed run is distinguishable per book; it is also the marker
+    /// downstream consumers use to recognise a trust-source report
+    /// where the audit-derived fields are deliberately absent.
+    pub audit_profile: String,
+    /// Per-field grades and flags from the metadata audit. `None`
+    /// under a profile whose `audit_enabled` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_fields: Option<Vec<FieldOut>>,
     /// Shape-level flag tokens the audit raised against the TOC. Held
     /// separately from [`Self::audit_fields`] so the seven publication-
     /// field histograms downstream consumers count are unchanged. Each
-    /// token carries a `toc:` prefix.
-    pub audit_shape_flags: Vec<String>,
+    /// token carries a `toc:` prefix. `None` under a profile whose
+    /// `audit_enabled` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_shape_flags: Option<Vec<String>>,
     /// Aggregated audit verdict (`clean` / `needs_work`).
     pub verdict: Option<String>,
     /// Row-level confidence (`high` / `medium` / `low`).
@@ -326,8 +335,9 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         base_attrs_actions: vec![],
         effective: None,
         inherited_from_parent: None,
-        audit_fields: vec![],
-        audit_shape_flags: vec![],
+        audit_profile: params.audit_profile.name.clone(),
+        audit_fields: None,
+        audit_shape_flags: None,
         verdict: None,
         confidence: None,
         elapsed_ms: 0,
@@ -471,12 +481,14 @@ fn run_pipeline(
     );
 
     record.biblio = Some(biblio_out(&extraction.biblio));
-    record.audit_fields = report_fields(&report);
-    record.audit_shape_flags = report
-        .shape_flags
-        .iter()
-        .map(|f| f.token().to_string())
-        .collect();
+    record.audit_fields = Some(report_fields(&report));
+    record.audit_shape_flags = Some(
+        report
+            .shape_flags
+            .iter()
+            .map(|f| f.token().to_string())
+            .collect(),
+    );
     record.verdict = Some(report.verdict.as_token().to_string());
     record.confidence = Some(report.confidence.as_str().to_string());
 
@@ -542,20 +554,22 @@ pub fn summarize(books: &[DryrunBookReport]) -> DryrunSummary {
         if let Some(c) = &book.confidence {
             *summary.confidence.entry(c.clone()).or_default() += 1;
         }
-        for field in &book.audit_fields {
-            *summary
-                .field_grades
-                .entry(field.field.clone())
-                .or_default()
-                .entry(field.grade.clone())
-                .or_default() += 1;
-            for flag in &field.flags {
+        if let Some(audit_fields) = book.audit_fields.as_ref() {
+            for field in audit_fields {
                 *summary
-                    .flag_counts
+                    .field_grades
                     .entry(field.field.clone())
                     .or_default()
-                    .entry(flag.clone())
+                    .entry(field.grade.clone())
                     .or_default() += 1;
+                for flag in &field.flags {
+                    *summary
+                        .flag_counts
+                        .entry(field.field.clone())
+                        .or_default()
+                        .entry(flag.clone())
+                        .or_default() += 1;
+                }
             }
         }
         for action in &book.base_attrs_actions {
@@ -564,8 +578,10 @@ pub fn summarize(books: &[DryrunBookReport]) -> DryrunSummary {
                 .entry(action.clone())
                 .or_default() += 1;
         }
-        for token in &book.audit_shape_flags {
-            *summary.toc_anomaly_counts.entry(token.clone()).or_default() += 1;
+        if let Some(shape_flags) = book.audit_shape_flags.as_ref() {
+            for token in shape_flags {
+                *summary.toc_anomaly_counts.entry(token.clone()).or_default() += 1;
+            }
         }
     }
     summary
@@ -679,13 +695,18 @@ mod tests {
         let chunks = rec.chunks.expect("chunks ran");
         assert!(chunks.count >= 1, "{chunks:?}");
         // The metadata audit produces some field rows even on a minimal file.
-        assert!(!rec.audit_fields.is_empty());
+        assert!(!rec.audit_fields.as_deref().unwrap_or_default().is_empty());
         assert!(rec.verdict.is_some());
         assert!(rec.confidence.is_some());
         // A tiny HTML fixture cannot raise a TOC shape signal: HTML
         // headings are anchored by construction and the body is too
         // short to trip the large-body bit.
-        assert!(rec.audit_shape_flags.is_empty());
+        assert!(
+            rec.audit_shape_flags
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -812,11 +833,12 @@ mod tests {
             base_attrs_actions: vec![],
             effective: None,
             inherited_from_parent: None,
-            audit_fields: vec![],
-            audit_shape_flags: vec![
+            audit_profile: "default".to_string(),
+            audit_fields: Some(vec![]),
+            audit_shape_flags: Some(vec![
                 "toc:unanchored_some".to_string(),
                 "toc:unanchored_half".to_string(),
-            ],
+            ]),
             verdict: Some("needs_work".to_string()),
             confidence: Some("low".to_string()),
             elapsed_ms: 0,
@@ -824,7 +846,7 @@ mod tests {
         };
         let mut clean = raised.clone();
         clean.stem = "clean".to_string();
-        clean.audit_shape_flags = vec![];
+        clean.audit_shape_flags = Some(vec![]);
         clean.verdict = Some("clean".to_string());
         clean.confidence = Some("high".to_string());
 
