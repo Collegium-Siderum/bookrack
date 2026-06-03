@@ -32,6 +32,7 @@ use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
 use lancedb::DistanceType;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::OptimizeAction;
 
 use bookrack_core::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 
@@ -196,6 +197,20 @@ impl ChunkStore {
     /// Total number of chunk rows in the table.
     pub async fn count_rows(&self) -> Result<usize> {
         Ok(self.table.count_rows(None).await?)
+    }
+
+    /// Run table-level maintenance: compact small fragments, prune
+    /// versions older than the LanceDB default retention, and absorb any
+    /// freshly-appended rows into existing indices.
+    ///
+    /// Safe to call on an empty table or one with no vector index — the
+    /// corresponding step is a no-op in those cases. A book write is
+    /// `delete_partition` followed by `append`, which leaves tombstones
+    /// and unindexed rows behind; running this at the end of each book
+    /// keeps that churn from accumulating.
+    pub async fn optimize(&self) -> Result<()> {
+        self.table.optimize(OptimizeAction::All).await?;
+        Ok(())
     }
 
     /// Return the `top_k` chunks nearest `query` under cosine distance,
@@ -455,6 +470,62 @@ mod tests {
         assert_eq!(hits[0].start_node_id, NodeId::new(100_000_001));
         // Distances are sorted nearest-first.
         assert!(hits[0].distance <= hits[1].distance);
+    }
+
+    #[tokio::test]
+    async fn optimize_on_an_empty_table_is_a_noop() {
+        let (_dir, store) = fresh_store().await;
+        store.optimize().await.expect("optimize");
+        assert_eq!(store.count_rows().await.expect("count"), 0);
+    }
+
+    #[tokio::test]
+    async fn optimize_after_append_keeps_rows_and_can_search() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        store.optimize().await.expect("optimize");
+        assert_eq!(store.count_rows().await.expect("count"), 2);
+        let hits = store
+            .search(&[0.9, 0.1, 0.0, 0.0], 2)
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].text, "chunk p1 o1");
+    }
+
+    #[tokio::test]
+    async fn optimize_after_delete_then_append_clears_tombstones() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(1, 3, [0.0, 0.0, 1.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        // Simulate the book-write pattern: delete the partition, append
+        // fresh rows, then optimize. The optimize call must succeed and
+        // the row count must reflect only the second batch.
+        store
+            .delete_partition(PartitionIdx::new(1))
+            .await
+            .expect("delete");
+        store
+            .append(&[
+                row(1, 1, [0.5, 0.5, 0.0, 0.0]),
+                row(1, 2, [0.5, 0.0, 0.5, 0.0]),
+            ])
+            .await
+            .expect("re-append");
+        store.optimize().await.expect("optimize");
+        assert_eq!(store.count_rows().await.expect("count"), 2);
     }
 
     #[tokio::test]

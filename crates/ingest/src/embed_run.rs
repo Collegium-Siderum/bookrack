@@ -102,6 +102,15 @@ pub async fn embed_book_chunks<E: Embedder>(
         report.total_chars += batch_chars;
         start = end;
     }
+
+    // Drain the delete-then-append churn: compact fragments, prune old
+    // versions, and absorb the freshly-appended rows into any existing
+    // index. Failure is non-fatal — the table is still consistent, just
+    // carrying tombstones and unindexed rows the next run will pick up.
+    if let Err(e) = store.optimize().await {
+        tracing::warn!(error = ?e, "lancedb optimize failed; continuing");
+    }
+
     Ok(report)
 }
 
