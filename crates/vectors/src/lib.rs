@@ -566,6 +566,20 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Read the persisted [`AnnConfig`] from
+    /// `<lancedb_dir>/vectors_meta.json`. Returns `Ok(None)` when no
+    /// meta file is present — the "legacy / fresh library" state — and
+    /// an error if the file is unparseable or carries an unknown kind.
+    ///
+    /// Reads through to disk every call; the meta is < 1 KB and writes
+    /// are rare, so caching would buy little and complicate invalidation.
+    pub fn current_ann_cfg(&self, lancedb_dir: &Path) -> Result<Option<AnnConfig>> {
+        match meta::load(lancedb_dir)? {
+            None => Ok(None),
+            Some(m) => Ok(Some(AnnConfig::from_meta(&m)?)),
+        }
+    }
+
     pub async fn optimize(&self) -> Result<()> {
         let started = std::time::Instant::now();
         let stats = self.table.optimize(OptimizeAction::All).await?;
@@ -930,6 +944,60 @@ mod tests {
             .expect("second drop");
         let meta = meta::load(dir.path()).expect("load").expect("meta present");
         assert_eq!(meta.kind, "brute-force");
+    }
+
+    #[tokio::test]
+    async fn current_ann_cfg_returns_none_without_meta() {
+        let (dir, store) = fresh_store().await;
+        assert!(
+            store
+                .current_ann_cfg(dir.path())
+                .expect("read cfg")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn current_ann_cfg_returns_brute_force_after_drop() {
+        let (dir, store) = fresh_store().await;
+        store
+            .drop_ann_index(dir.path(), fixed_ts())
+            .await
+            .expect("drop");
+        let cfg = store
+            .current_ann_cfg(dir.path())
+            .expect("read cfg")
+            .expect("meta present");
+        assert_eq!(cfg.kind, AnnKind::BruteForce);
+    }
+
+    #[tokio::test]
+    async fn current_ann_cfg_round_trips_after_build() {
+        let (dir, store) = fresh_store().await;
+        let rows: Vec<ChunkRow> = (0..300)
+            .map(|i| {
+                let v = i as f32 / 300.0;
+                row(1, i + 1, [v, 1.0 - v, 0.5, 0.25])
+            })
+            .collect();
+        store.append(&rows).await.expect("append");
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 1,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 1,
+            refine_factor: None,
+        };
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("build");
+        let read = store
+            .current_ann_cfg(dir.path())
+            .expect("read cfg")
+            .expect("present");
+        assert_eq!(read, cfg);
     }
 
     #[tokio::test]
