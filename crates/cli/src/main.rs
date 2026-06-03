@@ -119,6 +119,11 @@ enum Command {
         #[command(subcommand)]
         action: VectorsAction,
     },
+    /// Manage the corpus database — rebuild it from the opaque store.
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -149,6 +154,48 @@ enum VectorsAction {
     /// Drop the ANN index and mark the meta as brute-force. Search
     /// falls back to a full scan on the next query.
     Drop,
+    /// Re-embed every (or a single) book's chunks in place: read the
+    /// existing chunk rows back from LanceDB, drop their vectors, run
+    /// them back through the active embedder, and write them as the
+    /// new vectors. Use after switching `embed_model` or `embed_dim`.
+    Reembed {
+        /// Restrict the reembed to one intake id. Without this flag,
+        /// every intake currently in the `Embedded` state is reembedded.
+        #[arg(long, value_name = "INTAKE_ID")]
+        book: Option<i64>,
+        /// Print the plan (per-book chunk counts) and exit without
+        /// writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum CorpusAction {
+    /// Rebuild `corpus.db` from the v1 extraction envelopes recorded in
+    /// the opaque store. Intakes whose envelope is missing, mismatched,
+    /// or corrupt are reported but skipped.
+    Rebuild {
+        /// After the corpus tree is rebuilt, also re-embed every
+        /// reembedded book's chunks. Without this flag the LanceDB
+        /// chunks table is left as-is — search still works because
+        /// node ids are deterministic, but the vectors are unchanged.
+        #[arg(long)]
+        include_vectors: bool,
+        /// Restrict the rebuild to one intake id. Without this flag,
+        /// every intake whose lifecycle is past `Extracted` is rebuilt.
+        #[arg(long, value_name = "INTAKE_ID")]
+        book: Option<i64>,
+        /// Print the per-intake classification and exit without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -268,6 +315,27 @@ async fn main() -> Result<()> {
                 .await
             }
             VectorsAction::Drop => run_vectors_drop(&cfg).await,
+            VectorsAction::Reembed { book, dry_run, yes } => {
+                run_vectors_reembed(&cfg, book, dry_run, yes, profile_name.as_deref()).await
+            }
+        },
+        Command::Corpus { action } => match action {
+            CorpusAction::Rebuild {
+                include_vectors,
+                book,
+                dry_run,
+                yes,
+            } => {
+                run_corpus_rebuild(
+                    &cfg,
+                    include_vectors,
+                    book,
+                    dry_run,
+                    yes,
+                    profile_name.as_deref(),
+                )
+                .await
+            }
         },
     }
 }
@@ -442,6 +510,212 @@ async fn run_vectors_rebuild(
         base.num_partitions
     );
     Ok(())
+}
+
+/// Render `bookrack vectors reembed` — read each book's chunks back
+/// from LanceDB, drop the vectors, and run the active embedder over
+/// them. Use after switching `embed_model` / `embed_dim`.
+async fn run_vectors_reembed(
+    cfg: &Config,
+    book: Option<i64>,
+    dry_run: bool,
+    yes: bool,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let plans = bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book)
+        .await
+        .context("plan reembed")?;
+    if plans.is_empty() {
+        println!("no embedded intakes carry chunks; nothing to reembed");
+        return Ok(());
+    }
+    let total_chunks: usize = plans.iter().map(|p| p.chunk_count).sum();
+    let total_chars: usize = plans.iter().map(|p| p.total_chars).sum();
+    println!("reembed plan ({} intakes):", plans.len());
+    for plan in &plans {
+        println!(
+            "  intake {:>4}: {:>5} chunks, {:>9} chars",
+            plan.intake_id, plan.chunk_count, plan.total_chars
+        );
+    }
+    println!(
+        "totals:        {:>5} chunks, {:>9} chars",
+        total_chunks, total_chars
+    );
+    if dry_run {
+        return Ok(());
+    }
+    let prompt = "About to delete-and-rewrite the chunk rows above.\n\
+                  Existing vectors will be overwritten by fresh embeddings\n\
+                  from the currently configured model. This is irreversible.\n\
+                  Type 'yes' to continue: ";
+    if !yes && !confirm(prompt)? {
+        println!("aborted; no changes written");
+        return Ok(());
+    }
+
+    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let _ = profile_name;
+    let embed_cfg = EmbedConfig::from_env();
+    let embedder_client = embedder(cfg, &embed_cfg)?;
+    let report = bookrack_ingest::reembed::reembed_all(
+        &catalog,
+        &corpus,
+        &lancedb_dir,
+        &embed_cfg,
+        &embedder_client,
+        book,
+    )
+    .await
+    .context("reembed_all")?;
+    let _ = &mut corpus;
+
+    let total_written: usize = report
+        .intakes
+        .iter()
+        .map(|o| o.embed_run.chunks_written)
+        .sum();
+    let total_batches: usize = report.intakes.iter().map(|o| o.embed_run.batches).sum();
+    let total_shrinks: usize = report
+        .intakes
+        .iter()
+        .map(|o| o.embed_run.shrink_events)
+        .sum();
+    println!(
+        "reembedded: {} intakes / {} chunks / {} batches / {} shrinks",
+        report.intakes.len(),
+        total_written,
+        total_batches,
+        total_shrinks
+    );
+    if !report.skipped_empty.is_empty() {
+        println!("skipped (no chunks): {:?}", report.skipped_empty);
+    }
+    Ok(())
+}
+
+/// Render `bookrack corpus rebuild` — regenerate `corpus.db` nodes
+/// from the v1 extraction envelopes recorded in the opaque store.
+async fn run_corpus_rebuild(
+    cfg: &Config,
+    include_vectors: bool,
+    book: Option<i64>,
+    dry_run: bool,
+    yes: bool,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+
+    let plan_params = bookrack_ingest::rebuild::RebuildParams {
+        only: book,
+        dry_run: true,
+        ..Default::default()
+    };
+    let plan_report =
+        bookrack_ingest::rebuild::rebuild_from_intakes(&mut corpus, &catalog, &plan_params)
+            .context("plan rebuild")?;
+    println!(
+        "rebuild plan: {} rebuildable, {} missing_envelope, {} mismatched, {} failed",
+        plan_report.rebuilt.len(),
+        plan_report.missing_envelope.len(),
+        plan_report.mismatched.len(),
+        plan_report.failed.len()
+    );
+    if !plan_report.missing_envelope.is_empty() {
+        println!("  missing_envelope: {:?}", plan_report.missing_envelope);
+    }
+    if !plan_report.mismatched.is_empty() {
+        println!("  mismatched:       {:?}", plan_report.mismatched);
+    }
+    if !plan_report.failed.is_empty() {
+        for (id, err) in &plan_report.failed {
+            println!("  failed:           intake {id}: {err}");
+        }
+    }
+    if dry_run {
+        return Ok(());
+    }
+    if plan_report.rebuilt.is_empty() {
+        println!("no rebuildable intakes; aborting");
+        return Ok(());
+    }
+
+    let prompt = if include_vectors {
+        "About to overwrite corpus.db node rows for the intakes above,\n\
+         then re-embed each book's chunks into LanceDB. This is\n\
+         irreversible (the existing corpus tree is replaced).\n\
+         Type 'yes' to continue: "
+    } else {
+        "About to overwrite corpus.db node rows for the intakes above.\n\
+         LanceDB will retain its current chunks; search results will be\n\
+         inconsistent with the rebuilt corpus until you run\n\
+         `bookrack vectors reembed`.\n\
+         This is irreversible (the existing corpus tree is replaced).\n\
+         Type 'yes' to continue: "
+    };
+    if !yes && !confirm(prompt)? {
+        println!("aborted; no changes written");
+        return Ok(());
+    }
+
+    let run_params = bookrack_ingest::rebuild::RebuildParams {
+        only: book,
+        dry_run: false,
+        ..Default::default()
+    };
+    let report = bookrack_ingest::rebuild::rebuild_from_intakes(&mut corpus, &catalog, &run_params)
+        .context("rebuild")?;
+    println!(
+        "rebuilt: {} intakes ({} missing_envelope, {} mismatched, {} failed)",
+        report.rebuilt.len(),
+        report.missing_envelope.len(),
+        report.mismatched.len(),
+        report.failed.len()
+    );
+
+    if include_vectors && !report.rebuilt.is_empty() {
+        let lancedb_dir = cfg.lancedb_dir();
+        let embed_cfg = EmbedConfig::from_env();
+        let embedder_client = embedder(cfg, &embed_cfg)?;
+        let _ = profile_name;
+        let reembed = bookrack_ingest::reembed::reembed_all(
+            &catalog,
+            &corpus,
+            &lancedb_dir,
+            &embed_cfg,
+            &embedder_client,
+            book,
+        )
+        .await
+        .context("reembed after rebuild")?;
+        let total_written: usize = reembed
+            .intakes
+            .iter()
+            .map(|o| o.embed_run.chunks_written)
+            .sum();
+        println!(
+            "reembedded: {} intakes / {} chunks",
+            reembed.intakes.len(),
+            total_written
+        );
+    }
+    Ok(())
+}
+
+/// Read a confirmation token from stdin: only the literal "yes"
+/// (case-insensitive, trimmed) passes.
+fn confirm(prompt: &str) -> Result<bool> {
+    use std::io::{Write, stdin, stdout};
+    print!("{prompt}");
+    stdout().flush().context("flush stdout")?;
+    let mut buf = String::new();
+    stdin().read_line(&mut buf).context("read confirmation")?;
+    Ok(buf.trim().eq_ignore_ascii_case("yes"))
 }
 
 /// Render `bookrack vectors drop` — drop any ANN index and stamp the
