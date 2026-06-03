@@ -385,12 +385,21 @@ impl ChunkStore {
             .execute()
             .await?;
         let names = conn.table_names().execute().await?;
-        let table = if names.iter().any(|name| name == TABLE) {
-            conn.open_table(TABLE).execute().await?
+        let (table, dim) = if names.iter().any(|name| name == TABLE) {
+            let table = conn.open_table(TABLE).execute().await?;
+            // If the on-disk table already fixes a vector dim, reflect
+            // that in the handle rather than the caller's hint — the
+            // table's schema is the source of truth and any mismatch is
+            // caught at write time anyway.
+            let on_disk_dim = vector_dim_from_schema(table.schema().await?.as_ref())?;
+            (table, on_disk_dim)
         } else {
-            conn.create_empty_table(TABLE, chunk_schema(dim))
-                .execute()
-                .await?
+            (
+                conn.create_empty_table(TABLE, chunk_schema(dim))
+                    .execute()
+                    .await?,
+                dim,
+            )
         };
         Ok(ChunkStore { table, dim })
     }
@@ -728,6 +737,19 @@ impl ChunkStore {
             read_hits(batch, &mut hits)?;
         }
         Ok(hits)
+    }
+}
+
+/// Read the fixed-size list width of the `vector` column from a
+/// LanceDB schema. Used when opening an existing chunks table so the
+/// store handle reflects the on-disk dim, not the caller's hint.
+fn vector_dim_from_schema(schema: &Schema) -> Result<usize> {
+    let field = schema
+        .field_with_name("vector")
+        .map_err(|_| VectorsError::BadColumn("vector"))?;
+    match field.data_type() {
+        DataType::FixedSizeList(_, size) => Ok(*size as usize),
+        _ => Err(VectorsError::BadColumn("vector")),
     }
 }
 

@@ -18,6 +18,7 @@ mod chunk;
 mod dryrun;
 mod embed_run;
 pub mod envelope;
+pub mod reembed;
 pub mod sentences;
 mod structure;
 
@@ -143,6 +144,15 @@ pub enum IngestError {
     /// embedding dimension could not be determined.
     #[error("the embedder returned no vector for a non-empty batch")]
     EmptyEmbedding,
+
+    /// A driver was asked to operate on an intake id no row exists for.
+    #[error("no intake with id {0}")]
+    UnknownIntake(i64),
+
+    /// A reembed target intake is not in the `Embedded` lifecycle state,
+    /// so its chunks are not on disk to reembed.
+    #[error("intake {0} is not in the Embedded state; cannot reembed")]
+    IntakeNotEmbedded(i64),
 }
 
 /// A fallible `ingest` operation.

@@ -1,0 +1,341 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! L2 reembed: rebuild the dense store from the chunks already on disk,
+//! without re-extracting or re-chunking any source file.
+//!
+//! Each book's existing [`ChunkRow`]s are read back via
+//! [`ChunkStore::scan_partition`], mapped to [`ChunkPlan`]s by dropping
+//! the vector column, and fed back through [`embed_book_chunks`]. The
+//! latter owns the delete-then-append / churn-bump / cold-start ANN
+//! decisions, so reembed inherits them automatically — stamps mismatch
+//! handling is the same.
+
+use std::path::Path;
+
+use bookrack_catalog::{Catalog, IntakeStatus};
+use bookrack_config::EmbedConfig;
+use bookrack_core::PartitionIdx;
+use bookrack_corpus::Corpus;
+use bookrack_embed::Embedder;
+use bookrack_vectors::{ChunkRow, ChunkStore};
+
+use crate::chunk::ChunkPlan;
+use crate::embed_run::{EmbedRunReport, embed_book_chunks};
+use crate::{IngestError, Result};
+
+/// A planned per-book reembed: what would happen if [`reembed_book`]
+/// ran on this `intake_id`.
+#[derive(Debug, Clone)]
+pub struct ReembedPlan {
+    pub intake_id: i64,
+    pub partition: PartitionIdx,
+    pub chunk_count: usize,
+    pub total_chars: usize,
+}
+
+/// What one reembed call produced for one intake.
+#[derive(Debug, Clone)]
+pub struct ReembedOutcome {
+    pub intake_id: i64,
+    pub embed_run: EmbedRunReport,
+}
+
+/// Aggregate report for [`reembed_all`].
+#[derive(Debug, Clone, Default)]
+pub struct ReembedReport {
+    pub intakes: Vec<ReembedOutcome>,
+    /// Intakes the driver skipped because their partition held no
+    /// chunks (e.g. an aborted prior embed). Not an error.
+    pub skipped_empty: Vec<i64>,
+}
+
+/// Build a [`ReembedPlan`] for each intake currently in
+/// [`IntakeStatus::Embedded`], or for `only` when set. Reads the chunks
+/// table but writes nothing.
+pub async fn plan_reembed(
+    catalog: &Catalog,
+    lancedb_dir: &Path,
+    only: Option<i64>,
+) -> Result<Vec<ReembedPlan>> {
+    // The on-disk schema decides the dim; passing 0 forces the open
+    // path to read it from the schema for an existing table.
+    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let targets = collect_targets(catalog, only)?;
+    let mut plans = Vec::new();
+    for intake_id in targets {
+        let partition = PartitionIdx::new(intake_id);
+        let rows = store.scan_partition(partition).await?;
+        if rows.is_empty() {
+            continue;
+        }
+        let total_chars = rows.iter().map(|r| r.text.chars().count()).sum();
+        plans.push(ReembedPlan {
+            intake_id,
+            partition,
+            chunk_count: rows.len(),
+            total_chars,
+        });
+    }
+    Ok(plans)
+}
+
+/// Reembed one book: read its rows back, drop their vectors, and run
+/// [`embed_book_chunks`] on the resulting [`ChunkPlan`]s. Returns the
+/// underlying [`EmbedRunReport`].
+///
+/// On an empty partition returns a zeroed report — the caller may treat
+/// it as a skip.
+pub async fn reembed_book<E: Embedder>(
+    intake_id: i64,
+    embedder: &E,
+    corpus: &Corpus,
+    lancedb_dir: &Path,
+    cfg: &EmbedConfig,
+) -> Result<EmbedRunReport> {
+    let partition = PartitionIdx::new(intake_id);
+    let plans = read_chunk_plans(lancedb_dir, partition).await?;
+    if plans.is_empty() {
+        return Ok(EmbedRunReport::default());
+    }
+    embed_book_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await
+}
+
+/// Reembed every intake currently in [`IntakeStatus::Embedded`], or
+/// just `only` when set. Per-book failures abort the whole run so the
+/// caller can surface the first error verbatim.
+pub async fn reembed_all<E: Embedder>(
+    catalog: &Catalog,
+    corpus: &Corpus,
+    lancedb_dir: &Path,
+    cfg: &EmbedConfig,
+    embedder: &E,
+    only: Option<i64>,
+) -> Result<ReembedReport> {
+    let targets = collect_targets(catalog, only)?;
+    let mut report = ReembedReport::default();
+    for intake_id in targets {
+        let embed_run = reembed_book(intake_id, embedder, corpus, lancedb_dir, cfg).await?;
+        if embed_run.chunks_written == 0 {
+            report.skipped_empty.push(intake_id);
+            continue;
+        }
+        report.intakes.push(ReembedOutcome {
+            intake_id,
+            embed_run,
+        });
+    }
+    Ok(report)
+}
+
+fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<i64>> {
+    Ok(match only {
+        Some(id) => {
+            let intake = catalog
+                .intake_by_id(id)
+                .map_err(IngestError::from)?
+                .ok_or(IngestError::UnknownIntake(id))?;
+            if intake.status != IntakeStatus::Embedded {
+                return Err(IngestError::IntakeNotEmbedded(id));
+            }
+            vec![id]
+        }
+        None => catalog
+            .intakes_with_status(IntakeStatus::Embedded)
+            .map_err(IngestError::from)?
+            .into_iter()
+            .map(|i| i.intake_id)
+            .collect(),
+    })
+}
+
+/// Open the store, scan the partition, drop the vector column.
+async fn read_chunk_plans(lancedb_dir: &Path, partition: PartitionIdx) -> Result<Vec<ChunkPlan>> {
+    // Dim hint is irrelevant for an existing table: open reads the
+    // schema. For a fresh directory the scan is empty.
+    let store = ChunkStore::open(lancedb_dir, 0).await?;
+    let rows = store.scan_partition(partition).await?;
+    Ok(rows.into_iter().map(row_to_plan).collect())
+}
+
+fn row_to_plan(row: ChunkRow) -> ChunkPlan {
+    ChunkPlan {
+        start_node_id: row.start_node_id,
+        start_char_offset: row.start_char_offset,
+        end_node_id: row.end_node_id,
+        end_char_offset: row.end_char_offset,
+        text: row.text,
+        norm_chunk_sha256: row.norm_chunk_sha256,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+
+    use bookrack_catalog::NewIntake;
+    use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
+    use bookrack_vectors::ChunkRow;
+
+    use crate::current_index_stamps;
+
+    /// A toy embedder whose vector encodes its call generation, so the
+    /// reembed test can prove the vectors changed.
+    struct Fake {
+        generation: u8,
+    }
+
+    impl Embedder for Fake {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let n = texts.len();
+            let generation = self.generation;
+            async move {
+                let _ = EmbedError::Unreachable("".to_string());
+                Ok::<Vec<Vec<f32>>, EmbedError>(
+                    (0..n)
+                        .map(|_| {
+                            let mut v = vec![0.0f32; 4];
+                            v[1] = generation as f32;
+                            v
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    fn fake_row(intake_id: i64, offset: i64, text: &str) -> ChunkRow {
+        let node = PartitionIdx::new(intake_id)
+            .node_id(offset)
+            .expect("offset in range");
+        ChunkRow {
+            vector: vec![0.0; 4],
+            text: text.to_string(),
+            start_node_id: node,
+            start_char_offset: 0,
+            end_node_id: node,
+            end_char_offset: text.len() as i32,
+            norm_chunk_sha256: format!("sha-p{intake_id}-o{offset}"),
+        }
+    }
+
+    async fn seed_partition(lancedb_dir: &Path, intake_id: i64, count: usize) {
+        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let rows: Vec<ChunkRow> = (0..count as i64)
+            .map(|o| fake_row(intake_id, o + 1, &format!("chunk {intake_id}-{o}")))
+            .collect();
+        store.append(&rows).await.expect("seed");
+    }
+
+    fn seed_catalog_embedded(catalog: &mut Catalog, intake_ids: &[i64]) {
+        for &id in intake_ids {
+            let reg = catalog
+                .register_intake(
+                    &NewIntake::new(format!("sha-{id}"))
+                        .format("txt")
+                        .byte_size(1),
+                )
+                .expect("register");
+            assert_eq!(reg.intake().intake_id, id);
+            catalog
+                .set_intake_status(id, IntakeStatus::Embedded)
+                .expect("status");
+        }
+    }
+
+    fn stamp_corpus(corpus: &mut Corpus, model: &str, dim: u32) {
+        let stamps = current_index_stamps(model, dim);
+        corpus.reconcile_index_stamps(&stamps).expect("reconcile");
+    }
+
+    fn embed_cfg(model: &str) -> EmbedConfig {
+        EmbedConfig {
+            model: model.to_string(),
+            ..EmbedConfig::from_env()
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_lists_only_embedded_intakes_with_chunks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1, 2]);
+        seed_partition(dir.path(), 1, 3).await;
+        // Partition 2 left empty: planner skips it.
+
+        let plans = plan_reembed(&catalog, dir.path(), None)
+            .await
+            .expect("plan");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].intake_id, 1);
+        assert_eq!(plans[0].chunk_count, 3);
+    }
+
+    #[tokio::test]
+    async fn reembed_book_replaces_vectors_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        stamp_corpus(&mut corpus, "fake-1", 4);
+        seed_catalog_embedded(&mut catalog, &[1]);
+        seed_partition(dir.path(), 1, 5).await;
+
+        let before = ChunkStore::open(dir.path(), 4)
+            .await
+            .expect("open")
+            .count_rows()
+            .await
+            .expect("count");
+        assert_eq!(before, 5);
+
+        let cfg = embed_cfg("fake-1");
+        let report = reembed_book(1, &Fake { generation: 7 }, &corpus, dir.path(), &cfg)
+            .await
+            .expect("reembed");
+        assert_eq!(report.chunks_written, 5);
+
+        let store = ChunkStore::open(dir.path(), 4).await.expect("open");
+        assert_eq!(store.count_rows().await.expect("count"), 5);
+        let rows = store
+            .scan_partition(PartitionIdx::new(1))
+            .await
+            .expect("scan");
+        for row in &rows {
+            // Generation byte landed in slot 1 — proves the rows were
+            // rewritten rather than left untouched.
+            assert_eq!(row.vector[1], 7.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn reembed_all_visits_every_embedded_intake() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        stamp_corpus(&mut corpus, "fake-1", 4);
+        seed_catalog_embedded(&mut catalog, &[1, 2, 3]);
+        seed_partition(dir.path(), 1, 2).await;
+        seed_partition(dir.path(), 2, 4).await;
+        // intake 3 has no chunks: should land in skipped_empty.
+
+        let cfg = embed_cfg("fake-1");
+        let report = reembed_all(
+            &catalog,
+            &corpus,
+            dir.path(),
+            &cfg,
+            &Fake { generation: 9 },
+            None,
+        )
+        .await
+        .expect("reembed_all");
+
+        assert_eq!(report.intakes.len(), 2);
+        let ids: Vec<i64> = report.intakes.iter().map(|o| o.intake_id).collect();
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(report.skipped_empty, vec![3]);
+    }
+}

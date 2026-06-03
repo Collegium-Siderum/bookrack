@@ -299,6 +299,24 @@ impl Catalog {
         Ok(intake)
     }
 
+    /// All intakes carrying `status`, ordered by `intake_id` ascending.
+    /// Drives batch operations that walk the intake table by lifecycle
+    /// state (corpus rebuild, vectors reembed).
+    pub fn intakes_with_status(&self, status: IntakeStatus) -> Result<Vec<Intake>> {
+        let mut stmt = self
+            .conn
+            .prepare(&select_sql("WHERE status = :status ORDER BY intake_id"))?;
+        let rows = stmt.query_map(
+            named_params! { ":status": status.as_str() },
+            Intake::from_row,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Advance an intake's lifecycle state. Returns whether a row with
     /// that id existed.
     pub fn set_intake_status(&self, intake_id: i64, status: IntakeStatus) -> Result<bool> {
