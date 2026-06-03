@@ -85,6 +85,32 @@ pub enum VectorsError {
     /// recognise. Likely a meta file written by a newer crate version.
     #[error("vectors_meta has unknown kind {0:?}")]
     UnknownAnnKind(String),
+
+    /// A caller asked to build an ANN index for `AnnKind::BruteForce`,
+    /// which has no index — only `drop_ann_index` is meaningful for
+    /// that kind.
+    #[error("cannot build an ANN index for kind brute-force")]
+    BuildOnBruteForceKind,
+
+    /// An `IvfPq` build was attempted without the required quantization
+    /// parameters in the config.
+    #[error("IvfPq build is missing required parameter {0}")]
+    MissingPqParam(&'static str),
+
+    /// Product quantization is configured too coarsely for the
+    /// embedding dimension: `dim / num_sub_vectors > 8`. Loss from
+    /// over-aggressive compression is unacceptable. LanceDB recommends
+    /// `num_sub_vectors = dim / 8`.
+    #[error(
+        "IvfPq quantization too coarse: dim={dim} / num_sub_vectors={num_sub_vectors} > 8 \
+         (recommended num_sub_vectors = dim / 8)"
+    )]
+    IvfPqQuantizationTooCoarse {
+        /// The embedding dimension.
+        dim: usize,
+        /// The configured PQ sub-vector count.
+        num_sub_vectors: usize,
+    },
 }
 
 /// A fallible `vectors` operation.
@@ -390,6 +416,156 @@ impl ChunkStore {
     /// `delete_partition` followed by `append`, which leaves tombstones
     /// and unindexed rows behind; running this at the end of each book
     /// keeps that churn from accumulating.
+    /// Build an ANN index over the chunks table according to `cfg`,
+    /// dropping any existing index of the canonical name first. The new
+    /// configuration is stamped to `<lancedb_dir>/vectors_meta.json` on
+    /// success — `built_at` is owned by the caller (RFC 3339 expected)
+    /// so this module stays clock-deterministic.
+    ///
+    /// Guardrails:
+    ///
+    /// * `AnnKind::BruteForce` is rejected — there is no index to
+    ///   build; call [`drop_ann_index`] instead.
+    /// * For `AnnKind::IvfPq` and `AnnKind::IvfHnswPq`,
+    ///   `num_sub_vectors` is required, and `dim / num_sub_vectors > 8`
+    ///   is rejected as too-coarse quantization.
+    /// * `IvfHnsw*` builds are accepted but logged at `warn` — they
+    ///   carry an upstream recall regression on lancedb 0.30 and should
+    ///   not be relied on as a default.
+    pub async fn build_ann_index(
+        &self,
+        cfg: &AnnConfig,
+        lancedb_dir: &Path,
+        built_at: String,
+    ) -> Result<()> {
+        use lancedb::index::Index;
+        use lancedb::index::vector::{
+            IvfFlatIndexBuilder, IvfHnswFlatIndexBuilder, IvfHnswPqIndexBuilder,
+            IvfHnswSqIndexBuilder, IvfPqIndexBuilder, IvfSqIndexBuilder,
+        };
+
+        if matches!(cfg.kind, AnnKind::BruteForce) {
+            return Err(VectorsError::BuildOnBruteForceKind);
+        }
+        if matches!(cfg.kind, AnnKind::IvfPq | AnnKind::IvfHnswPq) {
+            let nsv = cfg
+                .num_sub_vectors
+                .ok_or(VectorsError::MissingPqParam("num_sub_vectors"))?;
+            if nsv == 0 || self.dim as u32 / nsv > 8 {
+                return Err(VectorsError::IvfPqQuantizationTooCoarse {
+                    dim: self.dim,
+                    num_sub_vectors: nsv as usize,
+                });
+            }
+        }
+        if matches!(
+            cfg.kind,
+            AnnKind::IvfHnswFlat | AnnKind::IvfHnswSq | AnnKind::IvfHnswPq
+        ) {
+            tracing::warn!(
+                kind = cfg.kind.as_str(),
+                "IvfHnsw* family is unstable on lancedb 0.30 (upstream recall regression)"
+            );
+        }
+
+        // Drop any pre-existing index of the canonical name. Missing-
+        // index errors are tolerated; other failures bubble up.
+        if let Err(e) = self.table.drop_index(DEFAULT_INDEX_NAME).await {
+            tracing::debug!(error = ?e, "drop_index before rebuild reported");
+        }
+
+        let started = std::time::Instant::now();
+        let index = match cfg.kind {
+            AnnKind::IvfFlat => Index::IvfFlat(
+                IvfFlatIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions),
+            ),
+            AnnKind::IvfSq => Index::IvfSq(
+                IvfSqIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions),
+            ),
+            AnnKind::IvfPq => {
+                let mut b = IvfPqIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions);
+                if let Some(nsv) = cfg.num_sub_vectors {
+                    b = b.num_sub_vectors(nsv);
+                }
+                if let Some(nb) = cfg.num_bits {
+                    b = b.num_bits(nb);
+                }
+                Index::IvfPq(b)
+            }
+            AnnKind::IvfHnswFlat => Index::IvfHnswFlat(
+                IvfHnswFlatIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions),
+            ),
+            AnnKind::IvfHnswSq => Index::IvfHnswSq(
+                IvfHnswSqIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions),
+            ),
+            AnnKind::IvfHnswPq => {
+                let mut b = IvfHnswPqIndexBuilder::default()
+                    .distance_type(DistanceType::Cosine)
+                    .num_partitions(cfg.num_partitions);
+                if let Some(nsv) = cfg.num_sub_vectors {
+                    b = b.num_sub_vectors(nsv);
+                }
+                if let Some(nb) = cfg.num_bits {
+                    b = b.num_bits(nb);
+                }
+                Index::IvfHnswPq(b)
+            }
+            AnnKind::BruteForce => unreachable!("guarded above"),
+        };
+
+        self.table
+            .create_index(&["vector"], index)
+            .name(DEFAULT_INDEX_NAME.to_string())
+            .execute()
+            .await?;
+
+        let built_at_chunk_count = self.count_rows().await? as u64;
+        let meta = cfg.to_meta(
+            built_at,
+            built_at_chunk_count,
+            0,
+            DEFAULT_INDEX_NAME.to_string(),
+        );
+        meta::store(lancedb_dir, &meta)?;
+
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
+        tracing::info!(
+            kind = cfg.kind.as_str(),
+            num_partitions = cfg.num_partitions,
+            nprobes = cfg.nprobes,
+            elapsed_ms,
+            built_at_chunk_count,
+            "built ann index"
+        );
+
+        Ok(())
+    }
+
+    /// Drop the ANN index attached to the chunks table (if any) and
+    /// mark `vectors_meta.json` as `kind = "brute-force"`. Idempotent —
+    /// a missing index is not an error.
+    pub async fn drop_ann_index(&self, lancedb_dir: &Path, built_at: String) -> Result<()> {
+        if let Err(e) = self.table.drop_index(DEFAULT_INDEX_NAME).await {
+            tracing::debug!(error = ?e, "drop_index in drop_ann_index reported");
+        }
+        let row_count = self.count_rows().await? as u64;
+        let cfg = AnnConfig::default_for(AnnKind::BruteForce);
+        let meta = cfg.to_meta(built_at, row_count, 0, DEFAULT_INDEX_NAME.to_string());
+        meta::store(lancedb_dir, &meta)?;
+        tracing::info!("dropped ann index; kind now brute-force");
+        Ok(())
+    }
+
     pub async fn optimize(&self) -> Result<()> {
         let started = std::time::Instant::now();
         let stats = self.table.optimize(OptimizeAction::All).await?;
@@ -658,6 +834,136 @@ mod tests {
         meta.kind = "ivf-warpdrive".to_string();
         let err = AnnConfig::from_meta(&meta).unwrap_err();
         assert!(matches!(err, VectorsError::UnknownAnnKind(_)));
+    }
+
+    /// Helper for tests that need a non-default embedding dimension.
+    async fn fresh_store_with_dim(dim: usize) -> (TempDir, ChunkStore) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ChunkStore::open(dir.path(), dim).await.expect("open");
+        (dir, store)
+    }
+
+    fn fixed_ts() -> String {
+        "2026-06-03T17:47:00Z".to_string()
+    }
+
+    #[tokio::test]
+    async fn build_on_brute_force_kind_is_rejected() {
+        let (dir, store) = fresh_store().await;
+        let cfg = AnnConfig::default_for(AnnKind::BruteForce);
+        let err = store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VectorsError::BuildOnBruteForceKind));
+    }
+
+    #[tokio::test]
+    async fn build_ivf_pq_without_num_sub_vectors_is_rejected() {
+        let (dir, store) = fresh_store().await;
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfPq,
+            num_partitions: 1,
+            num_sub_vectors: None,
+            num_bits: Some(8),
+            nprobes: 1,
+            refine_factor: None,
+        };
+        let err = store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            VectorsError::MissingPqParam("num_sub_vectors")
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_ivf_pq_with_too_coarse_quantization_is_rejected() {
+        // dim/nsv = 16/1 = 16 > 8, so the guardrail trips.
+        let (dir, store) = fresh_store_with_dim(16).await;
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfPq,
+            num_partitions: 1,
+            num_sub_vectors: Some(1),
+            num_bits: Some(8),
+            nprobes: 1,
+            refine_factor: None,
+        };
+        let err = store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            VectorsError::IvfPqQuantizationTooCoarse {
+                dim: 16,
+                num_sub_vectors: 1,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn drop_on_empty_table_writes_brute_force_meta() {
+        let (dir, store) = fresh_store().await;
+        store
+            .drop_ann_index(dir.path(), fixed_ts())
+            .await
+            .expect("drop");
+        let meta = meta::load(dir.path()).expect("load").expect("meta present");
+        assert_eq!(meta.kind, "brute-force");
+        assert_eq!(meta.built_at_chunk_count, 0);
+        assert_eq!(meta.churn_since_rebuild, 0);
+    }
+
+    #[tokio::test]
+    async fn drop_is_idempotent() {
+        let (dir, store) = fresh_store().await;
+        store
+            .drop_ann_index(dir.path(), fixed_ts())
+            .await
+            .expect("first drop");
+        store
+            .drop_ann_index(dir.path(), fixed_ts())
+            .await
+            .expect("second drop");
+        let meta = meta::load(dir.path()).expect("load").expect("meta present");
+        assert_eq!(meta.kind, "brute-force");
+    }
+
+    #[tokio::test]
+    async fn build_ivf_flat_then_meta_reflects_config() {
+        // Use enough rows to satisfy lancedb's IVF training; even
+        // num_partitions=1 wants a substantive sample. 300 vectors at
+        // dim=4 are tiny in absolute terms but exercise the path.
+        let (dir, store) = fresh_store().await;
+        let rows: Vec<ChunkRow> = (0..300)
+            .map(|i| {
+                let v = i as f32 / 300.0;
+                row(1, i + 1, [v, 1.0 - v, 0.5, 0.25])
+            })
+            .collect();
+        store.append(&rows).await.expect("append");
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 1,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 1,
+            refine_factor: None,
+        };
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("build");
+        let meta = meta::load(dir.path()).expect("load").expect("meta present");
+        assert_eq!(meta.kind, "ivf-flat");
+        assert_eq!(meta.num_partitions, 1);
+        assert_eq!(meta.default_nprobes, 1);
+        assert_eq!(meta.built_at_chunk_count, 300);
+        assert_eq!(meta.churn_since_rebuild, 0);
+        assert_eq!(meta.lance_index_name, DEFAULT_INDEX_NAME);
     }
 
     #[tokio::test]
