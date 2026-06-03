@@ -34,7 +34,7 @@ fn joined_text(extraction: &Extraction) -> String {
 
 /// Extract a fixture, asserting it produced a usable text layer.
 fn extracted(name: &str) -> Extraction {
-    match extract(&pdf_fixture(name)) {
+    match extract(&pdf_fixture(name), &common::default_extract_toggles()) {
         Ok(ExtractOutcome::Extracted(e)) => e,
         other => panic!("{name}: expected a usable text layer, got {other:?}"),
     }
@@ -163,7 +163,11 @@ fn encrypted_userpw_pdf_is_drm_protected() {
     }
     // A user (open) password is set: the file cannot be opened without
     // it. This project does not decrypt — it rejects the file.
-    let err = extract(&pdf_fixture("encrypted_userpw.pdf")).expect_err("user password");
+    let err = extract(
+        &pdf_fixture("encrypted_userpw.pdf"),
+        &common::default_extract_toggles(),
+    )
+    .expect_err("user password");
     assert!(matches!(err, ExtractError::DrmProtected), "got {err:?}");
 }
 
@@ -174,7 +178,10 @@ fn image_only_pdf_routes_to_ocr() {
     }
     // A pure-raster page with no text layer: nothing to extract, so the
     // adapter routes it to OCR rather than producing an empty success.
-    match extract(&pdf_fixture("image_only.pdf")) {
+    match extract(
+        &pdf_fixture("image_only.pdf"),
+        &common::default_extract_toggles(),
+    ) {
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             assert!(!reason.is_empty(), "the OCR-routing reason is recorded");
         }
@@ -190,7 +197,11 @@ fn corrupt_pdf_is_reported_as_a_corrupt_file() {
     // A file with the %PDF header but no recoverable objects: a
     // structural, whole-file failure, distinct from a missing text
     // layer.
-    let err = extract(&pdf_fixture("corrupt.pdf")).expect_err("corrupt file");
+    let err = extract(
+        &pdf_fixture("corrupt.pdf"),
+        &common::default_extract_toggles(),
+    )
+    .expect_err("corrupt file");
     assert!(
         matches!(err, ExtractError::CorruptFile { .. }),
         "got {err:?}"
@@ -316,8 +327,10 @@ fn pdf_extraction_is_deterministic() {
         "image_only.pdf",
     ] {
         let path = pdf_fixture(name);
-        let first = extract(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let second = extract(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let first = extract(&path, &common::default_extract_toggles())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let second = extract(&path, &common::default_extract_toggles())
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(first, second, "{name} extracts deterministically");
     }
 }

@@ -47,8 +47,8 @@ fn omnibus_classifies_footnote_and_caption_blocks() {
 #[test]
 fn extraction_is_deterministic() {
     let epub = pack_epub("omnibus");
-    let first = extract(&epub.path).expect("first extract");
-    let second = extract(&epub.path).expect("second extract");
+    let first = extract(&epub.path, &common::default_extract_toggles()).expect("first extract");
+    let second = extract(&epub.path, &common::default_extract_toggles()).expect("second extract");
     // The determinism invariant: same file => byte-identical Extraction.
     assert_eq!(first, second);
 }
@@ -78,7 +78,7 @@ fn flat_transcribes_bibliographic_metadata() {
 #[test]
 fn headings_with_no_prose_is_empty_extraction() {
     let epub = pack_epub("headings_only");
-    let err = extract(&epub.path).expect_err("no body blocks");
+    let err = extract(&epub.path, &common::default_extract_toggles()).expect_err("no body blocks");
     assert!(matches!(err, ExtractError::EmptyExtraction), "got {err:?}");
 }
 
@@ -88,7 +88,7 @@ fn a_non_archive_is_a_corrupt_file() {
     let path = dir.path().join("broken.epub");
     std::fs::write(&path, b"this is plainly not a zip archive").expect("write");
 
-    let err = extract(&path).expect_err("not an archive");
+    let err = extract(&path, &common::default_extract_toggles()).expect_err("not an archive");
     assert!(
         matches!(err, ExtractError::CorruptFile { .. }),
         "got {err:?}"

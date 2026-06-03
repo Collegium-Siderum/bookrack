@@ -709,6 +709,7 @@ dependencies = [
 name = "bookrack-extract"
 version = "0.1.0"
 dependencies = [
+ "bookrack-audit-profile",
  "bookrack-config",
  "encoding_rs",
  "pdfium-render",

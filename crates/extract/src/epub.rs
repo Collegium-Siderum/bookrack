@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+use bookrack_audit_profile::ExtractToggles;
 use rbook::Epub;
 
 use crate::contract::{
@@ -27,8 +28,8 @@ use crate::html_parse;
 /// dirty-partition detection.
 const EXTRACTOR_VERSION: &str = "rbook=0.7;scraper=0.27;epub-adapter=1";
 
-/// Extract one EPUB file.
-pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
+/// Extract one EPUB file under the given toggle bag.
+pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
     let epub = Epub::open(path).map_err(|e| ExtractError::CorruptFile {
         detail: e.to_string(),
     })?;
@@ -71,7 +72,7 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
     let toc = build_toc(&epub, &unit_of_manifest, &first_block_of, &block_of_anchor);
 
     // --- bibliographic metadata --------------------------------------
-    let biblio = build_biblio(&epub);
+    let biblio = build_biblio(&epub, toggles);
 
     Ok(Extraction {
         blocks,
@@ -134,7 +135,7 @@ fn build_toc(
 
 /// Transcribe the OPF Dublin Core metadata. Absent fields stay `None` —
 /// extract reports only what the file carries; enrichment is METADATA's.
-fn build_biblio(epub: &Epub) -> Biblio {
+fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
     let md = epub.metadata();
 
     let title = md.title().map(|t| t.value().to_string());
@@ -148,9 +149,13 @@ fn build_biblio(epub: &Epub) -> Biblio {
         .map(|t| t.value().to_string());
     let publisher = md.publishers().next().map(|p| p.value().to_string());
     let year_entry = md.published_entry().map(|e| e.value().to_string());
-    let year = year_entry.as_deref().and_then(parse_year);
+    let year = year_entry.as_deref().and_then(|v| parse_year(v, toggles));
     let language = md.language().map(|l| l.value().to_string());
-    let isbn = md.identifiers().find_map(|id| as_isbn(id.value()));
+    let isbn = if toggles.epub_isbn_recognition {
+        md.identifiers().find_map(|id| as_isbn(id.value()))
+    } else {
+        None
+    };
 
     let mut contributors = Vec::new();
     for creator in md.creators() {
@@ -160,6 +165,7 @@ fn build_biblio(epub: &Epub) -> Biblio {
             role: role_from_code(
                 creator.main_role().map(|r| r.code()),
                 ContributorRole::Author,
+                toggles,
             ),
         });
     }
@@ -169,6 +175,7 @@ fn build_biblio(epub: &Epub) -> Biblio {
             role: role_from_code(
                 contributor.main_role().map(|r| r.code()),
                 ContributorRole::Other,
+                toggles,
             ),
         });
     }
@@ -187,8 +194,17 @@ fn build_biblio(epub: &Epub) -> Biblio {
 }
 
 /// Map a MARC relator code to a contributor role, falling back to
-/// `default` when no code is present.
-fn role_from_code(code: Option<&str>, default: ContributorRole) -> ContributorRole {
+/// `default` when no code is present. With `marc_role_mapping = false`
+/// every code (and the bare-no-code path for non-creator entries)
+/// collapses onto `Other`.
+fn role_from_code(
+    code: Option<&str>,
+    default: ContributorRole,
+    toggles: &ExtractToggles,
+) -> ContributorRole {
+    if !toggles.marc_role_mapping {
+        return default;
+    }
     match code {
         None => default,
         Some(c) => match c {
@@ -204,10 +220,17 @@ fn role_from_code(code: Option<&str>, default: ContributorRole) -> ContributorRo
 ///
 /// Implausible years are rejected: a published-date sentinel some tools
 /// emit for "unknown" (`0101-01-01`) would otherwise transcribe as 101.
-fn parse_year(value: &str) -> Option<i32> {
+/// When `epub_year_range_check` is off the bounds check is skipped and
+/// any four-digit prefix passes.
+fn parse_year(value: &str, toggles: &ExtractToggles) -> Option<i32> {
     let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
     let year: i32 = digits.get(..4)?.parse().ok()?;
-    (1000..=2200).contains(&year).then_some(year)
+    if !toggles.epub_year_range_check {
+        return Some(year);
+    }
+    (toggles.epub_year_min..=toggles.epub_year_max)
+        .contains(&year)
+        .then_some(year)
 }
 
 /// Recognize an ISBN inside an identifier value (`urn:isbn:...`, or a

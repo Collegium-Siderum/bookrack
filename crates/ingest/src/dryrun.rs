@@ -330,7 +330,7 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         error: None,
     };
 
-    let extraction = match extract(path) {
+    let extraction = match extract(path, &bookrack_metadata::AuditProfile::default().extract) {
         Ok(ExtractOutcome::Extracted(e)) => e,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             record.extract_outcome = "needs_ocr".to_string();

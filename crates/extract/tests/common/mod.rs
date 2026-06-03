@@ -15,16 +15,24 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use bookrack_audit_profile::ExtractToggles;
 use bookrack_extract::{ExtractError, ExtractOutcome, Extraction, extract};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
+
+/// Default toggle bag the integration tests pass to `extract`. The
+/// helper avoids spelling out `ExtractToggles::default()` at every call
+/// site.
+pub fn default_extract_toggles() -> ExtractToggles {
+    ExtractToggles::default()
+}
 
 /// Extract a fixture and unwrap the [`ExtractOutcome::Extracted`] case,
 /// failing the test on an OCR-routing outcome or an error. Born-digital
 /// fixtures always carry a usable text layer, so this keeps the success
 /// assertion sites uncluttered.
 pub fn extracted(path: &Path) -> Extraction {
-    match extract(path) {
+    match extract(path, &default_extract_toggles()) {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         other => panic!("expected a usable text layer, got {other:?}"),
     }
@@ -47,7 +55,7 @@ pub fn pdf_fixture(name: &str) -> PathBuf {
 /// [`ExtractError::Io`] only when PDFium itself could not be loaded, so
 /// that error uniquely identifies the "binary absent" case.
 pub fn pdfium_available() -> bool {
-    match extract(&pdf_fixture("prose_en.pdf")) {
+    match extract(&pdf_fixture("prose_en.pdf"), &default_extract_toggles()) {
         Err(ExtractError::Io(e)) => {
             eprintln!("skipping PDF test: PDFium native library unavailable ({e})");
             false

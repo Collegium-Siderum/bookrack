@@ -22,6 +22,8 @@
 
 use std::path::Path;
 
+use bookrack_audit_profile::ExtractToggles;
+
 use crate::contract::{
     Biblio, Block, BlockKind, ExtractError, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
 };
@@ -45,8 +47,11 @@ const CHAPTER_UNITS: [char; 3] = ['\u{7ae0}', '\u{8282}', '\u{56de}'];
 /// the number run between a marker's prefix and its unit character.
 const CJK_NUMERALS: &str = "\u{96f6}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}\u{4e03}\u{516b}\u{4e5d}\u{5341}\u{767e}\u{5343}\u{4e07}\u{4e24}\u{58f9}\u{8d30}\u{53c1}\u{8086}\u{4f0d}\u{9646}\u{67d2}\u{634c}\u{7396}\u{62fe}\u{ff10}\u{ff11}\u{ff12}\u{ff13}\u{ff14}\u{ff15}\u{ff16}\u{ff17}\u{ff18}\u{ff19}";
 
-/// Extract one plain-text file.
-pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
+/// Extract one plain-text file. `toggles.txt_toc_enabled` gates whether
+/// Chinese chapter / volume marker lines are emitted as heading blocks;
+/// when off, every non-blank line lands as `BlockKind::Body` and the
+/// derived TOC stays empty.
+pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
     let (text, encoding) = decode(&bytes);
 
@@ -59,9 +64,13 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
         if line.is_empty() {
             continue;
         }
-        let kind = match heading_level(line) {
-            Some(level) => BlockKind::Heading { level },
-            None => BlockKind::Body,
+        let kind = if toggles.txt_toc_enabled {
+            match heading_level(line) {
+                Some(level) => BlockKind::Heading { level },
+                None => BlockKind::Body,
+            }
+        } else {
+            BlockKind::Body
         };
         blocks.push(Block {
             kind,

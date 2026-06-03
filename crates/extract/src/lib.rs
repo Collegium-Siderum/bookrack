@@ -23,6 +23,8 @@ pub use contract::*;
 
 use std::path::Path;
 
+use bookrack_audit_profile::ExtractToggles;
+
 /// Extract one source file into an [`ExtractOutcome`].
 ///
 /// The format is detected from the file extension. The outcome is
@@ -32,11 +34,16 @@ use std::path::Path;
 /// [`ExtractOutcome::NeedsOcr`] to route the file onto the OCR path; and
 /// a structural failure (an unreadable file, an unsupported format) is
 /// an [`ExtractError`].
-pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
+///
+/// `toggles` carries the four half-rule switches the EPUB and TXT
+/// adapters consult: EPUB year-range gating, EPUB ISBN recognition,
+/// MARC role-code mapping, and TXT heading detection. Format-detect,
+/// HTML, and PDF adapters do not yet consume the toggle bag.
+pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<ExtractOutcome, ExtractError> {
     match detect::detect(path) {
-        detect::Format::Epub => epub::extract(path).map(ExtractOutcome::Extracted),
+        detect::Format::Epub => epub::extract(path, toggles).map(ExtractOutcome::Extracted),
         detect::Format::Html => html::extract(path).map(ExtractOutcome::Extracted),
-        detect::Format::Txt => txt::extract(path).map(ExtractOutcome::Extracted),
+        detect::Format::Txt => txt::extract(path, toggles).map(ExtractOutcome::Extracted),
         // The PDF adapter resolves the three-state outcome itself — a
         // PDF can route to OCR — so it is not wrapped like the others.
         detect::Format::Pdf => pdf::extract(path),

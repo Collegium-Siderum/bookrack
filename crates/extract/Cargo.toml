@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 bookrack-config = { path = "../config" }
+bookrack-audit-profile.workspace = true
 encoding_rs.workspace = true
 pdfium-render.workspace = true
 rbook.workspace = true
