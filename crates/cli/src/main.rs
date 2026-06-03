@@ -360,6 +360,21 @@ async fn print_status(
             m.churn_since_rebuild
         ),
     }
+    // Meta drift: the meta claims an index name that LanceDB does not
+    // actually carry. This is the visible after-effect of a failed
+    // rebuild (meta written, but later state diverged) or of a manual
+    // intervention on the lancedb directory. Suggest a rebuild — the
+    // two sides reconcile from a fresh build.
+    if let Some(m) = meta
+        && m.kind != "brute-force"
+        && !indices.contains(&m.lance_index_name)
+    {
+        println!(
+            "meta drift:      expected index {:?}, found {:?}; \
+             run bookrack vectors rebuild",
+            m.lance_index_name, indices
+        );
+    }
     Ok(())
 }
 
