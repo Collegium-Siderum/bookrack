@@ -70,7 +70,20 @@ pub async fn embed_book_chunks<E: Embedder>(
     // Stamp the build parameters on a fresh index, or refuse a book whose
     // model or algorithm version differs from the one the index was built
     // with — before any vector is written, so the index is never mixed.
-    corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32))?;
+    // On mismatch, also delete `vectors_meta.json`: the ANN configuration
+    // is tied to the embedding model/dim, so it must not survive a model
+    // swap. Upper layers separately drop the chunks table.
+    if let Err(e) = corpus.reconcile_index_stamps(&current_index_stamps(&cfg.model, dim as u32)) {
+        if matches!(e, bookrack_corpus::CorpusError::IndexStampMismatch { .. })
+            && let Err(meta_err) = bookrack_vectors::meta::remove(lancedb_dir)
+        {
+            tracing::warn!(
+                error = ?meta_err,
+                "failed to remove vectors_meta.json after stamps mismatch"
+            );
+        }
+        return Err(e.into());
+    }
 
     let store = ChunkStore::open(lancedb_dir, dim).await?;
     let rows_before_delete = store.count_rows().await?;
@@ -607,6 +620,43 @@ mod tests {
         // First run: 0 + 3 = 3. Second run: 3 deleted + 3 inserted = 6.
         // Cumulative: 3 + 6 = 9.
         assert_eq!(meta.churn_since_rebuild, 9);
+    }
+
+    #[tokio::test]
+    async fn stamps_mismatch_removes_vectors_meta() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let plans: Vec<ChunkPlan> = (1..=3).map(|i| plan(i, "prose")).collect();
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        let first = EmbedConfig {
+            model: "model-a".to_string(),
+            ..EmbedConfig::default()
+        };
+        // First run: cold-start writes a meta.
+        embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &first)
+            .await
+            .expect("first run");
+        assert!(
+            bookrack_vectors::meta::load(dir.path())
+                .expect("load")
+                .is_some(),
+            "first run should leave a meta",
+        );
+        // Second run with a different model is refused, and the meta
+        // is cleared so a follow-up run does not serve a config tied
+        // to the old model.
+        let second = EmbedConfig {
+            model: "model-b".to_string(),
+            ..EmbedConfig::default()
+        };
+        let err = embed_book_chunks(&plans, &Fake { dim: 8 }, &corpus, dir.path(), &second)
+            .await
+            .expect_err("model swap must be refused");
+        assert!(matches!(
+            err,
+            IngestError::Corpus(bookrack_corpus::CorpusError::IndexStampMismatch { .. })
+        ));
+        let meta_after = bookrack_vectors::meta::load(dir.path()).expect("load after");
+        assert!(meta_after.is_none(), "meta must be cleared on mismatch");
     }
 
     #[tokio::test]
