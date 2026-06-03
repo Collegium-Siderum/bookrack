@@ -304,6 +304,22 @@ pub struct ChunkRow {
     pub norm_chunk_sha256: String,
 }
 
+/// Per-query overrides for [`ChunkStore::search_with`]. All fields are
+/// optional and default to "no override" — at the LanceDB layer this
+/// means the index uses its built-in defaults.
+#[derive(Debug, Default, Clone)]
+pub struct SearchOptions {
+    /// Override the IVF probe count for this query. When `None`, the
+    /// index defaults apply.
+    pub nprobes: Option<usize>,
+    /// Override the IVF-PQ refinement multiplier for this query.
+    pub refine_factor: Option<u32>,
+    /// Force a brute-force scan even if an index exists. Useful for
+    /// AB-testing recall against the ground truth without dropping
+    /// the index on disk.
+    pub bypass_index: bool,
+}
+
 /// One hit from a [`ChunkStore::search`], carrying the slim row plus
 /// its distance to the query. The vector itself is not returned — it is
 /// heavy and the search side never needs it.
@@ -603,18 +619,41 @@ impl ChunkStore {
     /// Return the `top_k` chunks nearest `query` under cosine distance,
     /// nearest first.
     ///
-    /// This is a brute-force scan: exact, and fast enough at pilot
-    /// scale. An IVF-PQ index is the follow-on for larger tables.
+    /// Defaults to "no overrides" — equivalent to
+    /// [`Self::search_with(query, top_k, SearchOptions::default())`].
     pub async fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<SearchHit>> {
-        let batches: Vec<RecordBatch> = self
+        self.search_with(query, top_k, SearchOptions::default())
+            .await
+    }
+
+    /// Return the `top_k` chunks nearest `query` with explicit ANN
+    /// overrides.
+    ///
+    /// `opts.nprobes` and `opts.refine_factor` adjust the IVF query
+    /// fan-out and PQ refinement for this call; `opts.bypass_index`
+    /// forces a brute-force scan even when an index is present (an
+    /// AB-testing escape hatch). When no override is set the index's
+    /// built-in defaults apply.
+    pub async fn search_with(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        opts: SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        let mut q = self
             .table
             .vector_search(query)?
-            .distance_type(DistanceType::Cosine)
-            .limit(top_k)
-            .execute()
-            .await?
-            .try_collect()
-            .await?;
+            .distance_type(DistanceType::Cosine);
+        if opts.bypass_index {
+            q = q.bypass_vector_index();
+        }
+        if let Some(np) = opts.nprobes {
+            q = q.nprobes(np);
+        }
+        if let Some(rf) = opts.refine_factor {
+            q = q.refine_factor(rf);
+        }
+        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
         let mut hits = Vec::new();
         for batch in &batches {
             read_hits(batch, &mut hits)?;
@@ -1170,6 +1209,73 @@ mod tests {
             .expect("re-append");
         store.optimize().await.expect("optimize");
         assert_eq!(store.count_rows().await.expect("count"), 2);
+    }
+
+    #[tokio::test]
+    async fn search_with_default_options_matches_old_search() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(1, 3, [0.0, 0.0, 1.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        let q = [0.9, 0.1, 0.0, 0.0];
+        let a = store.search(&q, 3).await.expect("search");
+        let b = store
+            .search_with(&q, 3, SearchOptions::default())
+            .await
+            .expect("search_with");
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn search_with_bypass_index_returns_results() {
+        // Without an index, lancedb already runs brute-force; the
+        // bypass flag is the no-op path. Still exercise it so a future
+        // refactor cannot silently break the API.
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        let opts = SearchOptions {
+            bypass_index: true,
+            ..SearchOptions::default()
+        };
+        let hits = store
+            .search_with(&[0.9, 0.1, 0.0, 0.0], 2, opts)
+            .await
+            .expect("search_with");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].text, "chunk p1 o1");
+    }
+
+    #[tokio::test]
+    async fn search_with_nprobes_override_runs_without_error() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+        let opts = SearchOptions {
+            nprobes: Some(5),
+            refine_factor: Some(2),
+            bypass_index: false,
+        };
+        let hits = store
+            .search_with(&[0.9, 0.1, 0.0, 0.0], 2, opts)
+            .await
+            .expect("search_with");
+        assert_eq!(hits.len(), 2);
     }
 
     #[tokio::test]
