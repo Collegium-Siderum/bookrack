@@ -436,7 +436,12 @@ fn run_pipeline(
         .filename_template
         .is_some()
         .then(|| FilenameBiblioOut::from(&filename_biblio));
-    let outcome = build_base_attrs(intake_id, extraction, Some(&filename_biblio));
+    let outcome = build_base_attrs(
+        intake_id,
+        extraction,
+        Some(&filename_biblio),
+        &params.audit_profile,
+    );
     let mut attrs = outcome.attrs;
     record.source_tag = attrs.source.clone();
     record.base_attrs = Some(BaseAttrsOut::from(&attrs));

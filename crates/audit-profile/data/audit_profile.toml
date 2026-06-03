@@ -25,10 +25,10 @@ min = 1450
 max = 2100
 pdf_likely_file_date = true
 timestamp_form = true
-# B1 cross-field reservation: when true, a filename-derived year overrides
-# a doubtful biblio year. Wired in stage 2 only if the corresponding
-# detector lands; currently inert.
-cross_field_filename_override = false
+# B1 cross-field rule. When true, an extracted year whose `year_raw` is in
+# timestamp shape and disagrees with the filename-derived year is dropped
+# at base-attrs assembly so the filename year fills the slot.
+cross_field_filename_override = true
 
 [title]
 placeholder_check = true
@@ -49,9 +49,12 @@ body_script_match = true
 [publisher]
 url_watermark = true
 whitelist_normalize_abbreviations = true
-# B1 reservation: when true, a 10-digit numeric ISBN that fails the
-# checksum is dropped from base attrs. Currently inert.
-drop_10digit_isbn_to_filename = false
+# B1 cross-field rule. When true, an extracted ISBN that fails the
+# ISBN-10/13 checksum is dropped from base attrs so the filename ISBN
+# fills the slot. Targets the ten-digit numeric fallback identifier
+# some EPUB toolchains stamp into `<dc:identifier>` when no real ISBN
+# is available.
+drop_10digit_isbn_to_filename = true
 
 [toc_shape]
 suspicious_flat = true

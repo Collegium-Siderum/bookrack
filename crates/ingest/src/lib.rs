@@ -705,7 +705,7 @@ fn run_metadata_substep(
     let started = std::time::Instant::now();
 
     // Real ingest discards the action trail; only the dryrun consumes it.
-    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio).attrs;
+    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio, audit_profile).attrs;
     if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
         tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
         audit(
@@ -869,6 +869,7 @@ fn build_base_attrs(
     intake_id: i64,
     extraction: &Extraction,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+    profile: &bookrack_metadata::AuditProfile,
 ) -> BaseAttrsOutcome {
     let biblio = &extraction.biblio;
     let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
@@ -880,13 +881,17 @@ fn build_base_attrs(
     attrs.isbn = biblio.isbn.clone();
     attrs.series = biblio.series.clone();
     attrs.language = biblio.language.clone();
-    drop_invalid_extracted_isbn(&mut attrs.isbn, &mut actions);
-    drop_stale_extracted_year(
-        &mut attrs.year,
-        biblio.year_raw.as_deref(),
-        filename_biblio,
-        &mut actions,
-    );
+    if profile.publisher.drop_10digit_isbn_to_filename {
+        drop_invalid_extracted_isbn(&mut attrs.isbn, &mut actions);
+    }
+    if profile.year.cross_field_filename_override {
+        drop_stale_extracted_year(
+            &mut attrs.year,
+            biblio.year_raw.as_deref(),
+            filename_biblio,
+            &mut actions,
+        );
+    }
     let extracted_any = attrs.title.is_some()
         || attrs.subtitle.is_some()
         || attrs.publisher.is_some()
@@ -2311,7 +2316,8 @@ mod book_pipeline_tests {
             year_raw: Some("2010".to_string()),
             ..Default::default()
         });
-        let outcome = super::build_base_attrs(1, &extraction, None);
+        let profile = bookrack_metadata::AuditProfile::default();
+        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
         assert!(
             outcome.actions.is_empty(),
             "expected no actions, got {:?}",
@@ -2328,12 +2334,34 @@ mod book_pipeline_tests {
             isbn: Some("1234567891".to_string()),
             ..Default::default()
         });
-        let outcome = super::build_base_attrs(1, &extraction, None);
+        let profile = bookrack_metadata::AuditProfile::default();
+        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
         assert!(outcome.attrs.isbn.is_none());
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         assert!(
             tokens.contains(&"drop_invalid_isbn".to_string()),
             "expected drop_invalid_isbn in {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn drop_invalid_isbn_off_keeps_extracted_isbn() {
+        // With `publisher.drop_10digit_isbn_to_filename = false` the
+        // checksum-failing extracted ISBN survives, so a filename ISBN
+        // cannot fill the slot.
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("T".to_string()),
+            isbn: Some("1234567891".to_string()),
+            ..Default::default()
+        });
+        let mut profile = bookrack_metadata::AuditProfile::default();
+        profile.publisher.drop_10digit_isbn_to_filename = false;
+        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
+        assert_eq!(outcome.attrs.isbn.as_deref(), Some("1234567891"));
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            !tokens.contains(&"drop_invalid_isbn".to_string()),
+            "expected no drop_invalid_isbn in {tokens:?}"
         );
     }
 
@@ -2345,11 +2373,12 @@ mod book_pipeline_tests {
             year_raw: Some("2019-04-01T00:00:00Z".to_string()),
             ..Default::default()
         });
+        let profile = bookrack_metadata::AuditProfile::default();
         let filename = bookrack_metadata::parse_filename(
             "Alice Author - A Sample Title (2006, Sample Press)",
-            &bookrack_metadata::AuditProfile::default().filename_parser,
+            &profile.filename_parser,
         );
-        let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
         // The stale 2019 was dropped, then the filename year filled in.
         assert_eq!(outcome.attrs.year.as_deref(), Some("2006"));
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
@@ -2364,16 +2393,43 @@ mod book_pipeline_tests {
     }
 
     #[test]
+    fn cross_field_year_override_off_keeps_timestamp_year() {
+        // With `year.cross_field_filename_override = false` the
+        // timestamp-shape extracted year survives even when the filename
+        // disagrees.
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("T".to_string()),
+            year: Some(2019),
+            year_raw: Some("2019-04-01T00:00:00Z".to_string()),
+            ..Default::default()
+        });
+        let mut profile = bookrack_metadata::AuditProfile::default();
+        profile.year.cross_field_filename_override = false;
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &profile.filename_parser,
+        );
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
+        assert_eq!(outcome.attrs.year.as_deref(), Some("2019"));
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            !tokens.contains(&"drop_stale_year".to_string()),
+            "expected no drop_stale_year in {tokens:?}"
+        );
+    }
+
+    #[test]
     fn build_base_attrs_records_filename_fallback_actions_per_field() {
         // The adapter found nothing; the filename parser fills five fields.
         // Every fill must surface as its own action so a JSONL consumer
         // can attribute each value back to a layer.
         let extraction = extraction_with_biblio(bookrack_extract::Biblio::default());
+        let profile = bookrack_metadata::AuditProfile::default();
         let filename = bookrack_metadata::parse_filename(
             "Alice Author - A Sample Title (2006, Sample Press)",
-            &bookrack_metadata::AuditProfile::default().filename_parser,
+            &profile.filename_parser,
         );
-        let outcome = super::build_base_attrs(1, &extraction, Some(&filename));
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         for expected in [
             "filename_fallback:title",

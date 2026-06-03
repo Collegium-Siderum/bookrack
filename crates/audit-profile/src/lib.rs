@@ -97,7 +97,7 @@ impl Default for YearToggles {
             max: 2100,
             pdf_likely_file_date: true,
             timestamp_form: true,
-            cross_field_filename_override: false,
+            cross_field_filename_override: true,
         }
     }
 }
@@ -161,7 +161,7 @@ impl Default for PublisherToggles {
         Self {
             url_watermark: true,
             whitelist_normalize_abbreviations: true,
-            drop_10digit_isbn_to_filename: false,
+            drop_10digit_isbn_to_filename: true,
         }
     }
 }
@@ -496,6 +496,7 @@ mod tests {
         assert!(profile.year.range_check);
         assert!(profile.year.pdf_likely_file_date);
         assert!(profile.year.timestamp_form);
+        assert!(profile.year.cross_field_filename_override);
         assert!(profile.title.placeholder_check);
         assert_eq!(profile.title.bracketed_min_chars, 3);
         assert!(profile.title.any_bracketed_enabled());
@@ -505,6 +506,9 @@ mod tests {
         assert_eq!(profile.toc_shape.skew_ratio, 4);
         assert_eq!(profile.toc_shape.large_body_min_blocks, 100);
         assert_eq!(profile.copyright_blocks.count, 6);
+        assert!(profile.publisher.url_watermark);
+        assert!(profile.publisher.whitelist_normalize_abbreviations);
+        assert!(profile.publisher.drop_10digit_isbn_to_filename);
         assert!(profile.filename_parser.enabled);
         assert_eq!(profile.filename_parser.year_min, 1500);
         assert_eq!(profile.filename_parser.year_max, 2100);
@@ -523,12 +527,14 @@ mod tests {
         assert!(!profile.year.range_check);
         assert!(!profile.year.pdf_likely_file_date);
         assert!(!profile.year.timestamp_form);
+        assert!(!profile.year.cross_field_filename_override);
         assert!(!profile.title.placeholder_check);
         assert!(!profile.title.purely_numeric);
         assert!(!profile.title.any_bracketed_enabled());
         assert!(!profile.language.bcp47_check);
         assert!(!profile.language.body_script_match);
         assert!(!profile.publisher.url_watermark);
+        assert!(!profile.publisher.drop_10digit_isbn_to_filename);
         assert!(!profile.toc_shape.suspicious_flat);
         assert!(!profile.toc_shape.heading_block_skew);
         assert!(!profile.toc_shape.empty_large_body);
