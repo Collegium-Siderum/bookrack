@@ -17,6 +17,7 @@
 mod chunk;
 mod dryrun;
 mod embed_run;
+pub mod envelope;
 pub mod sentences;
 mod structure;
 
@@ -28,6 +29,10 @@ pub use dryrun::{
     summarize,
 };
 pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
+pub use envelope::{
+    ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
+    envelope_filename, read_envelope, write_envelope,
+};
 
 use std::path::Path;
 
