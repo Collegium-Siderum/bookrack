@@ -461,6 +461,17 @@ impl Corpus {
         )
     }
 
+    /// Number of nodes belonging to one book. Uses the same index as
+    /// [`Self::book_nodes`] and [`Self::drop_partition`].
+    pub fn count_book_nodes(&self, book_root_id: NodeId) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE book_root_id = :book_root_id",
+            named_params! { ":book_root_id": book_root_id.get() },
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(n).unwrap_or(0))
+    }
+
     /// Find every prose leaf whose normalized text hashes to `hash` —
     /// the inverted lookup behind cross-file content deduplication.
     pub fn find_by_norm_text_sha256(&self, hash: &str) -> Result<Vec<Node>> {
