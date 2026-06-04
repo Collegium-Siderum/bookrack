@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_dbkit::{TableSpec, TimedConnection};
+use bookrack_dbkit::{OpenDecision, TableSpec, TimedConnection};
 use rusqlite::Connection;
 
 use crate::migrate::{TARGET_VERSION, migrations};
@@ -97,37 +97,40 @@ impl Catalog {
     /// is verified against the specs and the version mirror is rewritten.
     fn from_connection(mut conn: Connection, backup_dir: Option<&Path>) -> Result<Catalog> {
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-
-        // Refuse a database written by a newer binary rather than
-        // downgrading it: the operator runs a newer build or restores a
-        // backup.
-        if current > TARGET_VERSION {
-            return Err(CatalogError::SchemaTooNew {
-                found: current,
-                expected: TARGET_VERSION,
-            });
+        match decide(current) {
+            OpenDecision::Refuse { .. } => {
+                return Err(CatalogError::SchemaTooNew {
+                    found: current,
+                    expected: TARGET_VERSION,
+                });
+            }
+            OpenDecision::Migrate { .. } => {
+                // Snapshot only a file-backed database that already holds
+                // data and is about to be migrated. A fresh or in-memory
+                // database has nothing worth saving.
+                if let Some(dir) = backup_dir
+                    && has_user_tables(&conn)?
+                {
+                    backup_catalog(&conn, dir, current)?;
+                }
+                // Foreign keys are toggled around the migration, not
+                // inside it: a future 12-step table rebuild needs them
+                // off, and `PRAGMA foreign_keys` is a no-op within the
+                // migration's transaction. `catalog.db` declares none
+                // today; the dance keeps the seam ready for one that
+                // does.
+                conn.pragma_update(None, "foreign_keys", "OFF")?;
+                migrations()
+                    .to_latest(&mut conn)
+                    .map_err(CatalogError::Migrate)?;
+                conn.pragma_update(None, "foreign_keys", "ON")?;
+            }
+            OpenDecision::Match => {}
+            // `catalog.db` is source-of-truth and never produces this
+            // verdict: the migration framework advances any older revision
+            // forward, and there is no derived-stamp axis to disagree on.
+            OpenDecision::Rederive { .. } => unreachable!("catalog.db is never rederived"),
         }
-
-        // Snapshot only a file-backed database that already holds data and
-        // is about to be migrated. A fresh or in-memory database has
-        // nothing worth saving.
-        if let Some(dir) = backup_dir
-            && current < TARGET_VERSION
-            && has_user_tables(&conn)?
-        {
-            backup_catalog(&conn, dir, current)?;
-        }
-
-        // Foreign keys are toggled around the migration, not inside it: a
-        // future 12-step table rebuild needs them off, and
-        // `PRAGMA foreign_keys` is a no-op within the migration's
-        // transaction. `catalog.db` declares none today; the dance keeps
-        // the seam ready for one that does.
-        conn.pragma_update(None, "foreign_keys", "OFF")?;
-        migrations()
-            .to_latest(&mut conn)
-            .map_err(CatalogError::Migrate)?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
 
         // Acceptance gate, run on every open: `rusqlite_migration` advances
         // `user_version` but does not check the resulting schema shape.
@@ -195,6 +198,28 @@ fn now_iso_from(conn: &Connection) -> rusqlite::Result<String> {
     conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
         row.get(0)
     })
+}
+
+/// Classify a catalog database whose `user_version` is `current` into one
+/// of the four self-check verdicts the protocol distinguishes.
+///
+/// `catalog.db` is source-of-truth and rebuildable only by hand, so its
+/// decision tree is the minimal one: anything newer is refused, anything
+/// older is migrated forward, an exact match is opened unchanged. The
+/// rederive verdict is never produced — there is no derived-stamp axis
+/// for this store to disagree on.
+fn decide(current: i64) -> OpenDecision {
+    use std::cmp::Ordering;
+    match current.cmp(&TARGET_VERSION) {
+        Ordering::Greater => OpenDecision::Refuse {
+            reason: "catalog schema version newer than this binary",
+        },
+        Ordering::Less => OpenDecision::Migrate {
+            from: current,
+            to: TARGET_VERSION,
+        },
+        Ordering::Equal => OpenDecision::Match,
+    }
 }
 
 /// Whether the database holds any non-internal table — i.e. it is not a

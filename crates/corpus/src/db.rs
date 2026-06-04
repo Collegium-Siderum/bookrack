@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use bookrack_dbkit::{TableSpec, TimedConnection, apply_schema};
+use bookrack_dbkit::{OpenDecision, TableSpec, TimedConnection, apply_schema};
 use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
@@ -79,18 +79,48 @@ impl Corpus {
     /// Stamp the schema version on a fresh database, or verify it on an
     /// existing one.
     fn reconcile_schema_version(&self) -> Result<()> {
-        let Some(found) = self.meta_get(SCHEMA_VERSION_KEY)? else {
-            self.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
-            return Ok(());
-        };
-        if found.parse::<u32>().is_ok_and(|v| v == SCHEMA_VERSION) {
-            Ok(())
-        } else {
-            Err(CorpusError::SchemaMismatch {
-                found,
+        let found = self.meta_get(SCHEMA_VERSION_KEY)?;
+        match decide(found.as_deref()) {
+            OpenDecision::Match => {
+                if found.is_none() {
+                    self.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
+                }
+                Ok(())
+            }
+            OpenDecision::Rederive { .. } => Err(CorpusError::SchemaMismatch {
+                found: found.unwrap_or_default(),
                 expected: SCHEMA_VERSION,
-            })
+            }),
+            // `corpus.db` is rebuildable from sources and carries no
+            // forward-only migration sequence, so a mismatch is resolved
+            // by `bookrack corpus rebuild`, not by migrating forward;
+            // and there is no separate axis for the open path to refuse
+            // on at this point.
+            OpenDecision::Migrate { .. } | OpenDecision::Refuse { .. } => {
+                unreachable!("corpus.db open path emits only Match or Rederive")
+            }
         }
+    }
+}
+
+/// Classify a corpus database carrying the optional stamped
+/// `schema_version` value `found` into one of the four self-check
+/// verdicts.
+///
+/// `corpus.db` is rebuildable from sources, so its decision tree is
+/// the rebuildable-store shape: a missing stamp means a fresh database
+/// (open as [`OpenDecision::Match`], the caller will stamp it); an
+/// equal stamp also matches; anything else is a [`OpenDecision::Rederive`]
+/// — the resolution is `bookrack corpus rebuild`, not a migration.
+fn decide(found: Option<&str>) -> OpenDecision {
+    match found {
+        None => OpenDecision::Match,
+        Some(value) if value.parse::<u32>().is_ok_and(|v| v == SCHEMA_VERSION) => {
+            OpenDecision::Match
+        }
+        Some(_) => OpenDecision::Rederive {
+            reason: "corpus schema version disagrees with this binary",
+        },
     }
 }
 
