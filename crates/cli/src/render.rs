@@ -736,6 +736,72 @@ fn format_size(bytes: Option<u64>) -> String {
     format!("{:.2} GiB", n / (KIB * KIB * KIB))
 }
 
+/// Per-store findings the `bookrack verify` command accumulates before
+/// rendering. Every field is optional: an unverifiable store leaves its
+/// schema flag false and its error populated, and the rest skip the
+/// counts that depend on it.
+#[derive(Default)]
+pub struct VerifyReport {
+    pub catalog_schema_ok: bool,
+    pub catalog_schema_error: Option<String>,
+    pub corpus_schema_ok: bool,
+    pub corpus_schema_error: Option<String>,
+    pub intake_count: Option<u64>,
+    pub missing_intake_files: Option<Vec<i64>>,
+    pub vectors_built_at_chunk_count: Option<u64>,
+    pub vectors_churn: Option<u64>,
+}
+
+/// Print the `bookrack verify` report. Quiet on success, loud on
+/// failure: the report itself decides what landed, the renderer only
+/// translates.
+pub fn verify(report: &VerifyReport) {
+    println!("catalog.db:");
+    if report.catalog_schema_ok {
+        println!("  schema:         ok");
+    } else if let Some(err) = &report.catalog_schema_error {
+        println!("  schema:         FAILED");
+        for line in err.lines() {
+            println!("    {line}");
+        }
+    }
+    if let Some(n) = report.intake_count {
+        println!("  intakes:        {n}");
+    }
+    if let Some(missing) = &report.missing_intake_files {
+        if missing.is_empty() {
+            println!("  intake files:   every stored_path is present on disk");
+        } else {
+            println!("  intake files:   {} missing under books/:", missing.len());
+            for id in missing {
+                println!("    intake {id}");
+            }
+        }
+    }
+
+    println!();
+    println!("corpus.db:");
+    if report.corpus_schema_ok {
+        println!("  schema:         ok");
+    } else if let Some(err) = &report.corpus_schema_error {
+        println!("  schema:         FAILED");
+        for line in err.lines() {
+            println!("    {line}");
+        }
+    }
+
+    if report.vectors_built_at_chunk_count.is_some() || report.vectors_churn.is_some() {
+        println!();
+        println!("vectors:");
+        if let Some(n) = report.vectors_built_at_chunk_count {
+            println!("  chunks_at_build: {n}");
+        }
+        if let Some(n) = report.vectors_churn {
+            println!("  churn:           {n}");
+        }
+    }
+}
+
 /// Print the cited passages a `query` returned, best match first.
 pub fn citations(hits: &[Citation]) {
     if hits.is_empty() {

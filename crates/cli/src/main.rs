@@ -151,6 +151,10 @@ enum Command {
     /// Print a one-screen status card: resolution, embedder, schema
     /// versions, index stamps, and the on-disk size of each store.
     Info,
+    /// Verify the catalog and corpus schemas against the binary's
+    /// TableSpecs and tally the cross-store counts (catalog intakes,
+    /// vectors-meta chunk count, intake-file existence on disk).
+    Verify,
 }
 
 #[derive(clap::Subcommand)]
@@ -511,7 +515,66 @@ async fn main() -> Result<()> {
         Command::PipelineTrail { book, json } => run_pipeline_trail(&cfg, book, json),
         Command::Books { action } => run_books(&cfg, action),
         Command::Info => run_info(&cfg),
+        Command::Verify => run_verify(&cfg),
     }
+}
+
+fn run_verify(cfg: &Config) -> Result<()> {
+    let mut report = render::VerifyReport::default();
+
+    // Schema verification happens inside the open paths; surface success
+    // as a one-liner per database, and any failure as a multi-line block.
+    match Catalog::open_read_only(&cfg.catalog_db()) {
+        Ok(catalog) => {
+            report.catalog_schema_ok = true;
+            report.intake_count = catalog.count_intakes().ok();
+            report.missing_intake_files = scan_intake_files(cfg, &catalog).ok();
+        }
+        Err(e) => {
+            report.catalog_schema_error = Some(format!("{e:#}"));
+        }
+    }
+    match Corpus::open(&cfg.corpus_db()) {
+        Ok(_) => {
+            report.corpus_schema_ok = true;
+        }
+        Err(e) => {
+            report.corpus_schema_error = Some(format!("{e:#}"));
+        }
+    }
+    let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
+        .ok()
+        .flatten();
+    if let Some(meta) = &vectors_meta {
+        report.vectors_built_at_chunk_count = Some(meta.built_at_chunk_count);
+        report.vectors_churn = Some(meta.churn_since_rebuild);
+    }
+    render::verify(&report);
+    if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
+        anyhow::bail!("one or more stores failed verification");
+    }
+    Ok(())
+}
+
+/// Walk every intake row, resolve its `stored_path` under `books/`, and
+/// return the intake ids whose file is missing. `None` is returned only
+/// when the catalog could not be enumerated.
+fn scan_intake_files(cfg: &Config, catalog: &Catalog) -> Result<Vec<i64>> {
+    let intakes = catalog
+        .find_intakes(&IntakeFilter::default(), u32::MAX, 0)
+        .context("enumerate intakes")?;
+    let books_root = cfg.books_dir();
+    let mut missing = Vec::new();
+    for intake in intakes {
+        let Some(stored) = intake.stored_path else {
+            continue;
+        };
+        let resolved = books_root.join(&stored);
+        if !resolved.exists() {
+            missing.push(intake.intake_id);
+        }
+    }
+    Ok(missing)
 }
 
 fn run_info(cfg: &Config) -> Result<()> {
