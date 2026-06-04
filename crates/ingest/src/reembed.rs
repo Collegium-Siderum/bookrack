@@ -53,15 +53,29 @@ pub struct ReembedReport {
 /// Build a [`ReembedPlan`] for each intake currently in
 /// [`IntakeStatus::Embedded`], or for `only` when set. Reads the chunks
 /// table but writes nothing.
+///
+/// When `stale_only` is true the target set is restricted to intakes
+/// whose stored `extractor_version` does not equal this binary's
+/// [`EXTRACTOR_VERSION`] — the same filter [`reembed_all`] applies, so
+/// the printed plan and the eventual run always agree.
 pub async fn plan_reembed(
     catalog: &Catalog,
     lancedb_dir: &Path,
     only: Option<i64>,
+    stale_only: bool,
 ) -> Result<Vec<ReembedPlan>> {
     // The on-disk schema decides the dim; passing 0 forces the open
     // path to read it from the schema for an existing table.
     let store = ChunkStore::open(lancedb_dir, 0).await?;
-    let targets = collect_targets(catalog, only)?;
+    let mut targets = collect_targets(catalog, only)?;
+    if stale_only {
+        let stale: std::collections::HashSet<i64> = catalog
+            .stale_partitions(EXTRACTOR_VERSION)
+            .map_err(IngestError::from)?
+            .into_iter()
+            .collect();
+        targets.retain(|id| stale.contains(id));
+    }
     let mut plans = Vec::new();
     for intake_id in targets {
         let partition = PartitionIdx::new(intake_id);
@@ -281,12 +295,40 @@ mod tests {
         seed_partition(dir.path(), 1, 3).await;
         // Partition 2 left empty: planner skips it.
 
-        let plans = plan_reembed(&catalog, dir.path(), None)
+        let plans = plan_reembed(&catalog, dir.path(), None, false)
             .await
             .expect("plan");
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].intake_id, 1);
         assert_eq!(plans[0].chunk_count, 3);
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_respects_stale_only() {
+        // Both intakes carry chunks, but only one has a stale
+        // extractor_version. With `stale_only = true` the plan must
+        // match what `reembed_all(stale_only = true)` will actually run.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1, 2]);
+        seed_partition(dir.path(), 1, 3).await;
+        seed_partition(dir.path(), 2, 2).await;
+        // Mark intake 2 as stale by setting its extractor_version to
+        // a value below this binary's `EXTRACTOR_VERSION`.
+        catalog
+            .set_extraction(2, "fake", EXTRACTOR_VERSION.saturating_sub(1))
+            .expect("override extractor_version on intake 2");
+
+        let full = plan_reembed(&catalog, dir.path(), None, false)
+            .await
+            .expect("plan full");
+        assert_eq!(full.len(), 2);
+
+        let stale = plan_reembed(&catalog, dir.path(), None, true)
+            .await
+            .expect("plan stale");
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].intake_id, 2);
     }
 
     #[tokio::test]

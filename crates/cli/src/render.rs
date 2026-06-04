@@ -747,7 +747,12 @@ pub fn info(snapshot: &InfoSnapshot) {
         println!("  intakes:        (catalog unreadable)");
     }
     if let Some(n) = snapshot.ready_book_count {
-        println!("  ready books:    {n}");
+        // Counts rows whose `book_state.stage` has been advanced to
+        // `ready` — the terminal, post-review stage. Ingest stops at
+        // `embed`, so this stays at 0 until a reviewer or downstream
+        // workflow promotes the book; an embedded-but-unreviewed book
+        // is intentionally not counted here.
+        println!("  ready books:    {n}  (post-review stage)");
     }
 
     println!();

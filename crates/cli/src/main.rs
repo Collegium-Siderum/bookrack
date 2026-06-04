@@ -1114,10 +1114,19 @@ async fn print_status(
     meta: &Option<bookrack_vectors::VectorsMeta>,
 ) -> Result<()> {
     println!("table:           {row_count} rows");
-    if indices.is_empty() {
+    // LanceDB has been observed to enumerate the same index name more
+    // than once after repeated ingest / optimize passes. Print each
+    // distinct name once, preserving the order they were reported in.
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<&str> = indices
+        .iter()
+        .filter(|n| seen.insert(n.as_str()))
+        .map(String::as_str)
+        .collect();
+    if unique.is_empty() {
         println!("ann index:       (none — brute-force)");
     } else {
-        for name in indices {
+        for name in &unique {
             println!("ann index:       {name}");
             let stats = store
                 .index_stats(name)
@@ -1255,11 +1264,15 @@ async fn run_vectors_reembed(
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let plans = bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book)
+    let plans = bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, stale_only)
         .await
         .context("plan reembed")?;
     if plans.is_empty() {
-        println!("no embedded intakes carry chunks; nothing to reembed");
+        if stale_only {
+            println!("no stale partitions; nothing to reembed");
+        } else {
+            println!("no embedded intakes carry chunks; nothing to reembed");
+        }
         return Ok(());
     }
     let total_chunks: usize = plans.iter().map(|p| p.chunk_count).sum();
