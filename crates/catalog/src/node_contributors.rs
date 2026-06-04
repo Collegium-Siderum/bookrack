@@ -26,7 +26,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::int("ordinal").not_null(),
         ColumnSpec::text("origin")
             .not_null()
-            .comment("extracted / user"),
+            .comment("extracted / extracted-filename / user"),
         ColumnSpec::text("name").not_null(),
         ColumnSpec::text("nationality"),
         ColumnSpec::int("inheritable").not_null().default("1"),
