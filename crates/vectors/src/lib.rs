@@ -738,6 +738,57 @@ impl ChunkStore {
         }
         Ok(hits)
     }
+
+    /// Return the `top_k` chunks nearest `query`, restricted to one
+    /// book's partition.
+    ///
+    /// Pairs the ANN query with the same `start_node_id BETWEEN ...`
+    /// metadata predicate [`Self::scan_partition`] uses, so the
+    /// retrieval covers exactly the chunks owned by `partition` and no
+    /// others. Empty partitions return an empty `Vec`. Defaults to "no
+    /// ANN overrides" — equivalent to
+    /// `search_partition_with(query, partition, top_k, SearchOptions::default())`.
+    pub async fn search_by_partition(
+        &self,
+        query: &[f32],
+        partition: PartitionIdx,
+        top_k: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_partition_with(query, partition, top_k, SearchOptions::default())
+            .await
+    }
+
+    /// [`Self::search_by_partition`] with explicit ANN overrides.
+    pub async fn search_partition_with(
+        &self,
+        query: &[f32],
+        partition: PartitionIdx,
+        top_k: usize,
+        opts: SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        let lo = partition.root().get();
+        let hi = partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY;
+        let mut q = self
+            .table
+            .vector_search(query)?
+            .distance_type(DistanceType::Cosine)
+            .only_if(format!("start_node_id BETWEEN {lo} AND {hi}"));
+        if opts.bypass_index {
+            q = q.bypass_vector_index();
+        }
+        if let Some(np) = opts.nprobes {
+            q = q.nprobes(np);
+        }
+        if let Some(rf) = opts.refine_factor {
+            q = q.refine_factor(rf);
+        }
+        let batches: Vec<RecordBatch> = q.limit(top_k).execute().await?.try_collect().await?;
+        let mut hits = Vec::new();
+        for batch in &batches {
+            read_hits(batch, &mut hits)?;
+        }
+        Ok(hits)
+    }
 }
 
 /// Read the fixed-size list width of the `vector` column from a
@@ -1382,6 +1433,47 @@ mod tests {
         assert_eq!(hits[0].start_node_id, NodeId::new(100_000_001));
         // Distances are sorted nearest-first.
         assert!(hits[0].distance <= hits[1].distance);
+    }
+
+    #[tokio::test]
+    async fn search_by_partition_isolates_one_book() {
+        let (_dir, store) = fresh_store().await;
+        // Same vector in two partitions: without filtering, both would
+        // hit; with partition filtering only one book's row may appear.
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(2, 2, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+
+        let hits = store
+            .search_by_partition(&[0.9, 0.1, 0.0, 0.0], PartitionIdx::new(1), 4)
+            .await
+            .expect("search by partition");
+
+        assert_eq!(hits.len(), 2);
+        for hit in &hits {
+            assert_eq!(hit.start_node_id.partition(), PartitionIdx::new(1));
+        }
+        assert!(hits[0].text.starts_with("chunk p1"));
+    }
+
+    #[tokio::test]
+    async fn search_by_partition_on_an_empty_partition_returns_no_hits() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+            .await
+            .expect("append");
+        let hits = store
+            .search_by_partition(&[1.0, 0.0, 0.0, 0.0], PartitionIdx::new(7), 4)
+            .await
+            .expect("search empty partition");
+        assert!(hits.is_empty());
     }
 
     #[tokio::test]

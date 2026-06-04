@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::Catalog;
-use bookrack_core::NodeId;
+use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
 pub use bookrack_vectors::SearchOptions;
@@ -192,6 +192,49 @@ pub async fn retrieve_with<E: Embedder>(
         hits = hits.len(),
         elapsed_ms = recall_started.elapsed().as_secs_f64() * 1e3,
         "recalled nearest passages"
+    );
+    Ok(hits)
+}
+
+/// Variant of [`retrieve_with`] restricted to one book's partition.
+///
+/// Embeds the query the same way and applies the same overrides /
+/// meta-default merge, then asks the store for the nearest passages
+/// whose `start_node_id` falls inside `partition`. An empty partition
+/// returns an empty `Vec` rather than an error.
+pub async fn retrieve_with_partition<E: Embedder>(
+    query: &str,
+    store: &ChunkStore,
+    embedder: &E,
+    lancedb_dir: &Path,
+    overrides: SearchOptions,
+    top_k: usize,
+    partition: PartitionIdx,
+) -> Result<Vec<SearchHit>> {
+    let input = build_query_input(query);
+    let embed_started = Instant::now();
+    let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
+    let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
+    tracing::debug!(
+        elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
+        "embedded query"
+    );
+
+    let base = options_from_meta(store, lancedb_dir)?;
+    let opts = SearchOptions {
+        nprobes: overrides.nprobes.or(base.nprobes),
+        refine_factor: overrides.refine_factor.or(base.refine_factor),
+        bypass_index: overrides.bypass_index || base.bypass_index,
+    };
+    let recall_started = Instant::now();
+    let hits = store
+        .search_partition_with(query_vector, partition, top_k, opts)
+        .await?;
+    tracing::debug!(
+        hits = hits.len(),
+        partition = partition.get(),
+        elapsed_ms = recall_started.elapsed().as_secs_f64() * 1e3,
+        "recalled nearest passages within partition"
     );
     Ok(hits)
 }
@@ -623,6 +666,44 @@ mod tests {
         let opts = options_from_meta(&store, dir.path()).expect("options_from_meta");
         assert_eq!(opts.nprobes, None);
         assert!(!opts.bypass_index);
+    }
+
+    #[tokio::test]
+    async fn retrieve_with_partition_only_returns_hits_inside_that_book() {
+        // Build a fixture under intake 1, then append a stray chunk that
+        // belongs to intake 2's partition; retrieval restricted to
+        // partition 1 must skip it.
+        let (dir, _corpus, _catalog, store, leaf) = fixture(Some("A Test Book"), true).await;
+        let stray_partition_node = PartitionIdx::new(2).node_id(1).expect("offset in range");
+        store
+            .append(&[ChunkRow {
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+                text: "other-book passage".to_string(),
+                start_node_id: stray_partition_node,
+                start_char_offset: 0,
+                end_node_id: stray_partition_node,
+                end_char_offset: 10,
+                norm_chunk_sha256: "sha-2".to_string(),
+            }])
+            .await
+            .expect("append stray");
+
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = retrieve_with_partition(
+            "anything",
+            &store,
+            &query,
+            dir.path(),
+            SearchOptions::default(),
+            5,
+            PartitionIdx::new(1),
+        )
+        .await
+        .expect("retrieve partition");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].start_node_id, leaf);
     }
 
     #[tokio::test]
