@@ -20,6 +20,7 @@
 mod actor;
 mod book_pipeline_audit;
 mod book_state;
+mod cascade;
 mod catalog_meta;
 mod db;
 mod effective;
@@ -41,6 +42,7 @@ mod works;
 pub use actor::ActorKind;
 pub use book_pipeline_audit::{BookPipelineAudit, NewBookPipelineAudit};
 pub use book_state::{BookState, NewBookState};
+pub use cascade::BookRemovalCounts;
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::EffectiveAttrs;
 pub use expressions::{Expression, NewExpression};
