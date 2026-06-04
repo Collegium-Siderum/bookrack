@@ -28,9 +28,12 @@ use crate::signals::is_valid_isbn;
 
 /// Fields the filename parser may recover. Every field is `Option` so
 /// the caller can merge with extracted values per its own precedence.
-/// `author` is parsed even though `node_publication_attrs` has no
-/// author column today; future schema additions consume it without
-/// re-running the parser.
+/// `author` is parsed because the ingest pipeline writes it to the
+/// FRBR-style `node_contributors` table with
+/// `origin = "extracted-filename"`, alongside contributors the adapter
+/// extracted with `origin = "extracted"`. The flat
+/// `node_publication_attrs.author` stopgap column the original v1
+/// design contemplated is not needed for that path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilenameBiblio {
     pub title: Option<String>,

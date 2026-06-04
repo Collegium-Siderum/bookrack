@@ -414,9 +414,13 @@ mod tests {
         assert_eq!(read.byte_size, Some(8192));
         assert_eq!(read.status, IntakeStatus::Extracted);
         assert!(!read.intake_at.is_empty());
-        // No write path fills these columns yet; later pipeline stages do.
+        // `adapter` and `extractor_version` are filled by `set_extraction`,
+        // which this test does not call; they remain absent here.
         assert_eq!(read.adapter, None);
         assert_eq!(read.extractor_version, None);
+        // `expression_id` is reserved for the FRBR grouping work and
+        // `notes` for user-supplied remarks; the ingest pipeline does not
+        // fill either today.
         assert_eq!(read.expression_id, None);
         assert_eq!(read.notes, None);
     }

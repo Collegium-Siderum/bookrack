@@ -39,8 +39,8 @@ pub use envelope::{
 use std::path::Path;
 
 use bookrack_catalog::{
-    ActorKind, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState, NewIntake,
-    NewPublicationAttrs, NewReview,
+    ActorKind, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState, NewContributor,
+    NewIntake, NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
@@ -765,6 +765,7 @@ fn run_metadata_substep(
         );
         return None;
     }
+    write_contributors(catalog, intake_id, &extraction.biblio, filename_biblio);
 
     // trust-source short-circuit: when the profile disables the audit,
     // record the substep as skipped and write a `pending` review row
@@ -889,6 +890,67 @@ fn run_metadata_substep(
         None,
     );
     Some(report.verdict)
+}
+
+/// Persist contributors from the adapter-extracted biblio and the
+/// filename parser into `node_contributors`. The two sources coexist
+/// via distinct `origin` values — `"extracted"` for adapter-derived
+/// entries, `"extracted-filename"` for the filename parser's tentative
+/// author. Ordinals are independent across origins; the
+/// `(intake_id, scope, role, ordinal, origin)` UNIQUE constraint lets
+/// them share `ordinal = 0` without collision.
+///
+/// Deduplication across the two sources is a read-side concern: callers
+/// fold them via origin precedence (typically `user > extracted >
+/// extracted-filename`). Each write is best-effort; a duplicate row
+/// from a re-run of the same intake logs a warning and proceeds.
+fn write_contributors(
+    catalog: &Catalog,
+    intake_id: i64,
+    biblio: &bookrack_extract::Biblio,
+    filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+) {
+    for (ordinal, contrib) in biblio.contributors.iter().enumerate() {
+        let name = contrib.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let new = NewContributor::new(
+            intake_id,
+            BOOK_SCOPE,
+            contrib.role.as_str(),
+            ordinal as i64,
+            "extracted",
+            name,
+        );
+        if let Err(e) = catalog.add_contributor(&new) {
+            tracing::warn!(
+                error = %e,
+                role = contrib.role.as_str(),
+                "metadata: failed to write extracted contributor",
+            );
+        }
+    }
+    if let Some(author) = filename_biblio
+        .and_then(|fb| fb.author.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let new = NewContributor::new(
+            intake_id,
+            BOOK_SCOPE,
+            "author",
+            0,
+            "extracted-filename",
+            author,
+        );
+        if let Err(e) = catalog.add_contributor(&new) {
+            tracing::warn!(
+                error = %e,
+                "metadata: failed to write filename-derived author",
+            );
+        }
+    }
 }
 
 /// Build the base-layer record for the book root from the extracted
@@ -2564,5 +2626,138 @@ mod book_pipeline_tests {
             );
         }
         assert_eq!(outcome.attrs.source.as_deref(), Some("filename"));
+    }
+
+    fn intake_id(catalog: &mut Catalog, sha: &str) -> i64 {
+        catalog
+            .register_intake(&bookrack_catalog::NewIntake::new(sha.to_string()))
+            .expect("register")
+            .intake()
+            .intake_id
+    }
+
+    #[test]
+    fn write_contributors_persists_biblio_contributors_with_extracted_origin() {
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = intake_id(&mut catalog, "biblio-sha");
+        let biblio = bookrack_extract::Biblio {
+            contributors: vec![
+                bookrack_extract::Contributor {
+                    name: "Alice Author".to_string(),
+                    role: bookrack_extract::ContributorRole::Author,
+                },
+                bookrack_extract::Contributor {
+                    name: "Bob Author".to_string(),
+                    role: bookrack_extract::ContributorRole::Author,
+                },
+                bookrack_extract::Contributor {
+                    name: "Carol Translator".to_string(),
+                    role: bookrack_extract::ContributorRole::Translator,
+                },
+            ],
+            ..Default::default()
+        };
+        super::write_contributors(&catalog, intake, &biblio, None);
+        let rows = catalog
+            .contributors_for_address(intake, BOOK_SCOPE)
+            .expect("read");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.origin == "extracted"));
+        assert!(
+            rows.iter()
+                .any(|row| row.role == "author" && row.ordinal == 0 && row.name == "Alice Author"),
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.role == "author" && row.ordinal == 1 && row.name == "Bob Author"),
+        );
+        assert!(rows.iter().any(|row| row.role == "translator"
+            && row.ordinal == 2
+            && row.name == "Carol Translator"));
+    }
+
+    #[test]
+    fn write_contributors_persists_filename_author_with_distinct_origin() {
+        // The biblio is empty, so only the filename author lands. The
+        // entry is tagged `extracted-filename` to distinguish it from
+        // adapter-extracted contributors.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = intake_id(&mut catalog, "filename-sha");
+        let profile = bookrack_metadata::AuditProfile::default();
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &profile.filename_parser,
+        );
+        super::write_contributors(
+            &catalog,
+            intake,
+            &bookrack_extract::Biblio::default(),
+            Some(&filename),
+        );
+        let rows = catalog
+            .contributors_for_address(intake, BOOK_SCOPE)
+            .expect("read");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.role, "author");
+        assert_eq!(row.ordinal, 0);
+        assert_eq!(row.origin, "extracted-filename");
+        assert_eq!(row.name, "Alice Author");
+    }
+
+    #[test]
+    fn write_contributors_keeps_both_sources_side_by_side() {
+        // Same role and ordinal across two origins: the UNIQUE constraint
+        // includes origin so they coexist. A blank filename author is
+        // skipped without disturbing the extracted rows.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = intake_id(&mut catalog, "dual-source-sha");
+        let biblio = bookrack_extract::Biblio {
+            contributors: vec![bookrack_extract::Contributor {
+                name: " Murakami Haruki ".to_string(),
+                role: bookrack_extract::ContributorRole::Author,
+            }],
+            ..Default::default()
+        };
+        let filename = bookrack_metadata::FilenameBiblio {
+            author: Some("M. Haruki".to_string()),
+            ..Default::default()
+        };
+        super::write_contributors(&catalog, intake, &biblio, Some(&filename));
+
+        let blank_intake = intake_id(&mut catalog, "blank-author-sha");
+        let blank_filename = bookrack_metadata::FilenameBiblio {
+            author: Some("   ".to_string()),
+            ..Default::default()
+        };
+        super::write_contributors(
+            &catalog,
+            blank_intake,
+            &bookrack_extract::Biblio::default(),
+            Some(&blank_filename),
+        );
+
+        let rows = catalog
+            .contributors_for_address(intake, BOOK_SCOPE)
+            .expect("read");
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().any(|row| row.origin == "extracted"
+                && row.ordinal == 0
+                && row.name == "Murakami Haruki"),
+            "expected trimmed extracted author in {rows:?}",
+        );
+        assert!(
+            rows.iter().any(|row| row.origin == "extracted-filename"
+                && row.ordinal == 0
+                && row.name == "M. Haruki"),
+            "expected filename-derived author in {rows:?}",
+        );
+        assert!(
+            catalog
+                .contributors_for_address(blank_intake, BOOK_SCOPE)
+                .expect("read")
+                .is_empty(),
+        );
     }
 }
