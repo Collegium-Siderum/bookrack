@@ -18,6 +18,7 @@ mod chunk;
 mod dryrun;
 mod embed_run;
 pub mod envelope;
+pub mod ocr;
 pub mod rebuild;
 pub mod reembed;
 pub mod sentences;
@@ -154,6 +155,39 @@ pub enum IngestError {
     /// so its chunks are not on disk to reembed.
     #[error("intake {0} is not in the Embedded state; cannot reembed")]
     IntakeNotEmbedded(i64),
+
+    /// The source PDF an OCR product names is already registered in a
+    /// non-`NeedsOcr` state, so routing it through OCR would conflict
+    /// with the path it has already taken (extract, embed, or abort).
+    /// The intake's existing status is reported as a stable string.
+    #[error("source PDF intake {intake_id} is in {status}, not needs_ocr")]
+    OcrSourceStatusMismatch {
+        /// The conflicting intake id.
+        intake_id: i64,
+        /// The intake's existing status as the database string form.
+        status: &'static str,
+    },
+
+    /// The OCR product's sheet set is missing pages the source said
+    /// should be present, and the caller did not opt into a partial
+    /// ingest. The missing sheet numbers are 1-based.
+    #[error("OCR product is missing pages: {missing:?}")]
+    OcrPagesMissing {
+        /// The sheets the source declared (1-based) that the OCR
+        /// product did not cover.
+        missing: Vec<u32>,
+    },
+
+    /// The OCR product covers sheets the source PDF does not have,
+    /// which means the two were not produced from the same source.
+    /// Always an error — there is no `--allow-partial`-equivalent
+    /// route to ingest an OCR product paired with the wrong PDF.
+    #[error("OCR product carries pages not in the source: {excess:?}")]
+    OcrPagesExcess {
+        /// The 1-based sheets in the OCR product that the source did
+        /// not declare.
+        excess: Vec<u32>,
+    },
 }
 
 /// A fallible `ingest` operation.

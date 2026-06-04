@@ -203,6 +203,28 @@ fn blocks_from_pages(pages: &[Page]) -> Vec<Block> {
     blocks
 }
 
+/// Read the source PDF's physical sheet count. `/Pages` is a PDF
+/// metadata-layer construct independent of the text layer, so this
+/// works against a scan whose body the quality gate rejected. Callers
+/// use the value as the expected page count for the OCR-intake
+/// completeness check.
+pub fn count_pdf_pages(source_pdf: &Path) -> Result<u32, ExtractError> {
+    let pdfium = pdf::pdfium()?;
+    let _guard = pdf::EXTRACTION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let document =
+        pdfium
+            .load_pdf_from_file(source_pdf, None)
+            .map_err(|e| ExtractError::CorruptFile {
+                detail: e.to_string(),
+            })?;
+    let len = document.pages().len();
+    u32::try_from(len).map_err(|_| ExtractError::CorruptFile {
+        detail: format!("page count out of range: {len}"),
+    })
+}
+
 /// Re-open the source PDF to lift its `/Outline` into a TOC anchored on
 /// `blocks` and its `/Info` into a `Biblio`. Both reads use the shared
 /// PDFium handle and the process-level extraction lock the PDF adapter
