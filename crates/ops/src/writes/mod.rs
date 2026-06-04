@@ -2,7 +2,8 @@
 
 //! Write ops over the bookrack library.
 //!
-//! Reserved for a later phase. Each write op will open the catalog
-//! read-write, apply its change, and record one
-//! [`bookrack_catalog::MetadataAudit`] row tagged with the
+//! Each write op opens the catalog read-write, applies the change, and
+//! records a [`bookrack_catalog::MetadataAudit`] row tagged with the
 //! [`crate::Caller`] this [`crate::Ops`] was built with.
+
+pub mod metadata;

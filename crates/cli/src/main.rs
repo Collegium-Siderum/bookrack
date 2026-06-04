@@ -18,10 +18,7 @@ mod render;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bookrack_catalog::{
-    ActorKind, Catalog, IntakeFilter, NewMetadataAudit, NewOverride, NewReview,
-    STATUS_ACKNOWLEDGED, STATUS_PENDING,
-};
+use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, SearchConfig};
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
@@ -1830,23 +1827,26 @@ async fn run_metadata(
     if let MetadataAction::AuditProfile { action } = action {
         return run_metadata_audit_profile(action);
     }
+    // Trigger any pending catalog migration (with a pre-migration
+    // backup snapshot) once before dispatching. The write ops below
+    // open their own per-call handles via ops, which only see the
+    // already-migrated database.
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let audit_rules = load_audit_rules(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
+    let ops = catalog_only_ops(cfg);
     match action {
         MetadataAction::Show { book, json } => {
             run_metadata_show(&catalog, book, json, &audit_rules, &audit_profile)
         }
-        MetadataAction::Set { book, field, value } => {
-            run_metadata_set(&catalog, book, &field, &value)
-        }
-        MetadataAction::Clear { book, field } => run_metadata_clear(&catalog, book, &field),
-        MetadataAction::Ack { book, reason } => run_metadata_ack(&catalog, book, &reason),
+        MetadataAction::Set { book, field, value } => run_metadata_set(&ops, book, &field, &value),
+        MetadataAction::Clear { book, field } => run_metadata_clear(&ops, book, &field),
+        MetadataAction::Ack { book, reason } => run_metadata_ack(&ops, book, &reason),
         MetadataAction::Approve { book, reason } => {
-            run_metadata_approve(&catalog, book, reason.as_deref())
+            run_metadata_approve(&ops, book, reason.as_deref())
         }
-        MetadataAction::Reject { book, reason } => run_metadata_reject(&catalog, book, &reason),
+        MetadataAction::Reject { book, reason } => run_metadata_reject(&ops, book, &reason),
         MetadataAction::List {
             needs_review,
             limit,
@@ -2048,131 +2048,109 @@ fn run_metadata_show(
     Ok(())
 }
 
-fn run_metadata_set(catalog: &Catalog, book: i64, field: &str, value: &str) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let effective = catalog
-        .effective_publication_attrs(book, BOOK_SCOPE)
-        .context("read effective metadata")?;
-    let old_value = effective.get(field).map(str::to_string);
-    catalog
-        .set_override(&NewOverride::new(
-            book,
-            BOOK_SCOPE,
-            field,
-            Some(value.to_string()),
-            "human",
-        ))
-        .context("write override")?;
-    let mut audit = NewMetadataAudit::new("node_publication_attrs", "update", ActorKind::Human);
-    audit.node_id = Some(PartitionIdx::new(book).root().get());
-    audit.field = Some(field.to_string());
-    audit.old_value = old_value;
-    audit.new_value = Some(value.to_string());
-    catalog
-        .record_metadata_audit(&audit)
-        .context("record metadata audit")?;
-    println!("Set {field} on book {book}.");
-    Ok(())
-}
-
-fn run_metadata_clear(catalog: &Catalog, book: i64, field: &str) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let effective = catalog
-        .effective_publication_attrs(book, BOOK_SCOPE)
-        .context("read effective metadata")?;
-    let old_value = effective.get(field).map(str::to_string);
-    let existed = catalog
-        .clear_override(book, BOOK_SCOPE, field)
-        .context("clear override")?;
-    if !existed {
-        println!("No override on {field} for book {book}; nothing to clear.");
-        return Ok(());
+fn run_metadata_set(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    field: &str,
+    value: &str,
+) -> Result<()> {
+    let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
+        intake_id: book,
+        field: field.to_string(),
+        value: value.to_string(),
+    };
+    match bookrack_ops::writes::metadata::set_metadata_field(ops, req) {
+        Ok(_) => {
+            println!("Set {field} on book {book}.");
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("set metadata field via ops")),
     }
-    let mut audit = NewMetadataAudit::new("node_publication_attrs", "delete", ActorKind::Human);
-    audit.node_id = Some(PartitionIdx::new(book).root().get());
-    audit.field = Some(field.to_string());
-    audit.old_value = old_value;
-    catalog
-        .record_metadata_audit(&audit)
-        .context("record metadata audit")?;
-    println!("Cleared override on {field} for book {book}.");
-    Ok(())
 }
 
-fn run_metadata_ack(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let mut audit = NewMetadataAudit::new("node_reviews", "acknowledge_gate", ActorKind::Human);
-    audit.node_id = Some(PartitionIdx::new(book).root().get());
-    audit.reason = Some(reason.to_string());
-    catalog
-        .record_metadata_audit(&audit)
-        .context("record metadata audit")?;
-    catalog
-        .upsert_review(&NewReview::new(
-            book,
-            BOOK_SCOPE,
-            "human",
-            bookrack_catalog::STATUS_ACKNOWLEDGED,
-        ))
-        .context("upsert review")?;
-    println!("Acknowledged metadata gap on book {book}.");
-    Ok(())
+fn run_metadata_clear(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str) -> Result<()> {
+    let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
+        intake_id: book,
+        field: field.to_string(),
+    };
+    match bookrack_ops::writes::metadata::clear_metadata_field(ops, req) {
+        Ok(outcome) => {
+            if outcome.changed {
+                println!("Cleared override on {field} for book {book}.");
+            } else {
+                println!("No override on {field} for book {book}; nothing to clear.");
+            }
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("clear metadata field via ops")),
+    }
+}
+
+fn run_metadata_ack(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
+    let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
+        intake_id: book,
+        reason: reason.to_string(),
+    };
+    match bookrack_ops::writes::metadata::acknowledge_metadata_gap(ops, req) {
+        Ok(_) => {
+            println!("Acknowledged metadata gap on book {book}.");
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("acknowledge metadata gap via ops")),
+    }
 }
 
 /// Mark the record reviewed and correct. The operator (or an LLM acting
 /// on the operator's behalf) is asserting that the effective metadata
 /// matches the source; the audit's plausibility verdict is unchanged.
-fn run_metadata_approve(catalog: &Catalog, book: i64, reason: Option<&str>) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let mut audit = NewMetadataAudit::new("node_reviews", "approve", ActorKind::Human);
-    audit.node_id = Some(PartitionIdx::new(book).root().get());
-    audit.reason = reason.map(str::to_string);
-    catalog
-        .record_metadata_audit(&audit)
-        .context("record metadata audit")?;
-    let mut review = NewReview::new(book, BOOK_SCOPE, "human", bookrack_catalog::STATUS_APPROVED);
-    if let Some(r) = reason {
-        review = review.notes(r);
+fn run_metadata_approve(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    reason: Option<&str>,
+) -> Result<()> {
+    let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
+        intake_id: book,
+        reason: reason.map(str::to_string),
+    };
+    match bookrack_ops::writes::metadata::approve_metadata(ops, req) {
+        Ok(_) => {
+            println!("Approved metadata on book {book}.");
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("approve metadata via ops")),
     }
-    catalog.upsert_review(&review).context("upsert review")?;
-    println!("Approved metadata on book {book}.");
-    Ok(())
 }
 
 /// Reject the book. The pipeline rows stay in place so downstream
-/// consumers can filter on `rejected`; this records the human's
-/// rejection and the reason in the audit trail.
-fn run_metadata_reject(catalog: &Catalog, book: i64, reason: &str) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let mut audit = NewMetadataAudit::new("node_reviews", "reject", ActorKind::Human);
-    audit.node_id = Some(PartitionIdx::new(book).root().get());
-    audit.reason = Some(reason.to_string());
-    catalog
-        .record_metadata_audit(&audit)
-        .context("record metadata audit")?;
-    catalog
-        .upsert_review(
-            &NewReview::new(book, BOOK_SCOPE, "human", bookrack_catalog::STATUS_REJECTED)
-                .notes(reason),
-        )
-        .context("upsert review")?;
-    println!("Rejected book {book}.");
-    Ok(())
+/// consumers can filter on `rejected`; this records the rejection and
+/// the reason in the audit trail.
+fn run_metadata_reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
+    let req = bookrack_ops::dto::writes::RejectMetadataRequest {
+        intake_id: book,
+        reason: reason.to_string(),
+    };
+    match bookrack_ops::writes::metadata::reject_metadata(ops, req) {
+        Ok(_) => {
+            println!("Rejected book {book}.");
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("reject metadata via ops")),
+    }
 }
 
 async fn run_metadata_advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<()> {
@@ -2305,168 +2283,10 @@ mod tests {
         }
     }
 
-    fn seed_intake(catalog: &mut Catalog, sha: &str) -> i64 {
-        catalog
-            .register_intake(&bookrack_catalog::NewIntake::new(sha))
-            .expect("register intake")
-            .into_intake()
-            .intake_id
-    }
-
-    #[test]
-    fn metadata_set_records_the_override_and_an_update_audit_row() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-set");
-        run_metadata_set(&catalog, id, "title", "A New Title").expect("set");
-        let effective = catalog
-            .effective_publication_attrs(id, BOOK_SCOPE)
-            .expect("effective");
-        assert_eq!(effective.get("title"), Some("A New Title"));
-
-        let book_root_id = PartitionIdx::new(id).root().get();
-        let audit = catalog
-            .metadata_audit_for_node(book_root_id)
-            .expect("audit");
-        let update_row = audit
-            .iter()
-            .find(|r| r.action == "update")
-            .expect("an update row");
-        assert_eq!(update_row.field.as_deref(), Some("title"));
-        assert_eq!(update_row.new_value.as_deref(), Some("A New Title"));
-        assert!(update_row.old_value.is_none());
-    }
-
-    #[test]
-    fn metadata_set_pub_place_and_original_year_flow_through_the_effective_view() {
-        // The two new schema columns are settable via the EAV override
-        // path even without a base row; the effective view returns both.
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-pubplace");
-        run_metadata_set(&catalog, id, "pub_place", "New York").expect("set pub_place");
-        run_metadata_set(&catalog, id, "original_year", "1949").expect("set original_year");
-        let effective = catalog
-            .effective_publication_attrs(id, BOOK_SCOPE)
-            .expect("effective");
-        assert_eq!(effective.get("pub_place"), Some("New York"));
-        assert_eq!(effective.get("original_year"), Some("1949"));
-    }
-
-    #[test]
-    fn metadata_clear_falls_back_to_base_and_records_a_delete() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-clear");
-        // Seed a base title, then add an override, then clear it.
-        let mut base = bookrack_catalog::NewPublicationAttrs::new(id, BOOK_SCOPE);
-        base.title = Some("Base Title".to_string());
-        catalog.upsert_publication_attrs(&base).expect("base");
-        run_metadata_set(&catalog, id, "title", "Override Title").expect("set");
-        run_metadata_clear(&catalog, id, "title").expect("clear");
-
-        let effective = catalog
-            .effective_publication_attrs(id, BOOK_SCOPE)
-            .expect("effective");
-        // The override is gone, so the base value is what remains.
-        assert_eq!(effective.get("title"), Some("Base Title"));
-
-        let book_root_id = PartitionIdx::new(id).root().get();
-        let audit = catalog
-            .metadata_audit_for_node(book_root_id)
-            .expect("audit");
-        assert!(audit.iter().any(|r| r.action == "delete"));
-    }
-
-    #[test]
-    fn metadata_ack_records_a_review_and_a_gate_audit_row() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-ack");
-        run_metadata_ack(&catalog, id, "operator vetted").expect("ack");
-        let review = catalog
-            .review(id, BOOK_SCOPE)
-            .expect("review")
-            .expect("present");
-        assert_eq!(review.status, bookrack_catalog::STATUS_ACKNOWLEDGED);
-        let book_root_id = PartitionIdx::new(id).root().get();
-        let audit = catalog
-            .metadata_audit_for_node(book_root_id)
-            .expect("audit");
-        assert!(
-            audit.iter().any(|r| r.action == "acknowledge_gate"),
-            "audit rows: {audit:?}"
-        );
-    }
-
-    #[test]
-    fn metadata_approve_records_a_review_and_an_approval_audit_row() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-approve");
-        run_metadata_approve(&catalog, id, Some("checked against the printed copy"))
-            .expect("approve");
-        let review = catalog
-            .review(id, BOOK_SCOPE)
-            .expect("review")
-            .expect("present");
-        assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
-        assert_eq!(review.reviewed_by, "human");
-        let book_root_id = PartitionIdx::new(id).root().get();
-        let audit = catalog
-            .metadata_audit_for_node(book_root_id)
-            .expect("audit");
-        assert!(
-            audit.iter().any(|r| r.action == "approve"),
-            "audit rows: {audit:?}"
-        );
-    }
-
-    #[test]
-    fn metadata_approve_without_a_reason_still_records_the_audit_row() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-approve-noreason");
-        run_metadata_approve(&catalog, id, None).expect("approve");
-        let review = catalog
-            .review(id, BOOK_SCOPE)
-            .expect("review")
-            .expect("present");
-        assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
-        assert_eq!(review.notes, None);
-    }
-
-    #[test]
-    fn metadata_reject_records_a_review_and_a_reject_audit_row() {
-        let mut catalog = Catalog::open_in_memory().expect("open");
-        let id = seed_intake(&mut catalog, "sha-reject");
-        run_metadata_reject(&catalog, id, "wrong source file").expect("reject");
-        let review = catalog
-            .review(id, BOOK_SCOPE)
-            .expect("review")
-            .expect("present");
-        assert_eq!(review.status, bookrack_catalog::STATUS_REJECTED);
-        assert_eq!(review.notes.as_deref(), Some("wrong source file"));
-        let book_root_id = PartitionIdx::new(id).root().get();
-        let audit = catalog
-            .metadata_audit_for_node(book_root_id)
-            .expect("audit");
-        assert!(
-            audit.iter().any(|r| r.action == "reject"),
-            "audit rows: {audit:?}"
-        );
-    }
-
-    #[test]
-    fn metadata_write_paths_reject_unknown_intake_ids() {
-        let catalog = Catalog::open_in_memory().expect("open");
-        let err_msg = |r: Result<()>| format!("{:#}", r.expect_err("expected an error"));
-        assert!(
-            err_msg(run_metadata_set(&catalog, 999, "title", "X")).contains("no intake registered")
-        );
-        assert!(
-            err_msg(run_metadata_clear(&catalog, 999, "title")).contains("no intake registered")
-        );
-        assert!(err_msg(run_metadata_ack(&catalog, 999, "r")).contains("no intake registered"));
-        assert!(
-            err_msg(run_metadata_approve(&catalog, 999, None)).contains("no intake registered")
-        );
-        assert!(err_msg(run_metadata_reject(&catalog, 999, "r")).contains("no intake registered"));
-    }
+    // The behavioural coverage of `run_metadata_*` lives in
+    // `crates/ops/tests/metadata_writes.rs`, where the logic itself sits.
+    // The CLI handlers here are thin shells that hand the request off to
+    // `bookrack_ops::writes::metadata::*`.
 
     #[test]
     fn natural_name_hints_cover_the_common_typos_from_the_test_report() {

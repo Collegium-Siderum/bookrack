@@ -14,7 +14,7 @@ use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::{Ops, OpsError, reads};
+use bookrack_ops::{Ops, OpsError, reads, writes};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -105,6 +105,54 @@ pub struct ListPendingReviewsArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
+}
+
+/// Arguments for `library.metadata.set`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataSetArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// The field to set (`title`, `publisher`, `year`, `language`, ...).
+    pub field: String,
+    /// The new value.
+    pub value: String,
+}
+
+/// Arguments for `library.metadata.clear`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataClearArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// The field whose override should be removed.
+    pub field: String,
+}
+
+/// Arguments for `library.metadata.ack`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataAckArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Why the gap is being acknowledged; recorded on the audit row.
+    pub reason: String,
+}
+
+/// Arguments for `library.metadata.approve`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataApproveArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Optional reason recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Arguments for `library.metadata.reject`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataRejectArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Why the book is being rejected; recorded on the audit row.
+    pub reason: String,
 }
 
 /// MCP request handler. The streamable-HTTP service clones it per session;
@@ -387,6 +435,112 @@ impl BookrackServer {
             .await
             .map_err(ops_error_to_internal)?;
         respond_with(&info)
+    }
+
+    /// Set an override on one bibliographic field of a book.
+    #[tool(
+        name = "library.metadata.set",
+        description = "Set an override on one bibliographic field (`title`, \
+                       `publisher`, `year`, `language`, ...) of one book. The \
+                       extracted value is preserved; the override wins on read. \
+                       Appends one audit row tagged `actor_kind=llm`."
+    )]
+    async fn library_metadata_set(
+        &self,
+        Parameters(args): Parameters<MetadataSetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
+            intake_id: args.intake_id,
+            field: args.field,
+            value: args.value,
+        };
+        let outcome =
+            writes::metadata::set_metadata_field(&self.ops, req).map_err(ops_error_to_internal)?;
+        respond_with(&outcome)
+    }
+
+    /// Remove an override on one bibliographic field, reverting to the
+    /// extracted value.
+    #[tool(
+        name = "library.metadata.clear",
+        description = "Remove an override on one bibliographic field of one book, \
+                       reverting to the extracted value. Appends one audit row \
+                       even when there was no override to clear, so the trail \
+                       records that the operation was attempted."
+    )]
+    async fn library_metadata_clear(
+        &self,
+        Parameters(args): Parameters<MetadataClearArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
+            intake_id: args.intake_id,
+            field: args.field,
+        };
+        let outcome = writes::metadata::clear_metadata_field(&self.ops, req)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&outcome)
+    }
+
+    /// Acknowledge a metadata gap: flip the review row to `acknowledged`
+    /// with a recorded reason.
+    #[tool(
+        name = "library.metadata.ack",
+        description = "Acknowledge a metadata gap on one book: the audit verdict \
+                       is unchanged; the review row is flipped to `acknowledged` \
+                       with the given reason. The book stays on the review queue \
+                       until approved or rejected."
+    )]
+    async fn library_metadata_ack(
+        &self,
+        Parameters(args): Parameters<MetadataAckArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
+            intake_id: args.intake_id,
+            reason: args.reason,
+        };
+        let outcome = writes::metadata::acknowledge_metadata_gap(&self.ops, req)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&outcome)
+    }
+
+    /// Approve the metadata record: flip the review row to `approved`.
+    #[tool(
+        name = "library.metadata.approve",
+        description = "Approve the metadata record on one book: assert that the \
+                       effective metadata matches the source. Flips the review \
+                       row to `approved`. The audit verdict is unchanged."
+    )]
+    async fn library_metadata_approve(
+        &self,
+        Parameters(args): Parameters<MetadataApproveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
+            intake_id: args.intake_id,
+            reason: args.reason,
+        };
+        let outcome =
+            writes::metadata::approve_metadata(&self.ops, req).map_err(ops_error_to_internal)?;
+        respond_with(&outcome)
+    }
+
+    /// Reject the book: flip the review row to `rejected`.
+    #[tool(
+        name = "library.metadata.reject",
+        description = "Reject one book: flip the review row to `rejected`. \
+                       Pipeline rows stay in place so downstream consumers can \
+                       filter on `rejected`. Records the reason on the audit row."
+    )]
+    async fn library_metadata_reject(
+        &self,
+        Parameters(args): Parameters<MetadataRejectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = bookrack_ops::dto::writes::RejectMetadataRequest {
+            intake_id: args.intake_id,
+            reason: args.reason,
+        };
+        let outcome =
+            writes::metadata::reject_metadata(&self.ops, req).map_err(ops_error_to_internal)?;
+        respond_with(&outcome)
     }
 }
 
