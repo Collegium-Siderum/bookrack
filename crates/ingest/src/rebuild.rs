@@ -175,7 +175,7 @@ mod tests {
             biblio: Biblio::default(),
             provenance: Provenance {
                 adapter: "txt".into(),
-                extractor_version: "test".into(),
+                extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: vec![],
             },

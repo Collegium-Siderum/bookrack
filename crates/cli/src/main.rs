@@ -957,7 +957,9 @@ fn run_metadata_show(
     let biblio = Biblio::default();
     let provenance = Provenance {
         adapter,
-        extractor_version: String::new(),
+        // 0 marks a synthesized provenance: no extractor produced this,
+        // so any current `EXTRACTOR_VERSION` will compare as mismatched.
+        extractor_version: 0,
         text_layer_quality: TextLayerQuality::BornDigital,
         skipped_units: Vec::new(),
     };

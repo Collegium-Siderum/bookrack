@@ -24,12 +24,10 @@ use std::path::Path;
 
 use bookrack_audit_profile::ExtractToggles;
 
+use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, ExtractError, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
 };
-
-/// Behaviour-sensitive adapter version, stamped into `Provenance`.
-const ADAPTER_VERSION: &str = "txt-adapter=1";
 
 /// The ordinal prefix that opens a Chinese chapter / volume marker
 /// (U+7B2C).
@@ -53,7 +51,7 @@ const CJK_NUMERALS: &str = "\u{96f6}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{5
 /// derived TOC stays empty.
 pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
-    let (text, encoding) = decode(&bytes);
+    let text = decode(&bytes);
 
     // One non-blank line is one block; `str::lines` also strips the
     // `\r` of CRLF endings, and `trim` drops the leading ideographic
@@ -92,9 +90,7 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
         biblio: Biblio::default(),
         provenance: Provenance {
             adapter: "txt".to_string(),
-            // The encoding guess is behaviour-sensitive — a different
-            // guess yields different text — so it is stamped here.
-            extractor_version: format!("{ADAPTER_VERSION};encoding={encoding}"),
+            extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: TextLayerQuality::BornDigital,
             // A plain-text file is one source unit; nothing to skip.
             skipped_units: Vec::new(),
@@ -104,33 +100,26 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
 
 /// Decode raw bytes to text, detecting the encoding. Order: BOM, then a
 /// strict UTF-8 trial, then GB18030 (covers GBK / GB2312) for legacy
-/// Chinese text. Returns the text and the encoding label.
-fn decode(bytes: &[u8]) -> (String, &'static str) {
+/// Chinese text.
+fn decode(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return (String::from_utf8_lossy(rest).into_owned(), "utf-8-bom");
+        return String::from_utf8_lossy(rest).into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
         let (text, _) = encoding_rs::UTF_16LE.decode_without_bom_handling(rest);
-        return (text.into_owned(), "utf-16le");
+        return text.into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         let (text, _) = encoding_rs::UTF_16BE.decode_without_bom_handling(rest);
-        return (text.into_owned(), "utf-16be");
+        return text.into_owned();
     }
     if let Ok(s) = std::str::from_utf8(bytes) {
-        return (s.to_string(), "utf-8");
+        return s.to_string();
     }
     // Not UTF-8 — assume legacy Chinese. GB18030 is a strict superset of
     // GBK and GB2312, so one decoder covers all three.
-    let (text, _, had_errors) = encoding_rs::GB18030.decode(bytes);
-    (
-        text.into_owned(),
-        if had_errors {
-            "gb18030(lossy)"
-        } else {
-            "gb18030"
-        },
-    )
+    let (text, _, _) = encoding_rs::GB18030.decode(bytes);
+    text.into_owned()
 }
 
 /// Heading level of a Chinese chapter / volume marker line, or `None`.

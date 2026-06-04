@@ -32,9 +32,13 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
         ColumnSpec::int("byte_size"),
         ColumnSpec::text("adapter").comment("extraction adapter, stamped at EXTRACT"),
-        ColumnSpec::text("extractor_version").comment(
-            "extractor version string, stamped at EXTRACT; a mismatch marks a stale partition",
-        ),
+        ColumnSpec::int("extractor_version")
+            .not_null()
+            .default("1")
+            .comment(
+                "value of `bookrack_extract::EXTRACTOR_VERSION` at EXTRACT; \
+                 a mismatch with the current const marks a stale partition",
+            ),
         ColumnSpec::text("intake_at")
             .not_null()
             .comment("ISO-8601 UTC"),
@@ -249,10 +253,12 @@ pub struct Intake {
     pub byte_size: Option<i64>,
     /// Extraction adapter chosen for this file, stamped at EXTRACT.
     pub adapter: Option<String>,
-    /// The extractor version string that parsed this file, stamped at
-    /// EXTRACT. A mismatch against the current version marks a partition
-    /// stale and due for re-extraction.
-    pub extractor_version: Option<String>,
+    /// Value of `bookrack_extract::EXTRACTOR_VERSION` at the moment
+    /// this file was extracted. A mismatch against the current const
+    /// marks the partition stale and due for re-extraction. Defaults
+    /// to `1` for rows registered before [`Catalog::set_extraction`]
+    /// runs.
+    pub extractor_version: u32,
     /// Registration time, as an ISO-8601 UTC timestamp.
     pub intake_at: String,
     /// Coarse lifecycle state.
@@ -551,16 +557,16 @@ impl Catalog {
         Ok(affected > 0)
     }
 
-    /// Stamp the extraction provenance: the adapter that parsed the file
-    /// and the behaviour-sensitive extractor version string. Both are
-    /// known together once EXTRACT completes; recording the version is
-    /// what later lets a re-extraction detect a stale partition. Returns
-    /// whether a row with that id existed.
+    /// Stamp the extraction provenance: the adapter that parsed the
+    /// file and the value of `bookrack_extract::EXTRACTOR_VERSION` at
+    /// that moment. Both are known together once EXTRACT completes;
+    /// recording the version is what later lets a re-extraction detect
+    /// a stale partition. Returns whether a row with that id existed.
     pub fn set_extraction(
         &self,
         intake_id: i64,
         adapter: &str,
-        extractor_version: &str,
+        extractor_version: u32,
     ) -> Result<bool> {
         let affected = self.conn.execute(
             "UPDATE intake SET adapter = :adapter, extractor_version = :extractor_version \
@@ -628,10 +634,12 @@ mod tests {
         assert_eq!(read.byte_size, Some(8192));
         assert_eq!(read.status, IntakeStatus::Extracted);
         assert!(!read.intake_at.is_empty());
-        // `adapter` and `extractor_version` are filled by `set_extraction`,
-        // which this test does not call; they remain absent here.
+        // `adapter` is filled by `set_extraction`, which this test does
+        // not call, so it remains absent. `extractor_version` has a
+        // table default of `1` and so is non-NULL even on a freshly
+        // registered row.
         assert_eq!(read.adapter, None);
-        assert_eq!(read.extractor_version, None);
+        assert_eq!(read.extractor_version, 1);
         // `expression_id` is reserved for the FRBR grouping work and
         // `notes` for user-supplied remarks; the ingest pipeline does not
         // fill either today.

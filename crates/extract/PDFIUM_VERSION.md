@@ -52,10 +52,14 @@ adapter loads the library from the running executable's own directory.
 
 ## When this changes
 
-Bumping any value here is a behaviour-sensitive change: the PDFium
-build number is part of the PDF adapter's `extractor_version`, so a
-bump re-extracts downstream. Update, in lockstep:
+Bumping any value here is a behaviour-sensitive change: a different
+PDFium binary can extract text differently, which downstream must
+re-extract on. Update, in lockstep:
 
-- `pdfium-render` features in the workspace `Cargo.toml`,
+- the `pdfium-render` cargo feature in the workspace `Cargo.toml`,
 - the tag, URL, and SHA-256 in the CI `Fetch pinned PDFium` step,
-- the `PDFIUM_BUILD` constant in `crates/extract/src/pdf.rs`.
+- the values in the table above.
+
+Bumping the `pdfium-render` crate version itself also flips the
+behaviour-sensitive deps hash that `crates/extract/tests/dep_hash.rs`
+anchors, forcing `bookrack_extract::EXTRACTOR_VERSION` to bump.

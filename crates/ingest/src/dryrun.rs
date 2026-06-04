@@ -406,7 +406,7 @@ fn run_pipeline(
     catalog.set_extraction(
         intake_id,
         &extraction.provenance.adapter,
-        &extraction.provenance.extractor_version,
+        extraction.provenance.extractor_version,
     )?;
 
     // STRUCTURE.

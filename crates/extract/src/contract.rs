@@ -186,9 +186,10 @@ pub struct SkippedUnit {
 pub struct Provenance {
     /// Which adapter produced this — `"epub"`, `"html"`, `"txt"`, …
     pub adapter: String,
-    /// Behaviour-sensitive extractor versions, concatenated. A change
-    /// here means block boundaries may shift: downstream re-extracts.
-    pub extractor_version: String,
+    /// Value of [`crate::EXTRACTOR_VERSION`] at the moment this file
+    /// was extracted. A mismatch with the current const means block
+    /// boundaries may have shifted: downstream re-extracts.
+    pub extractor_version: u32,
     /// The text-layer quality verdict.
     pub text_layer_quality: TextLayerQuality,
     /// Sub-units skipped during extraction (a malformed PDF page, say)
@@ -297,7 +298,7 @@ mod tests {
             },
             provenance: Provenance {
                 adapter: "epub".into(),
-                extractor_version: "rbook=0.7;normalize=v3".into(),
+                extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: vec![SkippedUnit {
                     index: 3,

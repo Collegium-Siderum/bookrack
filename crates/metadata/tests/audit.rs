@@ -58,7 +58,7 @@ fn seed_base(
 fn provenance(adapter: &str, quality: TextLayerQuality) -> Provenance {
     Provenance {
         adapter: adapter.to_string(),
-        extractor_version: "test-1".to_string(),
+        extractor_version: 1,
         text_layer_quality: quality,
         skipped_units: Vec::new(),
     }

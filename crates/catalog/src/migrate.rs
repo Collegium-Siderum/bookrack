@@ -22,7 +22,7 @@ use rusqlite_migration::{M, Migrations};
 /// The `user_version` a fully-migrated `catalog.db` carries: the number of
 /// migrations defined. The `catalog_meta.schema_version` mirror is kept
 /// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 4;
+pub(crate) const TARGET_VERSION: i64 = 5;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -404,6 +404,50 @@ const PUB_PLACE_ORIGINAL_YEAR_DDL: &str = "\
 ALTER TABLE node_publication_attrs ADD COLUMN pub_place TEXT;\n\
 ALTER TABLE node_publication_attrs ADD COLUMN original_year TEXT;\n";
 
+// `M[4]` — collapse `intake.extractor_version` from a per-adapter string
+// to a single integer carrying `bookrack_extract::EXTRACTOR_VERSION`. The
+// string form had no production reader; existing rows back-fill to `1`,
+// the initial value of the const, because no behaviour-sensitive change
+// has happened yet from their perspective.
+//
+// SQLite cannot rewrite a column's type in place, so the table is
+// rebuilt via the 12-step pattern. `intake` carries no foreign keys
+// referencing it and no triggers/views, so steps 9/10 drop out; the
+// surviving steps are 4 (CREATE), 5 (INSERT … SELECT), 6 (DROP),
+// 7 (RENAME), 8 (recreate indexes), plus an explicit `sqlite_sequence`
+// reset so AUTOINCREMENT keeps issuing fresh `intake_id` values past
+// the highest pre-migration row.
+const INTAKE_EXTRACTOR_VERSION_DDL: &str = r#"
+CREATE TABLE intake_new (
+  intake_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_sha256 TEXT NOT NULL UNIQUE,
+  stored_path TEXT,
+  original_path TEXT,
+  format TEXT,
+  byte_size INTEGER,
+  adapter TEXT,
+  extractor_version INTEGER NOT NULL DEFAULT 1,
+  intake_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  expression_id INTEGER,
+  notes TEXT
+);
+INSERT INTO intake_new (
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, extractor_version, intake_at, status, expression_id, notes
+)
+SELECT
+  intake_id, source_sha256, stored_path, original_path, format, byte_size,
+  adapter, 1, intake_at, status, expression_id, notes
+FROM intake;
+DROP TABLE intake;
+ALTER TABLE intake_new RENAME TO intake;
+INSERT OR REPLACE INTO sqlite_sequence (name, seq)
+  SELECT 'intake', COALESCE(MAX(intake_id), 0) FROM intake;
+CREATE INDEX idx_intake_status ON intake(status);
+CREATE INDEX idx_intake_format ON intake(format);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -412,6 +456,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(CONTRIBUTOR_INDEX_DDL),
         M::up(NODE_ADDR_DDL),
         M::up(PUB_PLACE_ORIGINAL_YEAR_DDL),
+        M::up(INTAKE_EXTRACTOR_VERSION_DDL),
     ])
 }
 
@@ -465,6 +510,88 @@ mod tests {
         )
         .expect("query index")
             > 0
+    }
+
+    /// The type of column `column` on `table`, as SQLite reports it.
+    fn column_type(conn: &Connection, table: &str, column: &str) -> String {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table_info");
+        let row = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>("name")?, row.get::<_, String>("type")?))
+            })
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .find(|(name, _)| name == column)
+            .unwrap_or_else(|| panic!("{table}.{column} missing"));
+        row.1
+    }
+
+    #[test]
+    fn migration_m4_rebuilds_intake_with_an_integer_extractor_version() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[4] and seed a row that carries the legacy
+        // TEXT extractor_version, so the migration's INSERT … SELECT has
+        // a row to backfill.
+        migrations()
+            .to_version(&mut conn, 4)
+            .expect("apply M[0..3]");
+        conn.execute(
+            "INSERT INTO intake (\
+               source_sha256, original_path, format, byte_size, \
+               adapter, extractor_version, intake_at, status\
+             ) VALUES ('sha-rt', '/tmp/book.epub', 'epub', 8192, \
+                       'epub', 'rbook=0.7;scraper=0.27;epub-adapter=1', \
+                       '2026-06-04T00:00:00Z', 'extracted')",
+            [],
+        )
+        .expect("seed legacy row");
+        let legacy_id: i64 = conn
+            .query_row("SELECT intake_id FROM intake", [], |row| row.get(0))
+            .expect("read legacy id");
+
+        migrations().to_latest(&mut conn).expect("apply M[4]");
+
+        assert_eq!(column_type(&conn, "intake", "extractor_version"), "INTEGER");
+        let (id, ev): (i64, i64) = conn
+            .query_row(
+                "SELECT intake_id, extractor_version FROM intake",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read migrated row");
+        assert_eq!(id, legacy_id, "intake_id survives the rebuild");
+        assert_eq!(ev, 1, "extractor_version backfills to 1");
+        assert!(
+            index_exists(&conn, "idx_intake_status"),
+            "idx_intake_status recreated"
+        );
+        assert!(
+            index_exists(&conn, "idx_intake_format"),
+            "idx_intake_format recreated"
+        );
+
+        // A fresh insert via the standard path must receive an id past
+        // the highest pre-migration row, proving sqlite_sequence was
+        // restored after the rebuild.
+        conn.execute(
+            "INSERT INTO intake (source_sha256, intake_at, status) \
+             VALUES ('sha-next', '2026-06-04T00:00:01Z', 'pending')",
+            [],
+        )
+        .expect("insert next row");
+        let next_id: i64 = conn
+            .query_row(
+                "SELECT intake_id FROM intake WHERE source_sha256 = 'sha-next'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read next id");
+        assert!(
+            next_id > legacy_id,
+            "next intake_id ({next_id}) must exceed the legacy id ({legacy_id})"
+        );
     }
 
     #[test]

@@ -22,11 +22,16 @@ use tempfile::NamedTempFile;
 
 use crate::embed_run::now_rfc3339;
 
-/// The current envelope schema version.
-pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
+/// The current envelope schema version. v2 changed
+/// `extraction.provenance.extractor_version` from a per-adapter string
+/// to the integer `bookrack_extract::EXTRACTOR_VERSION`.
+pub const ENVELOPE_SCHEMA_VERSION: u32 = 2;
 
-/// Default file extension for the v1 envelope.
-pub const ENVELOPE_FILE_SUFFIX: &str = ".bookrack-extraction.json";
+/// Default file extension. The v2 envelope picks a distinct extension
+/// so an old v1 file on disk is never read as v2; the reader still
+/// matches the file at this path against [`ENVELOPE_SCHEMA_VERSION`]
+/// and fails closed on a mismatch.
+pub const ENVELOPE_FILE_SUFFIX: &str = ".bookrack-extraction.v2.json";
 
 /// Computed filename within the opaque store for one intake.
 pub fn envelope_filename(intake_id: i64) -> String {
@@ -114,7 +119,7 @@ mod tests {
             biblio: Biblio::default(),
             provenance: Provenance {
                 adapter: "txt".into(),
-                extractor_version: "v1".into(),
+                extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: vec![],
             },
@@ -142,7 +147,7 @@ mod tests {
         fs::write(
             &path,
             r#"{
-              "schema_version": 2,
+              "schema_version": 99,
               "intake_id": 1,
               "source_sha256": "abc",
               "captured_at": "2026-01-01T00:00:00Z",
@@ -152,7 +157,7 @@ mod tests {
                 "biblio": { "contributors": [] },
                 "provenance": {
                   "adapter": "txt",
-                  "extractor_version": "v1",
+                  "extractor_version": 1,
                   "text_layer_quality": "born_digital",
                   "skipped_units": []
                 }
@@ -163,7 +168,7 @@ mod tests {
         match read_envelope(&path) {
             Err(EnvelopeError::SchemaMismatch { expected, found }) => {
                 assert_eq!(expected, ENVELOPE_SCHEMA_VERSION);
-                assert_eq!(found, 2);
+                assert_eq!(found, 99);
             }
             other => panic!("unexpected: {other:?}"),
         }

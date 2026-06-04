@@ -42,26 +42,12 @@ use std::sync::{Mutex, OnceLock};
 
 use pdfium_render::prelude::*;
 
+use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, ExtractOutcome,
     Extraction, Provenance, SkippedUnit, Toc, TocEntry,
 };
 use crate::quality::{self, QualityDecision};
-
-/// Behaviour-sensitive version of this adapter. Bump when a change here
-/// shifts block boundaries or the extraction outcome.
-const PDF_ADAPTER_VERSION: u32 = 1;
-
-/// Bump on any change to coordinate paragraph reconstruction: it
-/// decides block boundaries, so a change must re-extract downstream.
-const COORDS_VERSION: u32 = 1;
-
-/// The pinned PDFium native build (see `PDFIUM_VERSION.md`). A different
-/// PDFium build can extract text differently, so the build number is
-/// part of `extractor_version`. It is a compile-time constant because
-/// P0 pins the `pdfium-render` cargo feature to exactly one build —
-/// there is nothing to query at runtime.
-const PDFIUM_BUILD: u32 = 7763;
 
 /// The process-wide PDFium handle.
 ///
@@ -157,24 +143,11 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
         biblio,
         provenance: Provenance {
             adapter: "pdf".to_string(),
-            extractor_version: extractor_version(),
+            extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: grade,
             skipped_units,
         },
     }))
-}
-
-/// The behaviour-sensitive version stamp for the PDF adapter.
-///
-/// It concatenates every dimension a downstream re-extraction must
-/// react to: the `pdfium-render` crate, the pinned PDFium native build,
-/// this adapter, the quality gate, and coordinate reconstruction.
-fn extractor_version() -> String {
-    format!(
-        "pdfium-render=0.9;pdfium-bin={PDFIUM_BUILD};\
-         pdf-adapter={PDF_ADAPTER_VERSION};quality={};coords={COORDS_VERSION}",
-        quality::QUALITY_VERSION,
-    )
 }
 
 // --- TOC: the PDF outline ------------------------------------------------

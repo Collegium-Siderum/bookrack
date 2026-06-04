@@ -27,11 +27,6 @@ use serde::Serialize;
 
 use crate::contract::TextLayerQuality;
 
-/// Bump on any change to a quality threshold or the verdict ladder:
-/// the verdict feeds extractor_version, and a changed verdict can
-/// shift downstream routing.
-pub const QUALITY_VERSION: u32 = 1;
-
 /// What the quality gate decided about a candidate text layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum QualityDecision {
@@ -79,10 +74,10 @@ pub struct QualityReport {
 
 // Thresholds — calibrated against the spike's PDF corpus and frozen
 // here as crate-internal constants (the verdict ladder is a behaviour
-// dimension versioned by QUALITY_VERSION, not a runtime knob). Born-
-// digital PDFs in that corpus carry images on <=11% of pages; scans and
-// dual-layer PDFs on >=99%, so the dual-layer cut is wide of either
-// cluster.
+// dimension caller code re-extracts on, signalled through the global
+// `EXTRACTOR_VERSION`). Born-digital PDFs in that corpus carry images
+// on <=11% of pages; scans and dual-layer PDFs on >=99%, so the dual-
+// layer cut is wide of either cluster.
 const CPP_OCR: f64 = 50.0; // below → almost certainly a bare scan
 const CPP_DOUBT: f64 = 200.0; // below → a suspiciously sparse layer
 const REPLACEMENT_OCR: f64 = 0.05;

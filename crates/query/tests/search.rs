@@ -70,7 +70,7 @@ fn extraction() -> Extraction {
         },
         provenance: Provenance {
             adapter: "test".to_string(),
-            extractor_version: "test-1".to_string(),
+            extractor_version: 1,
             text_layer_quality: TextLayerQuality::BornDigital,
             skipped_units: Vec::new(),
         },

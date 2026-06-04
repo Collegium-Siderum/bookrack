@@ -7,7 +7,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use bookrack_extract::{BlockKind, extract};
+use bookrack_extract::{BlockKind, EXTRACTOR_VERSION, extract};
 use common::extracted;
 
 fn fixture(name: &str) -> PathBuf {
@@ -25,13 +25,14 @@ fn utf8_text_yields_blocks_and_a_chapter_toc() {
     assert_eq!(depths, vec![0, 1, 1, 0, 1]);
     assert!(ex.toc.entries.iter().all(|e| e.start_block.is_some()));
     assert!(ex.blocks.iter().any(|b| b.kind == BlockKind::Body));
-    assert!(ex.provenance.extractor_version.contains("encoding=utf-8"));
+    assert_eq!(ex.provenance.extractor_version, EXTRACTOR_VERSION);
 }
 
 #[test]
 fn legacy_gbk_text_is_decoded_via_gb18030() {
     // The UTF-8 fixture re-encoded to GB18030 must extract to exactly
-    // the same blocks and TOC — only the stamped encoding differs.
+    // the same blocks and TOC: the legacy-encoding decode path is
+    // semantically transparent.
     let utf8 = std::fs::read(fixture("web_novel.txt")).expect("read fixture");
     let text = String::from_utf8(utf8).expect("fixture is utf-8");
     let (gbk, _, _) = encoding_rs::GB18030.encode(&text);
@@ -46,12 +47,7 @@ fn legacy_gbk_text_is_decoded_via_gb18030() {
 
     assert_eq!(from_gbk.blocks, from_utf8.blocks);
     assert_eq!(from_gbk.toc, from_utf8.toc);
-    assert!(
-        from_gbk
-            .provenance
-            .extractor_version
-            .contains("encoding=gb18030"),
-    );
+    assert_eq!(from_gbk.provenance.extractor_version, EXTRACTOR_VERSION);
 }
 
 #[test]

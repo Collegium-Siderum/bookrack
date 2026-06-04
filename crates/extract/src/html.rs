@@ -19,14 +19,12 @@
 
 use std::path::Path;
 
+use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, Extraction, Provenance,
     TextLayerQuality, Toc, TocEntry,
 };
 use crate::html_parse;
-
-/// Behaviour-sensitive extractor versions, stamped into `Provenance`.
-const EXTRACTOR_VERSION: &str = "scraper=0.27;html-adapter=1";
 
 /// Extract one standalone HTML file.
 pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
@@ -57,7 +55,7 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
         biblio,
         provenance: Provenance {
             adapter: "html".to_string(),
-            extractor_version: EXTRACTOR_VERSION.to_string(),
+            extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: TextLayerQuality::BornDigital,
             // A standalone HTML file is one source unit; there is no
             // sub-unit to skip.

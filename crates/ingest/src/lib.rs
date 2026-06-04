@@ -376,7 +376,7 @@ pub async fn ingest_book<E: Embedder>(
     catalog.set_extraction(
         intake_id,
         &extraction.provenance.adapter,
-        &extraction.provenance.extractor_version,
+        extraction.provenance.extractor_version,
     )?;
     // The status track is `Pending` (set by `register_intake`) →
     // `Extracted` here → `Embedded` after the embed run completes.
@@ -1263,7 +1263,7 @@ mod tests {
             },
             provenance: Provenance {
                 adapter: "test".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -1936,7 +1936,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2001,7 +2001,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2066,7 +2066,7 @@ mod book_pipeline_tests {
             biblio: bookrack_extract::Biblio::default(),
             provenance: bookrack_extract::Provenance {
                 adapter: "txt".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2128,7 +2128,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "pdf".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2189,7 +2189,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2249,7 +2249,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2307,7 +2307,7 @@ mod book_pipeline_tests {
             },
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
@@ -2481,7 +2481,7 @@ mod book_pipeline_tests {
             biblio,
             provenance: bookrack_extract::Provenance {
                 adapter: "epub".to_string(),
-                extractor_version: "test-1".to_string(),
+                extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
             },
