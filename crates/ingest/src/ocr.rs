@@ -27,11 +27,12 @@
 //! [`bookrack_extract::Provenance::partial_pages`] so downstream
 //! readers know which pages are real.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
 use bookrack_extract::Extraction;
 
+use crate::envelope;
 use crate::{IngestError, Result, sha256_hex};
 
 /// Parameters that shape one [`ingest_ocr_intake`] run.
@@ -55,8 +56,8 @@ pub struct OcrIngestReport {
     /// `page_count` carries the source's expected sheet count.
     pub pdf_intake_id: i64,
     /// The OCR markdown's intake id. Status is currently
-    /// [`IntakeStatus::Pending`] — later commits advance it through
-    /// `Extracted` and `Embedded`.
+    /// [`IntakeStatus::Extracted`] — a later commit advances it to
+    /// `Embedded` after CHUNK + EMBED.
     pub ocr_intake_id: i64,
     /// The scan PDF's whole-file SHA-256.
     pub source_sha_pdf: String,
@@ -67,6 +68,10 @@ pub struct OcrIngestReport {
     /// The highest sheet number the OCR product carries — its own
     /// page count, recorded into the OCR intake's `page_count`.
     pub ocr_page_count: u32,
+    /// Where the rebuild-cache envelope was written. `None` when the
+    /// write failed (logged as a warning rather than aborting the
+    /// run, matching the `ingest_book` convention).
+    pub envelope_path: Option<PathBuf>,
     /// The post-check extraction. On a partial run, its
     /// `provenance.partial_pages` carries the present sheet set.
     pub extraction: Extraction,
@@ -156,6 +161,45 @@ pub fn ingest_ocr_intake(
     let ocr_page_count = present_sheets(&extraction).last().copied().unwrap_or(0);
     catalog.set_page_count(ocr_intake_id, i64::from(ocr_page_count))?;
 
+    // 7. Write the rebuild-cache envelope. Mirrors `ingest_book`
+    //    (lib.rs L429-L453): same opaque-store directory, same
+    //    filename convention, same non-fatal failure handling — a
+    //    failed write only forfeits the rebuild path for this intake,
+    //    it does not abort the run. With the envelope on disk, the
+    //    OCR intake is reachable from `corpus rebuild --only` without
+    //    re-running the OCR adapter.
+    let envelope_path = books_dir.join(envelope::envelope_filename(ocr_intake_id));
+    let envelope_path = match envelope::write_envelope(
+        &envelope_path,
+        &extraction,
+        ocr_intake_id,
+        &source_sha_ocr,
+    ) {
+        Ok(()) => {
+            catalog.set_stored_path(ocr_intake_id, envelope_path.to_string_lossy().as_ref())?;
+            Some(envelope_path)
+        }
+        Err(err) => {
+            tracing::warn!(
+                intake_id = ocr_intake_id,
+                error = %err,
+                "failed to write OCR extraction envelope; rebuild path unavailable for this intake"
+            );
+            None
+        }
+    };
+
+    // 8. Stamp adapter + extractor_version and advance status to
+    //    `Extracted`. The OCR adapter constants live in the extract
+    //    crate; using its `ADAPTER` string keeps the format
+    //    commitment single-sourced.
+    catalog.set_extraction(
+        ocr_intake_id,
+        bookrack_extract::ocr::ADAPTER,
+        bookrack_extract::OCR_INTAKE_VERSION,
+    )?;
+    catalog.set_intake_status(ocr_intake_id, IntakeStatus::Extracted)?;
+
     Ok(OcrIngestReport {
         pdf_intake_id,
         ocr_intake_id,
@@ -163,6 +207,7 @@ pub fn ingest_ocr_intake(
         source_sha_ocr,
         expected_pages,
         ocr_page_count,
+        envelope_path,
         extraction,
     })
 }
@@ -369,15 +414,32 @@ mod tests {
         );
         assert!(stored.ends_with(&format!("{}.pdf", report.pdf_intake_id)));
 
-        // OCR intake: status still Pending (this commit does not yet
-        // advance it), page_count = 3 from the marker scan.
+        // OCR intake: advanced to Extracted by the envelope-and-stamp
+        // step, page_count = 3 from the marker scan, adapter stamped
+        // with the OCR adapter string, stored_path pointing at the
+        // envelope JSON in the opaque store.
         let ocr = catalog
             .intake_by_id(report.ocr_intake_id)
             .expect("lookup")
             .expect("present");
-        assert_eq!(ocr.status, IntakeStatus::Pending);
+        assert_eq!(ocr.status, IntakeStatus::Extracted);
         assert_eq!(ocr.page_count, Some(3));
         assert_eq!(ocr.format.as_deref(), Some("ocr-markdown"));
+        assert_eq!(ocr.adapter.as_deref(), Some("ocr-pages"));
+        assert_eq!(ocr.extractor_version, bookrack_extract::OCR_INTAKE_VERSION,);
+        let stored_ocr = ocr.stored_path.as_deref().expect("OCR stored_path set");
+        let envelope_path = report.envelope_path.as_deref().expect("envelope written");
+        assert_eq!(std::path::Path::new(stored_ocr), envelope_path);
+        assert!(envelope_path.exists(), "envelope JSON exists on disk");
+
+        // The envelope's body round-trips: opening it returns an
+        // ExtractionEnvelope whose extraction equals the in-memory one,
+        // and whose source_sha256 is the OCR markdown's hash (not the
+        // PDF's — the PDF hash lives in provenance.derived_from_sha256).
+        let env = crate::envelope::read_envelope(envelope_path).expect("read envelope");
+        assert_eq!(env.intake_id, report.ocr_intake_id);
+        assert_eq!(env.source_sha256, report.source_sha_ocr);
+        assert_eq!(env.extraction, report.extraction);
 
         // Complete coverage → partial_pages stays None;
         // derived_from_sha256 echoes the PDF intake's source_sha256.
