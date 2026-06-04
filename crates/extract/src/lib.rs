@@ -25,6 +25,23 @@ use std::path::Path;
 
 use bookrack_audit_profile::ExtractToggles;
 
+/// Monotonic version of the extractor's output. Stored on
+/// `intake.extractor_version`; a mismatch with a stored row marks the
+/// partition stale.
+///
+/// Bumped whenever the shape or interpretation of [`Extraction`]
+/// changes, or whenever a behaviour-sensitive dependency is upgraded.
+/// The companion test `tests/dep_hash.rs` fails until
+/// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
+pub const EXTRACTOR_VERSION: u32 = 1;
+
+/// SHA-256 of the sorted `name@version` lines of the behaviour-
+/// sensitive crates the extractor depends on. Refreshed in lockstep
+/// with [`EXTRACTOR_VERSION`]. See `tests/dep_hash.rs` for the input
+/// list and computation.
+pub const FROZEN_DEPS_HASH: &str =
+    "b4ad0eff4a4f766e81081f72e9313a2ef7ffb0dd60e8bcfb8e05e1aaf4d806ae";
+
 /// Extract one source file into an [`ExtractOutcome`].
 ///
 /// The format is detected from the file extension. The outcome is

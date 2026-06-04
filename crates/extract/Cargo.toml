@@ -20,5 +20,8 @@ thiserror.workspace = true
 # GB18030 to exercise the legacy-encoding decode path.
 encoding_rs.workspace = true
 serde_json.workspace = true
+# Hashes Cargo.lock entries for behaviour-sensitive crates in the
+# dep-hash anchor test.
+sha2.workspace = true
 tempfile.workspace = true
 zip.workspace = true
