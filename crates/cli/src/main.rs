@@ -17,7 +17,10 @@ mod render;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bookrack_catalog::{ActorKind, Catalog, NewMetadataAudit, NewOverride, NewReview};
+use bookrack_catalog::{
+    ActorKind, Catalog, IntakeFilter, NewMetadataAudit, NewOverride, NewReview,
+    STATUS_ACKNOWLEDGED, STATUS_PENDING,
+};
 use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, SearchConfig};
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
@@ -123,6 +126,14 @@ enum Command {
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
+    },
+    /// Render `book_pipeline_audit` rows for a book, oldest first.
+    PipelineTrail {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -271,6 +282,59 @@ enum MetadataAction {
         /// The intake id of the book.
         book: i64,
     },
+    /// Inspect and compare audit profiles.
+    AuditProfile {
+        #[command(subcommand)]
+        action: AuditProfileAction,
+    },
+    /// List books, optionally narrowed to those that still need review.
+    List {
+        /// Restrict the listing to books whose root audit confidence is
+        /// `low` or `medium` *and* whose review status is `pending` or
+        /// `acknowledged`. Missing review rows count as `pending`.
+        #[arg(long)]
+        needs_review: bool,
+        /// Maximum rows to print.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Skip this many rows before printing.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the `metadata_audit` history for a book, oldest first.
+    AuditTrail {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum AuditProfileAction {
+    /// Print every built-in profile name, one per line.
+    List {
+        /// Emit machine-readable JSON instead of the plain listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pretty-print the effective toggle settings for a named profile.
+    Show {
+        /// Built-in profile name (`default`, `trust-source`, `strict`).
+        name: String,
+    },
+    /// List the sub-section names that differ between two named profiles
+    /// and pretty-print each side's settings for those sections.
+    Diff {
+        /// First profile name.
+        a: String,
+        /// Second profile name.
+        b: String,
+    },
 }
 
 #[tokio::main]
@@ -364,6 +428,7 @@ async fn main() -> Result<()> {
                 .await
             }
         },
+        Command::PipelineTrail { book, json } => run_pipeline_trail(&cfg, book, json),
     }
 }
 
@@ -967,6 +1032,11 @@ async fn run_metadata(
     if let MetadataAction::Advance { book } = action {
         return run_metadata_advance(cfg, book, profile_name).await;
     }
+    // The audit-profile reflection commands need no catalog and no audit
+    // rules, so they short-circuit before the catalog open.
+    if let MetadataAction::AuditProfile { action } = action {
+        return run_metadata_audit_profile(action);
+    }
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let audit_rules = load_audit_rules(cfg);
@@ -984,8 +1054,126 @@ async fn run_metadata(
             run_metadata_approve(&catalog, book, reason.as_deref())
         }
         MetadataAction::Reject { book, reason } => run_metadata_reject(&catalog, book, &reason),
+        MetadataAction::List {
+            needs_review,
+            limit,
+            offset,
+            json,
+        } => run_metadata_list(&catalog, needs_review, limit, offset, json),
+        MetadataAction::AuditTrail { book, json } => run_metadata_audit_trail(&catalog, book, json),
         MetadataAction::Advance { .. } => unreachable!("handled above"),
+        MetadataAction::AuditProfile { .. } => unreachable!("handled above"),
     }
+}
+
+fn run_metadata_audit_profile(action: AuditProfileAction) -> Result<()> {
+    match action {
+        AuditProfileAction::List { json } => {
+            if json {
+                render::audit_profile_names_json(bookrack_audit_profile::ALL_BUILT_IN_NAMES);
+            } else {
+                for name in bookrack_audit_profile::ALL_BUILT_IN_NAMES {
+                    println!("{name}");
+                }
+            }
+            Ok(())
+        }
+        AuditProfileAction::Show { name } => {
+            let profile = bookrack_audit_profile::AuditProfile::from_named(&name)
+                .with_context(|| format!("unknown profile {name:?}"))?;
+            render::audit_profile_show(&name, &profile);
+            Ok(())
+        }
+        AuditProfileAction::Diff { a, b } => {
+            let pa = bookrack_audit_profile::AuditProfile::from_named(&a)
+                .with_context(|| format!("unknown profile {a:?}"))?;
+            let pb = bookrack_audit_profile::AuditProfile::from_named(&b)
+                .with_context(|| format!("unknown profile {b:?}"))?;
+            render::audit_profile_diff(&a, &pa, &b, &pb);
+            Ok(())
+        }
+    }
+}
+
+fn run_metadata_list(
+    catalog: &Catalog,
+    needs_review: bool,
+    limit: u32,
+    offset: u32,
+    json: bool,
+) -> Result<()> {
+    let needs_review_confidence: &[&str] = &["low", "medium"];
+    let needs_review_status: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
+    let filter = if needs_review {
+        IntakeFilter {
+            confidence_in: needs_review_confidence,
+            review_status_in: needs_review_status,
+            ..IntakeFilter::default()
+        }
+    } else {
+        IntakeFilter::default()
+    };
+    let intakes = catalog
+        .find_intakes(&filter, limit, offset)
+        .context("find intakes")?;
+    let total = catalog
+        .count_find_intakes(&filter)
+        .context("count intakes")?;
+    let mut rows = Vec::with_capacity(intakes.len());
+    for intake in intakes {
+        let effective = catalog
+            .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
+            .context("read effective metadata")?;
+        let title = effective.get("title").map(str::to_string);
+        let attrs = catalog
+            .publication_attrs(intake.intake_id, BOOK_SCOPE)
+            .context("read publication attrs")?;
+        let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
+        let review = catalog
+            .review(intake.intake_id, BOOK_SCOPE)
+            .context("read review")?
+            .map(|r| r.status);
+        rows.push(render::MetadataListRow {
+            intake_id: intake.intake_id,
+            title,
+            confidence,
+            review_status: review,
+        });
+    }
+    if json {
+        render::metadata_list_json(&rows, total);
+    } else {
+        render::metadata_list(&rows, total, needs_review);
+    }
+    Ok(())
+}
+
+fn run_metadata_audit_trail(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
+    let node_id = PartitionIdx::new(book).root().get();
+    let rows = catalog
+        .metadata_audit_for_node(node_id)
+        .context("read metadata audit")?;
+    if json {
+        render::metadata_audit_trail_json(book, &rows);
+    } else {
+        render::metadata_audit_trail(book, &rows);
+    }
+    Ok(())
+}
+
+fn run_pipeline_trail(cfg: &Config, book: i64, json: bool) -> Result<()> {
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let book_root_id = PartitionIdx::new(book).root().get();
+    let rows = catalog
+        .pipeline_audit_for_book(book_root_id)
+        .context("read pipeline audit")?;
+    if json {
+        render::pipeline_trail_json(book, &rows);
+    } else {
+        render::pipeline_trail(book, &rows);
+    }
+    Ok(())
 }
 
 fn run_metadata_show(

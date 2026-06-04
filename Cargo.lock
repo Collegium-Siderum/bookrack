@@ -639,6 +639,7 @@ name = "bookrack-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",

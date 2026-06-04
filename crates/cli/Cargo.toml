@@ -10,6 +10,7 @@ name = "bookrack"
 path = "src/main.rs"
 
 [dependencies]
+bookrack-audit-profile = { path = "../audit-profile" }
 bookrack-config = { path = "../config" }
 bookrack-obs = { path = "../obs" }
 bookrack-ingest = { path = "../ingest" }
