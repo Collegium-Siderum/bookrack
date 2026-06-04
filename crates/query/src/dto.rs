@@ -175,7 +175,7 @@ impl BookSummary {
     /// Project a catalog [`Intake`] row into a list summary, using the
     /// `title` and `top_contributor` resolved separately (the catalog
     /// row only carries identity / lifecycle fields).
-    pub(crate) fn from_intake(
+    pub fn from_intake(
         intake: &Intake,
         title: Option<String>,
         top_contributor: Option<String>,
@@ -191,7 +191,8 @@ impl BookSummary {
 }
 
 impl ContributorEntry {
-    pub(crate) fn from_row(row: NodeContributor) -> ContributorEntry {
+    /// Project a [`NodeContributor`] row into a wire-ready entry.
+    pub fn from_row(row: NodeContributor) -> ContributorEntry {
         ContributorEntry {
             role: row.role,
             ordinal: row.ordinal,
@@ -205,7 +206,7 @@ impl ContributorEntry {
 impl BookDetail {
     /// Project a catalog [`Intake`] plus its effective biblio and
     /// contributor rows into the detail DTO.
-    pub(crate) fn build(
+    pub fn build(
         intake: Intake,
         effective: EffectiveAttrs,
         contributors: Vec<NodeContributor>,
@@ -230,7 +231,8 @@ impl BookDetail {
 }
 
 impl TocNode {
-    pub(crate) fn from_node(node: &Node) -> TocNode {
+    /// Project a corpus [`Node`] into a TOC entry.
+    pub fn from_node(node: &Node) -> TocNode {
         TocNode {
             node_id: node.node_id.get(),
             parent_id: node.parent_id.map(|id| id.get()),
@@ -247,7 +249,7 @@ impl TocNode {
 /// value and a flag set when clamping changed it. A `requested` of 0
 /// becomes [`DEFAULT_LIST_LIMIT`] — a missing limit on the wire is
 /// what `0` represents at this seam.
-pub(crate) fn clamp_limit(requested: u32) -> (u32, bool) {
+pub fn clamp_limit(requested: u32) -> (u32, bool) {
     let effective = if requested == 0 {
         DEFAULT_LIST_LIMIT
     } else {

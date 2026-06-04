@@ -649,6 +649,7 @@ dependencies = [
  "bookrack-ingest",
  "bookrack-metadata",
  "bookrack-obs",
+ "bookrack-query",
  "bookrack-search",
  "bookrack-vectors",
  "clap",

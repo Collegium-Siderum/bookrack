@@ -9,6 +9,7 @@ use bookrack_audit_profile::AuditProfile;
 use bookrack_catalog::{BookPipelineAudit, MetadataAudit};
 use bookrack_ingest::IngestReport;
 use bookrack_metadata::{FieldGrade, FieldReport, MetadataReport};
+use bookrack_query::dto::{BookDetail, LibraryStats, ListBooksResult, Toc};
 use bookrack_search::Citation;
 
 /// First `max` characters of `text`, collapsed to a single line, with an
@@ -454,6 +455,130 @@ fn write_opt_string(out: &mut String, value: Option<&str>) {
             out.push('"');
         }
         None => out.push_str("null"),
+    }
+}
+
+/// Print a `books list` / `books find` page as a human-readable table.
+pub fn books_list(result: &ListBooksResult) {
+    if result.books.is_empty() {
+        println!("No books.");
+        return;
+    }
+    println!(
+        "{:>8}  {:<10}  {:<25}  title",
+        "intake", "status", "contributor",
+    );
+    for book in &result.books {
+        let format = book.format.as_deref().unwrap_or("-");
+        let contributor = book.top_contributor.as_deref().unwrap_or("-");
+        let title = book.title.as_deref().unwrap_or("(no title)");
+        println!(
+            "{:>8}  {:<10}  {:<25}  [{format}] {title}",
+            book.intake_id, book.status, contributor,
+        );
+    }
+    let shown = result.books.len() as u64;
+    let suffix = if result.truncated { " (truncated)" } else { "" };
+    if shown < result.total {
+        println!(
+            "\n... {} more (showing {} of {}{})",
+            result.total - shown,
+            shown,
+            result.total,
+            suffix,
+        );
+    } else {
+        println!("\ntotal: {}{}", result.total, suffix);
+    }
+}
+
+/// Same page as a JSON object, using `serde_json` over the DTO.
+pub fn books_list_json(result: &ListBooksResult) {
+    let s = serde_json::to_string(result).expect("ListBooksResult serializes");
+    println!("{s}");
+}
+
+/// Print one book's full bibliographic record.
+pub fn books_show(detail: &BookDetail) {
+    let title = detail.title.as_deref().unwrap_or("(no title)");
+    let format = detail.format.as_deref().unwrap_or("-");
+    println!(
+        "Book {} [{format}] {} {title}",
+        detail.intake_id, detail.status,
+    );
+    if !detail.effective_biblio.is_empty() {
+        println!("  effective metadata:");
+        for (key, value) in &detail.effective_biblio {
+            println!("    {key}: {value}");
+        }
+    }
+    if !detail.contributors.is_empty() {
+        println!("  contributors:");
+        for c in &detail.contributors {
+            let nat = c
+                .nationality
+                .as_deref()
+                .map(|n| format!(" ({n})"))
+                .unwrap_or_default();
+            println!(
+                "    [{}#{}] {}{nat} via {}",
+                c.role, c.ordinal, c.name, c.origin,
+            );
+        }
+    }
+}
+
+/// Same record as a JSON object.
+pub fn books_show_json(detail: &BookDetail) {
+    let s = serde_json::to_string(detail).expect("BookDetail serializes");
+    println!("{s}");
+}
+
+/// Print a book's table of contents, depth-first.
+pub fn books_toc(toc: &Toc) {
+    println!(
+        "Book {}: {} TOC nodes{}",
+        toc.intake_id,
+        toc.nodes.len(),
+        if toc.truncated { " (truncated)" } else { "" },
+    );
+    for node in &toc.nodes {
+        let indent: String = std::iter::repeat_n("  ", node.depth as usize).collect();
+        let title = node.title.as_deref().unwrap_or("(untitled)");
+        println!("{indent}- [{}] {title}", node.node_id);
+    }
+}
+
+/// Same TOC as a JSON object.
+pub fn books_toc_json(toc: &Toc) {
+    let s = serde_json::to_string(toc).expect("Toc serializes");
+    println!("{s}");
+}
+
+/// Print aggregate library counts.
+pub fn books_stats(stats: &LibraryStats) {
+    print_count_map("intake by status", &stats.intake_counts_by_status);
+    print_count_map("intake by format", &stats.intake_count_by_format);
+    print_count_map("book state by stage", &stats.book_state_counts_by_stage);
+    print_count_map(
+        "retrieval issue by status",
+        &stats.retrieval_issue_counts_by_status,
+    );
+}
+
+/// Same stats as a JSON object.
+pub fn books_stats_json(stats: &LibraryStats) {
+    let s = serde_json::to_string(stats).expect("LibraryStats serializes");
+    println!("{s}");
+}
+
+fn print_count_map(label: &str, map: &std::collections::BTreeMap<String, u64>) {
+    if map.is_empty() {
+        return;
+    }
+    println!("{label}:");
+    for (key, value) in map {
+        println!("  {key:>16}  {value}");
     }
 }
 

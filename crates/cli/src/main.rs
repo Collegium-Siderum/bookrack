@@ -28,6 +28,10 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::{AuditInput, AuditRules, TocStats};
+use bookrack_query::dto::{
+    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
+    TocNode, clamp_limit,
+};
 use bookrack_vectors::ChunkStore;
 
 #[derive(clap::Parser)]
@@ -81,6 +85,10 @@ enum Command {
     Query {
         /// The natural-language query.
         text: String,
+        /// Restrict the recall to one book's id partition. Without the
+        /// flag, every book in the library is in scope.
+        #[arg(long, value_name = "INTAKE_ID")]
+        in_book: Option<i64>,
         /// Force a brute-force scan for this query, ignoring any ANN
         /// index. Useful for ground-truth checks.
         #[arg(long)]
@@ -131,6 +139,74 @@ enum Command {
     PipelineTrail {
         /// The intake id of the book.
         book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Browse the library — list, find, show, table-of-contents, stats.
+    Books {
+        #[command(subcommand)]
+        action: BooksAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum BooksAction {
+    /// List books in catalog order, paginated.
+    List {
+        /// Maximum books to print.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Skip this many books before printing.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Filter books by title substring, contributor, or format.
+    Find {
+        /// Case-sensitive substring match against the book title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Exact-equality match against a contributor name.
+        #[arg(long)]
+        contributor: Option<String>,
+        /// Restrict the contributor JOIN to one role (`author`,
+        /// `translator`, ...). Only takes effect with `--contributor`.
+        #[arg(long)]
+        role: Option<String>,
+        /// Exact-equality match against the file format.
+        #[arg(long)]
+        format: Option<String>,
+        /// Maximum books to print.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        /// Skip this many books before printing.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the full bibliographic record for one book.
+    Show {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one book's table of contents, depth-first.
+    Toc {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregate counts across the library.
+    Stats {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
@@ -351,10 +427,11 @@ async fn main() -> Result<()> {
         } => run_ingest(&cfg, &path, hold_for_metadata, profile_name.as_deref()).await,
         Command::Query {
             text,
+            in_book,
             bypass_ann,
             nprobes,
             refine_factor,
-        } => run_query(&cfg, &text, bypass_ann, nprobes, refine_factor).await,
+        } => run_query(&cfg, &text, in_book, bypass_ann, nprobes, refine_factor).await,
         Command::Metadata { action } => run_metadata(&cfg, action, profile_name.as_deref()).await,
         Command::Dryrun {
             path,
@@ -429,7 +506,204 @@ async fn main() -> Result<()> {
             }
         },
         Command::PipelineTrail { book, json } => run_pipeline_trail(&cfg, book, json),
+        Command::Books { action } => run_books(&cfg, action),
     }
+}
+
+fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
+    let catalog = Catalog::open_read_only(&cfg.catalog_db()).context("open catalog")?;
+    match action {
+        BooksAction::List {
+            limit,
+            offset,
+            json,
+        } => run_books_list(&catalog, BookFilter::default(), limit, offset, json),
+        BooksAction::Find {
+            title,
+            contributor,
+            role,
+            format,
+            limit,
+            offset,
+            json,
+        } => {
+            let filter = BookFilter {
+                title_substring: title,
+                contributor_name: contributor,
+                contributor_role: role,
+                statuses: Vec::new(),
+                format,
+            };
+            run_books_list(&catalog, filter, limit, offset, json)
+        }
+        BooksAction::Show { book, json } => run_books_show(&catalog, book, json),
+        BooksAction::Toc { book, json } => run_books_toc(cfg, &catalog, book, json),
+        BooksAction::Stats { json } => run_books_stats(&catalog, json),
+    }
+}
+
+fn run_books_list(
+    catalog: &Catalog,
+    filter: BookFilter,
+    limit: u32,
+    offset: u32,
+    json: bool,
+) -> Result<()> {
+    let (effective_limit, clamp_triggered) = clamp_limit(limit);
+    let catalog_filter = IntakeFilter {
+        title_substring: filter.title_substring.as_deref(),
+        contributor_name: filter.contributor_name.as_deref(),
+        contributor_role: filter.contributor_role.as_deref(),
+        statuses: filter.statuses.as_slice(),
+        format: filter.format.as_deref(),
+        ..IntakeFilter::default()
+    };
+    let intakes = catalog
+        .find_intakes(&catalog_filter, effective_limit, offset)
+        .context("find intakes")?;
+    let total = catalog
+        .count_find_intakes(&catalog_filter)
+        .context("count intakes")?;
+    let mut books = Vec::with_capacity(intakes.len());
+    for intake in intakes {
+        let effective = catalog
+            .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
+            .context("read effective metadata")?;
+        let title = effective.get("title").map(str::to_string);
+        let contributors = catalog
+            .contributors_for_address(intake.intake_id, BOOK_SCOPE)
+            .context("read contributors")?;
+        let top_contributor = contributors.first().map(|c| c.name.clone());
+        books.push(BookSummary::from_intake(&intake, title, top_contributor));
+    }
+    let returned = books.len() as u64;
+    let truncated = clamp_triggered || u64::from(offset) + returned < total;
+    let result = ListBooksResult {
+        books,
+        total,
+        truncated,
+    };
+    if json {
+        render::books_list_json(&result);
+    } else {
+        render::books_list(&result);
+    }
+    Ok(())
+}
+
+fn run_books_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
+    let Some(intake) = catalog.intake_by_id(book).context("look up intake")? else {
+        anyhow::bail!("no intake registered for book {book}");
+    };
+    let effective = catalog
+        .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
+        .context("read effective metadata")?;
+    let contributors = catalog
+        .contributors_for_address(intake.intake_id, BOOK_SCOPE)
+        .context("read contributors")?;
+    let detail = BookDetail::build(intake, effective, contributors);
+    if json {
+        render::books_show_json(&detail);
+    } else {
+        render::books_show(&detail);
+    }
+    Ok(())
+}
+
+fn run_books_toc(cfg: &Config, catalog: &Catalog, book: i64, json: bool) -> Result<()> {
+    if catalog
+        .intake_by_id(book)
+        .context("look up intake")?
+        .is_none()
+    {
+        anyhow::bail!("no intake registered for book {book}");
+    }
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let book_root_id = PartitionIdx::new(book).root();
+    let nodes = corpus
+        .toc_for_book(book_root_id, MAX_TOC_NODES + 1)
+        .context("read toc")?;
+    if nodes.is_empty() {
+        if json {
+            println!("null");
+        } else {
+            println!("Book {book}: no TOC nodes.");
+        }
+        return Ok(());
+    }
+    let truncated = nodes.len() > MAX_TOC_NODES;
+    let projected: Vec<TocNode> = nodes
+        .iter()
+        .take(MAX_TOC_NODES)
+        .map(TocNode::from_node)
+        .collect();
+    let toc = Toc {
+        intake_id: book,
+        nodes: projected,
+        truncated,
+    };
+    if json {
+        render::books_toc_json(&toc);
+    } else {
+        render::books_toc(&toc);
+    }
+    Ok(())
+}
+
+fn run_books_stats(catalog: &Catalog, json: bool) -> Result<()> {
+    let mut intake_counts_by_status = std::collections::BTreeMap::new();
+    for status in bookrack_catalog::IntakeStatus::ALL {
+        let n = catalog
+            .count_intakes_by_status(std::slice::from_ref(&status))
+            .context("count intakes by status")?;
+        intake_counts_by_status.insert(status.as_str().to_string(), n);
+    }
+    let mut intake_count_by_format = std::collections::BTreeMap::new();
+    for format in ["epub", "pdf", "mobi", "azw3", "txt"] {
+        let n = catalog
+            .count_intakes_by_format(format)
+            .context("count intakes by format")?;
+        if n > 0 {
+            intake_count_by_format.insert(format.to_string(), n);
+        }
+    }
+    let mut book_state_counts_by_stage = std::collections::BTreeMap::new();
+    for stage in [
+        "extract",
+        "structure",
+        "metadata",
+        "chunk",
+        "embed",
+        "ready",
+    ] {
+        let n = catalog
+            .count_book_states_by_stage(stage)
+            .context("count book states")?;
+        if n > 0 {
+            book_state_counts_by_stage.insert(stage.to_string(), n);
+        }
+    }
+    let mut retrieval_issue_counts_by_status = std::collections::BTreeMap::new();
+    for status in ["open", "triaged", "resolved", "wontfix"] {
+        let n = catalog
+            .count_retrieval_issues_by_status(&[status])
+            .context("count retrieval issues")?;
+        if n > 0 {
+            retrieval_issue_counts_by_status.insert(status.to_string(), n);
+        }
+    }
+    let stats = LibraryStats {
+        intake_counts_by_status,
+        intake_count_by_format,
+        book_state_counts_by_stage,
+        retrieval_issue_counts_by_status,
+    };
+    if json {
+        render::books_stats_json(&stats);
+    } else {
+        render::books_stats(&stats);
+    }
+    Ok(())
 }
 
 /// Render `bookrack vectors status` — a read-only summary of the
@@ -956,6 +1230,7 @@ async fn run_ingest(
 async fn run_query(
     cfg: &Config,
     text: &str,
+    in_book: Option<i64>,
     bypass_ann: bool,
     nprobes: Option<usize>,
     refine_factor: Option<u32>,
@@ -1001,18 +1276,34 @@ async fn run_query(
         nprobes: nprobes.or(env.nprobes),
         refine_factor: refine_factor.or(env.refine_factor),
     };
-    let hits = bookrack_search::search_with(
-        text,
-        &corpus,
-        &catalog,
-        &store,
-        &embedder,
-        &cfg.lancedb_dir(),
-        overrides,
-        search_cfg.top_k,
-    )
-    .await
-    .context("run query")?;
+    let hits = if let Some(intake_id) = in_book {
+        let partition = PartitionIdx::new(intake_id);
+        let raw = bookrack_search::retrieve_with_partition(
+            text,
+            &store,
+            &embedder,
+            &cfg.lancedb_dir(),
+            overrides,
+            search_cfg.top_k,
+            partition,
+        )
+        .await
+        .context("run query in book")?;
+        bookrack_search::cite(&corpus, &catalog, raw).context("cite passages")?
+    } else {
+        bookrack_search::search_with(
+            text,
+            &corpus,
+            &catalog,
+            &store,
+            &embedder,
+            &cfg.lancedb_dir(),
+            overrides,
+            search_cfg.top_k,
+        )
+        .await
+        .context("run query")?
+    };
     render::citations(&hits);
     Ok(())
 }
