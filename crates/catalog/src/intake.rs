@@ -5,8 +5,40 @@
 //! An *intake* is one ingested source file. Its `source_sha256` (the
 //! whole-file hash) is the identity anchor of the entire data model:
 //! one file, one intake, one book. Registration is idempotent on that
-//! hash, so re-offering a file that is already known returns the
-//! existing row instead of creating a duplicate.
+//! hash, so re-offering a file already known returns the existing row
+//! instead of creating a duplicate.
+//!
+//! # Format commitment
+//!
+//! The shape of this table is the bookrack intake format: any future
+//! binary opens an existing `catalog.db` and reads every row's
+//! intake fields back unchanged. The rules:
+//!
+//! - Columns may be added, never renamed and never dropped.
+//! - A new column must be nullable or carry a literal default, so an
+//!   older binary's `INSERT` path remains valid.
+//! - Existing values, once written from a production path, are
+//!   frozen in meaning. The string value sets of `format`, `adapter`,
+//!   and `status` (the `IntakeStatus` enum) are append-only; an
+//!   existing label never changes meaning.
+//! - `intake_id` is permanent and never reused. `source_sha256` is
+//!   permanent and identifies the same bytes for the lifetime of
+//!   the database.
+//! - `intake_at` is ISO-8601 UTC at second resolution, with the `Z`
+//!   timezone designator.
+//! - `extractor_version` carries the integer in
+//!   `bookrack_extract::EXTRACTOR_VERSION` at the moment the file
+//!   was extracted, and reading the integer back yields the value
+//!   it was written with.
+//!
+//! Fields not yet written by any production path — `notes`,
+//! `expression_id`, and `stored_path` together with the opaque-store
+//! directory layout under it — sit outside the commitment until
+//! first use.
+//!
+//! The commitment is anchored physically by the round-trip test on
+//! `tests/fixtures/intake/v1/catalog.db`: a future binary that
+//! breaks any rule above flips that test red.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
 use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
