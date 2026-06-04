@@ -1755,6 +1755,19 @@ async fn run_query(
     // resolver can read the effective book title; it is used only
     // synchronously for citation and dropped at the end of this scope.
     let catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
+    // Refuse a `--in-book` against an unknown or already-removed intake
+    // up front, before the embedder probe and the vector store open.
+    // Without this guard the query silently returns zero hits and reads
+    // as "this book is fine, it just has no matches" — which is the
+    // opposite of what happened.
+    if let Some(intake_id) = in_book
+        && catalog
+            .intake_by_id(intake_id)
+            .context("look up intake")?
+            .is_none()
+    {
+        anyhow::bail!("no intake registered for book {intake_id}");
+    }
     let embedder = embedder(cfg, &embed_cfg)?;
 
     // The store's vector width is fixed at creation and must match the
