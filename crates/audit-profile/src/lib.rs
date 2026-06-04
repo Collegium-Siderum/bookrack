@@ -57,6 +57,11 @@ pub const PROFILE_DEFAULT: &str = "default";
 pub const PROFILE_TRUST_SOURCE: &str = "trust-source";
 pub const PROFILE_STRICT: &str = "strict";
 
+/// Names of every built-in profile preset that [`AuditProfile::from_named`]
+/// resolves. Listed in the order shipped to operators: the default first,
+/// then the two alternatives.
+pub const ALL_BUILT_IN_NAMES: &[&str] = &[PROFILE_DEFAULT, PROFILE_TRUST_SOURCE, PROFILE_STRICT];
+
 /// Audit profile consumed by the metadata audit, the filename parser,
 /// and the extract half-rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -553,6 +558,20 @@ mod tests {
         assert!(AuditProfile::from_named(PROFILE_TRUST_SOURCE).is_some());
         assert!(AuditProfile::from_named(PROFILE_STRICT).is_some());
         assert!(AuditProfile::from_named("unknown-profile").is_none());
+    }
+
+    #[test]
+    fn all_built_in_names_resolves_via_from_named() {
+        assert_eq!(
+            ALL_BUILT_IN_NAMES,
+            &[PROFILE_DEFAULT, PROFILE_TRUST_SOURCE, PROFILE_STRICT]
+        );
+        for name in ALL_BUILT_IN_NAMES {
+            assert!(
+                AuditProfile::from_named(name).is_some(),
+                "{name} resolves via from_named",
+            );
+        }
     }
 
     #[test]
