@@ -649,6 +649,13 @@ pub struct InfoSnapshot {
     pub catalog_schema_version_expected: u32,
     pub corpus_stamps: CorpusStamps,
     pub vectors_meta: Option<VectorsMeta>,
+    /// Live chunk-row count from the vector store. `None` when the
+    /// library has not been ingested into yet, or when the store could
+    /// not be opened. Distinct from
+    /// `vectors_meta.built_at_chunk_count`, which freezes a snapshot at
+    /// the last ANN build — `bookrack vectors status` reads the same
+    /// live number, so the two surfaces agree.
+    pub current_chunks: Option<usize>,
     pub intake_count: Option<u64>,
     pub ready_book_count: Option<u64>,
     pub disk: DiskUsage,
@@ -745,14 +752,21 @@ pub fn info(snapshot: &InfoSnapshot) {
 
     println!();
     println!("vectors:");
+    match snapshot.current_chunks {
+        Some(n) => println!("  chunks:          {n} (live)"),
+        None => println!("  chunks:          (no vector store yet)"),
+    }
     if let Some(meta) = &snapshot.vectors_meta {
-        println!("  ann kind:       {}", meta.kind);
-        println!("  num_partitions: {}", meta.num_partitions);
-        println!("  index name:     {}", meta.lance_index_name);
-        println!("  built_at:       {}", meta.built_at);
-        println!("  chunks built:   {}", meta.built_at_chunk_count);
-        println!("  churn:          {}", meta.churn_since_rebuild);
-    } else {
+        println!("  ann kind:        {}", meta.kind);
+        println!("  num_partitions:  {}", meta.num_partitions);
+        println!("  index name:      {}", meta.lance_index_name);
+        println!("  built_at:        {}", meta.built_at);
+        println!("  chunks at build: {}", meta.built_at_chunk_count);
+        println!(
+            "  churn:           {} (since last build)",
+            meta.churn_since_rebuild
+        );
+    } else if snapshot.current_chunks.is_none() {
         println!("  (no vectors_meta.json — never built)");
     }
 

@@ -627,7 +627,7 @@ async fn main() -> Result<()> {
         },
         Command::PipelineTrail { book, json } => run_pipeline_trail(&cfg, book, json),
         Command::Books { action } => run_books(&cfg, action),
-        Command::Info => run_info(&cfg),
+        Command::Info => run_info(&cfg).await,
         Command::Verify => run_verify(&cfg),
         Command::Stamps { action } => match action {
             StampsAction::Reconcile => run_stamps_reconcile(&cfg).await,
@@ -732,12 +732,13 @@ fn scan_intake_files(cfg: &Config, catalog: &Catalog) -> Result<Vec<i64>> {
     Ok(missing)
 }
 
-fn run_info(cfg: &Config) -> Result<()> {
+async fn run_info(cfg: &Config) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let corpus_stamps = read_corpus_stamps(cfg).unwrap_or_default();
     let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
         .ok()
         .flatten();
+    let current_chunks = read_current_chunk_count(cfg, &corpus_stamps).await;
     let intake_count = open_read_only_catalog(cfg)
         .and_then(|c| c.count_intakes().map_err(anyhow::Error::from))
         .ok();
@@ -758,12 +759,28 @@ fn run_info(cfg: &Config) -> Result<()> {
         catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
         corpus_stamps,
         vectors_meta,
+        current_chunks,
         intake_count,
         ready_book_count: ready_count,
         disk,
     };
     render::info(&snapshot);
     Ok(())
+}
+
+/// Best-effort live read of the vector store's row count. The corpus
+/// stamp pins the dimension the store was built with; a library that
+/// has never been ingested into has no stamp, no store, and no
+/// answer — return `None` and let the renderer say so. Errors are
+/// swallowed so `info` stays informational rather than failing on a
+/// half-built library.
+async fn read_current_chunk_count(
+    cfg: &Config,
+    corpus_stamps: &render::CorpusStamps,
+) -> Option<usize> {
+    let dim: usize = corpus_stamps.vector_dim.as_deref()?.parse().ok()?;
+    let store = ChunkStore::open(&cfg.lancedb_dir(), dim).await.ok()?;
+    store.count_rows().await.ok()
 }
 
 fn open_read_only_catalog(cfg: &Config) -> Result<Catalog> {
