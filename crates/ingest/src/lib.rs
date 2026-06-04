@@ -254,6 +254,12 @@ pub struct IngestParams {
     /// downstream audit. Defaults to the shipped profile so an
     /// embedder that does not set it sees the pre-profile behaviour.
     pub audit_profile: bookrack_metadata::AuditProfile,
+    /// When true, run the full pipeline even if the source's
+    /// `source_sha256` is already on file and the stored
+    /// `extractor_version` / `embed_model` stamps match this binary's.
+    /// Off by default — a re-ingest of an up-to-date source returns a
+    /// no-op report instead of re-extracting and re-embedding.
+    pub force: bool,
 }
 
 /// What one [`ingest_book`] run produced.
@@ -263,14 +269,25 @@ pub struct IngestReport {
     pub intake_id: i64,
     /// The book's root node id.
     pub book_root_id: NodeId,
-    /// Total corpus nodes written, including the root.
+    /// Total corpus nodes written, including the root. Zero on a
+    /// `no_op` run.
     pub nodes_written: usize,
-    /// How many of those nodes are prose leaves.
+    /// How many of those nodes are prose leaves. Zero on a `no_op` run.
     pub prose_leaves: usize,
-    /// How many chunk rows were embedded and written to the vector store.
+    /// How many chunk rows were embedded and written to the vector
+    /// store. Zero on a `no_op` run.
     pub chunks_written: usize,
     /// Whether the file was already registered (idempotent re-ingest).
     pub already_registered: bool,
+    /// True when the source was already on file and every recorded
+    /// stamp matched, so the pipeline returned without re-extracting,
+    /// re-chunking, or re-embedding. The `nodes_written`,
+    /// `prose_leaves`, and `chunks_written` counts are all zero.
+    pub no_op: bool,
+    /// True when the caller asked for [`IngestParams::force`] and the
+    /// pipeline therefore ran end-to-end even though the source was
+    /// already on file. Mutually exclusive with `no_op`.
+    pub forced: bool,
 }
 
 /// Ingest one source file end to end: extract it, register it, build its
@@ -301,6 +318,21 @@ pub async fn ingest_book<E: Embedder>(
     let bytes = std::fs::read(file)?;
     let source_sha = sha256_hex(&bytes);
     let run_id = new_run_id(&source_sha);
+
+    // True-idempotent fast path: if the source is already on file, the
+    // intake reached `Embedded`, and every stamp this binary would write
+    // matches what is already stored, the run has nothing left to do.
+    // The caller can override with [`IngestParams::force`] to re-extract
+    // and re-embed regardless.
+    if !params.force
+        && let Some(report) = noop_if_up_to_date(catalog, &source_sha, &params.embed.model)?
+    {
+        tracing::info!(
+            intake_id = report.intake_id,
+            "ingest noop: source unchanged and stamps current",
+        );
+        return Ok(report);
+    }
 
     // EXTRACT.
     let started = std::time::Instant::now();
@@ -508,6 +540,8 @@ pub async fn ingest_book<E: Embedder>(
             prose_leaves: structure.prose_leaves,
             chunks_written: 0,
             already_registered,
+            no_op: false,
+            forced: params.force,
         });
     }
 
@@ -532,7 +566,46 @@ pub async fn ingest_book<E: Embedder>(
         prose_leaves: structure.prose_leaves,
         chunks_written: embed.chunks_written,
         already_registered,
+        no_op: false,
+        forced: params.force,
     })
+}
+
+/// Inspect the catalog and book state to decide whether a re-ingest of
+/// `source_sha` would do any new work. Returns `Some(report)` if every
+/// stamp matches, in which case the caller should return the report
+/// immediately; returns `None` to fall through to the full pipeline.
+fn noop_if_up_to_date(
+    catalog: &Catalog,
+    source_sha: &str,
+    embed_model: &str,
+) -> Result<Option<IngestReport>> {
+    let Some(intake) = catalog.intake_by_sha(source_sha)? else {
+        return Ok(None);
+    };
+    if intake.status != IntakeStatus::Embedded {
+        return Ok(None);
+    }
+    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
+        return Ok(None);
+    }
+    let book_root_id = PartitionIdx::new(intake.intake_id).root();
+    let Some(state) = catalog.book_state(book_root_id.get())? else {
+        return Ok(None);
+    };
+    if state.embed_model.as_deref() != Some(embed_model) {
+        return Ok(None);
+    }
+    Ok(Some(IngestReport {
+        intake_id: intake.intake_id,
+        book_root_id,
+        nodes_written: 0,
+        prose_leaves: 0,
+        chunks_written: 0,
+        already_registered: true,
+        no_op: true,
+        forced: false,
+    }))
 }
 
 /// Run CHUNK and EMBED for a book whose corpus tree is already in
@@ -1833,6 +1906,112 @@ mod book_pipeline_tests {
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.confidence.as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn re_ingest_of_an_up_to_date_source_is_a_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let first = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        assert!(first.chunks_written > 0);
+        assert!(!first.no_op);
+        assert!(!first.forced);
+
+        let baseline = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+
+        // Second ingest of the same file: the source SHA is on file,
+        // status is Embedded, extractor_version and embed_model both
+        // match. The pipeline must short-circuit.
+        let second = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("second ingest");
+        assert!(second.no_op, "second ingest should be a no-op");
+        assert_eq!(second.intake_id, first.intake_id);
+        assert_eq!(second.chunks_written, 0);
+        assert_eq!(second.nodes_written, 0);
+        assert!(second.already_registered);
+        assert!(!second.forced);
+
+        // The pipeline audit must not have grown: no new stage rows.
+        let after = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        assert_eq!(after, baseline, "no new audit rows on a noop re-ingest");
+    }
+
+    #[tokio::test]
+    async fn force_re_ingest_runs_the_full_pipeline_even_when_up_to_date() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = write_sample(dir.path());
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        let first = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        let baseline = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+
+        let forced = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("forced ingest");
+        assert!(!forced.no_op);
+        assert!(forced.forced);
+        assert!(forced.already_registered);
+        assert!(forced.chunks_written > 0);
+
+        // The audit trail has grown: forced ingest re-ran every stage.
+        let after = catalog
+            .pipeline_audit_for_book(first.book_root_id.get())
+            .expect("audit")
+            .len();
+        assert!(after > baseline, "forced ingest must add new audit rows");
     }
 
     #[tokio::test]

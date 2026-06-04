@@ -88,6 +88,13 @@ enum Command {
         /// operator has corrected the record.
         #[arg(long)]
         hold_for_metadata: bool,
+        /// Re-extract, re-chunk, and re-embed even when the source's
+        /// `source_sha256` is already on file and every stamp matches
+        /// this binary. Without this flag, an up-to-date re-ingest is a
+        /// no-op. Use it after editing the source file or to recover
+        /// from a corrupted partition.
+        #[arg(long)]
+        force: bool,
     },
     /// Query the library and print cited passages.
     Query {
@@ -474,12 +481,14 @@ async fn main() -> Result<()> {
             path,
             recursive,
             hold_for_metadata,
+            force,
         } => {
             run_ingest(
                 &cfg,
                 &path,
                 recursive,
                 hold_for_metadata,
+                force,
                 profile_name.as_deref(),
             )
             .await
@@ -1468,6 +1477,7 @@ async fn run_ingest(
     path: &Path,
     recursive: bool,
     hold_for_metadata: bool,
+    force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
@@ -1480,6 +1490,7 @@ async fn run_ingest(
     let params = IngestParams {
         embed: embed_cfg,
         hold_for_metadata,
+        force,
         audit_rules,
         audit_profile,
         ..Default::default()
@@ -1519,7 +1530,8 @@ async fn run_ingest(
         if files.len() == 1 { "" } else { "s" },
     );
     let mut newly_ingested = 0usize;
-    let mut already_present = 0usize;
+    let mut refreshed = 0usize;
+    let mut skipped_noop = 0usize;
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     for file in &files {
         match ingest_book(
@@ -1534,12 +1546,25 @@ async fn run_ingest(
         .await
         {
             Ok(report) => {
-                if report.already_registered {
-                    already_present += 1;
+                if report.no_op {
+                    skipped_noop += 1;
                     println!(
-                        "  - {} (intake {}, already present)",
+                        "  = {} (intake {}, already up to date)",
                         file.display(),
                         report.intake_id,
+                    );
+                } else if report.already_registered {
+                    refreshed += 1;
+                    let marker = if report.forced {
+                        "forced"
+                    } else {
+                        "stamp drift"
+                    };
+                    println!(
+                        "  ~ {} (intake {}, refreshed [{marker}], {} chunks)",
+                        file.display(),
+                        report.intake_id,
+                        report.chunks_written,
                     );
                 } else {
                     newly_ingested += 1;
@@ -1565,10 +1590,13 @@ async fn run_ingest(
     }
     println!();
     println!(
-        "Recursive ingest summary: {newly_ingested} new, {already_present} already present, \
-         {} failed.",
+        "Recursive ingest summary: {newly_ingested} new, {refreshed} refreshed, \
+         {skipped_noop} already up to date, {} failed.",
         failed.len(),
     );
+    if skipped_noop > 0 && !force {
+        println!("  (Pass --force to re-extract and re-embed up-to-date intakes.)");
+    }
     if !failed.is_empty() {
         anyhow::bail!("{} file(s) failed during recursive ingest", failed.len());
     }

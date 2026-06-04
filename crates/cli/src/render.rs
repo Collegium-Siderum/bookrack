@@ -27,10 +27,23 @@ fn snippet(text: &str, max: usize) -> String {
 
 /// Print the outcome of one `ingest` run.
 pub fn ingest(report: &IngestReport) {
-    if report.already_registered {
+    if report.no_op {
         println!(
-            "Already ingested (intake {}); refreshed in place.",
-            report.intake_id
+            "Already ingested as intake {}; source and stamps unchanged, nothing to do.",
+            report.intake_id,
+        );
+        println!("  (Pass --force to re-extract, re-chunk, and re-embed anyway.)");
+        return;
+    }
+    if report.forced {
+        println!(
+            "Re-ingested intake {} with --force: re-extracted and re-embedded.",
+            report.intake_id,
+        );
+    } else if report.already_registered {
+        println!(
+            "Refreshed intake {}: a stamp had drifted, so the pipeline re-ran.",
+            report.intake_id,
         );
     } else {
         println!("Ingested as intake {}.", report.intake_id);
