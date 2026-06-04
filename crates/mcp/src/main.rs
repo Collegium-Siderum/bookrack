@@ -15,8 +15,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, SearchConfig};
+use bookrack_config::{
+    Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
+};
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
 
@@ -77,6 +80,24 @@ async fn main() -> Result<()> {
         Caller::mcp(),
     );
 
+    let info_context = LibraryInfoContext {
+        data_dir: cfg.data_dir().display().to_string(),
+        library_name: cfg.library().map(str::to_string),
+        resolution_source: resolution_source_label(cfg.source()).to_string(),
+        ollama_url: cfg.ollama_url().to_string(),
+        embed_model_configured: embed_cfg.model.clone(),
+    };
+
     let mcp_cfg = McpConfig::from_env();
-    bookrack_mcp::serve(Arc::new(ops), &mcp_cfg.addr).await
+    bookrack_mcp::serve(Arc::new(ops), info_context, &mcp_cfg.addr).await
+}
+
+fn resolution_source_label(source: ResolutionSource) -> &'static str {
+    match source {
+        ResolutionSource::DataDirFlag => "--data-dir flag",
+        ResolutionSource::LibraryFlag => "--library flag",
+        ResolutionSource::EnvVar => "BOOKRACK_DATA_DIR env",
+        ResolutionSource::RegistryDefault => "registry default",
+        ResolutionSource::Explicit => "explicit",
+    }
 }

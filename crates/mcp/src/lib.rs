@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
+use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::{Ops, OpsError, reads};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -95,21 +96,37 @@ pub struct BookIdArgs {
     pub intake_id: i64,
 }
 
+/// Arguments for `library.list_pending_reviews`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListPendingReviewsArgs {
+    /// Maximum number of rows in this page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip.
+    #[serde(default)]
+    pub offset: Option<u32>,
+}
+
 /// MCP request handler. The streamable-HTTP service clones it per session;
 /// the heavy state sits behind an `Arc`, so a clone is cheap and every
 /// session shares one warm ops handle.
 #[derive(Clone)]
 pub struct BookrackServer {
     ops: SharedOps,
+    info_context: LibraryInfoContext,
     tool_router: ToolRouter<BookrackServer>,
 }
 
 #[tool_router(router = tool_router)]
 impl BookrackServer {
-    /// Build a handler over the given warm ops handle.
-    pub fn new(ops: SharedOps) -> BookrackServer {
+    /// Build a handler over the given warm ops handle. `info_context`
+    /// carries the static facts (data dir, library name, ollama url,
+    /// embed model) needed to fill `library.info` without re-reading the
+    /// process environment on every call.
+    pub fn new(ops: SharedOps, info_context: LibraryInfoContext) -> BookrackServer {
         BookrackServer {
             ops,
+            info_context,
             tool_router: Self::tool_router(),
         }
     }
@@ -278,6 +295,99 @@ impl BookrackServer {
             Err(e) => Err(ops_error_to_internal(e)),
         }
     }
+
+    /// Return the metadata-status read for one book.
+    #[tool(
+        name = "library.show_metadata_audit",
+        description = "Return the metadata-status record for one book: the \
+                       bibliographic detail plus the persisted audit verdict, \
+                       confidence, and current review status. Returns null when \
+                       no such book is registered."
+    )]
+    async fn library_show_metadata_audit(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match reads::metadata::show_metadata_audit(&self.ops, args.intake_id) {
+            Ok(report) => respond_with(&Some(report)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::metadata_report::MetadataReport>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return books still on the metadata review queue.
+    #[tool(
+        name = "library.list_pending_reviews",
+        description = "List books whose metadata audit confidence is low or medium \
+                       and whose review is still pending or acknowledged. Paginated."
+    )]
+    async fn library_list_pending_reviews(
+        &self,
+        Parameters(args): Parameters<ListPendingReviewsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::metadata::list_pending_reviews(&self.ops, limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
+    /// Return the metadata-edit audit trail for one book.
+    #[tool(
+        name = "library.show_audit_trail",
+        description = "Return the metadata-edit audit trail for one book, oldest \
+                       first. Returns null when no such book is registered."
+    )]
+    async fn library_show_audit_trail(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match reads::metadata::show_audit_trail(&self.ops, args.intake_id) {
+            Ok(trail) => respond_with(&Some(trail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return the book-level pipeline audit trail for one book.
+    #[tool(
+        name = "library.show_pipeline_trail",
+        description = "Return the book-level pipeline audit trail for one book, \
+                       oldest first. Each row records a pipeline sub-step (stage, \
+                       outcome, duration, run id). Returns null when no such book \
+                       is registered."
+    )]
+    async fn library_show_pipeline_trail(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match reads::pipeline::show_pipeline_trail(&self.ops, args.intake_id) {
+            Ok(trail) => respond_with(&Some(trail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<Vec<bookrack_ops::dto::audit::PipelineAuditEntry>>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return the one-page library status card.
+    #[tool(
+        name = "library.info",
+        description = "Return a one-page status card for the open library: schema \
+                       versions, embedder configuration, stamped index parameters, \
+                       live row count, intake counts, and approximate disk usage."
+    )]
+    async fn library_info(&self) -> Result<CallToolResult, ErrorData> {
+        let ctx = self.info_context.clone();
+        let info = reads::info::show_library_info(&self.ops, ctx)
+            .await
+            .map_err(ops_error_to_internal)?;
+        respond_with(&info)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -313,9 +423,13 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 ///
 /// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
 /// server pointed at `http://<addr>/mcp`.
-pub async fn serve(ops: SharedOps, addr: &str) -> anyhow::Result<()> {
+pub async fn serve(
+    ops: SharedOps,
+    info_context: LibraryInfoContext,
+    addr: &str,
+) -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
-        move || Ok(BookrackServer::new(ops.clone())),
+        move || Ok(BookrackServer::new(ops.clone(), info_context.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );

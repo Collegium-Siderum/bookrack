@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use bookrack_catalog::{ActorKind, MetadataAudit};
+use bookrack_catalog::{ActorKind, BookPipelineAudit, MetadataAudit};
 
 /// Who (or what) initiated an op, with the optional bookkeeping every
 /// write op forwards to `metadata_audit`. CLI builds this with
@@ -82,8 +82,7 @@ impl AuditTrailEntry {
     }
 }
 
-/// One row of the book-level pipeline audit trail, projected for the
-/// wire. Filled out by a later phase that adds the matching read op.
+/// One row of the book-level pipeline audit trail, projected for the wire.
 #[derive(Debug, Clone, Serialize)]
 pub struct PipelineAuditEntry {
     /// Surrogate key assigned by the database.
@@ -116,4 +115,27 @@ pub struct PipelineAuditEntry {
     pub ts: String,
     /// The session the run belongs to.
     pub session_id: Option<String>,
+}
+
+impl PipelineAuditEntry {
+    /// Project a catalog [`BookPipelineAudit`] row into a wire-ready entry.
+    pub fn from_row(row: BookPipelineAudit) -> PipelineAuditEntry {
+        PipelineAuditEntry {
+            audit_id: row.audit_id,
+            book_root_id: row.book_root_id,
+            stage: row.stage,
+            sub_step: row.sub_step,
+            outcome: row.outcome,
+            pipeline_run_id: row.pipeline_run_id,
+            actor_kind: row.actor_kind.as_str().to_string(),
+            actor_detail: row.actor_detail,
+            adapter: row.adapter,
+            source_sha256: row.source_sha256,
+            metric_summary: row.metric_summary,
+            error_message: row.error_message,
+            duration_ms: row.duration_ms,
+            ts: row.ts,
+            session_id: row.session_id,
+        }
+    }
 }

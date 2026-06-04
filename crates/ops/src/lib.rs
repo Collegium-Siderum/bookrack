@@ -74,7 +74,6 @@ pub struct Ops<E: Embedder> {
     library: Option<Library<E>>,
     corpus_db: PathBuf,
     catalog_db: PathBuf,
-    #[allow(dead_code)] // Wired through for later phases that touch vectors.
     lancedb_dir: PathBuf,
     caller: Caller,
 }
@@ -141,6 +140,10 @@ impl<E: Embedder> Ops<E> {
 
     pub(crate) fn catalog_db(&self) -> &Path {
         &self.catalog_db
+    }
+
+    pub(crate) fn lancedb_dir(&self) -> &Path {
+        &self.lancedb_dir
     }
 }
 

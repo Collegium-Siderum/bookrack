@@ -8,4 +8,7 @@
 //! pipeline-trail, and library-info reads.
 
 pub mod books;
+pub mod info;
+pub mod metadata;
+pub mod pipeline;
 pub mod search;

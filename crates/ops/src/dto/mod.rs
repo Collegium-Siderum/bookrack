@@ -7,6 +7,8 @@
 //! shapes and audit-trail / pipeline-trail entries live in this crate.
 
 pub mod audit;
+pub mod info;
+pub mod metadata_report;
 pub mod writes;
 
 pub use bookrack_query::dto::{
