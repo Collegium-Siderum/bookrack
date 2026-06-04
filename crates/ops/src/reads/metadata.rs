@@ -82,12 +82,19 @@ pub fn list_pending_reviews<E: Embedder>(
 }
 
 /// Read the metadata-edit audit trail for one book, oldest first.
+///
+/// `metadata_audit` rows outlive their book by design: `bookrack
+/// remove` drops the `intake` row but preserves the audit history.
+/// This read therefore surfaces rows whenever any exist, regardless of
+/// whether the `intake_id` is still registered. Only when no rows
+/// exist AND no `intake` is registered for the id is it reported as
+/// [`OpsError::IntakeNotFound`] — that is the "ghost id" case.
 pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec<AuditTrailEntry>> {
     let catalog = Catalog::open_read_only(ops.catalog_db())?;
-    if catalog.intake_by_id(intake_id)?.is_none() {
-        return Err(OpsError::IntakeNotFound { intake_id });
-    }
     let node_id = PartitionIdx::new(intake_id).root().get();
     let rows = catalog.metadata_audit_for_node(node_id)?;
+    if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
+        return Err(OpsError::IntakeNotFound { intake_id });
+    }
     Ok(rows.into_iter().map(AuditTrailEntry::from_row).collect())
 }

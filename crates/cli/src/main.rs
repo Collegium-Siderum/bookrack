@@ -1956,14 +1956,22 @@ fn run_metadata_list(
 }
 
 fn run_metadata_audit_trail(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
+    // `metadata_audit` rows outlive the `intake` row by design — see
+    // the matching contract in `bookrack_ops::reads::metadata`. Read
+    // first, then only consult `intake_by_id` to disambiguate the
+    // empty result.
     let node_id = PartitionIdx::new(book).root().get();
     let rows = catalog
         .metadata_audit_for_node(node_id)
         .context("read metadata audit")?;
+    if rows.is_empty()
+        && catalog
+            .intake_by_id(book)
+            .context("look up intake")?
+            .is_none()
+    {
+        anyhow::bail!("no intake registered for book {book}");
+    }
     if json {
         render::metadata_audit_trail_json(book, &rows);
     } else {
@@ -1975,14 +1983,22 @@ fn run_metadata_audit_trail(catalog: &Catalog, book: i64, json: bool) -> Result<
 fn run_pipeline_trail(cfg: &Config, book: i64, json: bool) -> Result<()> {
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
+    // `book_pipeline_audit` rows outlive the `intake` row by design —
+    // see the matching contract in `bookrack_ops::reads::pipeline`.
+    // Read first, then only consult `intake_by_id` to disambiguate
+    // the empty result.
     let book_root_id = PartitionIdx::new(book).root().get();
     let rows = catalog
         .pipeline_audit_for_book(book_root_id)
         .context("read pipeline audit")?;
+    if rows.is_empty()
+        && catalog
+            .intake_by_id(book)
+            .context("look up intake")?
+            .is_none()
+    {
+        anyhow::bail!("no intake registered for book {book}");
+    }
     if json {
         render::pipeline_trail_json(book, &rows);
     } else {
