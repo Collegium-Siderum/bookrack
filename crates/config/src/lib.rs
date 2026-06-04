@@ -308,6 +308,16 @@ pub const EMBED_BATCH_MAX_CHUNKS_ENV: &str = "BOOKRACK_EMBED_BATCH_MAX_CHUNKS";
 /// Environment variable overriding the OOM-shrink char-budget floor.
 pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR_BUDGET";
 
+/// Default interval, in seconds, between EMBED-progress heartbeats on
+/// stderr. Calibrated to be visible on a tiny book («47 s» small EPUB)
+/// without spamming the log on a fast embedder.
+pub const DEFAULT_EMBED_PROGRESS_INTERVAL_SECS: u64 = 5;
+
+/// Environment variable overriding the EMBED-progress heartbeat
+/// interval, in seconds. A value of `0` emits a heartbeat after every
+/// batch; any non-numeric value falls back to the default.
+pub const EMBED_PROGRESS_INTERVAL_ENV: &str = "BOOKRACK_EMBED_PROGRESS_INTERVAL_SECS";
+
 /// Environment variable overriding the log filter directive.
 pub const LOG_ENV: &str = "BOOKRACK_LOG";
 
@@ -375,6 +385,11 @@ pub struct EmbedConfig {
     pub batch_min_char_budget: usize,
     /// Capacity of the producer-to-consumer channel, in chunks.
     pub channel_capacity: usize,
+    /// Lower bound on the gap between EMBED-progress heartbeats. The
+    /// loop emits a heartbeat on the first batch and then at most once
+    /// per `progress_interval`; `Duration::ZERO` opts into a heartbeat
+    /// after every batch.
+    pub progress_interval: Duration,
 }
 
 impl Default for EmbedConfig {
@@ -388,6 +403,7 @@ impl Default for EmbedConfig {
             batch_max_chunks: 64,
             batch_min_char_budget: 500,
             channel_capacity: 2_000,
+            progress_interval: Duration::from_secs(DEFAULT_EMBED_PROGRESS_INTERVAL_SECS),
         }
     }
 }
@@ -421,6 +437,10 @@ impl EmbedConfig {
                 d.batch_min_char_budget,
             ),
             channel_capacity: d.channel_capacity,
+            progress_interval: Duration::from_secs(env_usize(
+                get(EMBED_PROGRESS_INTERVAL_ENV),
+                DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
+            ) as u64),
         }
     }
 }
@@ -926,6 +946,39 @@ mod tests {
         assert_eq!(cfg.request_timeout, d.request_timeout);
         assert_eq!(cfg.max_retries, d.max_retries);
         assert_eq!(cfg.channel_capacity, d.channel_capacity);
+    }
+
+    #[test]
+    fn embed_config_progress_interval_default_and_override() {
+        let d = EmbedConfig::default();
+        assert_eq!(
+            d.progress_interval,
+            Duration::from_secs(DEFAULT_EMBED_PROGRESS_INTERVAL_SECS),
+        );
+
+        let cfg = EmbedConfig::resolve_from(|key| match key {
+            EMBED_PROGRESS_INTERVAL_ENV => Some("12".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.progress_interval, Duration::from_secs(12));
+
+        // A zero-second override opts into a heartbeat after every
+        // batch — that is the documented contract of the env var.
+        let burst = EmbedConfig::resolve_from(|key| match key {
+            EMBED_PROGRESS_INTERVAL_ENV => Some("0".to_string()),
+            _ => None,
+        });
+        assert_eq!(burst.progress_interval, Duration::ZERO);
+
+        // Non-numeric falls back, never panics.
+        let bad = EmbedConfig::resolve_from(|key| match key {
+            EMBED_PROGRESS_INTERVAL_ENV => Some("not-a-number".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            bad.progress_interval,
+            Duration::from_secs(DEFAULT_EMBED_PROGRESS_INTERVAL_SECS),
+        );
     }
 
     #[test]

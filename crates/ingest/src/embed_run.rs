@@ -14,7 +14,7 @@
 //! the same file replaces its rows rather than duplicating them.
 
 use std::path::Path;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bookrack_config::EmbedConfig;
 use bookrack_corpus::Corpus;
@@ -95,6 +95,9 @@ pub async fn embed_book_chunks<E: Embedder>(
 
     let mut report = EmbedRunReport::default();
     let mut start = 0usize;
+    let phase_started = Instant::now();
+    let mut ticker = ProgressTicker::new(cfg.progress_interval);
+    let total = plans.len();
     while start < plans.len() {
         let end = greedy_batch_end(plans, start, cfg);
         let batch = &plans[start..end];
@@ -117,6 +120,16 @@ pub async fn embed_book_chunks<E: Embedder>(
         report.shrink_events += shrinks;
         report.total_chars += batch_chars;
         start = end;
+
+        if ticker.should_emit(Instant::now()) {
+            tracing::info!(
+                chunks_done = report.chunks_written,
+                chunks_total = total,
+                batch = report.batches,
+                elapsed_s = phase_started.elapsed().as_secs_f64(),
+                "embed progress",
+            );
+        }
     }
 
     // Drain the delete-then-append churn: compact fragments, prune old
@@ -254,6 +267,41 @@ fn days_to_ymd(days_since_epoch: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m as u32, d as u32)
+}
+
+/// Throttle for the EMBED-progress heartbeat: emits the first tick
+/// unconditionally so users see a sign of life right away, then once
+/// per `interval`. `interval == Duration::ZERO` emits on every batch.
+#[derive(Debug)]
+struct ProgressTicker {
+    interval: Duration,
+    last: Option<Instant>,
+}
+
+impl ProgressTicker {
+    fn new(interval: Duration) -> Self {
+        ProgressTicker {
+            interval,
+            last: None,
+        }
+    }
+
+    /// True iff the loop should emit a heartbeat at `now`. Records the
+    /// emission timestamp on `true` so the next call respects the
+    /// interval.
+    fn should_emit(&mut self, now: Instant) -> bool {
+        match self.last {
+            None => {
+                self.last = Some(now);
+                true
+            }
+            Some(last) if now.duration_since(last) >= self.interval => {
+                self.last = Some(now);
+                true
+            }
+            Some(_) => false,
+        }
+    }
 }
 
 /// Find the end of the greedy batch starting at `start`: grow while the
@@ -752,5 +800,36 @@ mod tests {
             IngestError::Corpus(CorpusError::IndexStampMismatch { key, .. })
                 if key == bookrack_corpus::EMBED_MODEL_KEY
         ));
+    }
+
+    #[test]
+    fn progress_ticker_emits_the_first_tick_unconditionally() {
+        let mut ticker = ProgressTicker::new(Duration::from_secs(60));
+        // The first call always emits — users get a sign of life on the
+        // first batch even if the interval is long.
+        assert!(ticker.should_emit(Instant::now()));
+    }
+
+    #[test]
+    fn progress_ticker_throttles_subsequent_ticks_to_the_interval() {
+        let base = Instant::now();
+        let mut ticker = ProgressTicker::new(Duration::from_secs(5));
+        assert!(ticker.should_emit(base));
+        // Two seconds later: under the 5 s interval, no tick.
+        assert!(!ticker.should_emit(base + Duration::from_secs(2)));
+        // Five seconds after the previous emission: the interval has
+        // elapsed, tick again.
+        assert!(ticker.should_emit(base + Duration::from_secs(5)));
+        // Immediately after: throttled.
+        assert!(!ticker.should_emit(base + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn progress_ticker_with_a_zero_interval_emits_on_every_call() {
+        let mut ticker = ProgressTicker::new(Duration::ZERO);
+        let now = Instant::now();
+        assert!(ticker.should_emit(now));
+        assert!(ticker.should_emit(now));
+        assert!(ticker.should_emit(now));
     }
 }
