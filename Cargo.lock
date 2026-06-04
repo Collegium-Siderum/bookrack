@@ -799,6 +799,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-ops"
+version = "0.1.0"
+dependencies = [
+ "bookrack-catalog",
+ "bookrack-core",
+ "bookrack-corpus",
+ "bookrack-embed",
+ "bookrack-query",
+ "bookrack-search",
+ "bookrack-vectors",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bookrack-query"
 version = "0.1.0"
 dependencies = [
