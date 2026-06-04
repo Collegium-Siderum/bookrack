@@ -7,10 +7,20 @@
 //! into this crate; the MCP server deserializes tool arguments and calls
 //! into this crate. Output shapes are DTOs that both surfaces serialize.
 //!
-//! This phase lays the scaffolding: the [`Ops`] handle wraps one warm
-//! [`bookrack_query::Library`] together with the file-system paths every
-//! op needs, the read modules proxy straight through to the library
-//! facade, and the write module is reserved for later phases.
+//! Two constructors:
+//!
+//! - [`Ops::with_library`] holds a warm [`bookrack_query::Library`], so
+//!   search ops are available. The MCP daemon and CLI subcommands that
+//!   need vector recall (`bookrack query`) use this path.
+//! - [`Ops::catalog_only`] omits the embedder and vector store, so a
+//!   short-lived CLI process that only browses the catalog does not pay
+//!   the Ollama probe cost. Search ops on this variant fail with
+//!   [`OpsError::SearchUnavailable`].
+//!
+//! Reads open the catalog read-only per call; writes (added in a later
+//! phase) open it read-write per call and record a
+//! [`bookrack_catalog::MetadataAudit`] row tagged with the [`Caller`]
+//! this [`Ops`] was built with.
 
 pub mod dto;
 pub mod reads;
@@ -47,6 +57,10 @@ pub enum OpsError {
         /// The intake id the caller asked for.
         intake_id: i64,
     },
+
+    /// A search op was issued on an [`Ops`] built without a vector store.
+    #[error("search is not available on a catalog-only Ops handle")]
+    SearchUnavailable,
 }
 
 /// A fallible op.
@@ -54,27 +68,21 @@ pub type Result<T> = std::result::Result<T, OpsError>;
 
 /// Warm, shareable op state.
 ///
-/// Holds the warm [`Library`] together with the file-system paths every
-/// op needs and the [`Caller`] every write op stamps onto its audit
-/// row. Reads proxy through the library; writes (added in a later
-/// phase) open the catalog read-write per call.
+/// Holds the file-system paths every op needs and, optionally, a warm
+/// [`Library`] for search.
 pub struct Ops<E: Embedder> {
-    library: Library<E>,
-    // The path fields below stay populated even when no write op is in
-    // scope yet, so a later phase can open the catalog read-write or the
-    // corpus directly without changing the constructor signature.
-    #[allow(dead_code)]
+    library: Option<Library<E>>,
     corpus_db: PathBuf,
-    #[allow(dead_code)]
     catalog_db: PathBuf,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Wired through for later phases that touch vectors.
     lancedb_dir: PathBuf,
     caller: Caller,
 }
 
 impl<E: Embedder> Ops<E> {
-    /// Wrap a warm [`Library`] in an [`Ops`] for the given caller.
-    pub fn new(
+    /// Build an `Ops` over a warm [`Library`]. Use this when search ops
+    /// are needed.
+    pub fn with_library(
         library: Library<E>,
         corpus_db: PathBuf,
         catalog_db: PathBuf,
@@ -82,7 +90,27 @@ impl<E: Embedder> Ops<E> {
         caller: Caller,
     ) -> Ops<E> {
         Ops {
-            library,
+            library: Some(library),
+            corpus_db,
+            catalog_db,
+            lancedb_dir: lancedb_dir.to_path_buf(),
+            caller,
+        }
+    }
+
+    /// Build an `Ops` over the catalog and corpus only. Search ops on
+    /// this handle return [`OpsError::SearchUnavailable`]; reads of book
+    /// metadata, TOC, stats, and audit trails all work. This skips the
+    /// embedder probe, which a short-lived CLI invocation cannot afford
+    /// to pay on every call.
+    pub fn catalog_only(
+        corpus_db: PathBuf,
+        catalog_db: PathBuf,
+        lancedb_dir: &Path,
+        caller: Caller,
+    ) -> Ops<E> {
+        Ops {
+            library: None,
             corpus_db,
             catalog_db,
             lancedb_dir: lancedb_dir.to_path_buf(),
@@ -95,14 +123,24 @@ impl<E: Embedder> Ops<E> {
         &self.caller
     }
 
-    /// The embedding dimension the vector store was opened at.
-    pub fn dimension(&self) -> usize {
-        self.library.dimension()
+    /// The embedding dimension the vector store was opened at, if this
+    /// `Ops` was built with a warm library.
+    pub fn dimension(&self) -> Option<usize> {
+        self.library.as_ref().map(Library::dimension)
     }
 
-    /// Borrow the underlying read facade. Read ops on `Ops` proxy to it.
-    pub(crate) fn library(&self) -> &Library<E> {
-        &self.library
+    /// Borrow the underlying read facade, or [`None`] when this `Ops`
+    /// was built catalog-only.
+    pub(crate) fn library(&self) -> Option<&Library<E>> {
+        self.library.as_ref()
+    }
+
+    pub(crate) fn corpus_db(&self) -> &Path {
+        &self.corpus_db
+    }
+
+    pub(crate) fn catalog_db(&self) -> &Path {
+        &self.catalog_db
     }
 }
 

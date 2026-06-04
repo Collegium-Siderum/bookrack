@@ -29,10 +29,8 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::{AuditInput, AuditRules, TocStats};
-use bookrack_query::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
-    TocNode, clamp_limit,
-};
+use bookrack_ops::dto::BookFilter;
+use bookrack_ops::{Caller, Ops, reads};
 use bookrack_vectors::ChunkStore;
 
 /// Trailing block shown by `bookrack --help`. Names the environment
@@ -950,13 +948,13 @@ fn dir_size(path: &Path) -> Option<u64> {
 }
 
 fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
-    let catalog = Catalog::open_read_only(&cfg.catalog_db()).context("open catalog")?;
+    let ops = catalog_only_ops(cfg);
     match action {
         BooksAction::List {
             limit,
             offset,
             json,
-        } => run_books_list(&catalog, BookFilter::default(), limit, offset, json),
+        } => run_books_list(&ops, BookFilter::default(), limit, offset, json),
         BooksAction::Find {
             title,
             contributor,
@@ -973,55 +971,23 @@ fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
                 statuses: Vec::new(),
                 format,
             };
-            run_books_list(&catalog, filter, limit, offset, json)
+            run_books_list(&ops, filter, limit, offset, json)
         }
-        BooksAction::Show { book, json } => run_books_show(&catalog, book, json),
-        BooksAction::Toc { book, json } => run_books_toc(cfg, &catalog, book, json),
-        BooksAction::Stats { json } => run_books_stats(&catalog, json),
+        BooksAction::Show { book, json } => run_books_show(&ops, book, json),
+        BooksAction::Toc { book, json } => run_books_toc(&ops, book, json),
+        BooksAction::Stats { json } => run_books_stats(&ops, json),
     }
 }
 
 fn run_books_list(
-    catalog: &Catalog,
+    ops: &Ops<OllamaEmbedClient>,
     filter: BookFilter,
     limit: u32,
     offset: u32,
     json: bool,
 ) -> Result<()> {
-    let (effective_limit, clamp_triggered) = clamp_limit(limit);
-    let catalog_filter = IntakeFilter {
-        title_substring: filter.title_substring.as_deref(),
-        contributor_name: filter.contributor_name.as_deref(),
-        contributor_role: filter.contributor_role.as_deref(),
-        statuses: filter.statuses.as_slice(),
-        format: filter.format.as_deref(),
-        ..IntakeFilter::default()
-    };
-    let intakes = catalog
-        .find_intakes(&catalog_filter, effective_limit, offset)
-        .context("find intakes")?;
-    let total = catalog
-        .count_find_intakes(&catalog_filter)
-        .context("count intakes")?;
-    let mut books = Vec::with_capacity(intakes.len());
-    for intake in intakes {
-        let effective = catalog
-            .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
-            .context("read effective metadata")?;
-        let title = effective.get("title").map(str::to_string);
-        let contributors = catalog
-            .contributors_for_address(intake.intake_id, BOOK_SCOPE)
-            .context("read contributors")?;
-        let top_contributor = contributors.first().map(|c| c.name.clone());
-        books.push(BookSummary::from_intake(&intake, title, top_contributor));
-    }
-    let returned = books.len() as u64;
-    let truncated = clamp_triggered || u64::from(offset) + returned < total;
-    let result = ListBooksResult {
-        books,
-        total,
-        truncated,
-    };
+    let result =
+        reads::books::find_books(ops, filter, limit, offset).context("find books via ops")?;
     if json {
         render::books_list_json(&result);
     } else {
@@ -1030,17 +996,14 @@ fn run_books_list(
     Ok(())
 }
 
-fn run_books_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
-    let Some(intake) = catalog.intake_by_id(book).context("look up intake")? else {
-        anyhow::bail!("no intake registered for book {book}");
+fn run_books_show(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
+    let detail = match reads::books::show_book(ops, book) {
+        Ok(d) => d,
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => return Err(anyhow::Error::from(e).context("show book via ops")),
     };
-    let effective = catalog
-        .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
-        .context("read effective metadata")?;
-    let contributors = catalog
-        .contributors_for_address(intake.intake_id, BOOK_SCOPE)
-        .context("read contributors")?;
-    let detail = BookDetail::build(intake, effective, contributors);
     if json {
         render::books_show_json(&detail);
     } else {
@@ -1049,20 +1012,15 @@ fn run_books_show(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_books_toc(cfg: &Config, catalog: &Catalog, book: i64, json: bool) -> Result<()> {
-    if catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .is_none()
-    {
-        anyhow::bail!("no intake registered for book {book}");
-    }
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let book_root_id = PartitionIdx::new(book).root();
-    let nodes = corpus
-        .toc_for_book(book_root_id, MAX_TOC_NODES + 1)
-        .context("read toc")?;
-    if nodes.is_empty() {
+fn run_books_toc(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
+    let toc = match reads::books::show_toc(ops, book) {
+        Ok(t) => t,
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => return Err(anyhow::Error::from(e).context("show toc via ops")),
+    };
+    if toc.nodes.is_empty() {
         if json {
             println!("null");
         } else {
@@ -1070,17 +1028,6 @@ fn run_books_toc(cfg: &Config, catalog: &Catalog, book: i64, json: bool) -> Resu
         }
         return Ok(());
     }
-    let truncated = nodes.len() > MAX_TOC_NODES;
-    let projected: Vec<TocNode> = nodes
-        .iter()
-        .take(MAX_TOC_NODES)
-        .map(TocNode::from_node)
-        .collect();
-    let toc = Toc {
-        intake_id: book,
-        nodes: projected,
-        truncated,
-    };
     if json {
         render::books_toc_json(&toc);
     } else {
@@ -1089,60 +1036,26 @@ fn run_books_toc(cfg: &Config, catalog: &Catalog, book: i64, json: bool) -> Resu
     Ok(())
 }
 
-fn run_books_stats(catalog: &Catalog, json: bool) -> Result<()> {
-    let mut intake_counts_by_status = std::collections::BTreeMap::new();
-    for status in bookrack_catalog::IntakeStatus::ALL {
-        let n = catalog
-            .count_intakes_by_status(std::slice::from_ref(&status))
-            .context("count intakes by status")?;
-        intake_counts_by_status.insert(status.as_str().to_string(), n);
-    }
-    let mut intake_count_by_format = std::collections::BTreeMap::new();
-    for format in ["epub", "pdf", "mobi", "azw3", "txt"] {
-        let n = catalog
-            .count_intakes_by_format(format)
-            .context("count intakes by format")?;
-        if n > 0 {
-            intake_count_by_format.insert(format.to_string(), n);
-        }
-    }
-    let mut book_state_counts_by_stage = std::collections::BTreeMap::new();
-    for stage in [
-        "extract",
-        "structure",
-        "metadata",
-        "chunk",
-        "embed",
-        "ready",
-    ] {
-        let n = catalog
-            .count_book_states_by_stage(stage)
-            .context("count book states")?;
-        if n > 0 {
-            book_state_counts_by_stage.insert(stage.to_string(), n);
-        }
-    }
-    let mut retrieval_issue_counts_by_status = std::collections::BTreeMap::new();
-    for status in ["open", "triaged", "resolved", "wontfix"] {
-        let n = catalog
-            .count_retrieval_issues_by_status(&[status])
-            .context("count retrieval issues")?;
-        if n > 0 {
-            retrieval_issue_counts_by_status.insert(status.to_string(), n);
-        }
-    }
-    let stats = LibraryStats {
-        intake_counts_by_status,
-        intake_count_by_format,
-        book_state_counts_by_stage,
-        retrieval_issue_counts_by_status,
-    };
+fn run_books_stats(ops: &Ops<OllamaEmbedClient>, json: bool) -> Result<()> {
+    let stats = reads::books::show_stats(ops).context("show stats via ops")?;
     if json {
         render::books_stats_json(&stats);
     } else {
         render::books_stats(&stats);
     }
     Ok(())
+}
+
+/// Build a catalog-only [`Ops`] for short-lived CLI invocations that do
+/// not need vector search. Skips the Ollama dimension probe so the
+/// process can serve a `books *` subcommand in milliseconds.
+fn catalog_only_ops(cfg: &Config) -> Ops<OllamaEmbedClient> {
+    Ops::catalog_only(
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        Caller::cli(),
+    )
 }
 
 /// Render `bookrack vectors status` — a read-only summary of the

@@ -10,6 +10,7 @@ bookrack-query = { path = "../query" }
 bookrack-config = { path = "../config" }
 bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
+bookrack-ops = { path = "../ops" }
 rmcp.workspace = true
 axum.workspace = true
 clap.workspace = true

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! bookrack MCP server: exposes the read-only query facade to agent
-//! clients over streamable HTTP.
+//! bookrack MCP server: exposes the shared ops layer to agent clients
+//! over streamable HTTP.
 //!
-//! The server is a thin shell. It holds one warm [`Library`] behind an
-//! `Arc` and maps each tool call onto a facade method; it depends only on
-//! `bookrack-query`, never on the database crates behind that facade, so a
-//! schema change downstream leaves this crate untouched.
+//! The server is a thin shell. It holds one warm [`Ops`] behind an `Arc`
+//! and maps each tool call onto an `ops::*` function; it depends only on
+//! `bookrack-ops`, never on the database crates behind it, so a schema
+//! change downstream leaves this crate untouched.
 
 use std::sync::Arc;
 
 use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_query::Library;
-use bookrack_query::dto::BookFilter;
+use bookrack_ops::dto::BookFilter;
+use bookrack_ops::{Ops, OpsError, reads};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -23,8 +23,8 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 
-/// The warm query state, shared across MCP sessions.
-type SharedLibrary = Arc<Library<OllamaEmbedClient>>;
+/// The warm ops state, shared across MCP sessions.
+type SharedOps = Arc<Ops<OllamaEmbedClient>>;
 
 /// Arguments for the `library.search` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -97,19 +97,19 @@ pub struct BookIdArgs {
 
 /// MCP request handler. The streamable-HTTP service clones it per session;
 /// the heavy state sits behind an `Arc`, so a clone is cheap and every
-/// session shares one warm library.
+/// session shares one warm ops handle.
 #[derive(Clone)]
 pub struct BookrackServer {
-    library: SharedLibrary,
+    ops: SharedOps,
     tool_router: ToolRouter<BookrackServer>,
 }
 
 #[tool_router(router = tool_router)]
 impl BookrackServer {
-    /// Build a handler over the given warm library.
-    pub fn new(library: SharedLibrary) -> BookrackServer {
+    /// Build a handler over the given warm ops handle.
+    pub fn new(ops: SharedOps) -> BookrackServer {
         BookrackServer {
-            library,
+            ops,
             tool_router: Self::tool_router(),
         }
     }
@@ -125,11 +125,9 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let hits = self
-            .library
-            .search(&args.query, args.top_k)
+        let hits = reads::search::search(&self.ops, &args.query, args.top_k)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(ops_error_to_internal)?;
         tracing::info!(hits = hits.len(), "mcp library.search");
         respond_with(&hits)
     }
@@ -146,17 +144,24 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchInBookArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let hits = self
-            .library
-            .search_in_book(args.intake_id, &args.query, args.top_k)
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        tracing::info!(
-            intake_id = args.intake_id,
-            hits = hits.len(),
-            "mcp library.search_in_book"
-        );
-        respond_with(&hits)
+        let result =
+            reads::search::search_in_book(&self.ops, args.intake_id, &args.query, args.top_k).await;
+        match result {
+            Ok(hits) => {
+                tracing::info!(
+                    intake_id = args.intake_id,
+                    hits = hits.len(),
+                    "mcp library.search_in_book"
+                );
+                respond_with(&hits)
+            }
+            // Preserve the prior wire shape: an unknown intake reads
+            // as an empty hit list on this tool, not a fault.
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
     }
 
     /// Aggregate counts over the library (intakes, book states, retrieval
@@ -168,10 +173,7 @@ impl BookrackServer {
                        issues by triage status."
     )]
     async fn library_stats(&self) -> Result<CallToolResult, ErrorData> {
-        let stats = self
-            .library
-            .stats()
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let stats = reads::books::show_stats(&self.ops).map_err(ops_error_to_internal)?;
         respond_with(&stats)
     }
 
@@ -188,10 +190,8 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = self
-            .library
-            .list_books(limit, offset)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let page =
+            reads::books::list_books(&self.ops, limit, offset).map_err(ops_error_to_internal)?;
         tracing::info!(
             returned = page.books.len(),
             total = page.total,
@@ -228,10 +228,8 @@ impl BookrackServer {
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = self
-            .library
-            .find_books(filter, limit, offset)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let page = reads::books::find_books(&self.ops, filter, limit, offset)
+            .map_err(ops_error_to_internal)?;
         tracing::info!(
             returned = page.books.len(),
             total = page.total,
@@ -251,11 +249,13 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let detail = self
-            .library
-            .show_book(args.intake_id)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        respond_with(&detail)
+        match reads::books::show_book(&self.ops, args.intake_id) {
+            Ok(detail) => respond_with(&Some(detail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::BookDetail>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
     }
 
     /// Return one book's table of contents.
@@ -270,11 +270,13 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let toc = self
-            .library
-            .show_toc(args.intake_id)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        respond_with(&toc)
+        match reads::books::show_toc(&self.ops, args.intake_id) {
+            Ok(toc) => respond_with(&Some(toc)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
     }
 }
 
@@ -302,13 +304,18 @@ fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(json)]))
 }
 
+/// Map a generic [`OpsError`] to an MCP internal error.
+fn ops_error_to_internal(e: OpsError) -> ErrorData {
+    ErrorData::internal_error(e.to_string(), None)
+}
+
 /// Bind the streamable-HTTP server at `addr` and serve until Ctrl-C.
 ///
 /// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
 /// server pointed at `http://<addr>/mcp`.
-pub async fn serve(library: SharedLibrary, addr: &str) -> anyhow::Result<()> {
+pub async fn serve(ops: SharedOps, addr: &str) -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
-        move || Ok(BookrackServer::new(library.clone())),
+        move || Ok(BookrackServer::new(ops.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
@@ -328,10 +335,11 @@ pub async fn serve(library: SharedLibrary, addr: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use bookrack_query::dto::{
+    use bookrack_ops::Citation;
+    use bookrack_ops::dto::{
         BookDetail, BookSummary, ContributorEntry, LibraryStats, ListBooksResult, Toc, TocNode,
     };
-    use bookrack_query::{Citation, NodeId};
+    use bookrack_query::NodeId;
 
     fn citation(node: i64) -> Citation {
         Citation {

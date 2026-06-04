@@ -17,6 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, SearchConfig};
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
 
 #[derive(clap::Parser)]
@@ -68,6 +69,14 @@ async fn main() -> Result<()> {
     .await
     .context("open query library")?;
 
+    let ops = Ops::with_library(
+        library,
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        Caller::mcp(),
+    );
+
     let mcp_cfg = McpConfig::from_env();
-    bookrack_mcp::serve(Arc::new(library), &mcp_cfg.addr).await
+    bookrack_mcp::serve(Arc::new(ops), &mcp_cfg.addr).await
 }

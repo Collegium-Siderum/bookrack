@@ -21,6 +21,7 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-extract = { path = "../extract" }
 bookrack-metadata = { path = "../metadata" }
+bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
 bookrack-vectors = { path = "../vectors" }
 clap.workspace = true
