@@ -9,6 +9,8 @@
 *.sqlite
 *.sqlite-*
 *.db
+# Committed test fixtures stay tracked despite the *.db blanket.
+!crates/*/tests/fixtures/**/*.db
 
 # Secrets / local config
 .env
