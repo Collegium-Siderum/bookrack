@@ -156,6 +156,21 @@ pub enum ContributorRole {
     Other,
 }
 
+impl ContributorRole {
+    /// The role's canonical string form, matching the `snake_case` serde
+    /// representation and the convention `node_contributors.role` stores.
+    /// Adding a variant without updating this match — and the test that
+    /// pins it to the serde form — is a build-time error.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ContributorRole::Author => "author",
+            ContributorRole::Translator => "translator",
+            ContributorRole::Editor => "editor",
+            ContributorRole::Other => "other",
+        }
+    }
+}
+
 /// One source sub-unit that extraction skipped rather than aborting on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedUnit {
@@ -298,5 +313,23 @@ mod tests {
         let bytes = serde_json::to_vec(&original).expect("serialize");
         let parsed: Extraction = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn contributor_role_as_str_matches_serde_form() {
+        for role in [
+            ContributorRole::Author,
+            ContributorRole::Translator,
+            ContributorRole::Editor,
+            ContributorRole::Other,
+        ] {
+            let json = serde_json::to_value(role).expect("serialize");
+            let serde_form = json.as_str().expect("string variant");
+            assert_eq!(
+                role.as_str(),
+                serde_form,
+                "as_str() drifted from serde form for {role:?}",
+            );
+        }
     }
 }
