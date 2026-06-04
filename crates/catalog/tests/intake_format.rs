@@ -107,6 +107,10 @@ fn intake_v1_fixture_round_trips() {
             !row.intake_at.is_empty(),
             "intake_at must survive the rebuild"
         );
+        // `page_count` was added by M[6] as nullable: every fixture row
+        // pre-dates the column and so must read back as None after the
+        // migration runs on open.
+        assert_eq!(row.page_count, None);
     }
 
     // sqlite_sequence survives the M[4] rebuild, so the next

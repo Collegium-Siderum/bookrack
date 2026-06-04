@@ -79,6 +79,11 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .comment("see IntakeStatus"),
         ColumnSpec::int("expression_id").comment("FRBR soft reference; backfilled at METADATA"),
         ColumnSpec::text("notes"),
+        ColumnSpec::int("page_count").comment(
+            "paginated source: physical sheet count. Nullable: reflow formats \
+             (EPUB / HTML / TXT) carry no page count, and rows registered \
+             before this column existed read back as NULL.",
+        ),
     ],
     composite_pk: None,
     uniques: &[],
@@ -355,6 +360,10 @@ pub struct Intake {
     pub expression_id: Option<i64>,
     /// Free-form notes.
     pub notes: Option<String>,
+    /// Physical sheet count for paginated sources (PDF, multi-frame
+    /// TIFF, image folders, OCR products). `None` for reflow formats
+    /// and for rows registered before the column was added.
+    pub page_count: Option<i64>,
 }
 
 impl Intake {
@@ -375,6 +384,7 @@ impl Intake {
             status: decode(row, "status", IntakeStatus::from_db_str)?,
             expression_id: row.get("expression_id")?,
             notes: row.get("notes")?,
+            page_count: row.get("page_count")?,
         })
     }
 }
@@ -686,6 +696,18 @@ impl Catalog {
         Ok(affected > 0)
     }
 
+    /// Record the physical sheet count for a paginated intake. Returns
+    /// whether a row with that id existed. The value, once set, is the
+    /// expected page count any derived OCR manifestation must cover; it
+    /// is the parameter the completeness check compares against.
+    pub fn set_page_count(&self, intake_id: i64, page_count: i64) -> Result<bool> {
+        let affected = self.conn.execute(
+            "UPDATE intake SET page_count = :page_count WHERE intake_id = :intake_id",
+            named_params! { ":page_count": page_count, ":intake_id": intake_id },
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Stamp the extraction provenance: the adapter that parsed the
     /// file and the value of `bookrack_extract::EXTRACTOR_VERSION` at
     /// that moment. Both are known together once EXTRACT completes;
@@ -862,6 +884,41 @@ mod tests {
 
         assert!(catalog.intake_by_sha("absent").expect("lookup").is_none());
         assert!(catalog.intake_by_id(9999).expect("lookup").is_none());
+    }
+
+    #[test]
+    fn page_count_is_none_on_a_freshly_registered_intake() {
+        let mut catalog = catalog();
+        let intake = catalog
+            .register_intake(&NewIntake::new("sha-fresh-pc").format("pdf"))
+            .expect("register")
+            .into_intake();
+        // `register_intake` never writes `page_count`; it is set later
+        // by the paginated-source path.
+        assert_eq!(intake.page_count, None);
+    }
+
+    #[test]
+    fn set_page_count_writes_and_reads_back() {
+        let mut catalog = catalog();
+        let id = catalog
+            .register_intake(&NewIntake::new("sha-pc").format("pdf"))
+            .expect("register")
+            .intake()
+            .intake_id;
+        assert!(catalog.set_page_count(id, 612).expect("set"));
+
+        let read = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(read.page_count, Some(612));
+
+        // Re-setting overwrites the previous value (the column is a
+        // plain UPDATE, not an append).
+        assert!(catalog.set_page_count(id, 613).expect("re-set"));
+        let read = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(read.page_count, Some(613));
+
+        // A missing intake reports "no row updated".
+        assert!(!catalog.set_page_count(9999, 1).expect("miss"));
     }
 
     #[test]

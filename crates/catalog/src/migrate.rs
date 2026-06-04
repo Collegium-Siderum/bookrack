@@ -22,7 +22,7 @@ use rusqlite_migration::{M, Migrations};
 /// The `user_version` a fully-migrated `catalog.db` carries: the number of
 /// migrations defined. The `catalog_meta.schema_version` mirror is kept
 /// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 6;
+pub(crate) const TARGET_VERSION: i64 = 7;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -456,6 +456,14 @@ CREATE INDEX idx_intake_format ON intake(format);
 // rows with `NULL` until the next ingest restamps them.
 const AUDIT_VERDICT_DDL: &str = "ALTER TABLE node_publication_attrs ADD COLUMN audit_verdict TEXT;";
 
+// `M[6]` — add `intake.page_count` for paginated sources: physical
+// sheet count of a PDF, a TIFF stack, an image folder, or an OCR
+// product. The column is nullable: reflow formats (EPUB / HTML / TXT)
+// carry no page count, and rows registered before the column existed
+// read back as NULL. Additive: `ALTER TABLE ... ADD COLUMN` is O(1)
+// and leaves existing rows with NULL.
+const INTAKE_PAGE_COUNT_DDL: &str = "ALTER TABLE intake ADD COLUMN page_count INTEGER;";
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -466,6 +474,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(PUB_PLACE_ORIGINAL_YEAR_DDL),
         M::up(INTAKE_EXTRACTOR_VERSION_DDL),
         M::up(AUDIT_VERDICT_DDL),
+        M::up(INTAKE_PAGE_COUNT_DDL),
     ])
 }
 
@@ -627,6 +636,44 @@ mod tests {
             cols.iter().any(|c| c == "audit_verdict"),
             "expected audit_verdict column, got {cols:?}"
         );
+    }
+
+    #[test]
+    fn migration_m6_adds_page_count_to_intake_as_nullable_integer() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[6] and seed a pre-migration row so the
+        // post-migration NULL backfill can be asserted explicitly.
+        migrations()
+            .to_version(&mut conn, 6)
+            .expect("apply M[0..5]");
+        conn.execute(
+            "INSERT INTO intake (\
+               source_sha256, original_path, format, byte_size, \
+               adapter, extractor_version, intake_at, status\
+             ) VALUES ('sha-legacy', '/tmp/book.pdf', 'pdf', 8192, \
+                       'pdf', 1, '2026-06-05T00:00:00Z', 'extracted')",
+            [],
+        )
+        .expect("seed pre-M[6] row");
+
+        migrations().to_latest(&mut conn).expect("apply M[6]");
+
+        let cols = columns_of(&conn, "intake");
+        assert!(
+            cols.iter().any(|c| c == "page_count"),
+            "expected page_count column, got {cols:?}"
+        );
+        assert_eq!(column_type(&conn, "intake", "page_count"), "INTEGER");
+
+        // Pre-migration row reads back NULL on the new column.
+        let legacy_pc: Option<i64> = conn
+            .query_row(
+                "SELECT page_count FROM intake WHERE source_sha256 = 'sha-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read legacy row");
+        assert_eq!(legacy_pc, None);
     }
 
     #[test]
