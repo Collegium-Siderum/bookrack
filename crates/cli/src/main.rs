@@ -68,10 +68,18 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Ingest and embed a single file into the library.
+    /// Ingest and embed a single file (or, with `--recursive`, every
+    /// supported file under a directory) into the library.
     Ingest {
-        /// Path to the source file to ingest.
+        /// Path to the source file, or — with `--recursive` — the
+        /// directory to walk.
         path: PathBuf,
+        /// Walk `path` as a directory, ingesting every supported file
+        /// found. Files whose `source_sha256` is already registered are
+        /// skipped via the existing intake deduplication; a per-file
+        /// failure is logged and the walk continues.
+        #[arg(long)]
+        recursive: bool,
         /// Stop in the metadata stage when the audit verdict is
         /// `needs_work` and wait for an operator. Off by default —
         /// EMBED runs straight through and the audit verdict is
@@ -447,8 +455,18 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Ingest {
             path,
+            recursive,
             hold_for_metadata,
-        } => run_ingest(&cfg, &path, hold_for_metadata, profile_name.as_deref()).await,
+        } => {
+            run_ingest(
+                &cfg,
+                &path,
+                recursive,
+                hold_for_metadata,
+                profile_name.as_deref(),
+            )
+            .await
+        }
         Command::Query {
             text,
             in_book,
@@ -1418,6 +1436,7 @@ pub(crate) fn load_audit_profile(
 async fn run_ingest(
     cfg: &Config,
     path: &Path,
+    recursive: bool,
     hold_for_metadata: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
@@ -1435,19 +1454,138 @@ async fn run_ingest(
         audit_profile,
         ..Default::default()
     };
-    let report = ingest_book(
-        path,
-        &mut corpus,
-        &mut catalog,
-        &cfg.lancedb_dir(),
-        &cfg.books_dir(),
-        &embedder,
-        &params,
-    )
-    .await
-    .context("ingest book")?;
-    render::ingest(&report);
+
+    if !recursive {
+        let report = ingest_book(
+            path,
+            &mut corpus,
+            &mut catalog,
+            &cfg.lancedb_dir(),
+            &cfg.books_dir(),
+            &embedder,
+            &params,
+        )
+        .await
+        .context("ingest book")?;
+        render::ingest(&report);
+        return Ok(());
+    }
+
+    if !path.is_dir() {
+        anyhow::bail!(
+            "--recursive requires a directory; {} is not one",
+            path.display()
+        );
+    }
+    let files = collect_supported_files(path)?;
+    if files.is_empty() {
+        println!("No supported files under {}.", path.display());
+        return Ok(());
+    }
+    println!(
+        "Walking {} ({} supported file{}):",
+        path.display(),
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+    );
+    let mut newly_ingested = 0usize;
+    let mut already_present = 0usize;
+    let mut failed: Vec<(PathBuf, String)> = Vec::new();
+    for file in &files {
+        match ingest_book(
+            file,
+            &mut corpus,
+            &mut catalog,
+            &cfg.lancedb_dir(),
+            &cfg.books_dir(),
+            &embedder,
+            &params,
+        )
+        .await
+        {
+            Ok(report) => {
+                if report.already_registered {
+                    already_present += 1;
+                    println!(
+                        "  - {} (intake {}, already present)",
+                        file.display(),
+                        report.intake_id,
+                    );
+                } else {
+                    newly_ingested += 1;
+                    println!(
+                        "  + {} (intake {}, {} chunks)",
+                        file.display(),
+                        report.intake_id,
+                        report.chunks_written,
+                    );
+                }
+            }
+            Err(e) => {
+                let message = format!("{e:#}");
+                tracing::warn!(
+                    file = %file.display(),
+                    error = %message,
+                    "ingest failed; continuing",
+                );
+                println!("  ! {} — failed: {message}", file.display());
+                failed.push((file.clone(), message));
+            }
+        }
+    }
+    println!();
+    println!(
+        "Recursive ingest summary: {newly_ingested} new, {already_present} already present, \
+         {} failed.",
+        failed.len(),
+    );
+    if !failed.is_empty() {
+        anyhow::bail!("{} file(s) failed during recursive ingest", failed.len());
+    }
     Ok(())
+}
+
+/// Walk `dir` depth-first and collect every regular file whose extension
+/// is one of the formats `bookrack ingest` supports. Hidden files (those
+/// whose name starts with `.`) are skipped.
+fn collect_supported_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    const SUPPORTED: &[&str] = &["epub", "pdf", "mobi", "azw3", "txt"];
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = std::fs::read_dir(&current)
+            .with_context(|| format!("read_dir {}", current.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("entry of {}", current.display()))?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("metadata of {}", path.display()))?;
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            if let Some(ext) = ext
+                && SUPPORTED.contains(&ext.as_str())
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 async fn run_query(
