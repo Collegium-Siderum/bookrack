@@ -635,14 +635,22 @@ impl Catalog {
     /// `Extracted | DedupHold | Embedded`, vectors reembed against
     /// `Embedded`.
     ///
-    /// Returns an empty `Vec` on a fresh database, or when every row's
-    /// `extractor_version` already equals `current`.
+    /// Excludes rows whose adapter is the OCR-intake adapter, which
+    /// carries its own version dimension (`OCR_INTAKE_VERSION`) and
+    /// has its own staleness query in [`Self::stale_ocr_partitions`].
+    /// Without this filter, every bump of the born-digital
+    /// `EXTRACTOR_VERSION` would mark every OCR row stale even though
+    /// no behaviour change touched the OCR parser.
+    ///
+    /// Returns an empty `Vec` on a fresh database, or when every
+    /// non-OCR row's `extractor_version` already equals `current`.
     ///
     /// [`bookrack_extract::EXTRACTOR_VERSION`]: https://docs.rs/bookrack-extract
     pub fn stale_partitions(&self, current: u32) -> Result<Vec<i64>> {
         let mut stmt = self.conn.prepare(
             "SELECT intake_id FROM intake \
              WHERE extractor_version != :current \
+               AND (adapter IS NULL OR adapter != 'ocr-pages') \
              ORDER BY intake_id",
         )?;
         let rows = stmt.query_map(named_params! { ":current": current }, |row| row.get(0))?;
@@ -658,7 +666,48 @@ impl Catalog {
     /// so a count and a listing reach the same rows.
     pub fn count_stale_partitions(&self, current: u32) -> Result<u64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM intake WHERE extractor_version != :current",
+            "SELECT COUNT(*) FROM intake \
+             WHERE extractor_version != :current \
+               AND (adapter IS NULL OR adapter != 'ocr-pages')",
+            named_params! { ":current": current },
+            |row| row.get(0),
+        )?;
+        count_as_u64(n)
+    }
+
+    /// OCR intakes whose stored `extractor_version` is not equal to
+    /// `current`, ordered by ascending `intake_id`. The OCR parser
+    /// carries its own version dimension (`OCR_INTAKE_VERSION`); a
+    /// bump there marks OCR-derived content stale without disturbing
+    /// the rest of the corpus.
+    ///
+    /// Mirrors [`Self::stale_partitions`] for the born-digital half:
+    /// the two together cover every staleness signal exactly once,
+    /// with no row reached by both queries.
+    pub fn stale_ocr_partitions(&self, current: u32) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT intake_id FROM intake \
+             WHERE adapter = 'ocr-pages' \
+               AND extractor_version != :current \
+             ORDER BY intake_id",
+        )?;
+        let rows = stmt.query_map(named_params! { ":current": current }, |row| row.get(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Number of OCR intakes whose stored `extractor_version` is not
+    /// equal to `current`. Shares the WHERE shape with
+    /// [`Self::stale_ocr_partitions`] so a count and a listing reach
+    /// the same rows.
+    pub fn count_stale_ocr_partitions(&self, current: u32) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM intake \
+             WHERE adapter = 'ocr-pages' \
+               AND extractor_version != :current",
             named_params! { ":current": current },
             |row| row.get(0),
         )?;
@@ -851,6 +900,95 @@ mod tests {
         let stale = catalog.stale_partitions(3).expect("query");
         assert_eq!(stale, vec![a, b, _c]);
         assert_eq!(catalog.count_stale_partitions(3).expect("count"), 3);
+    }
+
+    #[test]
+    fn stale_partitions_excludes_ocr_rows_and_stale_ocr_partitions_returns_them() {
+        let mut catalog = catalog();
+        // Three born-digital rows: `epub_old` at v1, `epub_new` at v2,
+        // `pdf_old` at v1. Two OCR rows: `ocr_old` at v1, `ocr_new`
+        // at v2. Born-digital staleness must not surface OCR rows;
+        // OCR staleness must not surface born-digital rows.
+        let epub_old = catalog
+            .register_intake(&NewIntake::new("sha-epub-old"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let epub_new = catalog
+            .register_intake(&NewIntake::new("sha-epub-new"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let pdf_old = catalog
+            .register_intake(&NewIntake::new("sha-pdf-old"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let ocr_old = catalog
+            .register_intake(&NewIntake::new("sha-ocr-old"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let ocr_new = catalog
+            .register_intake(&NewIntake::new("sha-ocr-new"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+
+        assert!(
+            catalog
+                .set_extraction(epub_old, "epub", 1)
+                .expect("epub_old")
+        );
+        assert!(
+            catalog
+                .set_extraction(epub_new, "epub", 2)
+                .expect("epub_new")
+        );
+        assert!(catalog.set_extraction(pdf_old, "pdf", 1).expect("pdf_old"));
+        assert!(
+            catalog
+                .set_extraction(ocr_old, "ocr-pages", 1)
+                .expect("ocr_old")
+        );
+        assert!(
+            catalog
+                .set_extraction(ocr_new, "ocr-pages", 2)
+                .expect("ocr_new")
+        );
+
+        // Born-digital queries against current = 2: epub_old and pdf_old
+        // are stale; epub_new is current; OCR rows are filtered out
+        // regardless of their version.
+        let bd_stale = catalog.stale_partitions(2).expect("bd query");
+        assert_eq!(bd_stale, vec![epub_old, pdf_old]);
+        assert_eq!(
+            catalog.count_stale_partitions(2).expect("bd count"),
+            bd_stale.len() as u64
+        );
+
+        // OCR queries against current = 2: only ocr_old is stale;
+        // born-digital rows are filtered out regardless of version.
+        let ocr_stale = catalog.stale_ocr_partitions(2).expect("ocr query");
+        assert_eq!(ocr_stale, vec![ocr_old]);
+        assert_eq!(
+            catalog.count_stale_ocr_partitions(2).expect("ocr count"),
+            ocr_stale.len() as u64
+        );
+
+        // The two queries partition the stale set: their results never
+        // overlap. With current = 1 on both, only epub_new (v2) and
+        // ocr_new (v2) are stale, on disjoint sides.
+        let bd_v1 = catalog.stale_partitions(1).expect("bd v1");
+        let ocr_v1 = catalog.stale_ocr_partitions(1).expect("ocr v1");
+        assert_eq!(bd_v1, vec![epub_new]);
+        assert_eq!(ocr_v1, vec![ocr_new]);
+        for id in &bd_v1 {
+            assert!(
+                !ocr_v1.contains(id),
+                "row {id} reached by both staleness queries"
+            );
+        }
     }
 
     #[test]
