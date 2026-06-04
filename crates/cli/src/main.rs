@@ -683,9 +683,10 @@ async fn run_corpus_rebuild(
          Type 'yes' to continue: "
     } else {
         "About to overwrite corpus.db node rows for the intakes above.\n\
-         LanceDB will retain its current chunks; search results will be\n\
-         inconsistent with the rebuilt corpus until you run\n\
-         `bookrack vectors reembed`.\n\
+         LanceDB will retain its current chunks; the index_meta build\n\
+         stamps are re-stamped from the existing chunks so search can\n\
+         continue to run. Re-embed with `bookrack vectors reembed`\n\
+         if you bumped the chunking or normalization algorithm.\n\
          This is irreversible (the existing corpus tree is replaced).\n\
          Type 'yes' to continue: "
     };
@@ -709,6 +710,30 @@ async fn run_corpus_rebuild(
         report.mismatched.len(),
         report.failed.len()
     );
+
+    // L0-only rebuilds end here with a fresh node tree but no
+    // index_meta stamps; the next `query` would fail at the
+    // serve-side gate. Re-stamp from the existing chunks before
+    // returning so search keeps working. When `--include-vectors`
+    // is set the subsequent reembed writes the same stamps, so this
+    // path is skipped to avoid a redundant reconcile.
+    if !include_vectors && !report.rebuilt.is_empty() {
+        let lancedb_dir = cfg.lancedb_dir();
+        let embed_cfg = EmbedConfig::from_env();
+        let stamped = bookrack_ingest::rebuild::stamp_index_from_existing_chunks(
+            &corpus,
+            &lancedb_dir,
+            &embed_cfg.model,
+        )
+        .await
+        .context("stamp index_meta after rebuild")?;
+        if !stamped {
+            println!(
+                "no chunks on disk; index_meta stamps were not written. \
+                 Run `bookrack vectors reembed` after embedding to enable search."
+            );
+        }
+    }
 
     if include_vectors && !report.rebuilt.is_empty() {
         let lancedb_dir = cfg.lancedb_dir();

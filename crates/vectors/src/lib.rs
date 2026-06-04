@@ -403,6 +403,38 @@ impl ChunkStore {
     /// table is first created; reopening a store with a different `dim`
     /// than its rows were written with will fail later, on write or
     /// read — a directory must be reused only with one embedding model.
+    /// Open the existing chunks table under `lancedb_dir`, or return
+    /// `None` if no such table is on disk.
+    ///
+    /// Unlike [`ChunkStore::open`] this method never creates the table
+    /// — a missing directory or a directory without the `chunks` table
+    /// is reported as `Ok(None)` rather than silently established
+    /// with a placeholder dimension. The reader-version guard still
+    /// runs before the table is opened, so a sidecar written by a
+    /// newer binary refuses the open.
+    pub async fn try_open(lancedb_dir: &Path) -> Result<Option<ChunkStore>> {
+        ensure_lance_env();
+        let stored_min_reader = meta::load(lancedb_dir)?.and_then(|m| m.min_reader_version);
+        if let bookrack_dbkit::OpenDecision::Refuse { .. } =
+            bookrack_dbkit::reader_version_decision(stored_min_reader)
+        {
+            return Err(VectorsError::ReaderTooOld {
+                required: stored_min_reader.expect("Refuse implies a stamp was present"),
+                current: bookrack_dbkit::READER_VERSION,
+            });
+        }
+        let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
+            .execute()
+            .await?;
+        let names = conn.table_names().execute().await?;
+        if !names.iter().any(|name| name == TABLE) {
+            return Ok(None);
+        }
+        let table = conn.open_table(TABLE).execute().await?;
+        let dim = vector_dim_from_schema(table.schema().await?.as_ref())?;
+        Ok(Some(ChunkStore { table, dim }))
+    }
+
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
         // Reader-version axis: a meta file written by a future binary

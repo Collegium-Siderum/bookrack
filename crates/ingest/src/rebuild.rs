@@ -22,9 +22,10 @@ use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_core::NodeType;
 use bookrack_corpus::Corpus;
 use bookrack_extract::EXTRACTOR_VERSION;
+use bookrack_vectors::ChunkStore;
 
 use crate::envelope::{self, EnvelopeError};
-use crate::{IngestError, Result, StructureParams, ingest_structure};
+use crate::{IngestError, Result, StructureParams, current_index_stamps, ingest_structure};
 
 /// Per-intake outcome bucket the driver fills in.
 #[derive(Debug, Clone, Default)]
@@ -123,6 +124,42 @@ pub fn rebuild_from_intakes(
     Ok(report)
 }
 
+/// Stamp `corpus.db`'s `index_meta` with the build parameters of the
+/// vectors currently on disk.
+///
+/// Use after an L0 rebuild that refreshed the corpus tree without
+/// touching the chunks table: the rebuilt `corpus.db` would otherwise
+/// carry no stamps, and the query path's `verify_index_stamps` gate
+/// would refuse to serve until a separate `vectors reembed` writes
+/// them. Reads the vector dimension from the chunks table's schema —
+/// the on-disk source of truth — and takes the embedding model from
+/// `embed_model` (the caller's configured runtime value). The chunk
+/// and normalize versions come from this binary's compiled-in
+/// constants on the documented assumption that a rebuild does not
+/// bump them; if it did, the vectors are stale and a reembed is the
+/// right path, not this helper.
+///
+/// Returns `Ok(true)` if stamps were written or already matched,
+/// `Ok(false)` if the chunks table is missing or empty (nothing to
+/// stamp against — the caller is expected to embed before serving).
+/// A stamp mismatch — pre-existing stamps that disagree with the
+/// inferred ones — is propagated as [`IngestError`].
+pub async fn stamp_index_from_existing_chunks(
+    corpus: &Corpus,
+    lancedb_dir: &Path,
+    embed_model: &str,
+) -> Result<bool> {
+    let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+        return Ok(false);
+    };
+    if store.count_rows().await? == 0 {
+        return Ok(false);
+    }
+    let dim = store.dimension() as u32;
+    corpus.reconcile_index_stamps(&current_index_stamps(embed_model, dim))?;
+    Ok(true)
+}
+
 fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_catalog::Intake>> {
     Ok(match only {
         Some(id) => {
@@ -214,6 +251,85 @@ mod tests {
         let path = books_dir.join(envelope_filename(intake_id));
         write_envelope(&path, extraction, intake_id, sha).expect("write envelope");
         path.to_string_lossy().into_owned()
+    }
+
+    /// Seed a single chunk row into the lancedb dir so the helper
+    /// has a non-empty chunks table to read its dim from. Uses a
+    /// minimal 4-dim vector to keep the test cheap.
+    async fn seed_one_chunk(lancedb_dir: &Path) {
+        use bookrack_core::PartitionIdx;
+        use bookrack_vectors::ChunkRow;
+        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let node = PartitionIdx::new(1).node_id(1).expect("offset in range");
+        store
+            .append(&[ChunkRow {
+                vector: vec![0.1, 0.2, 0.3, 0.4],
+                text: "seed".into(),
+                start_node_id: node,
+                start_char_offset: 0,
+                end_node_id: node,
+                end_char_offset: 4,
+                norm_chunk_sha256: "sha-seed".into(),
+            }])
+            .await
+            .expect("append");
+    }
+
+    #[tokio::test]
+    async fn stamp_index_writes_stamps_when_chunks_are_present() {
+        let dir = tempdir().expect("tempdir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        seed_one_chunk(dir.path()).await;
+
+        let wrote = stamp_index_from_existing_chunks(&corpus, dir.path(), "fake-model")
+            .await
+            .expect("stamp");
+        assert!(wrote);
+        // Read back the four stamps and confirm they match the
+        // inferred build parameters.
+        let model = corpus
+            .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
+            .expect("meta")
+            .expect("model present");
+        assert_eq!(model, "fake-model");
+        let dim = corpus
+            .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+            .expect("meta")
+            .expect("dim present");
+        assert_eq!(dim, "4");
+    }
+
+    #[tokio::test]
+    async fn stamp_index_reports_no_write_when_chunks_are_empty() {
+        let dir = tempdir().expect("tempdir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        // Create an empty chunks table by opening with a real dim;
+        // count_rows is zero, and the helper should not stamp.
+        let _ = ChunkStore::open(dir.path(), 4).await.expect("open");
+
+        let wrote = stamp_index_from_existing_chunks(&corpus, dir.path(), "fake-model")
+            .await
+            .expect("stamp");
+        assert!(!wrote);
+        assert!(
+            corpus
+                .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
+                .expect("meta")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn stamp_index_reports_no_write_when_table_is_absent() {
+        let dir = tempdir().expect("tempdir");
+        let corpus = Corpus::open_in_memory().expect("corpus");
+        // No ChunkStore::open call: the chunks table does not exist.
+        // The helper must report `false` without creating one.
+
+        let wrote = stamp_index_from_existing_chunks(&corpus, dir.path(), "fake-model")
+            .await
+            .expect("stamp");
+        assert!(!wrote);
     }
 
     #[test]
