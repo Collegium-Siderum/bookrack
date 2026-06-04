@@ -146,6 +146,8 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
             extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: grade,
             skipped_units,
+            derived_from_sha256: None,
+            partial_pages: None,
         },
     }))
 }

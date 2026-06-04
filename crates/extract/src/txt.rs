@@ -94,6 +94,8 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
             text_layer_quality: TextLayerQuality::BornDigital,
             // A plain-text file is one source unit; nothing to skip.
             skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
         },
     })
 }

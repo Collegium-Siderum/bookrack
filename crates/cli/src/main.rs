@@ -2069,6 +2069,8 @@ fn run_metadata_show(
         extractor_version: 0,
         text_layer_quality: TextLayerQuality::BornDigital,
         skipped_units: Vec::new(),
+        derived_from_sha256: None,
+        partial_pages: None,
     };
     let toc_stats = TocStats::default();
     let input = AuditInput {

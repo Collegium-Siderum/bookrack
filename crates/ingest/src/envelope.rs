@@ -122,6 +122,8 @@ mod tests {
                 extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: vec![],
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         }
     }
@@ -172,6 +174,48 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn legacy_envelope_without_new_provenance_fields_reads_with_serde_default() {
+        // A v2 envelope written before `derived_from_sha256` and
+        // `partial_pages` existed on `Provenance`. Its `provenance`
+        // object omits both fields; `#[serde(default)]` on the new
+        // fields keeps this binary's reader from rejecting it, so
+        // earlier envelopes on disk stay readable without an envelope
+        // schema bump.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.json");
+        fs::write(
+            &path,
+            format!(
+                r#"{{
+                  "schema_version": {ENVELOPE_SCHEMA_VERSION},
+                  "intake_id": 7,
+                  "source_sha256": "legacy-sha",
+                  "captured_at": "2026-01-01T00:00:00Z",
+                  "extraction": {{
+                    "blocks": [],
+                    "toc": {{ "entries": [] }},
+                    "biblio": {{ "contributors": [] }},
+                    "provenance": {{
+                      "adapter": "txt",
+                      "extractor_version": 1,
+                      "text_layer_quality": "born_digital",
+                      "skipped_units": []
+                    }}
+                  }}
+                }}"#
+            ),
+        )
+        .expect("write legacy envelope");
+
+        let env = read_envelope(&path).expect("read legacy envelope");
+        assert_eq!(env.schema_version, ENVELOPE_SCHEMA_VERSION);
+        assert_eq!(env.intake_id, 7);
+        assert_eq!(env.source_sha256, "legacy-sha");
+        assert_eq!(env.extraction.provenance.derived_from_sha256, None);
+        assert_eq!(env.extraction.provenance.partial_pages, None);
     }
 
     #[test]

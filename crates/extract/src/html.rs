@@ -60,6 +60,8 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
             // A standalone HTML file is one source unit; there is no
             // sub-unit to skip.
             skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
         },
     })
 }

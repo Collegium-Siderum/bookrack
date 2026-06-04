@@ -1394,6 +1394,8 @@ mod tests {
                 extractor_version: 1,
                 text_layer_quality: TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         }
     }
@@ -2184,6 +2186,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2250,6 +2254,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2317,6 +2323,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2379,6 +2387,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2440,6 +2450,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2500,6 +2512,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2558,6 +2572,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         };
         let intake = catalog
@@ -2732,6 +2748,8 @@ mod book_pipeline_tests {
                 extractor_version: 1,
                 text_layer_quality: bookrack_extract::TextLayerQuality::BornDigital,
                 skipped_units: Vec::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
             },
         }
     }

@@ -85,6 +85,8 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
             // Born-digital: a broken spine document aborts the whole
             // file (see ExtractError), so nothing is ever skipped.
             skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
         },
     })
 }
