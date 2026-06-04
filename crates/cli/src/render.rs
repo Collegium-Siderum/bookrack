@@ -11,6 +11,7 @@ use bookrack_ingest::IngestReport;
 use bookrack_metadata::{FieldGrade, FieldReport, MetadataReport};
 use bookrack_query::dto::{BookDetail, LibraryStats, ListBooksResult, Toc};
 use bookrack_search::Citation;
+use bookrack_vectors::VectorsMeta;
 
 /// First `max` characters of `text`, collapsed to a single line, with an
 /// ellipsis when truncated.
@@ -580,6 +581,159 @@ fn print_count_map(label: &str, map: &std::collections::BTreeMap<String, u64>) {
     for (key, value) in map {
         println!("  {key:>16}  {value}");
     }
+}
+
+/// Aggregated view the `bookrack info` command assembles before
+/// rendering. Pure data — the renderer never reads from the catalog or
+/// the filesystem itself, so it stays trivially testable.
+pub struct InfoSnapshot {
+    pub data_dir: String,
+    pub library: Option<String>,
+    pub source: &'static str,
+    pub ollama_url: String,
+    pub embed_model_configured: String,
+    pub corpus_schema_version_expected: u32,
+    pub catalog_schema_version_expected: u32,
+    pub corpus_stamps: CorpusStamps,
+    pub vectors_meta: Option<VectorsMeta>,
+    pub intake_count: Option<u64>,
+    pub ready_book_count: Option<u64>,
+    pub disk: DiskUsage,
+}
+
+/// Four `index_meta` stamps from `corpus.db`, plus the on-disk schema
+/// version. Each is optional — a fresh library has none of them.
+#[derive(Default)]
+pub struct CorpusStamps {
+    pub embed_model: Option<String>,
+    pub vector_dim: Option<String>,
+    pub chunk_version: Option<String>,
+    pub normalize_version: Option<String>,
+    pub schema_version_on_disk: Option<String>,
+}
+
+/// Sizes of the three persisted stores. Each is `None` when the file or
+/// directory is absent — a freshly-bootstrapped library reports nothing.
+pub struct DiskUsage {
+    pub catalog_db: Option<u64>,
+    pub corpus_db: Option<u64>,
+    pub lancedb_dir: Option<u64>,
+}
+
+/// Print the one-screen status card.
+pub fn info(snapshot: &InfoSnapshot) {
+    println!("data_dir:        {}", snapshot.data_dir);
+    let library = snapshot.library.as_deref().unwrap_or("(unnamed)");
+    println!("library:         {library}  via {}", snapshot.source);
+    println!("ollama_url:      {}", snapshot.ollama_url);
+    println!(
+        "embed_model:     {} (configured)",
+        snapshot.embed_model_configured
+    );
+
+    println!();
+    println!("corpus.db:");
+    println!(
+        "  schema_version: binary {}, on-disk {}",
+        snapshot.corpus_schema_version_expected,
+        snapshot
+            .corpus_stamps
+            .schema_version_on_disk
+            .as_deref()
+            .unwrap_or("(empty)"),
+    );
+    println!(
+        "  embed_model:    {}",
+        snapshot
+            .corpus_stamps
+            .embed_model
+            .as_deref()
+            .unwrap_or("(empty)"),
+    );
+    println!(
+        "  vector_dim:     {}",
+        snapshot
+            .corpus_stamps
+            .vector_dim
+            .as_deref()
+            .unwrap_or("(empty)"),
+    );
+    println!(
+        "  chunk_version:  {}",
+        snapshot
+            .corpus_stamps
+            .chunk_version
+            .as_deref()
+            .unwrap_or("(empty)"),
+    );
+    println!(
+        "  normalize_ver:  {}",
+        snapshot
+            .corpus_stamps
+            .normalize_version
+            .as_deref()
+            .unwrap_or("(empty)"),
+    );
+
+    println!();
+    println!("catalog.db:");
+    println!(
+        "  schema_version: binary {} (run a write to refresh the on-disk row)",
+        snapshot.catalog_schema_version_expected,
+    );
+    if let Some(n) = snapshot.intake_count {
+        println!("  intakes:        {n}");
+    } else {
+        println!("  intakes:        (catalog unreadable)");
+    }
+    if let Some(n) = snapshot.ready_book_count {
+        println!("  ready books:    {n}");
+    }
+
+    println!();
+    println!("vectors:");
+    if let Some(meta) = &snapshot.vectors_meta {
+        println!("  ann kind:       {}", meta.kind);
+        println!("  num_partitions: {}", meta.num_partitions);
+        println!("  index name:     {}", meta.lance_index_name);
+        println!("  built_at:       {}", meta.built_at);
+        println!("  chunks built:   {}", meta.built_at_chunk_count);
+        println!("  churn:          {}", meta.churn_since_rebuild);
+    } else {
+        println!("  (no vectors_meta.json — never built)");
+    }
+
+    println!();
+    println!("disk:");
+    println!(
+        "  catalog.db:     {}",
+        format_size(snapshot.disk.catalog_db)
+    );
+    println!("  corpus.db:      {}", format_size(snapshot.disk.corpus_db));
+    println!(
+        "  lancedb/:       {}",
+        format_size(snapshot.disk.lancedb_dir)
+    );
+}
+
+/// Render a byte count as a short human-readable string, or `(absent)`
+/// when the source could not be read.
+fn format_size(bytes: Option<u64>) -> String {
+    let Some(n) = bytes else {
+        return "(absent)".to_string();
+    };
+    const KIB: f64 = 1024.0;
+    let n = n as f64;
+    if n < KIB {
+        return format!("{n} B");
+    }
+    if n < KIB * KIB {
+        return format!("{:.1} KiB", n / KIB);
+    }
+    if n < KIB * KIB * KIB {
+        return format!("{:.1} MiB", n / (KIB * KIB));
+    }
+    format!("{:.2} GiB", n / (KIB * KIB * KIB))
 }
 
 /// Print the cited passages a `query` returned, best match first.

@@ -148,6 +148,9 @@ enum Command {
         #[command(subcommand)]
         action: BooksAction,
     },
+    /// Print a one-screen status card: resolution, embedder, schema
+    /// versions, index stamps, and the on-disk size of each store.
+    Info,
 }
 
 #[derive(clap::Subcommand)]
@@ -507,7 +510,118 @@ async fn main() -> Result<()> {
         },
         Command::PipelineTrail { book, json } => run_pipeline_trail(&cfg, book, json),
         Command::Books { action } => run_books(&cfg, action),
+        Command::Info => run_info(&cfg),
     }
+}
+
+fn run_info(cfg: &Config) -> Result<()> {
+    let embed_cfg = EmbedConfig::from_env();
+    let corpus_stamps = read_corpus_stamps(cfg).unwrap_or_default();
+    let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
+        .ok()
+        .flatten();
+    let intake_count = open_read_only_catalog(cfg)
+        .and_then(|c| c.count_intakes().map_err(anyhow::Error::from))
+        .ok();
+    let ready_count = open_read_only_catalog(cfg)
+        .and_then(|c| {
+            c.count_book_states_by_stage("ready")
+                .map_err(anyhow::Error::from)
+        })
+        .ok();
+    let disk = disk_usage(cfg);
+    let snapshot = render::InfoSnapshot {
+        data_dir: cfg.data_dir().display().to_string(),
+        library: cfg.library().map(str::to_string),
+        source: resolution_source_label(cfg.source()),
+        ollama_url: cfg.ollama_url().to_string(),
+        embed_model_configured: embed_cfg.model.clone(),
+        corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
+        catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
+        corpus_stamps,
+        vectors_meta,
+        intake_count,
+        ready_book_count: ready_count,
+        disk,
+    };
+    render::info(&snapshot);
+    Ok(())
+}
+
+fn open_read_only_catalog(cfg: &Config) -> Result<Catalog> {
+    Catalog::open_read_only(&cfg.catalog_db()).map_err(anyhow::Error::from)
+}
+
+fn read_corpus_stamps(cfg: &Config) -> Result<render::CorpusStamps> {
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    Ok(render::CorpusStamps {
+        embed_model: corpus
+            .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
+            .ok()
+            .flatten(),
+        vector_dim: corpus
+            .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
+            .ok()
+            .flatten(),
+        chunk_version: corpus
+            .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)
+            .ok()
+            .flatten(),
+        normalize_version: corpus
+            .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)
+            .ok()
+            .flatten(),
+        schema_version_on_disk: corpus.meta_get("schema_version").ok().flatten(),
+    })
+}
+
+fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'static str {
+    use bookrack_config::ResolutionSource::*;
+    match source {
+        DataDirFlag => "--data-dir flag",
+        LibraryFlag => "--library flag",
+        EnvVar => "BOOKRACK_DATA_DIR env",
+        RegistryDefault => "registry default",
+        Explicit => "explicit",
+    }
+}
+
+fn disk_usage(cfg: &Config) -> render::DiskUsage {
+    render::DiskUsage {
+        catalog_db: file_size(&cfg.catalog_db()),
+        corpus_db: file_size(&cfg.corpus_db()),
+        lancedb_dir: dir_size(&cfg.lancedb_dir()),
+    }
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+fn dir_size(path: &Path) -> Option<u64> {
+    if !path.is_dir() {
+        return None;
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    Some(total)
 }
 
 fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
