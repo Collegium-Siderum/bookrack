@@ -202,6 +202,21 @@ impl Catalog {
         )?;
         Ok(affected > 0)
     }
+
+    /// Remove the pipeline-owned contributor rows on a node — those with
+    /// `origin` in `('extracted', 'extracted-filename')`. The ingest
+    /// refresh path calls this before writing the freshly extracted set
+    /// so a re-run replaces those rows wholesale; rows curated by a
+    /// human (`origin = 'user'`) are left untouched. Returns the number
+    /// of rows removed.
+    pub fn clear_extracted_contributors(&self, intake_id: i64, scope: &str) -> Result<usize> {
+        let affected = self.conn.execute(
+            "DELETE FROM node_contributors WHERE intake_id = :intake_id AND scope = :scope \
+             AND origin IN ('extracted', 'extracted-filename')",
+            named_params! { ":intake_id": intake_id, ":scope": scope },
+        )?;
+        Ok(affected)
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +283,55 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["First", "Second"]);
+    }
+
+    #[test]
+    fn clear_extracted_contributors_removes_pipeline_origins_but_keeps_user_rows() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        for (role, ordinal, origin, name) in [
+            ("author", 0, "extracted", "Adapter Author"),
+            ("translator", 0, "extracted", "Adapter Translator"),
+            ("author", 0, "extracted-filename", "Filename Author"),
+            ("editor", 0, "user", "Hand Curated Editor"),
+        ] {
+            catalog
+                .add_contributor(&NewContributor::new(1, SCOPE, role, ordinal, origin, name))
+                .expect("seed");
+        }
+
+        let removed = catalog
+            .clear_extracted_contributors(1, SCOPE)
+            .expect("clear");
+        assert_eq!(removed, 3);
+
+        let remaining = catalog.contributors_for_address(1, SCOPE).expect("read");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].origin, "user");
+        assert_eq!(remaining[0].name, "Hand Curated Editor");
+
+        // The same contributor is now free to be re-inserted with the
+        // same natural key; the prior UNIQUE collision is gone.
+        catalog
+            .add_contributor(&NewContributor::new(
+                1,
+                SCOPE,
+                "author",
+                0,
+                "extracted",
+                "Adapter Author",
+            ))
+            .expect("re-add after clear");
+    }
+
+    #[test]
+    fn clear_extracted_contributors_returns_zero_when_no_rows_match() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        assert_eq!(
+            catalog
+                .clear_extracted_contributors(42, SCOPE)
+                .expect("clear"),
+            0,
+        );
     }
 
     #[test]

@@ -972,14 +972,22 @@ fn run_metadata_substep(
 ///
 /// Deduplication across the two sources is a read-side concern: callers
 /// fold them via origin precedence (typically `user > extracted >
-/// extracted-filename`). Each write is best-effort; a duplicate row
-/// from a re-run of the same intake logs a warning and proceeds.
+/// extracted-filename`). The pipeline-owned rows are dropped before
+/// the rewrite so a re-ingest replaces the extracted set wholesale,
+/// without ever colliding with itself; rows with `origin = 'user'` are
+/// left in place.
 fn write_contributors(
     catalog: &Catalog,
     intake_id: i64,
     biblio: &bookrack_extract::Biblio,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
 ) {
+    if let Err(e) = catalog.clear_extracted_contributors(intake_id, BOOK_SCOPE) {
+        tracing::warn!(
+            error = %e,
+            "metadata: failed to clear pipeline-owned contributors before refresh",
+        );
+    }
     for (ordinal, contrib) in biblio.contributors.iter().enumerate() {
         let name = contrib.name.trim();
         if name.is_empty() {
@@ -2935,5 +2943,60 @@ mod book_pipeline_tests {
                 .expect("read")
                 .is_empty(),
         );
+    }
+
+    #[test]
+    fn write_contributors_refresh_replaces_pipeline_rows_without_duplicates() {
+        // Re-running write_contributors for the same intake must replace
+        // the extracted set rather than collide on the UNIQUE natural
+        // key. A user-curated row sharing role and ordinal survives the
+        // refresh because its origin is preserved.
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = intake_id(&mut catalog, "refresh-sha");
+        catalog
+            .add_contributor(&bookrack_catalog::NewContributor::new(
+                intake,
+                BOOK_SCOPE,
+                "editor",
+                0,
+                "user",
+                "Hand Curated Editor",
+            ))
+            .expect("seed user row");
+
+        let biblio = bookrack_extract::Biblio {
+            contributors: vec![bookrack_extract::Contributor {
+                name: "First Author".to_string(),
+                role: bookrack_extract::ContributorRole::Author,
+            }],
+            ..Default::default()
+        };
+        let filename = bookrack_metadata::FilenameBiblio {
+            author: Some("F. Author".to_string()),
+            ..Default::default()
+        };
+        super::write_contributors(&catalog, intake, &biblio, Some(&filename));
+        super::write_contributors(&catalog, intake, &biblio, Some(&filename));
+
+        let rows = catalog
+            .contributors_for_address(intake, BOOK_SCOPE)
+            .expect("read");
+        assert_eq!(
+            rows.len(),
+            3,
+            "one extracted + one extracted-filename + one user, no duplicates: {rows:?}",
+        );
+        assert_eq!(rows.iter().filter(|r| r.origin == "extracted").count(), 1,);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.origin == "extracted-filename")
+                .count(),
+            1,
+        );
+        let user_row = rows
+            .iter()
+            .find(|r| r.origin == "user")
+            .expect("user row preserved");
+        assert_eq!(user_row.name, "Hand Curated Editor");
     }
 }
