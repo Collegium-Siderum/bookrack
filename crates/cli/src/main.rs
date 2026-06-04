@@ -12,6 +12,7 @@
 //! truth for every default.
 
 mod dryrun;
+mod remove;
 mod render;
 
 use std::path::{Path, PathBuf};
@@ -63,6 +64,19 @@ const QUERY_AFTER_HELP: &str = "\
 Examples:
   bookrack query \"the history of madness\"
   bookrack query \"recurring motifs\" --in-book 1";
+
+/// Trailing block shown by `bookrack remove --help`.
+const REMOVE_AFTER_HELP: &str = "\
+Examples:
+  bookrack remove 42
+  bookrack remove --sha 9f1c... --dry-run
+  bookrack remove 42 --yes
+
+Notes:
+  metadata_audit and book_pipeline_audit rows are preserved by design
+  so the pipeline history of a removed book remains queryable. Vector
+  rows are tombstoned in LanceDB; their space is reclaimed by the
+  optimize pass the next ingest runs, not by remove itself.";
 
 #[derive(clap::Parser)]
 #[command(
@@ -220,6 +234,28 @@ enum Command {
     Libraries {
         #[command(subcommand)]
         action: LibrariesAction,
+    },
+    /// Drop a book from every store — intake row, opaque envelope,
+    /// corpus partition, vectors partition, and the cascaded catalog
+    /// tables. Preserves `metadata_audit` and `book_pipeline_audit` as a
+    /// forensic record. Vector rows are tombstoned; their space is
+    /// reclaimed by the next ingest's optimize pass.
+    #[command(after_help = REMOVE_AFTER_HELP)]
+    Remove {
+        /// Intake id of the book to remove. Mutually exclusive with
+        /// `--sha`; exactly one of the two must be supplied.
+        intake_id: Option<i64>,
+        /// Whole-file SHA-256 of the source file, looked up in
+        /// `catalog.intake.source_sha256`. Mutually exclusive with the
+        /// positional intake id.
+        #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
+        sha: Option<String>,
+        /// Print the per-store plan and exit without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -672,6 +708,23 @@ async fn main() -> Result<()> {
         Command::Libraries { action } => match action {
             LibrariesAction::List { json } => run_libraries_list(json),
         },
+        Command::Remove {
+            intake_id,
+            sha,
+            dry_run,
+            yes,
+        } => {
+            remove::run(
+                &cfg,
+                remove::RemoveArgs {
+                    intake_id,
+                    sha,
+                    dry_run,
+                    yes,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -2526,6 +2579,32 @@ mod tests {
         // returning None is how we signal that.
         assert_eq!(natural_name_hint("nope"), None);
         assert_eq!(natural_name_hint(""), None);
+    }
+
+    #[test]
+    fn remove_subcommand_parses_both_input_shapes() {
+        // Positional intake id, --sha alternative, and the destructive
+        // toggles must all parse without --library or --data-dir.
+        for argv in [
+            vec!["bookrack", "remove", "42"],
+            vec!["bookrack", "remove", "42", "--dry-run"],
+            vec!["bookrack", "remove", "42", "--yes"],
+            vec!["bookrack", "remove", "--sha", "deadbeef"],
+            vec!["bookrack", "remove", "--sha", "deadbeef", "--dry-run"],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn remove_rejects_both_intake_id_and_sha_together() {
+        // The `--sha` and positional id select the same target two
+        // different ways; supplying both is a user error.
+        let Err(err) = Cli::try_parse_from(["bookrack", "remove", "42", "--sha", "abc"]) else {
+            panic!("the two selectors must not be combined");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
