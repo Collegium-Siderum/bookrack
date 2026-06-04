@@ -9,9 +9,13 @@
 //!   distribution-watermark sniffer.
 //!
 //! Each file declares `schema_version = 1`; the loader rejects any
-//! other value. Missing files yield empty sub-rules and a warning;
-//! the engine then treats every value as neutral, the same outcome
-//! it produced before the lists existed.
+//! other value. The whole directory is opt-in: a missing directory or
+//! missing files yield empty sub-rules and the audit then treats every
+//! value as neutral, the same outcome it produced before the lists
+//! existed. A missing directory loads silently; an existing directory
+//! with one file absent logs a debug-level note so an operator who
+//! went looking can see what got skipped without polluting normal-run
+//! stderr.
 
 use std::path::{Path, PathBuf};
 
@@ -46,10 +50,15 @@ impl AuditRules {
         Self::default()
     }
 
-    /// Load both files from one directory. A missing file is logged
-    /// once and its sub-rules stay empty; a malformed file aborts the
-    /// load with an error.
+    /// Load both files from one directory. The directory itself is
+    /// opt-in: when it does not exist the audit runs with empty rules
+    /// and no log line. Inside an existing directory, a missing file
+    /// leaves its sub-rules empty with a debug-level note; a malformed
+    /// file aborts the load with an error.
     pub fn load_from(dir: &Path) -> Result<Self, LoadError> {
+        if !dir.exists() {
+            return Ok(Self::empty());
+        }
         let publishers = load_publishers(&dir.join(PUBLISHERS_FILE))?;
         let watermarks = load_watermarks(&dir.join(WATERMARKS_FILE))?;
         Ok(Self {
@@ -143,13 +152,16 @@ fn load_watermarks(path: &Path) -> Result<WatermarksFile, LoadError> {
     Ok(file)
 }
 
-/// Read a file if it exists; return `None` and emit a warning when
-/// missing, propagate any other I/O error.
+/// Read a file if it exists; return `None` and emit a debug-level
+/// note when missing, propagate any other I/O error. The caller
+/// guarantees the parent directory exists, so `NotFound` here means
+/// the user opted into the rules directory but did not author this
+/// particular file — informational, not warning-level.
 fn read_optional(path: &Path) -> Result<Option<String>, LoadError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(
+            tracing::debug!(
                 path = %path.display(),
                 "audit rules file not found; falling back to empty list",
             );
@@ -190,6 +202,22 @@ mod tests {
         let rules = AuditRules::load_from(tmp.path()).expect("load");
         assert!(rules.publisher_whitelist.is_empty());
         assert!(rules.contact_tokens.is_empty());
+    }
+
+    #[test]
+    fn load_returns_empty_when_the_directory_itself_is_absent() {
+        // The rules directory is opt-in: callers that point the loader
+        // at a non-existent path should get empty rules back without
+        // an error and without log noise.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let absent = tmp.path().join("nonexistent");
+        assert!(!absent.exists());
+        let rules = AuditRules::load_from(&absent).expect("load");
+        assert!(rules.publisher_whitelist.is_empty());
+        assert!(rules.contact_tokens.is_empty());
+        assert!(rules.promo_tokens.is_empty());
+        assert!(rules.ascii_distribution_tokens.is_empty());
+        assert!(rules.watermark_cjk_tokens.is_empty());
     }
 
     #[test]
