@@ -10,3 +10,8 @@ bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# Round-trip test for the committed v1 intake fixture opens the file
+# through a temp copy so a CI run never mutates the committed bytes.
+tempfile.workspace = true
