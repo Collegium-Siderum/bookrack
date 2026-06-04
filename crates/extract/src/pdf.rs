@@ -61,7 +61,7 @@ static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
 /// Serializes whole PDF extractions against PDFium — see the module's
 /// thread-safety note. It guards only a sequence of PDFium calls, never
 /// any data, hence `Mutex<()>`.
-static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
 
 /// Extract one PDF file.
 pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
@@ -162,7 +162,7 @@ const MAX_TOC_ENTRIES: usize = 50_000;
 /// entry to a block. An outline entry points at a *target page*, not at
 /// a text fragment, so it is anchored to the first block on (or after)
 /// that page.
-fn build_toc(document: &PdfDocument, blocks: &[Block]) -> Toc {
+pub(crate) fn build_toc(document: &PdfDocument, blocks: &[Block]) -> Toc {
     let mut raw: Vec<(String, u8, Option<usize>)> = Vec::new();
     if let Some(root) = document.bookmarks().root() {
         walk_bookmarks(root, 0, &mut raw);
@@ -226,7 +226,7 @@ fn bookmark_target_page(node: &PdfBookmark) -> Option<usize> {
 /// page is the target page or later. Anchoring forward (rather than
 /// requiring an exact page) keeps the entry resolvable when its target
 /// page carries no extracted block — e.g. a part-title or blank page.
-fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
+pub(crate) fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
     blocks
         .iter()
         .position(|b| b.source_unit as usize >= target_page)
@@ -235,7 +235,7 @@ fn anchor_block(blocks: &[Block], target_page: usize) -> Option<usize> {
 // --- biblio: the /Info dictionary ----------------------------------------
 
 /// Read every populated `/Info` tag, verbatim and trimmed.
-fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
+pub(crate) fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
     use PdfDocumentMetadataTagType as Tag;
     let metadata = document.metadata();
     let mut tags = Vec::new();
@@ -267,7 +267,7 @@ fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, String)> {
 ///
 /// `/Info` is transcribed faithfully, garbage and all: reconciling it
 /// against the page text is the METADATA stage's job, not extract's.
-fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
+pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
     let find = |key: &str| {
         info_tags
             .iter()
@@ -313,7 +313,7 @@ fn parse_pdf_year(date: &str) -> Option<i32> {
 /// directory that was searched: `Io` already means "the host
 /// environment could not satisfy this request", so no dedicated
 /// contract variant is minted for it.
-fn pdfium() -> Result<&'static Pdfium, ExtractError> {
+pub(crate) fn pdfium() -> Result<&'static Pdfium, ExtractError> {
     match PDFIUM.get_or_init(load_pdfium) {
         Ok(pdfium) => Ok(pdfium),
         Err(message) => Err(ExtractError::Io(std::io::Error::other(message.clone()))),
