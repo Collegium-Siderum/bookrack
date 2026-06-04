@@ -244,6 +244,54 @@ fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
         .unwrap_or_else(|| data_dir.join("backup"))
 }
 
+/// One entry in the library registry: a name, its data root, and a flag
+/// for the registry's `default = "..."` selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryEntry {
+    /// Short symbolic name a caller passes to `--library`.
+    pub name: String,
+    /// Absolute data root the registry maps the name to.
+    pub data_dir: PathBuf,
+    /// True when the registry's `default = "<this name>"` picks this
+    /// entry as the resolution fallback.
+    pub is_default: bool,
+}
+
+/// Read the library registry and return every entry, sorted by name.
+///
+/// Returns `Ok(None)` when [`REGISTRY_ENV`] is unset or blank — the
+/// registry is optional, and a binary that resolves through
+/// [`DATA_DIR_ENV`] alone has no registry to list. A configured but
+/// malformed or unreadable registry surfaces as the matching error.
+pub fn list_libraries() -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
+    list_libraries_from(std::env::var(REGISTRY_ENV).ok())
+}
+
+/// Pure form of [`list_libraries`], for tests that should not mutate
+/// the process environment.
+fn list_libraries_from(env: Option<String>) -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
+    let Some(registry) = load_registry(env)? else {
+        return Ok(None);
+    };
+    Ok(Some(library_entries(&registry)))
+}
+
+/// Project a parsed [`Registry`] into a sorted entry list. Pure so the
+/// projection can be tested without touching the filesystem.
+fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {
+    let mut entries: Vec<LibraryEntry> = registry
+        .libraries
+        .iter()
+        .map(|(name, data_dir)| LibraryEntry {
+            name: name.clone(),
+            data_dir: data_dir.clone(),
+            is_default: registry.default.as_deref() == Some(name.as_str()),
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
 /// Embedding model served by the local Ollama daemon, used when
 /// [`EmbedConfig`] is left at its default.
 pub const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding:0.6b";
@@ -929,6 +977,37 @@ mod tests {
             pdfium_lib_dir_from(Some("   ".to_string())),
             PathBuf::from("   "),
         );
+    }
+
+    #[test]
+    fn library_entries_lists_every_library_and_marks_the_default() {
+        let entries = library_entries(&sample_registry());
+        assert_eq!(entries.len(), 2);
+        // Sorted by name.
+        assert_eq!(entries[0].name, "prod");
+        assert_eq!(entries[1].name, "test");
+        assert!(entries[0].is_default);
+        assert!(!entries[1].is_default);
+        assert_eq!(entries[0].data_dir, PathBuf::from("/roots/prod"));
+        assert_eq!(entries[1].data_dir, PathBuf::from("/roots/test"));
+    }
+
+    #[test]
+    fn library_entries_marks_no_default_when_registry_has_none() {
+        let registry =
+            parse_registry("[libraries]\nprod = \"/roots/prod\"\n").expect("registry parses");
+        let entries = library_entries(&registry);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_default);
+    }
+
+    #[test]
+    fn list_libraries_from_returns_none_when_unset_or_blank() {
+        assert!(matches!(list_libraries_from(None), Ok(None)));
+        assert!(matches!(
+            list_libraries_from(Some("   ".to_string())),
+            Ok(None)
+        ));
     }
 
     #[test]
