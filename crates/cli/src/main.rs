@@ -34,8 +34,43 @@ use bookrack_query::dto::{
 };
 use bookrack_vectors::ChunkStore;
 
+/// Trailing block shown by `bookrack --help`. Names the environment
+/// variables that select the library and the embed backend, and the
+/// runtime prerequisite a fresh install most often trips over: Ollama
+/// must be reachable for any command that embeds text.
+const TOP_AFTER_HELP: &str = "\
+Environment:
+  BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
+  BOOKRACK_REGISTRY     TOML file mapping --library names to roots
+  BOOKRACK_OLLAMA_URL   Ollama endpoint (default http://localhost:11434)
+  BOOKRACK_EMBED_MODEL  embedding model tag (default qwen3-embedding:0.6b)
+  BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
+
+Prerequisites:
+  ingest and query both call Ollama for embeddings. Start Ollama and pull
+  the embed model before either command runs, e.g.:
+      ollama pull qwen3-embedding:0.6b";
+
+/// Trailing block shown by `bookrack ingest --help`.
+const INGEST_AFTER_HELP: &str = "\
+Examples:
+  bookrack ingest path/to/book.epub
+  bookrack ingest path/to/books-dir --recursive
+  bookrack ingest path/to/book.epub --force";
+
+/// Trailing block shown by `bookrack query --help`.
+const QUERY_AFTER_HELP: &str = "\
+Examples:
+  bookrack query \"the history of madness\"
+  bookrack query \"recurring motifs\" --in-book 1";
+
 #[derive(clap::Parser)]
-#[command(name = "bookrack", version, about = "Search a local library of books.")]
+#[command(
+    name = "bookrack",
+    version,
+    about = "Search a local library of books.",
+    after_help = TOP_AFTER_HELP,
+)]
 struct Cli {
     /// Operate on the library at this data root, overriding the
     /// environment. Mutually exclusive with `--library`.
@@ -70,6 +105,7 @@ impl Cli {
 enum Command {
     /// Ingest and embed a single file (or, with `--recursive`, every
     /// supported file under a directory) into the library.
+    #[command(after_help = INGEST_AFTER_HELP)]
     Ingest {
         /// Path to the source file, or — with `--recursive` — the
         /// directory to walk.
@@ -97,6 +133,7 @@ enum Command {
         force: bool,
     },
     /// Query the library and print cited passages.
+    #[command(after_help = QUERY_AFTER_HELP)]
     Query {
         /// The natural-language query.
         text: String,
