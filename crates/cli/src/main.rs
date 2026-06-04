@@ -1723,7 +1723,7 @@ async fn run_query(
         .await
         .context("run query")?
     };
-    render::citations(&hits);
+    render::citations(&hits, search_cfg.weak_distance_threshold);
     Ok(())
 }
 

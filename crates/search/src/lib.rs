@@ -53,6 +53,12 @@ pub enum SearchError {
     /// The embedder returned no vector for the query.
     #[error("the embedder returned no vector for the query")]
     EmptyEmbedding,
+
+    /// The caller passed a query that is empty or whitespace-only.
+    /// Embedding such an input would return the nearest neighbours of
+    /// the asymmetric query prompt itself, not of any real intent.
+    #[error("query text is empty; pass a non-empty natural-language phrase")]
+    EmptyQuery,
 }
 
 /// A fallible `search` operation.
@@ -171,6 +177,9 @@ pub async fn retrieve_with<E: Embedder>(
     overrides: SearchOptions,
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
+    if query.trim().is_empty() {
+        return Err(SearchError::EmptyQuery);
+    }
     let input = build_query_input(query);
     let embed_started = Instant::now();
     let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
@@ -211,6 +220,9 @@ pub async fn retrieve_with_partition<E: Embedder>(
     top_k: usize,
     partition: PartitionIdx,
 ) -> Result<Vec<SearchHit>> {
+    if query.trim().is_empty() {
+        return Err(SearchError::EmptyQuery);
+    }
     let input = build_query_input(query);
     let embed_started = Instant::now();
     let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
@@ -443,6 +455,21 @@ mod tests {
         }
     }
 
+    /// An embedder the retrieve path must never reach. The empty-query
+    /// gate fires before any embedding call, so any test that uses this
+    /// fails loudly if the gate ever regresses.
+    struct PanicEmbedder;
+
+    impl Embedder for PanicEmbedder {
+        fn embed_batch(
+            &self,
+            _texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let _ = self;
+            async move { panic!("the embedder must not be called for an empty query") }
+        }
+    }
+
     #[test]
     fn citation_serializes_with_node_id_as_bare_int() {
         let citation = Citation {
@@ -561,6 +588,36 @@ mod tests {
             .await
             .expect("append");
         (dir, corpus, catalog, store, leaf.node_id)
+    }
+
+    #[tokio::test]
+    async fn empty_query_is_rejected_before_any_embedder_call() {
+        let (dir, _corpus, _catalog, store, _leaf) = fixture(Some("A Test Book"), true).await;
+        let panicking = PanicEmbedder;
+        for query in ["", "   ", "\t\n  "] {
+            let err = retrieve_with(query, &store, &panicking, dir.path(), Default::default(), 5)
+                .await
+                .expect_err("empty query must be rejected");
+            assert!(
+                matches!(err, SearchError::EmptyQuery),
+                "unexpected: {err:?}"
+            );
+            let err = retrieve_with_partition(
+                query,
+                &store,
+                &panicking,
+                dir.path(),
+                Default::default(),
+                5,
+                PartitionIdx::new(1),
+            )
+            .await
+            .expect_err("empty query must be rejected on the partition path too");
+            assert!(
+                matches!(err, SearchError::EmptyQuery),
+                "unexpected: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

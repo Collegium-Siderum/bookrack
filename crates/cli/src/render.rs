@@ -886,10 +886,21 @@ pub fn libraries_list_json(entries: Option<&[LibraryEntry]>) {
 }
 
 /// Print the cited passages a `query` returned, best match first.
-pub fn citations(hits: &[Citation]) {
+///
+/// When the recall is non-empty and every hit's cosine distance lands
+/// at or above `weak_threshold`, an advisory line precedes the listing
+/// so the operator can tell a noisy recall from a real one.
+pub fn citations(hits: &[Citation], weak_threshold: f32) {
     if hits.is_empty() {
         println!("No matching passages.");
         return;
+    }
+    if let Some(best_distance) = all_hits_weak(hits.iter().map(|h| h.distance), weak_threshold) {
+        println!(
+            "\u{26a0} all hits weak: best distance {best_distance:.3} \
+             (>= threshold {weak_threshold:.3}). \
+             Results may be noise; consider rephrasing the query.",
+        );
     }
     for (i, hit) in hits.iter().enumerate() {
         let trail = if hit.breadcrumb.is_empty() {
@@ -899,5 +910,56 @@ pub fn citations(hits: &[Citation]) {
         };
         println!("{}. [{:.3}] {}", i + 1, hit.distance, trail);
         println!("   {}", snippet(&hit.text, 200));
+    }
+}
+
+/// Inspect a recall's per-hit distances and report the best one when
+/// every hit lands at or above `weak_threshold`. Returns `None` when
+/// the recall is empty or at least one hit is below the threshold —
+/// i.e. when no weak-hits banner should print.
+///
+/// Pulled out of [`citations`] so the threshold decision is unit-
+/// testable without driving the println loop.
+fn all_hits_weak<I>(distances: I, weak_threshold: f32) -> Option<f32>
+where
+    I: IntoIterator<Item = f32>,
+{
+    let best = distances.into_iter().fold(f32::INFINITY, f32::min);
+    if best.is_finite() && best >= weak_threshold {
+        Some(best)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_hits_weak;
+
+    #[test]
+    fn all_hits_weak_returns_none_when_at_least_one_hit_is_below_threshold() {
+        let banner = all_hits_weak([0.45, 0.62, 0.71], 0.5);
+        assert_eq!(banner, None);
+    }
+
+    #[test]
+    fn all_hits_weak_returns_the_best_distance_when_every_hit_is_at_or_above() {
+        let banner = all_hits_weak([0.55, 0.62, 0.71], 0.5).expect("banner");
+        assert!((banner - 0.55).abs() < 1e-6);
+    }
+
+    #[test]
+    fn all_hits_weak_treats_an_empty_recall_as_no_banner() {
+        // An empty recall already prints "No matching passages."; no
+        // banner on top of it.
+        assert_eq!(all_hits_weak(std::iter::empty(), 0.5), None);
+    }
+
+    #[test]
+    fn all_hits_weak_includes_distances_equal_to_the_threshold() {
+        // The threshold is inclusive: a hit landing exactly on it
+        // counts as weak.
+        let banner = all_hits_weak([0.5, 0.6], 0.5).expect("banner");
+        assert!((banner - 0.5).abs() < 1e-6);
     }
 }

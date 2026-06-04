@@ -328,6 +328,15 @@ pub const DEFAULT_SEARCH_TOP_K: usize = 5;
 /// Environment variable overriding the search result count.
 pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
 
+/// Cosine-distance threshold at or above which a hit is treated as a
+/// weak match. Calibrated against the EMBED spike's real corpus: real
+/// monolingual matches sit around 0.25, cross-language matches around
+/// 0.45, and noise / prompt-only embeddings around 0.55 and above.
+pub const DEFAULT_SEARCH_WEAK_THRESHOLD: f32 = 0.5;
+
+/// Environment variable overriding the weak-hit distance threshold.
+pub const SEARCH_WEAK_THRESHOLD_ENV: &str = "BOOKRACK_SEARCH_WEAK_THRESHOLD";
+
 /// Listen address the MCP server binds when [`McpConfig`] is left at its
 /// default. Loopback only: the server is a local query daemon, not a
 /// network service.
@@ -422,12 +431,18 @@ impl EmbedConfig {
 pub struct SearchConfig {
     /// How many nearest passages a query returns.
     pub top_k: usize,
+    /// Cosine-distance threshold at or above which a hit is treated as
+    /// a weak match. When every top-`top_k` hit lands at or above this
+    /// value, the CLI prints an advisory line so the operator knows
+    /// the recall set is probably noise.
+    pub weak_distance_threshold: f32,
 }
 
 impl Default for SearchConfig {
     fn default() -> SearchConfig {
         SearchConfig {
             top_k: DEFAULT_SEARCH_TOP_K,
+            weak_distance_threshold: DEFAULT_SEARCH_WEAK_THRESHOLD,
         }
     }
 }
@@ -444,6 +459,10 @@ impl SearchConfig {
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> SearchConfig {
         SearchConfig {
             top_k: env_usize(get(SEARCH_TOP_K_ENV), DEFAULT_SEARCH_TOP_K),
+            weak_distance_threshold: env_f32(
+                get(SEARCH_WEAK_THRESHOLD_ENV),
+                DEFAULT_SEARCH_WEAK_THRESHOLD,
+            ),
         }
     }
 }
@@ -525,6 +544,15 @@ fn env_trimmed(value: Option<String>) -> Option<String> {
 fn env_usize(value: Option<String>, default: usize) -> usize {
     env_trimmed(value)
         .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Parse an environment value as `f32`, falling back to `default` when
+/// it is unset, blank, unparseable, or not a finite number.
+fn env_f32(value: Option<String>, default: f32) -> f32 {
+    env_trimmed(value)
+        .and_then(|s| s.parse::<f32>().ok())
+        .filter(|n| n.is_finite())
         .unwrap_or(default)
 }
 
@@ -917,16 +945,31 @@ mod tests {
     #[test]
     fn search_config_default_and_env_override() {
         assert_eq!(SearchConfig::default().top_k, DEFAULT_SEARCH_TOP_K);
+        assert_eq!(
+            SearchConfig::default().weak_distance_threshold,
+            DEFAULT_SEARCH_WEAK_THRESHOLD,
+        );
 
         let cfg = SearchConfig::resolve_from(|key| match key {
             SEARCH_TOP_K_ENV => Some("10".to_string()),
+            SEARCH_WEAK_THRESHOLD_ENV => Some("0.42".to_string()),
             _ => None,
         });
         assert_eq!(cfg.top_k, 10);
+        assert!((cfg.weak_distance_threshold - 0.42).abs() < 1e-6);
 
         // A blank value falls back to the default.
         let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()));
         assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
+        assert_eq!(blank.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
+
+        // Non-finite values fall back rather than poisoning the
+        // threshold comparison downstream.
+        let bad = SearchConfig::resolve_from(|key| match key {
+            SEARCH_WEAK_THRESHOLD_ENV => Some("nan".to_string()),
+            _ => None,
+        });
+        assert_eq!(bad.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
     }
 
     #[test]
