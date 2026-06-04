@@ -30,6 +30,7 @@ earlier ones already happened.
 |---|---|---|---|
 | `rbook`, `scraper`, `encoding_rs`, `unicode-normalization`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
 | `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources |
+| `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` |
 | `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | vectors only | `bookrack vectors reembed` |
@@ -68,6 +69,16 @@ plan + reembed follow. Use `bookrack corpus rebuild --stale-only` and
 `bookrack vectors reembed --stale-only` to scope a sweep to the
 partitions actually behind, identified by their stored
 `extractor_version` not matching this binary's.
+
+OCR intakes carry their own version dimension and sit on a sibling
+track: `OCR_INTAKE_VERSION` advances them, `EXTRACTOR_VERSION` does
+not. `corpus rebuild --stale-only` and `vectors reembed --stale-only`
+target born-digital partitions and skip OCR rows, so a bump to
+`OCR_INTAKE_VERSION` is refreshed by re-running `bookrack intake ocr`
+against the OCR markdown the user produced — the original product is
+the source of truth for the OCR side. `Catalog::stale_ocr_partitions`
+is the catalog-level equivalent of `stale_partitions` for the OCR
+side; it is exposed as a query but not yet wired to a CLI sweep.
 
 ## Recommended window
 
