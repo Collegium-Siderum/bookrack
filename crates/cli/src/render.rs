@@ -7,6 +7,7 @@
 
 use bookrack_audit_profile::AuditProfile;
 use bookrack_catalog::{BookPipelineAudit, MetadataAudit};
+use bookrack_config::LibraryEntry;
 use bookrack_ingest::IngestReport;
 use bookrack_metadata::{FieldGrade, FieldReport, MetadataReport};
 use bookrack_query::dto::{BookDetail, LibraryStats, ListBooksResult, Toc};
@@ -800,6 +801,53 @@ pub fn verify(report: &VerifyReport) {
             println!("  churn:           {n}");
         }
     }
+}
+
+/// Print the library registry as a human-readable listing. A `None`
+/// argument means the registry is not configured at all — surfaced as
+/// a single explanatory line rather than an empty body.
+pub fn libraries_list(entries: Option<&[LibraryEntry]>) {
+    let Some(entries) = entries else {
+        println!("No registry configured (set BOOKRACK_REGISTRY).");
+        return;
+    };
+    if entries.is_empty() {
+        println!("Registry has no library entries.");
+        return;
+    }
+    println!("{:<20}  {:<10}  data_dir", "name", "default");
+    for entry in entries {
+        let default_mark = if entry.is_default { "yes" } else { "" };
+        println!(
+            "{:<20}  {:<10}  {}",
+            entry.name,
+            default_mark,
+            entry.data_dir.display(),
+        );
+    }
+}
+
+/// Same registry as a JSON array — `null` when no registry is set.
+pub fn libraries_list_json(entries: Option<&[LibraryEntry]>) {
+    let Some(entries) = entries else {
+        println!("null");
+        return;
+    };
+    let mut out = String::from("[");
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        write_string_field(&mut out, "name", &entry.name);
+        out.push(',');
+        write_string_field(&mut out, "data_dir", &entry.data_dir.display().to_string());
+        out.push(',');
+        out.push_str(&format!("\"is_default\":{}", entry.is_default));
+        out.push('}');
+    }
+    out.push(']');
+    println!("{out}");
 }
 
 /// Print the cited passages a `query` returned, best match first.

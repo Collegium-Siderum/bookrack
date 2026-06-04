@@ -171,6 +171,23 @@ enum Command {
         #[command(subcommand)]
         action: StampsAction,
     },
+    /// Inspect the library registry — the file named by
+    /// `BOOKRACK_REGISTRY` that maps short names to data roots.
+    Libraries {
+        #[command(subcommand)]
+        action: LibrariesAction,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum LibrariesAction {
+    /// List every entry in the registry, marking the `default = "..."`
+    /// fallback when one is set.
+    List {
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -554,7 +571,20 @@ async fn main() -> Result<()> {
         Command::Stamps { action } => match action {
             StampsAction::Reconcile => run_stamps_reconcile(&cfg).await,
         },
+        Command::Libraries { action } => match action {
+            LibrariesAction::List { json } => run_libraries_list(json),
+        },
     }
+}
+
+fn run_libraries_list(json: bool) -> Result<()> {
+    let entries = bookrack_config::list_libraries().context("list libraries")?;
+    if json {
+        render::libraries_list_json(entries.as_deref());
+    } else {
+        render::libraries_list(entries.as_deref());
+    }
+    Ok(())
 }
 
 async fn run_stamps_reconcile(cfg: &Config) -> Result<()> {
