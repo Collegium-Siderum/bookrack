@@ -1943,10 +1943,24 @@ fn run_metadata_show(
         rules,
     };
     let report = bookrack_metadata::audit(&input, profile);
+    let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
+    let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
     if json {
-        render::metadata_show_json(book, &report, review_status.as_deref());
+        render::metadata_show_json(
+            book,
+            &report,
+            review_status.as_deref(),
+            stored_verdict.as_deref(),
+            stored_confidence.as_deref(),
+        );
     } else {
-        render::metadata_show(book, &report, review_status.as_deref());
+        render::metadata_show(
+            book,
+            &report,
+            review_status.as_deref(),
+            stored_verdict.as_deref(),
+            stored_confidence.as_deref(),
+        );
     }
     Ok(())
 }

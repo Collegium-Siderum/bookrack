@@ -56,20 +56,33 @@ pub fn ingest(report: &IngestReport) {
 
 /// Print the metadata audit report for one book as a human-readable
 /// listing, leading with the human/LLM review status and the audit's
-/// own plausibility verdict, then one line per field.
+/// stored verdict and confidence, then one line per field from a live
+/// re-grade against the current effective metadata.
 ///
 /// `review_status` is the value from `node_reviews.status` — `pending`
 /// until a human or LLM advances it — or `None` if the book has no
-/// review row at all. The audit verdict is kept on a separate line so
-/// the reader cannot mistake a `clean` audit for an `approved` review.
-pub fn metadata_show(book: i64, report: &MetadataReport, review_status: Option<&str>) {
+/// review row at all. `stored_verdict` and `stored_confidence` come
+/// straight from `node_publication_attrs`, so the headline numbers
+/// agree with `metadata list`; `None` for either means the audit has
+/// not run yet (e.g. a `trust-source` ingest). The per-field grades
+/// below are labelled as a live re-grade so the reader does not
+/// mistake them for the historical per-field grades the headline
+/// summarises.
+pub fn metadata_show(
+    book: i64,
+    report: &MetadataReport,
+    review_status: Option<&str>,
+    stored_verdict: Option<&str>,
+    stored_confidence: Option<&str>,
+) {
     let status = review_status.unwrap_or("(no review row)");
     println!("Book {book}: review status {status}");
     println!(
         "  audit verdict {} (confidence {})",
-        report.verdict.as_token(),
-        report.confidence.as_str()
+        stored_verdict.unwrap_or("(not audited)"),
+        stored_confidence.unwrap_or("(not audited)"),
     );
+    println!("  live re-grade vs current effective metadata:");
     for field in &report.fields {
         let grade = grade_label(field.grade);
         let flags = if field.flags.is_empty() {
@@ -78,9 +91,9 @@ pub fn metadata_show(book: i64, report: &MetadataReport, review_status: Option<&
             let tokens: Vec<&str> = field.flags.iter().map(|f| f.token()).collect();
             format!(" [{}]", tokens.join(", "))
         };
-        println!("  {:>10}  {grade}{flags}", field.field);
+        println!("    {:>10}  {grade}{flags}", field.field);
         if !field.hint.is_empty() {
-            println!("              {}", field.hint);
+            println!("                {}", field.hint);
         }
     }
     if !report.copyright_blocks.is_empty() {
@@ -94,19 +107,28 @@ pub fn metadata_show(book: i64, report: &MetadataReport, review_status: Option<&
 }
 
 /// Print the same report as a single-line JSON object. Hand-emitted
-/// so the metadata crate stays free of a serde dependency.
-pub fn metadata_show_json(book: i64, report: &MetadataReport, review_status: Option<&str>) {
+/// so the metadata crate stays free of a serde dependency. The
+/// `audit_verdict` and `confidence` keys carry the stored audit
+/// outcome; `live_regrade` holds the per-field grades against the
+/// current effective metadata.
+pub fn metadata_show_json(
+    book: i64,
+    report: &MetadataReport,
+    review_status: Option<&str>,
+    stored_verdict: Option<&str>,
+    stored_confidence: Option<&str>,
+) {
     let mut out = String::new();
     out.push('{');
     write_string_field(&mut out, "review_status", review_status.unwrap_or(""));
     out.push(',');
-    write_string_field(&mut out, "audit_verdict", report.verdict.as_token());
+    write_string_field(&mut out, "audit_verdict", stored_verdict.unwrap_or(""));
     out.push(',');
-    write_string_field(&mut out, "confidence", report.confidence.as_str());
+    write_string_field(&mut out, "confidence", stored_confidence.unwrap_or(""));
     out.push(',');
     out.push_str(&format!("\"book\":{book}"));
     out.push(',');
-    out.push_str("\"fields\":[");
+    out.push_str("\"live_regrade\":[");
     for (i, field) in report.fields.iter().enumerate() {
         if i > 0 {
             out.push(',');

@@ -907,12 +907,16 @@ fn run_metadata_substep(
     };
     let report = bookrack_metadata::audit(&input, audit_profile);
 
-    // Roll the audit's row-level confidence back into the base record.
-    // The upsert overwrites every column, so the biblio values seeded
-    // above are spelled out again to preserve them.
+    // Roll the audit's row-level confidence and verdict back into the
+    // base record. The upsert overwrites every column, so the biblio
+    // values seeded above are spelled out again to preserve them.
+    // Stamping both fields lets `metadata list` and `metadata show`
+    // read the same historical audit outcome from the row instead of
+    // one view re-running a synthetic audit.
     attrs.confidence = Some(report.confidence.as_str().to_string());
+    attrs.audit_verdict = Some(report.verdict.as_token().to_string());
     if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
-        tracing::warn!(error = %e, "metadata: failed to write confidence rollup");
+        tracing::warn!(error = %e, "metadata: failed to write audit rollup");
     }
 
     let outcome = match report.verdict {
@@ -1914,6 +1918,9 @@ mod book_pipeline_tests {
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.confidence.as_deref(), Some("low"));
+        // Verdict is stamped alongside confidence so `metadata show`
+        // and `metadata list` agree on the historical audit outcome.
+        assert_eq!(attrs.audit_verdict.as_deref(), Some("needs_work"));
     }
 
     #[tokio::test]
@@ -2160,6 +2167,7 @@ mod book_pipeline_tests {
         assert_eq!(attrs.source_format.as_deref(), Some("epub"));
         // Required + should-fill fields all Strong → confidence high.
         assert_eq!(attrs.confidence.as_deref(), Some("high"));
+        assert_eq!(attrs.audit_verdict.as_deref(), Some("clean"));
     }
 
     #[tokio::test]
@@ -2229,9 +2237,11 @@ mod book_pipeline_tests {
             .publication_attrs(intake_id, "book")
             .expect("attrs")
             .expect("present");
-        // Base attrs are still seeded; the audit-derived confidence is not.
+        // Base attrs are still seeded; the audit-derived confidence
+        // and verdict are not.
         assert_eq!(attrs.title.as_deref(), Some("A Complete Book"));
         assert!(attrs.confidence.is_none());
+        assert!(attrs.audit_verdict.is_none());
     }
 
     #[tokio::test]

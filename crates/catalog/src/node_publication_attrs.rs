@@ -42,6 +42,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("source_format"),
         ColumnSpec::text("source").comment("ocr_marker / extracted / web"),
         ColumnSpec::text("confidence").comment("high / medium / low"),
+        ColumnSpec::text("audit_verdict").comment("clean / needs_work"),
         ColumnSpec::text("enriched_by"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),
@@ -55,11 +56,11 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
      (intake_id, scope, title, subtitle, publisher, year, publication_date, isbn, series, \
       series_number, edition, language, pub_place, original_title, original_language, \
-      original_year, source_format, source, confidence, enriched_by) \
+      original_year, source_format, source, confidence, audit_verdict, enriched_by) \
      VALUES (:intake_id, :scope, :title, :subtitle, :publisher, :year, :publication_date, \
              :isbn, :series, :series_number, :edition, :language, :pub_place, \
              :original_title, :original_language, :original_year, :source_format, :source, \
-             :confidence, :enriched_by) \
+             :confidence, :audit_verdict, :enriched_by) \
      ON CONFLICT(intake_id, scope) DO UPDATE SET \
        title = excluded.title, \
        subtitle = excluded.subtitle, \
@@ -78,6 +79,7 @@ const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
        source_format = excluded.source_format, \
        source = excluded.source, \
        confidence = excluded.confidence, \
+       audit_verdict = excluded.audit_verdict, \
        enriched_by = excluded.enriched_by";
 
 /// A `SELECT` of every column with `tail` (a `WHERE` clause) appended.
@@ -132,6 +134,11 @@ pub struct PublicationAttrs {
     pub source: Option<String>,
     /// Extraction confidence (`high` / `medium` / `low`).
     pub confidence: Option<String>,
+    /// Plausibility verdict from the metadata audit (`clean` /
+    /// `needs_work`). Stamped at ingest alongside `confidence` so a
+    /// later `metadata show` can render the historical audit outcome
+    /// without re-running the audit on synthetic inputs.
+    pub audit_verdict: Option<String>,
     /// What produced the enrichment, when the row was enriched.
     pub enriched_by: Option<String>,
 }
@@ -160,6 +167,7 @@ impl PublicationAttrs {
             source_format: row.get("source_format")?,
             source: row.get("source")?,
             confidence: row.get("confidence")?,
+            audit_verdict: row.get("audit_verdict")?,
             enriched_by: row.get("enriched_by")?,
         })
     }
@@ -211,6 +219,9 @@ pub struct NewPublicationAttrs {
     pub source: Option<String>,
     /// Extraction confidence.
     pub confidence: Option<String>,
+    /// Audit verdict (`clean` / `needs_work`) — see
+    /// [`PublicationAttrs::audit_verdict`].
+    pub audit_verdict: Option<String>,
     /// What produced the enrichment.
     pub enriched_by: Option<String>,
 }
@@ -239,6 +250,7 @@ impl NewPublicationAttrs {
             source_format: None,
             source: None,
             confidence: None,
+            audit_verdict: None,
             enriched_by: None,
         }
     }
@@ -269,6 +281,7 @@ impl Catalog {
                 ":source_format": new.source_format,
                 ":source": new.source,
                 ":confidence": new.confidence,
+                ":audit_verdict": new.audit_verdict,
                 ":enriched_by": new.enriched_by,
             },
         )?;
@@ -324,6 +337,7 @@ mod tests {
             source_format: Some("epub".into()),
             source: Some("extracted".into()),
             confidence: Some("high".into()),
+            audit_verdict: Some("clean".into()),
             enriched_by: Some("llm".into()),
         }
     }
@@ -358,6 +372,7 @@ mod tests {
         assert_eq!(read.source_format.as_deref(), Some("epub"));
         assert_eq!(read.source.as_deref(), Some("extracted"));
         assert_eq!(read.confidence.as_deref(), Some("high"));
+        assert_eq!(read.audit_verdict.as_deref(), Some("clean"));
         assert_eq!(read.enriched_by.as_deref(), Some("llm"));
     }
 

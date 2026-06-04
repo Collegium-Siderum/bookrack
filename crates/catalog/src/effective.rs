@@ -100,6 +100,7 @@ fn base_pairs(attrs: &PublicationAttrs) -> Vec<(&'static str, String)> {
         source_format,
         source,
         confidence,
+        audit_verdict,
         enriched_by,
     } = attrs;
     [
@@ -120,6 +121,7 @@ fn base_pairs(attrs: &PublicationAttrs) -> Vec<(&'static str, String)> {
         ("source_format", source_format),
         ("source", source),
         ("confidence", confidence),
+        ("audit_verdict", audit_verdict),
         ("enriched_by", enriched_by),
     ]
     .into_iter()

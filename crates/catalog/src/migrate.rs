@@ -22,7 +22,7 @@ use rusqlite_migration::{M, Migrations};
 /// The `user_version` a fully-migrated `catalog.db` carries: the number of
 /// migrations defined. The `catalog_meta.schema_version` mirror is kept
 /// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 5;
+pub(crate) const TARGET_VERSION: i64 = 6;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -448,6 +448,14 @@ CREATE INDEX idx_intake_status ON intake(status);
 CREATE INDEX idx_intake_format ON intake(format);
 "#;
 
+// `M[5]` — stamp the audit verdict on the publication-attrs row
+// alongside the existing `confidence` column, so `metadata list` and
+// `metadata show` agree on the historical audit outcome instead of one
+// reading the stored row and the other re-running a synthetic audit.
+// Additive: `ALTER TABLE ... ADD COLUMN` is O(1) and leaves existing
+// rows with `NULL` until the next ingest restamps them.
+const AUDIT_VERDICT_DDL: &str = "ALTER TABLE node_publication_attrs ADD COLUMN audit_verdict TEXT;";
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -457,6 +465,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(NODE_ADDR_DDL),
         M::up(PUB_PLACE_ORIGINAL_YEAR_DDL),
         M::up(INTAKE_EXTRACTOR_VERSION_DDL),
+        M::up(AUDIT_VERDICT_DDL),
     ])
 }
 
@@ -606,6 +615,17 @@ mod tests {
         assert!(
             cols.iter().any(|c| c == "original_year"),
             "expected original_year column, got {cols:?}"
+        );
+    }
+
+    #[test]
+    fn migration_m5_adds_audit_verdict_to_publication_attrs() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations().to_latest(&mut conn).expect("apply");
+        let cols = columns_of(&conn, "node_publication_attrs");
+        assert!(
+            cols.iter().any(|c| c == "audit_verdict"),
+            "expected audit_verdict column, got {cols:?}"
         );
     }
 
