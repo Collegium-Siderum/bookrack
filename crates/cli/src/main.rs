@@ -163,6 +163,12 @@ enum VectorsAction {
         /// every intake currently in the `Embedded` state is reembedded.
         #[arg(long, value_name = "INTAKE_ID")]
         book: Option<i64>,
+        /// Restrict the reembed to intakes whose stored
+        /// `extractor_version` does not equal this binary's
+        /// `bookrack_extract::EXTRACTOR_VERSION`. Combines with `--book`
+        /// by intersection.
+        #[arg(long)]
+        stale_only: bool,
         /// Print the plan (per-book chunk counts) and exit without
         /// writing.
         #[arg(long)]
@@ -189,6 +195,12 @@ enum CorpusAction {
         /// every intake whose lifecycle is past `Extracted` is rebuilt.
         #[arg(long, value_name = "INTAKE_ID")]
         book: Option<i64>,
+        /// Restrict the rebuild to intakes whose stored
+        /// `extractor_version` does not equal this binary's
+        /// `bookrack_extract::EXTRACTOR_VERSION`. Combines with `--book`
+        /// by intersection.
+        #[arg(long)]
+        stale_only: bool,
         /// Print the per-intake classification and exit without writing.
         #[arg(long)]
         dry_run: bool,
@@ -315,14 +327,28 @@ async fn main() -> Result<()> {
                 .await
             }
             VectorsAction::Drop => run_vectors_drop(&cfg).await,
-            VectorsAction::Reembed { book, dry_run, yes } => {
-                run_vectors_reembed(&cfg, book, dry_run, yes, profile_name.as_deref()).await
+            VectorsAction::Reembed {
+                book,
+                stale_only,
+                dry_run,
+                yes,
+            } => {
+                run_vectors_reembed(
+                    &cfg,
+                    book,
+                    stale_only,
+                    dry_run,
+                    yes,
+                    profile_name.as_deref(),
+                )
+                .await
             }
         },
         Command::Corpus { action } => match action {
             CorpusAction::Rebuild {
                 include_vectors,
                 book,
+                stale_only,
                 dry_run,
                 yes,
             } => {
@@ -330,6 +356,7 @@ async fn main() -> Result<()> {
                     &cfg,
                     include_vectors,
                     book,
+                    stale_only,
                     dry_run,
                     yes,
                     profile_name.as_deref(),
@@ -518,6 +545,7 @@ async fn run_vectors_rebuild(
 async fn run_vectors_reembed(
     cfg: &Config,
     book: Option<i64>,
+    stale_only: bool,
     dry_run: bool,
     yes: bool,
     profile_name: Option<&str>,
@@ -568,6 +596,7 @@ async fn run_vectors_reembed(
         &embed_cfg,
         &embedder_client,
         book,
+        stale_only,
     )
     .await
     .context("reembed_all")?;
@@ -603,6 +632,7 @@ async fn run_corpus_rebuild(
     cfg: &Config,
     include_vectors: bool,
     book: Option<i64>,
+    stale_only: bool,
     dry_run: bool,
     yes: bool,
     profile_name: Option<&str>,
@@ -613,6 +643,7 @@ async fn run_corpus_rebuild(
 
     let plan_params = bookrack_ingest::rebuild::RebuildParams {
         only: book,
+        stale_only,
         dry_run: true,
         ..Default::default()
     };
@@ -665,6 +696,7 @@ async fn run_corpus_rebuild(
 
     let run_params = bookrack_ingest::rebuild::RebuildParams {
         only: book,
+        stale_only,
         dry_run: false,
         ..Default::default()
     };
@@ -690,6 +722,7 @@ async fn run_corpus_rebuild(
             &embed_cfg,
             &embedder_client,
             book,
+            stale_only,
         )
         .await
         .context("reembed after rebuild")?;

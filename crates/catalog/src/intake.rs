@@ -558,6 +558,47 @@ impl Catalog {
         count_as_u64(n)
     }
 
+    /// Intakes whose stored `extractor_version` is not equal to
+    /// `current`, ordered by ascending `intake_id`.
+    ///
+    /// These partitions hold derived content produced by an older
+    /// extractor. Callers pass [`bookrack_extract::EXTRACTOR_VERSION`]
+    /// — the soft reference style the catalog uses for every
+    /// cross-crate identity — and combine the result with their own
+    /// status filter: corpus rebuild folds it against
+    /// `Extracted | DedupHold | Embedded`, vectors reembed against
+    /// `Embedded`.
+    ///
+    /// Returns an empty `Vec` on a fresh database, or when every row's
+    /// `extractor_version` already equals `current`.
+    ///
+    /// [`bookrack_extract::EXTRACTOR_VERSION`]: https://docs.rs/bookrack-extract
+    pub fn stale_partitions(&self, current: u32) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT intake_id FROM intake \
+             WHERE extractor_version != :current \
+             ORDER BY intake_id",
+        )?;
+        let rows = stmt.query_map(named_params! { ":current": current }, |row| row.get(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Number of intakes whose stored `extractor_version` is not equal
+    /// to `current`. Shares the WHERE shape with [`Self::stale_partitions`]
+    /// so a count and a listing reach the same rows.
+    pub fn count_stale_partitions(&self, current: u32) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM intake WHERE extractor_version != :current",
+            named_params! { ":current": current },
+            |row| row.get(0),
+        )?;
+        count_as_u64(n)
+    }
+
     /// Number of intake rows whose `format` matches `format` exactly.
     /// Rows whose `format` is `NULL` are excluded.
     pub fn count_intakes_by_format(&self, format: &str) -> Result<u64> {
@@ -691,6 +732,46 @@ mod tests {
             .expect("re-register");
         assert!(!again.is_new(), "a known file must not create a second row");
         assert_eq!(again.intake().intake_id, first.intake_id);
+    }
+
+    #[test]
+    fn stale_partitions_lists_rows_whose_extractor_version_differs() {
+        let mut catalog = catalog();
+        // Three rows at version 1 (the default), one we then advance
+        // to version 2.
+        let a = catalog
+            .register_intake(&NewIntake::new("sha-a"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let b = catalog
+            .register_intake(&NewIntake::new("sha-b"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        let _c = catalog
+            .register_intake(&NewIntake::new("sha-c"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        assert!(catalog.set_extraction(a, "epub", 2).expect("stamp a"));
+        assert!(catalog.set_extraction(b, "epub", 2).expect("stamp b"));
+        // _c stays at the default version 1.
+
+        // Against current = 2, only _c is stale.
+        let stale = catalog.stale_partitions(2).expect("query");
+        assert_eq!(stale, vec![_c]);
+        assert_eq!(catalog.count_stale_partitions(2).expect("count"), 1);
+
+        // Against current = 1, _a and _b are stale.
+        let stale = catalog.stale_partitions(1).expect("query");
+        assert_eq!(stale, vec![a, b]);
+        assert_eq!(catalog.count_stale_partitions(1).expect("count"), 2);
+
+        // Against current = 3, every row is stale.
+        let stale = catalog.stale_partitions(3).expect("query");
+        assert_eq!(stale, vec![a, b, _c]);
+        assert_eq!(catalog.count_stale_partitions(3).expect("count"), 3);
     }
 
     #[test]

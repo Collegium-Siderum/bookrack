@@ -21,6 +21,7 @@ use std::path::Path;
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_core::NodeType;
 use bookrack_corpus::Corpus;
+use bookrack_extract::EXTRACTOR_VERSION;
 
 use crate::envelope::{self, EnvelopeError};
 use crate::{IngestError, Result, StructureParams, ingest_structure};
@@ -53,6 +54,12 @@ pub struct RebuildParams {
     /// [`IngestError::UnknownIntake`] / [`IngestError::IntakeNotEmbedded`]
     /// — the latter reuses the "not in a rebuildable state" semantics.
     pub only: Option<i64>,
+    /// When true, restrict the rebuild to intakes whose stored
+    /// `extractor_version` does not equal this binary's
+    /// [`EXTRACTOR_VERSION`] — the partitions whose derived content
+    /// was produced by an older extractor and so most needs a refresh.
+    /// Combines with [`Self::only`] by intersection.
+    pub stale_only: bool,
     /// When true, do not write anything: produce a [`RebuildReport`]
     /// that classifies each intake (rebuildable / missing_envelope /
     /// mismatched / failed) but skips the actual structure call.
@@ -67,7 +74,15 @@ pub fn rebuild_from_intakes(
     catalog: &Catalog,
     params: &RebuildParams,
 ) -> Result<RebuildReport> {
-    let targets = collect_targets(catalog, params.only)?;
+    let mut targets = collect_targets(catalog, params.only)?;
+    if params.stale_only {
+        let stale: std::collections::HashSet<i64> = catalog
+            .stale_partitions(EXTRACTOR_VERSION)
+            .map_err(IngestError::from)?
+            .into_iter()
+            .collect();
+        targets.retain(|i| stale.contains(&i.intake_id));
+    }
     let mut report = RebuildReport::default();
     for intake in targets {
         let intake_id = intake.intake_id;
@@ -233,6 +248,50 @@ mod tests {
                 .len()
                 > 1
         );
+    }
+
+    #[test]
+    fn stale_only_skips_partitions_at_current_extractor_version() {
+        let dir = tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = sample_extraction();
+
+        // One row that has been bumped to the current extractor version
+        // (so it is NOT stale) and one that is still at the default
+        // (also not stale today; pretend a future binary is at v2).
+        let fresh = register(&mut catalog, "sha-fresh");
+        catalog
+            .set_intake_status(fresh, IntakeStatus::Embedded)
+            .expect("status");
+        catalog
+            .set_extraction(fresh, "txt", bookrack_extract::EXTRACTOR_VERSION)
+            .expect("stamp fresh");
+        let path = seed_envelope(dir.path(), fresh, "sha-fresh", &extraction);
+        catalog.set_stored_path(fresh, &path).expect("stored");
+
+        let stale = register(&mut catalog, "sha-stale");
+        catalog
+            .set_intake_status(stale, IntakeStatus::Embedded)
+            .expect("status");
+        catalog
+            .set_extraction(stale, "txt", bookrack_extract::EXTRACTOR_VERSION + 99)
+            .expect("stamp stale");
+        let path = seed_envelope(dir.path(), stale, "sha-stale", &extraction);
+        catalog.set_stored_path(stale, &path).expect("stored");
+
+        // Without the filter, both rebuild; with it, only the stale one.
+        let report = rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &RebuildParams {
+                stale_only: true,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("rebuild");
+        assert_eq!(report.rebuilt, vec![stale]);
     }
 
     #[test]

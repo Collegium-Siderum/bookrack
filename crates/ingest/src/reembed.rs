@@ -17,6 +17,7 @@ use bookrack_config::EmbedConfig;
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
+use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::{ChunkRow, ChunkStore};
 
 use crate::chunk::ChunkPlan;
@@ -103,6 +104,11 @@ pub async fn reembed_book<E: Embedder>(
 /// Reembed every intake currently in [`IntakeStatus::Embedded`], or
 /// just `only` when set. Per-book failures abort the whole run so the
 /// caller can surface the first error verbatim.
+///
+/// When `stale_only` is true the target set is further restricted to
+/// intakes whose stored `extractor_version` does not equal this
+/// binary's [`EXTRACTOR_VERSION`]; combines with `only` by
+/// intersection.
 pub async fn reembed_all<E: Embedder>(
     catalog: &Catalog,
     corpus: &Corpus,
@@ -110,8 +116,17 @@ pub async fn reembed_all<E: Embedder>(
     cfg: &EmbedConfig,
     embedder: &E,
     only: Option<i64>,
+    stale_only: bool,
 ) -> Result<ReembedReport> {
-    let targets = collect_targets(catalog, only)?;
+    let mut targets = collect_targets(catalog, only)?;
+    if stale_only {
+        let stale: std::collections::HashSet<i64> = catalog
+            .stale_partitions(EXTRACTOR_VERSION)
+            .map_err(IngestError::from)?
+            .into_iter()
+            .collect();
+        targets.retain(|id| stale.contains(id));
+    }
     let mut report = ReembedReport::default();
     for intake_id in targets {
         let embed_run = reembed_book(intake_id, embedder, corpus, lancedb_dir, cfg).await?;
@@ -329,6 +344,7 @@ mod tests {
             &cfg,
             &Fake { generation: 9 },
             None,
+            false,
         )
         .await
         .expect("reembed_all");
