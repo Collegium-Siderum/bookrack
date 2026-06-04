@@ -61,6 +61,17 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     ],
 };
 
+/// The six organizing [`NodeType`] variants whose rows make up a book's
+/// table of contents. Used by [`Corpus::toc_for_book`]'s IN-list.
+const ORGANIZING_NODE_TYPES: &[NodeType] = &[
+    NodeType::Collection,
+    NodeType::Volume,
+    NodeType::Work,
+    NodeType::Chapter,
+    NodeType::Section,
+    NodeType::Subsection,
+];
+
 /// `INSERT` for one node. Parameters are bound by name, so this column
 /// order and the bind list in [`insert_one`] need not be kept in step.
 const INSERT_NODE_SQL: &str = "INSERT INTO nodes \
@@ -469,6 +480,37 @@ impl Corpus {
         )
     }
 
+    /// Fetch the organizing nodes that form one book's table of
+    /// contents, ordered as a depth-first TOC walk: by `toc_lo` first
+    /// (the start of each node's document-order span) then by `depth`
+    /// to place a parent ahead of children that share its start, then
+    /// by `ordinal` as a final tiebreaker.
+    ///
+    /// At most `cap` rows are returned; the cap is enforced inside the
+    /// SQL with `LIMIT`. An unknown `book_root_id` returns an empty
+    /// `Vec` rather than an error. Leaves are filtered out: the
+    /// result is the TOC, not the full node tree.
+    pub fn toc_for_book(&self, book_root_id: NodeId, cap: usize) -> Result<Vec<Node>> {
+        let placeholders = ORGANIZING_NODE_TYPES
+            .iter()
+            .map(|t| format!("'{}'", t.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = select_sql(&format!(
+            "WHERE book_root_id = :book_root_id \
+             AND node_type IN ({placeholders}) \
+             ORDER BY toc_lo, depth, ordinal LIMIT :cap"
+        ));
+        let cap_i = i64::try_from(cap).unwrap_or(i64::MAX);
+        self.query_nodes(
+            &sql,
+            named_params! {
+                ":book_root_id": book_root_id.get(),
+                ":cap": cap_i,
+            },
+        )
+    }
+
     /// Set or clear a node's expression link. Returns whether a node
     /// with that id existed.
     pub fn set_expression_id(&self, node_id: NodeId, expression_id: Option<i64>) -> Result<bool> {
@@ -728,6 +770,100 @@ mod tests {
             corpus.insert_node(&bad),
             Err(CorpusError::InvalidNode { .. })
         ));
+    }
+
+    #[test]
+    fn toc_for_book_returns_only_organizing_nodes_in_depth_first_order() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 5).expect("ids");
+        // Two chapters under the root, one section under chapter 1, and
+        // one prose leaf under chapter 1 — the leaf must not appear in
+        // the TOC.
+        let chap1 = ids[0];
+        let chap2 = ids[1];
+        let sect1 = ids[2];
+        let leaf = ids[3];
+
+        corpus
+            .insert_node(
+                &NewNode::child(chap1, root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(1, 50),
+            )
+            .expect("chap1");
+        corpus
+            .insert_node(
+                &NewNode::child(sect1, chap1, root, 0, 2, NodeType::Section)
+                    .title("Section 1.1")
+                    .toc_span(2, 20),
+            )
+            .expect("sect1");
+        corpus
+            .insert_node(
+                &NewNode::child(leaf, chap1, root, 1, 2, NodeType::Paragraph)
+                    .text("body")
+                    .text_stats(4, 1)
+                    .toc_span(21, 21),
+            )
+            .expect("leaf");
+        corpus
+            .insert_node(
+                &NewNode::child(chap2, root, root, 1, 1, NodeType::Chapter)
+                    .title("Chapter Two")
+                    .toc_span(60, 99),
+            )
+            .expect("chap2");
+
+        // Also seed the root's toc_span so it sorts ahead of chapter 1.
+        corpus
+            .conn
+            .execute(
+                "UPDATE nodes SET toc_lo = 1, toc_hi = 99 WHERE node_id = ?",
+                [root.get()],
+            )
+            .expect("set root span");
+
+        let toc = corpus.toc_for_book(root, 1000).expect("toc");
+        let titles: Vec<&str> = toc
+            .iter()
+            .map(|n| n.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            titles,
+            vec!["A Book", "Chapter One", "Section 1.1", "Chapter Two"]
+        );
+        assert!(
+            toc.iter().all(|n| n.node_type.is_organizing()),
+            "leaves must be filtered out: {toc:?}"
+        );
+    }
+
+    #[test]
+    fn toc_for_book_caps_the_result_size() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 4).expect("ids");
+        for (i, id) in ids.iter().enumerate() {
+            corpus
+                .insert_node(
+                    &NewNode::child(*id, root, root, i as i64, 1, NodeType::Chapter)
+                        .title(format!("Chapter {i}"))
+                        .toc_span((i as i64) * 10 + 5, (i as i64) * 10 + 9),
+                )
+                .expect("chapter");
+        }
+        let toc = corpus.toc_for_book(root, 2).expect("toc");
+        assert_eq!(toc.len(), 2);
+    }
+
+    #[test]
+    fn toc_for_book_unknown_root_returns_empty() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        let toc = corpus
+            .toc_for_book(NodeId::new(999_999_999), 100)
+            .expect("toc");
+        assert!(toc.is_empty());
     }
 
     #[test]
