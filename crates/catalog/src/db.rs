@@ -57,6 +57,7 @@ const SPECS: &[&TableSpec] = &[
 /// ephemeral one (useful in tests).
 pub struct Catalog {
     pub(crate) conn: TimedConnection,
+    read_only: bool,
 }
 
 impl Catalog {
@@ -134,10 +135,49 @@ impl Catalog {
 
         let catalog = Catalog {
             conn: TimedConnection::new(conn, "catalog"),
+            read_only: false,
         };
         // Mirror the authoritative version into `catalog_meta` for audit.
         catalog.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
         Ok(catalog)
+    }
+
+    /// Open the `catalog.db` at `path` for read-only access.
+    ///
+    /// Skips the migration step entirely — the file must already be at
+    /// the current schema revision — and locks the connection with
+    /// `PRAGMA query_only = ON`, so any subsequent write through the
+    /// resulting handle is rejected by SQLite with `SQLITE_READONLY`.
+    ///
+    /// Designed for daemon-side query consumers that share one schema
+    /// migration owned by a separate read-write entry point at process
+    /// start. The `verify_all(SPECS)` acceptance gate still runs, so an
+    /// unmigrated or schema-drifted database is refused at open rather
+    /// than discovered halfway through a query.
+    pub fn open_read_only(path: &Path) -> Result<Catalog> {
+        let conn = Connection::open(path)?;
+        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if current > TARGET_VERSION {
+            return Err(CatalogError::SchemaTooNew {
+                found: current,
+                expected: TARGET_VERSION,
+            });
+        }
+        conn.pragma_update(None, "query_only", "ON")?;
+        bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
+        Ok(Catalog {
+            conn: TimedConnection::new(conn, "catalog"),
+            read_only: true,
+        })
+    }
+
+    /// Whether this handle was opened read-only.
+    ///
+    /// `true` only for handles produced by [`Catalog::open_read_only`].
+    /// Diagnostic — the actual write barrier is the SQLite
+    /// `query_only` PRAGMA, not this flag.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// The current UTC time as an ISO-8601 string, read from SQLite's
@@ -374,6 +414,54 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         bookrack_dbkit::verify_all(&catalog.conn, SPECS)
             .expect("the rendered schema must conform to every spec");
+    }
+
+    #[test]
+    fn open_read_only_rejects_writes() {
+        use crate::{IntakeStatus, NewIntake};
+
+        let dir = unique_dir("read-only-blocks-writes");
+        let path = dir.join("catalog.db");
+        {
+            // Initialize the schema through the read-write entry point.
+            let mut catalog = Catalog::open(&path).expect("first open");
+            catalog
+                .register_intake(&NewIntake::new("sha-rw"))
+                .expect("seed");
+        }
+
+        let read_only = Catalog::open_read_only(&path).expect("open read-only");
+        assert!(read_only.is_read_only());
+
+        // The existing row is still readable.
+        let by_sha = read_only
+            .intake_by_sha("sha-rw")
+            .expect("read existing")
+            .expect("present");
+        assert_eq!(by_sha.status, IntakeStatus::Pending);
+
+        // But any write through this handle fails with a SQLite error.
+        let mut writer = read_only;
+        let err = writer
+            .register_intake(&NewIntake::new("sha-blocked"))
+            .expect_err("write must fail");
+        assert!(matches!(err, CatalogError::Sqlite(_)), "{err:?}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_is_idempotent_against_an_initialized_database() {
+        let dir = unique_dir("read-only-reads");
+        let path = dir.join("catalog.db");
+        Catalog::open(&path).expect("first open");
+        let read_only = Catalog::open_read_only(&path).expect("read-only open");
+        // The acceptance gate ran: the version mirror is still readable.
+        let version = read_only.meta_get(SCHEMA_VERSION_KEY).expect("read");
+        assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
+        assert!(read_only.is_read_only());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

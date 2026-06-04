@@ -58,6 +58,23 @@ pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
 
+/// The logical address of a book's root node. Stamped into
+/// `node_publication_attrs.scope` and `node_contributors.scope` for every
+/// row that describes the whole book rather than a sub-volume; used as a
+/// `WHERE` literal by every read API that wants to reach exactly the book
+/// root.
+pub const BOOK_SCOPE: &str = "book";
+
+/// Convert a SQLite `COUNT(*)` (which the driver hands back as `i64`)
+/// into the unsigned width every catalog `count_*` API returns.
+/// `COUNT(*)` is non-negative by definition, so a negative result here
+/// means the SQLite driver returned something impossible; we treat it as
+/// `0` rather than panicking.
+#[inline]
+pub(crate) fn count_as_u64(n: i64) -> Result<u64> {
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
 /// A fallible `catalog` operation.
 pub type Result<T> = std::result::Result<T, CatalogError>;
 

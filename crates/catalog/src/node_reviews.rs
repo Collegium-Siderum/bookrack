@@ -35,9 +35,9 @@
 //!   outright.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
-use rusqlite::{OptionalExtension, Row, named_params};
+use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
 
-use crate::{Catalog, Result};
+use crate::{Catalog, Result, count_as_u64};
 
 /// `node_reviews.status` value the pipeline writes after a fresh ingest.
 /// Means "no human or LLM has confirmed this record". The pipeline never
@@ -179,6 +179,30 @@ impl Catalog {
         Ok(())
     }
 
+    /// Number of node reviews whose `status` falls in `statuses`. An
+    /// empty slice means "no filter" and counts every row.
+    pub fn count_node_reviews_by_status(&self, statuses: &[&str]) -> Result<u64> {
+        if statuses.is_empty() {
+            let n: i64 = self
+                .conn
+                .query_row("SELECT COUNT(*) FROM node_reviews", [], |row| row.get(0))?;
+            return count_as_u64(n);
+        }
+        debug_assert!(
+            statuses.len() <= 8,
+            "count_node_reviews_by_status takes at most 8 statuses, got {}",
+            statuses.len()
+        );
+        let placeholders = vec!["?"; statuses.len()].join(", ");
+        let sql = format!("SELECT COUNT(*) FROM node_reviews WHERE status IN ({placeholders})");
+        let n: i64 =
+            self.conn
+                .query_row(&sql, params_from_iter(statuses.iter().copied()), |row| {
+                    row.get(0)
+                })?;
+        count_as_u64(n)
+    }
+
     /// Fetch the review of the node at `(intake_id, scope)`, or `None` if
     /// it has not been reviewed.
     pub fn review(&self, intake_id: i64, scope: &str) -> Result<Option<NodeReview>> {
@@ -223,6 +247,40 @@ mod tests {
     fn a_missing_review_reads_as_none() {
         let catalog = Catalog::open_in_memory().expect("open");
         assert!(catalog.review(404, SCOPE).expect("read").is_none());
+    }
+
+    #[test]
+    fn count_node_reviews_by_status_filters_and_sums() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_PENDING))
+            .expect("write");
+        catalog
+            .upsert_review(&NewReview::new(2, SCOPE, "human", STATUS_APPROVED))
+            .expect("write");
+        catalog
+            .upsert_review(&NewReview::new(3, SCOPE, "human", STATUS_REJECTED))
+            .expect("write");
+
+        assert_eq!(
+            catalog
+                .count_node_reviews_by_status(&[STATUS_PENDING])
+                .expect("count pending"),
+            1
+        );
+        assert_eq!(
+            catalog
+                .count_node_reviews_by_status(&[STATUS_APPROVED, STATUS_REJECTED])
+                .expect("count in-list"),
+            2
+        );
+        // Empty slice ≡ count everything.
+        assert_eq!(
+            catalog
+                .count_node_reviews_by_status(&[])
+                .expect("count all"),
+            3
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
 
-use crate::{Catalog, Result};
+use crate::{Catalog, Result, count_as_u64};
 
 /// The single source of truth for the `book_state` table's schema. Its
 /// DDL is rendered from this spec.
@@ -180,6 +180,17 @@ impl Catalog {
         Ok(())
     }
 
+    /// Number of book-state rows currently at `stage`. Uses
+    /// `idx_book_state_stage`.
+    pub fn count_book_states_by_stage(&self, stage: &str) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM book_state WHERE current_stage = :stage",
+            named_params! { ":stage": stage },
+            |row| row.get(0),
+        )?;
+        count_as_u64(n)
+    }
+
     /// Fetch a book's pipeline state, or `None` if none is recorded.
     pub fn book_state(&self, book_root_id: i64) -> Result<Option<BookState>> {
         let state = self
@@ -232,6 +243,39 @@ mod tests {
     fn a_missing_book_state_reads_as_none() {
         let catalog = Catalog::open_in_memory().expect("open");
         assert!(catalog.book_state(404).expect("read").is_none());
+    }
+
+    #[test]
+    fn count_book_states_by_stage_groups_by_current_stage() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_book_state(&NewBookState::new(100_000_001, 1, "extract"))
+            .expect("write");
+        catalog
+            .upsert_book_state(&NewBookState::new(100_000_002, 2, "extract"))
+            .expect("write");
+        catalog
+            .upsert_book_state(&NewBookState::new(100_000_003, 3, "embed"))
+            .expect("write");
+
+        assert_eq!(
+            catalog
+                .count_book_states_by_stage("extract")
+                .expect("count extract"),
+            2
+        );
+        assert_eq!(
+            catalog
+                .count_book_states_by_stage("embed")
+                .expect("count embed"),
+            1
+        );
+        assert_eq!(
+            catalog
+                .count_book_states_by_stage("unknown")
+                .expect("count unknown"),
+            0
+        );
     }
 
     #[test]

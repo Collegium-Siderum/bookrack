@@ -9,9 +9,9 @@
 //! existing row instead of creating a duplicate.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
-use rusqlite::{OptionalExtension, Row, named_params};
+use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
 
-use crate::{Catalog, Result};
+use crate::{Catalog, Result, count_as_u64};
 
 /// The single source of truth for the `intake` table's schema. Its DDL
 /// is rendered from this spec.
@@ -317,6 +317,46 @@ impl Catalog {
         Ok(out)
     }
 
+    /// Total number of intake rows.
+    pub fn count_intakes(&self) -> Result<u64> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM intake", [], |row| row.get(0))?;
+        count_as_u64(n)
+    }
+
+    /// Number of intake rows whose `status` falls in `statuses`. An empty
+    /// slice means "no filter" and counts every row.
+    pub fn count_intakes_by_status(&self, statuses: &[IntakeStatus]) -> Result<u64> {
+        if statuses.is_empty() {
+            return self.count_intakes();
+        }
+        debug_assert!(
+            statuses.len() <= 8,
+            "count_intakes_by_status takes at most 8 statuses, got {}",
+            statuses.len()
+        );
+        let placeholders = vec!["?"; statuses.len()].join(", ");
+        let sql = format!("SELECT COUNT(*) FROM intake WHERE status IN ({placeholders})");
+        let n: i64 = self.conn.query_row(
+            &sql,
+            params_from_iter(statuses.iter().map(|s| s.as_str())),
+            |row| row.get(0),
+        )?;
+        count_as_u64(n)
+    }
+
+    /// Number of intake rows whose `format` matches `format` exactly.
+    /// Rows whose `format` is `NULL` are excluded.
+    pub fn count_intakes_by_format(&self, format: &str) -> Result<u64> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM intake WHERE format = :format",
+            named_params! { ":format": format },
+            |row| row.get(0),
+        )?;
+        count_as_u64(n)
+    }
+
     /// Advance an intake's lifecycle state. Returns whether a row with
     /// that id existed.
     pub fn set_intake_status(&self, intake_id: i64, status: IntakeStatus) -> Result<bool> {
@@ -499,6 +539,109 @@ mod tests {
                 .expect("miss")
         );
         assert!(!catalog.set_stored_path(9999, "store/x").expect("miss"));
+    }
+
+    #[test]
+    fn count_intakes_grows_with_each_registration() {
+        let mut catalog = catalog();
+        assert_eq!(catalog.count_intakes().expect("count empty"), 0);
+        catalog
+            .register_intake(&NewIntake::new("sha-a"))
+            .expect("register");
+        catalog
+            .register_intake(&NewIntake::new("sha-b"))
+            .expect("register");
+        assert_eq!(catalog.count_intakes().expect("count two"), 2);
+    }
+
+    #[test]
+    fn count_intakes_by_status_filters_and_sums() {
+        let mut catalog = catalog();
+        let ids: Vec<i64> = ["sha-a", "sha-b", "sha-c"]
+            .iter()
+            .map(|sha| {
+                catalog
+                    .register_intake(&NewIntake::new(*sha))
+                    .expect("register")
+                    .intake()
+                    .intake_id
+            })
+            .collect();
+        catalog
+            .set_intake_status(ids[1], IntakeStatus::Extracted)
+            .expect("set");
+        catalog
+            .set_intake_status(ids[2], IntakeStatus::Embedded)
+            .expect("set");
+
+        assert_eq!(
+            catalog
+                .count_intakes_by_status(&[IntakeStatus::Pending])
+                .expect("count one"),
+            1
+        );
+        assert_eq!(
+            catalog
+                .count_intakes_by_status(&[IntakeStatus::Extracted, IntakeStatus::Embedded])
+                .expect("count in-list"),
+            2
+        );
+        assert_eq!(
+            catalog
+                .count_intakes_by_status(&[IntakeStatus::Aborted])
+                .expect("count miss"),
+            0
+        );
+    }
+
+    #[test]
+    fn count_intakes_by_status_empty_slice_counts_everything() {
+        let mut catalog = catalog();
+        catalog
+            .register_intake(&NewIntake::new("sha-x"))
+            .expect("register");
+        catalog
+            .register_intake(&NewIntake::new("sha-y"))
+            .expect("register");
+        assert_eq!(
+            catalog
+                .count_intakes_by_status(&[])
+                .expect("count empty slice"),
+            catalog.count_intakes().expect("count all"),
+        );
+    }
+
+    #[test]
+    fn count_intakes_by_format_filters_and_misses() {
+        let mut catalog = catalog();
+        catalog
+            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .expect("register");
+        catalog
+            .register_intake(&NewIntake::new("sha-2").format("epub"))
+            .expect("register");
+        catalog
+            .register_intake(&NewIntake::new("sha-3").format("pdf"))
+            .expect("register");
+        // A format-less intake is excluded by the WHERE.
+        catalog
+            .register_intake(&NewIntake::new("sha-4"))
+            .expect("register");
+
+        assert_eq!(
+            catalog.count_intakes_by_format("epub").expect("count epub"),
+            2
+        );
+        assert_eq!(
+            catalog.count_intakes_by_format("pdf").expect("count pdf"),
+            1
+        );
+        assert_eq!(
+            catalog
+                .count_intakes_by_format("mobi")
+                .expect("count unknown"),
+            0
+        );
     }
 
     #[test]

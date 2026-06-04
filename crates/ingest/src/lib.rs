@@ -39,8 +39,8 @@ pub use envelope::{
 use std::path::Path;
 
 use bookrack_catalog::{
-    ActorKind, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState, NewContributor,
-    NewIntake, NewPublicationAttrs, NewReview,
+    ActorKind, BOOK_SCOPE, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState,
+    NewContributor, NewIntake, NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
@@ -716,9 +716,6 @@ fn audit(
 const METADATA_BODY_SAMPLE_BLOCKS: usize = 10;
 /// Maximum characters in the body sample carried into the audit.
 const METADATA_BODY_SAMPLE_CHARS: usize = 4096;
-/// Logical address of the book root; the v1 audit only writes here.
-const BOOK_SCOPE: &str = "book";
-
 /// Run the non-blocking metadata sub-step in place: seed the
 /// publication-attrs base from the extracted [`Biblio`], run the
 /// audit over the resulting effective record, and persist the

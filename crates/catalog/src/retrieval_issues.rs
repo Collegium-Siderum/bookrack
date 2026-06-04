@@ -8,9 +8,9 @@
 //! trimmable, never a source of truth.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
-use rusqlite::{OptionalExtension, Row, named_params};
+use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
 
-use crate::{Catalog, Result};
+use crate::{Catalog, Result, count_as_u64};
 
 /// The single source of truth for the `retrieval_issues` table's schema.
 /// Its DDL is rendered from this spec.
@@ -234,6 +234,32 @@ impl Catalog {
         Ok(issue)
     }
 
+    /// Number of retrieval-issue rows whose `status` falls in `statuses`.
+    /// An empty slice means "no filter" and counts every row.
+    pub fn count_retrieval_issues_by_status(&self, statuses: &[&str]) -> Result<u64> {
+        if statuses.is_empty() {
+            let n: i64 =
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM retrieval_issues", [], |row| {
+                        row.get(0)
+                    })?;
+            return count_as_u64(n);
+        }
+        debug_assert!(
+            statuses.len() <= 8,
+            "count_retrieval_issues_by_status takes at most 8 statuses, got {}",
+            statuses.len()
+        );
+        let placeholders = vec!["?"; statuses.len()].join(", ");
+        let sql = format!("SELECT COUNT(*) FROM retrieval_issues WHERE status IN ({placeholders})");
+        let n: i64 =
+            self.conn
+                .query_row(&sql, params_from_iter(statuses.iter().copied()), |row| {
+                    row.get(0)
+                })?;
+        count_as_u64(n)
+    }
+
     /// Every still-open issue, oldest first.
     pub fn open_retrieval_issues(&self) -> Result<Vec<RetrievalIssue>> {
         let mut stmt = self.conn.prepare(&select_sql(
@@ -308,6 +334,40 @@ mod tests {
         assert_eq!(read.status, "open");
         assert_eq!(read.severity, "medium");
         assert_eq!(read.seen_count, 1);
+    }
+
+    #[test]
+    fn count_retrieval_issues_by_status_filters_and_sums() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .record_retrieval_issue(&NewRetrievalIssue::new("zero_hits"))
+            .expect("open one");
+        catalog
+            .record_retrieval_issue(&NewRetrievalIssue::new("recall_miss"))
+            .expect("open two");
+        let mut resolved = NewRetrievalIssue::new("recall_miss");
+        resolved.status = "resolved".to_string();
+        catalog.record_retrieval_issue(&resolved).expect("resolved");
+
+        assert_eq!(
+            catalog
+                .count_retrieval_issues_by_status(&["open"])
+                .expect("count open"),
+            2
+        );
+        assert_eq!(
+            catalog
+                .count_retrieval_issues_by_status(&["open", "resolved"])
+                .expect("count in-list"),
+            3
+        );
+        // Empty slice ≡ count everything.
+        assert_eq!(
+            catalog
+                .count_retrieval_issues_by_status(&[])
+                .expect("count all"),
+            3
+        );
     }
 
     #[test]
