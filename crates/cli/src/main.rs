@@ -469,9 +469,61 @@ enum AuditProfileAction {
     },
 }
 
+/// clap's default "did you mean" tip only sees top-level subcommand
+/// names, so a user typing `bookrack list` lands on a suggestion of
+/// `bookrack ingest`. This wrapper parses normally, then on a
+/// `InvalidSubcommand` error checks the offending token against a
+/// hand-maintained map of natural-name aliases and prints a friendlier
+/// tip before exiting through clap's own renderer.
+fn parse_cli_with_natural_name_hints() -> Cli {
+    match <Cli as clap::Parser>::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if err.kind() == clap::error::ErrorKind::InvalidSubcommand
+                && let Some(typed) = invalid_subcommand_token(&err)
+                && let Some(hint) = natural_name_hint(&typed)
+            {
+                eprintln!("tip: did you mean {hint}?");
+            }
+            err.exit();
+        }
+    }
+}
+
+/// Pull the offending token out of clap's `InvalidSubcommand` error
+/// context, or `None` if the context shape is unexpected.
+fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
+    err.context().find_map(|(kind, value)| {
+        if matches!(kind, clap::error::ContextKind::InvalidSubcommand)
+            && let clap::error::ContextValue::String(s) = value
+        {
+            Some(s.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Map a natural-language guess at a command name to the real
+/// invocation. Returns the hint string already shaped for the user
+/// (multiple options joined with ` or `), or `None` for tokens not in
+/// the table — those fall through to clap's own similarity tip.
+fn natural_name_hint(typed: &str) -> Option<String> {
+    let suggestions: &[&str] = match typed {
+        "list" | "ls" => &["`bookrack books list`"],
+        "find" => &["`bookrack books find <text>`"],
+        "show" => &["`bookrack books show <id>`"],
+        "stats" => &["`bookrack books stats`"],
+        "status" => &["`bookrack info`", "`bookrack books stats`"],
+        "search" => &["`bookrack query <text>`"],
+        _ => return None,
+    };
+    Some(suggestions.join(" or "))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = <Cli as clap::Parser>::parse();
+    let cli = parse_cli_with_natural_name_hints();
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
@@ -2383,5 +2435,40 @@ mod tests {
             err_msg(run_metadata_approve(&catalog, 999, None)).contains("no intake registered")
         );
         assert!(err_msg(run_metadata_reject(&catalog, 999, "r")).contains("no intake registered"));
+    }
+
+    #[test]
+    fn natural_name_hints_cover_the_common_typos_from_the_test_report() {
+        for (typed, expected) in [
+            ("list", "`bookrack books list`"),
+            ("ls", "`bookrack books list`"),
+            ("find", "`bookrack books find <text>`"),
+            ("show", "`bookrack books show <id>`"),
+            ("stats", "`bookrack books stats`"),
+            ("search", "`bookrack query <text>`"),
+        ] {
+            assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
+        }
+
+        // `status` is ambiguous between library-level and per-book; the
+        // hint surfaces both so the user picks.
+        let status = natural_name_hint("status").expect("status maps");
+        assert!(status.contains("`bookrack info`"));
+        assert!(status.contains("`bookrack books stats`"));
+        assert!(status.contains(" or "));
+
+        // Tokens not in the table fall through to clap's similarity tip;
+        // returning None is how we signal that.
+        assert_eq!(natural_name_hint("nope"), None);
+        assert_eq!(natural_name_hint(""), None);
+    }
+
+    #[test]
+    fn invalid_subcommand_token_extracts_the_offending_string() {
+        let Err(err) = Cli::try_parse_from(["bookrack", "list"]) else {
+            panic!("`list` is not a valid subcommand and must error");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("list"));
     }
 }
