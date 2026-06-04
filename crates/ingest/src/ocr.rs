@@ -37,8 +37,8 @@ use bookrack_extract::Extraction;
 
 use crate::envelope;
 use crate::{
-    IngestError, IngestParams, Result, ingest_structure, new_run_id, resume_from_chunk, set_state,
-    sha256_hex,
+    IngestError, IngestParams, Result, ingest_structure, new_run_id, resume_from_chunk,
+    run_metadata_substep, set_state, sha256_hex,
 };
 
 /// Parameters that shape one [`ingest_ocr_intake`] run.
@@ -86,6 +86,13 @@ pub struct OcrIngestReport {
     pub prose_leaves: usize,
     /// How many chunk rows reached the vector store.
     pub chunks_written: usize,
+    /// The metadata audit's plausibility verdict for the book's
+    /// effective record (`clean` / `needs_work`). `None` when no
+    /// audit ran — typically a `trust-source` profile.
+    pub audit_verdict: Option<String>,
+    /// The audit's confidence in that verdict (`high` / `medium` /
+    /// `low`). Paired with `audit_verdict`; both `None` together.
+    pub audit_confidence: Option<String>,
     /// The post-check extraction. On a partial run, its
     /// `provenance.partial_pages` carries the present sheet set.
     pub extraction: Extraction,
@@ -93,16 +100,18 @@ pub struct OcrIngestReport {
 
 /// Drive the full OCR-intake pipeline: register the two intakes, run
 /// the OCR adapter, verify the coverage, write the rebuild-cache
-/// envelope, and route the extraction through STRUCTURE → CHUNK →
-/// EMBED. On success the OCR intake reaches
-/// [`IntakeStatus::Embedded`]; the scan PDF intake stays
+/// envelope, route the extraction through STRUCTURE, seed and audit
+/// the metadata, then chain CHUNK → EMBED. On success the OCR intake
+/// reaches [`IntakeStatus::Embedded`]; the scan PDF intake stays
 /// [`IntakeStatus::NeedsOcr`] as the durable anchor for the source.
+/// The audit verdict is bubbled into the report but never gates the
+/// pipeline; it is consultative, exactly as on the born-digital path.
 ///
-/// METADATA (the audit + filename + publication-attrs seeding step)
-/// is not yet routed for OCR intakes; the OCR book reaches `Embedded`
-/// with empty `node_publication_attrs`, so search returns chunks but
-/// citations carry no title until a follow-up commit wires the
-/// substep through with `source = "ocr_marker"`.
+/// The metadata substep treats the source PDF's filename as the
+/// book's filename channel (the OCR markdown's name is an opaque
+/// artifact), and stamps `node_publication_attrs.source = "ocr_marker"`
+/// because the provenance adapter is the OCR one — the
+/// long-reserved placeholder token surfaces here for the first time.
 // Matches the shape of `ingest_book`, which sits right at the 7-argument
 // limit and only needs the OCR pair (source PDF + OcrIngestParams) on
 // top — bundling that into a struct would obscure the parameter parity
@@ -254,7 +263,37 @@ pub async fn ingest_ocr_intake<E: Embedder>(
             .ocr_marker_finished_at(&parsed_at),
     );
 
-    // 11. CHUNK + EMBED via the shared resume entry point. It writes
+    // 11. METADATA (non-blocking): seed publication_attrs from the
+    //     extraction, parse a filename biblio off the source PDF's
+    //     filename (the OCR markdown is an opaque artifact whose name
+    //     does not carry book identity), and run the deterministic
+    //     audit. `build_base_attrs` writes `source = "ocr_marker"`
+    //     because the provenance adapter is the OCR one — the
+    //     placeholder the column was reserved for first surfaces here.
+    //     The audit verdict is bubbled into the report; it does not
+    //     gate the pipeline (CHUNK + EMBED run regardless).
+    let pdf_stem = source_pdf_path.file_stem().and_then(|s| s.to_str());
+    let filename_biblio = pdf_stem
+        .map(|stem| bookrack_metadata::parse_filename(stem, &params.audit_profile.filename_parser));
+    let outcome = run_metadata_substep(
+        catalog,
+        ocr_intake_id,
+        book_root_raw,
+        &extraction,
+        &structure.toc_stats,
+        pdf_stem,
+        filename_biblio.as_ref(),
+        &params.audit_rules,
+        &params.audit_profile,
+        &run_id,
+        &source_sha_ocr,
+    );
+    let (audit_verdict, audit_confidence) = match &outcome {
+        Some(o) => (Some(o.verdict.clone()), Some(o.confidence.clone())),
+        None => (None, None),
+    };
+
+    // 12. CHUNK + EMBED via the shared resume entry point. It writes
     //     its own audit rows, advances `book_state` to `embed`, and
     //     flips the intake's status to `Embedded` on success.
     let embed = resume_from_chunk(
@@ -283,6 +322,8 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         nodes_written: structure.nodes_written,
         prose_leaves: structure.prose_leaves,
         chunks_written: embed.chunks_written,
+        audit_verdict,
+        audit_confidence,
         extraction,
     })
 }
@@ -585,6 +626,25 @@ mod tests {
             report.extraction.provenance.derived_from_sha256.as_deref(),
             Some(report.source_sha_pdf.as_str()),
         );
+
+        // METADATA ran on the OCR book: the audit produced a verdict
+        // and `node_publication_attrs.source` is the OCR-marker token —
+        // the placeholder the column was reserved for, first consumed
+        // by this path.
+        assert!(report.audit_verdict.is_some(), "audit verdict produced");
+        assert!(
+            report.audit_confidence.is_some(),
+            "audit confidence produced"
+        );
+        let attrs = p
+            .catalog
+            .publication_attrs(report.ocr_intake_id, bookrack_catalog::BOOK_SCOPE)
+            .expect("publication_attrs lookup")
+            .expect("publication_attrs row present");
+        assert_eq!(attrs.source.as_deref(), Some("ocr_marker"));
+        assert_eq!(attrs.source_format.as_deref(), Some("ocr-pages"));
+        // /Info Title flows in via the source PDF as the title.
+        assert_eq!(attrs.title.as_deref(), Some("Synthetic OCR Fixture"));
     }
 
     #[tokio::test]

@@ -93,6 +93,14 @@ pub fn ocr_intake(report: &OcrIngestReport) {
             report.ocr_intake_id,
         );
     }
+    if report.audit_verdict.as_deref() == Some("needs_work") {
+        let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
+        println!(
+            "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
+             Run `bookrack metadata show {}` to inspect.",
+            report.ocr_intake_id,
+        );
+    }
 }
 
 /// Surface a `needs_work` audit verdict on stdout so the operator

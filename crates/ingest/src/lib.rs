@@ -876,7 +876,7 @@ pub struct AuditOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_metadata_substep(
+pub(crate) fn run_metadata_substep(
     catalog: &Catalog,
     intake_id: i64,
     book_root_id: i64,
@@ -1201,11 +1201,20 @@ fn build_base_attrs(
             &mut actions,
         );
     }
-    attrs.source = Some(if extracted_any || !filename_filled_any {
-        "extracted".to_string()
-    } else {
-        "filename".to_string()
-    });
+    // An OCR-derived row takes the `ocr_marker` token regardless of
+    // which channel filled which field: even when /Info supplied the
+    // title and /Outline the structure, the data still originated from
+    // an externally-OCR'd source manifestation, and that fact is what
+    // `source` is meant to record.
+    attrs.source = Some(
+        if extraction.provenance.adapter == bookrack_extract::ocr::ADAPTER {
+            "ocr_marker".to_string()
+        } else if extracted_any || !filename_filled_any {
+            "extracted".to_string()
+        } else {
+            "filename".to_string()
+        },
+    );
     attrs.source_format = Some(extraction.provenance.adapter.clone());
     BaseAttrsOutcome { attrs, actions }
 }
