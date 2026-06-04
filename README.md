@@ -66,6 +66,35 @@ and `watermarks.toml` carries the four watermark token lists (see
 [watermarks.example.toml](crates/metadata/data/watermarks.example.toml)).
 Both files are user-supplied; bookrack ships only the examples.
 
+## Upgrading
+
+An upgraded binary may read older derived data exactly, or it may
+need that data rebuilt before it can serve correct results. The
+trigger is whether the upgrade bumps a behaviour-sensitive
+dependency or a stamp constant. Three commands cover every refresh
+case:
+
+- `bookrack corpus rebuild` — regenerate `corpus.db` from the v1
+  extraction envelopes. Use this after a corpus schema bump, or to
+  recover from a deleted `corpus.db` when the chunks table is still
+  on disk.
+- `bookrack vectors reembed` — re-run the active embedder over the
+  existing chunk text. Use this after bumping the embedding model,
+  the vector width, `CHUNK_VERSION`, or `NORMALIZE_VERSION`.
+- Re-ingest the source files — the only path that refreshes
+  `extractor_version`. Use this after bumping a behaviour-sensitive
+  parser dependency (`rbook`, `scraper`, `encoding_rs`,
+  `unicode-normalization`, `pdfium-render`).
+
+The `--stale-only` flag on `corpus rebuild` and `vectors reembed`
+scopes the refresh to the partitions whose stored
+`extractor_version` lags this binary's. A reembed that touches every
+book is the most expensive refresh; schedule it for a low-activity
+window and wrap long runs in `caffeinate -i` on macOS, as above.
+
+See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
+matrix and per-command guidance.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
