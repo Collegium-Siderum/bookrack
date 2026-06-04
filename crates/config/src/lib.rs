@@ -48,6 +48,27 @@ pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
 pub struct Config {
     data_dir: PathBuf,
     ollama_url: String,
+    library: Option<String>,
+    source: ResolutionSource,
+}
+
+/// How the data root in a resolved [`Config`] was selected.
+///
+/// Surfaced to operators by `bookrack info` so the precedence ladder
+/// inside [`Config::resolve`] is no longer a black box: a wrong root is
+/// diagnosed by reading the source, not by guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionSource {
+    /// Won by the `--data-dir` CLI flag.
+    DataDirFlag,
+    /// Won by `--library <name>`, with the path looked up in the registry.
+    LibraryFlag,
+    /// Won by the [`DATA_DIR_ENV`] environment variable.
+    EnvVar,
+    /// Won by the registry's `default = "<name>"` entry.
+    RegistryDefault,
+    /// Constructed directly via [`Config::new`], bypassing resolution.
+    Explicit,
 }
 
 /// How the data root to operate on was selected on the command line.
@@ -127,11 +148,15 @@ impl Config {
 
     /// Construct from an explicit data root, for callers that resolve
     /// the root themselves (e.g. a CLI flag). Performs no filesystem
-    /// check — the caller vouches for the path.
+    /// check — the caller vouches for the path. The resulting [`Config`]
+    /// has no library name and its source is reported as
+    /// [`ResolutionSource::Explicit`].
     pub fn new(data_dir: PathBuf, ollama_url: String) -> Config {
         Config {
             data_dir,
             ollama_url,
+            library: None,
+            source: ResolutionSource::Explicit,
         }
     }
 
@@ -143,6 +168,22 @@ impl Config {
     /// The Ollama HTTP endpoint for embeddings.
     pub fn ollama_url(&self) -> &str {
         &self.ollama_url
+    }
+
+    /// The registry library name the data root was selected from, when
+    /// the resolution went through the registry (`--library` or the
+    /// registry's `default`). `None` when the root came directly from a
+    /// path (the `--data-dir` flag, [`DATA_DIR_ENV`], or
+    /// [`Config::new`]).
+    pub fn library(&self) -> Option<&str> {
+        self.library.as_deref()
+    }
+
+    /// How the data root was selected. Surfaced by `bookrack info` so
+    /// operators can see which precedence rung of [`Config::resolve`]
+    /// won, instead of guessing.
+    pub fn source(&self) -> ResolutionSource {
+        self.source
     }
 
     /// Directory of user-provided original book files awaiting intake.
@@ -439,6 +480,14 @@ fn env_usize(value: Option<String>, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Outcome of [`select_root`]: the chosen data root paired with the
+/// metadata `bookrack info` needs to explain how it was chosen.
+struct Resolved {
+    data_dir: PathBuf,
+    source: ResolutionSource,
+    library: Option<String>,
+}
+
 /// Pick the data root by precedence, without checking that the chosen
 /// path exists. Pure over its inputs so the precedence rules can be
 /// tested without mutating the environment or writing registry files.
@@ -449,21 +498,39 @@ fn select_root(
     selection: &LibrarySelection,
     env_data_dir: Option<String>,
     registry: Option<&Registry>,
-) -> Result<PathBuf, ConfigError> {
+) -> Result<Resolved, ConfigError> {
     if let Some(dir) = &selection.data_dir {
-        return Ok(dir.clone());
+        return Ok(Resolved {
+            data_dir: dir.clone(),
+            source: ResolutionSource::DataDirFlag,
+            library: None,
+        });
     }
     if let Some(name) = &selection.library {
         let registry = registry.ok_or(ConfigError::RegistryNotConfigured)?;
-        return lookup_library(registry, name);
+        let data_dir = lookup_library(registry, name)?;
+        return Ok(Resolved {
+            data_dir,
+            source: ResolutionSource::LibraryFlag,
+            library: Some(name.clone()),
+        });
     }
     if let Some(dir) = env_trimmed(env_data_dir) {
-        return Ok(PathBuf::from(dir));
+        return Ok(Resolved {
+            data_dir: PathBuf::from(dir),
+            source: ResolutionSource::EnvVar,
+            library: None,
+        });
     }
     if let Some(registry) = registry
         && let Some(name) = &registry.default
     {
-        return lookup_library(registry, name);
+        let data_dir = lookup_library(registry, name)?;
+        return Ok(Resolved {
+            data_dir,
+            source: ResolutionSource::RegistryDefault,
+            library: Some(name.clone()),
+        });
     }
     Err(ConfigError::MissingDataDir)
 }
@@ -479,7 +546,12 @@ fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigErro
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
 /// existing directory; the Ollama endpoint falls back to its default.
-fn finish(data_dir: PathBuf, ollama_url: Option<String>) -> Result<Config, ConfigError> {
+fn finish(resolved: Resolved, ollama_url: Option<String>) -> Result<Config, ConfigError> {
+    let Resolved {
+        data_dir,
+        source,
+        library,
+    } = resolved;
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
@@ -487,6 +559,8 @@ fn finish(data_dir: PathBuf, ollama_url: Option<String>) -> Result<Config, Confi
     Ok(Config {
         data_dir,
         ollama_url,
+        library,
+        source,
     })
 }
 
@@ -597,13 +671,15 @@ mod tests {
             data_dir: Some(PathBuf::from("/explicit/root")),
             library: Some("test".to_string()),
         };
-        let root = select_root(
+        let resolved = select_root(
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
         )
         .expect("the flag resolves");
-        assert_eq!(root, PathBuf::from("/explicit/root"));
+        assert_eq!(resolved.data_dir, PathBuf::from("/explicit/root"));
+        assert_eq!(resolved.source, ResolutionSource::DataDirFlag);
+        assert_eq!(resolved.library, None);
     }
 
     #[test]
@@ -613,13 +689,15 @@ mod tests {
             library: Some("test".to_string()),
         };
         // Wins over the data-root variable.
-        let root = select_root(
+        let resolved = select_root(
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
         )
         .expect("the library resolves");
-        assert_eq!(root, PathBuf::from("/roots/test"));
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/test"));
+        assert_eq!(resolved.source, ResolutionSource::LibraryFlag);
+        assert_eq!(resolved.library.as_deref(), Some("test"));
     }
 
     #[test]
@@ -649,22 +727,26 @@ mod tests {
     #[test]
     fn data_root_variable_wins_over_the_registry_default() {
         let selection = LibrarySelection::default();
-        let root = select_root(
+        let resolved = select_root(
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
         )
         .expect("the variable resolves");
-        assert_eq!(root, PathBuf::from("/env/root"));
+        assert_eq!(resolved.data_dir, PathBuf::from("/env/root"));
+        assert_eq!(resolved.source, ResolutionSource::EnvVar);
+        assert_eq!(resolved.library, None);
     }
 
     #[test]
     fn registry_default_is_the_last_resort() {
         let selection = LibrarySelection::default();
         // No flag, no data-root variable: fall to the registry default.
-        let root =
+        let resolved =
             select_root(&selection, None, Some(&sample_registry())).expect("the default resolves");
-        assert_eq!(root, PathBuf::from("/roots/prod"));
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
+        assert_eq!(resolved.source, ResolutionSource::RegistryDefault);
+        assert_eq!(resolved.library.as_deref(), Some("prod"));
     }
 
     #[test]
@@ -702,6 +784,13 @@ mod tests {
         let cfg = resolve(Some(existing_dir()), Some("http://host:9999".to_string()))
             .expect("valid data dir");
         assert_eq!(cfg.ollama_url(), "http://host:9999");
+    }
+
+    #[test]
+    fn explicit_construction_reports_no_library_and_explicit_source() {
+        let cfg = Config::new(PathBuf::from("root"), DEFAULT_OLLAMA_URL.to_string());
+        assert_eq!(cfg.library(), None);
+        assert_eq!(cfg.source(), ResolutionSource::Explicit);
     }
 
     #[test]
