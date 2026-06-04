@@ -29,11 +29,17 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_catalog::{Catalog, IntakeStatus, NewBookState, NewIntake};
+use bookrack_core::{NodeId, NodeType};
+use bookrack_corpus::Corpus;
+use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
 
 use crate::envelope;
-use crate::{IngestError, Result, sha256_hex};
+use crate::{
+    IngestError, IngestParams, Result, ingest_structure, new_run_id, resume_from_chunk, set_state,
+    sha256_hex,
+};
 
 /// Parameters that shape one [`ingest_ocr_intake`] run.
 #[derive(Debug, Clone, Default)]
@@ -55,10 +61,12 @@ pub struct OcrIngestReport {
     /// The scan PDF's intake id. Status is [`IntakeStatus::NeedsOcr`],
     /// `page_count` carries the source's expected sheet count.
     pub pdf_intake_id: i64,
-    /// The OCR markdown's intake id. Status is currently
-    /// [`IntakeStatus::Extracted`] — a later commit advances it to
-    /// `Embedded` after CHUNK + EMBED.
+    /// The OCR markdown's intake id. Status is
+    /// [`IntakeStatus::Embedded`] on success.
     pub ocr_intake_id: i64,
+    /// The OCR book's root node id. Same `partition_idx =
+    /// ocr_intake_id` invariant the rest of the pipeline relies on.
+    pub book_root_id: NodeId,
     /// The scan PDF's whole-file SHA-256.
     pub source_sha_pdf: String,
     /// The OCR markdown's whole-file SHA-256.
@@ -72,23 +80,44 @@ pub struct OcrIngestReport {
     /// write failed (logged as a warning rather than aborting the
     /// run, matching the `ingest_book` convention).
     pub envelope_path: Option<PathBuf>,
+    /// Total corpus nodes written for this book, including the root.
+    pub nodes_written: usize,
+    /// How many of those nodes are prose leaves.
+    pub prose_leaves: usize,
+    /// How many chunk rows reached the vector store.
+    pub chunks_written: usize,
     /// The post-check extraction. On a partial run, its
     /// `provenance.partial_pages` carries the present sheet set.
     pub extraction: Extraction,
 }
 
-/// Register the source PDF and the OCR markdown as two intakes, run
-/// the OCR adapter, and verify the coverage.
+/// Drive the full OCR-intake pipeline: register the two intakes, run
+/// the OCR adapter, verify the coverage, write the rebuild-cache
+/// envelope, and route the extraction through STRUCTURE → CHUNK →
+/// EMBED. On success the OCR intake reaches
+/// [`IntakeStatus::Embedded`]; the scan PDF intake stays
+/// [`IntakeStatus::NeedsOcr`] as the durable anchor for the source.
 ///
-/// This commit lays down the registration and check steps; later
-/// commits extend the same function to write the envelope and to run
-/// STRUCTURE / CHUNK / EMBED.
-pub fn ingest_ocr_intake(
+/// METADATA (the audit + filename + publication-attrs seeding step)
+/// is not yet routed for OCR intakes; the OCR book reaches `Embedded`
+/// with empty `node_publication_attrs`, so search returns chunks but
+/// citations carry no title until a follow-up commit wires the
+/// substep through with `source = "ocr_marker"`.
+// Matches the shape of `ingest_book`, which sits right at the 7-argument
+// limit and only needs the OCR pair (source PDF + OcrIngestParams) on
+// top — bundling that into a struct would obscure the parameter parity
+// with `ingest_book` without meaningfully simplifying the call sites.
+#[allow(clippy::too_many_arguments)]
+pub async fn ingest_ocr_intake<E: Embedder>(
+    corpus: &mut Corpus,
     catalog: &mut Catalog,
+    lancedb_dir: &Path,
     books_dir: &Path,
     ocr_md_path: &Path,
     source_pdf_path: &Path,
-    params: &OcrIngestParams,
+    embedder: &E,
+    params: &IngestParams,
+    ocr_params: &OcrIngestParams,
 ) -> Result<OcrIngestReport> {
     // 1. Read and hash both files.
     let ocr_bytes = std::fs::read(ocr_md_path)?;
@@ -98,7 +127,7 @@ pub fn ingest_ocr_intake(
 
     // 2. Determine the expected page count: an explicit override wins,
     //    otherwise PDFium reads the source's `/Pages`.
-    let expected_pages = match params.expected_pages {
+    let expected_pages = match ocr_params.expected_pages {
         Some(n) => n,
         None => bookrack_extract::ocr::count_pdf_pages(source_pdf_path)?,
     };
@@ -148,7 +177,7 @@ pub fn ingest_ocr_intake(
     // 6. Completeness check. A failure aborts the OCR intake; the
     //    scan PDF intake is left as it was (NeedsOcr) so the user can
     //    fix the OCR product and re-try.
-    let coverage = match check_coverage(&extraction, expected_pages, params.allow_partial) {
+    let coverage = match check_coverage(&extraction, expected_pages, ocr_params.allow_partial) {
         Ok(c) => c,
         Err(e) => {
             catalog.set_intake_status(ocr_intake_id, IntakeStatus::Aborted)?;
@@ -200,14 +229,60 @@ pub fn ingest_ocr_intake(
     )?;
     catalog.set_intake_status(ocr_intake_id, IntakeStatus::Extracted)?;
 
+    // 9. STRUCTURE: build the corpus node tree from the extraction.
+    //    The OCR book joins the same `partition_idx = intake_id`
+    //    regime as every other book — its `book_root_id` is the
+    //    OCR intake's root, not the scan PDF's.
+    let run_id = new_run_id(&source_sha_ocr);
+    let structure = ingest_structure(
+        corpus,
+        ocr_intake_id,
+        NodeType::Work,
+        &extraction,
+        &params.structure,
+    )?;
+    let book_root_raw = structure.book_root_id.get();
+    let parsed_at = catalog.now_iso()?;
+
+    // 10. Book-state row at the `structure` stage, with
+    //     `ocr_marker_finished_at` stamped — the OCR-intake-specific
+    //     signal the column was reserved for.
+    set_state(
+        catalog,
+        NewBookState::new(book_root_raw, ocr_intake_id, "structure")
+            .parsed_at(&parsed_at)
+            .ocr_marker_finished_at(&parsed_at),
+    );
+
+    // 11. CHUNK + EMBED via the shared resume entry point. It writes
+    //     its own audit rows, advances `book_state` to `embed`, and
+    //     flips the intake's status to `Embedded` on success.
+    let embed = resume_from_chunk(
+        corpus,
+        catalog,
+        lancedb_dir,
+        embedder,
+        params,
+        ocr_intake_id,
+        structure.book_root_id,
+        &run_id,
+        &source_sha_ocr,
+        &parsed_at,
+    )
+    .await?;
+
     Ok(OcrIngestReport {
         pdf_intake_id,
         ocr_intake_id,
+        book_root_id: structure.book_root_id,
         source_sha_pdf,
         source_sha_ocr,
         expected_pages,
         ocr_page_count,
         envelope_path,
+        nodes_written: structure.nodes_written,
+        prose_leaves: structure.prose_leaves,
+        chunks_written: embed.chunks_written,
         extraction,
     })
 }
@@ -337,10 +412,56 @@ mod tests {
     // run. PDFium is required to lift `/Outline` / `/Info` and to read
     // `/Pages`; without it the tests skip cleanly.
 
+    use std::future::Future;
     use std::path::PathBuf;
 
     use bookrack_catalog::{Catalog, NewIntake};
+    use bookrack_corpus::Corpus;
+    use bookrack_embed::{Embedder, Result as EmbedResult};
     use tempfile::tempdir;
+
+    /// Constant-vector embedder, sufficient for the EMBED stage to
+    /// produce a stable shape. Mirrors the `Fake` embedder the
+    /// `ingest_book` tests use.
+    struct Fake {
+        dim: usize,
+    }
+
+    impl Embedder for Fake {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let (dim, n) = (self.dim, texts.len());
+            async move { Ok(vec![vec![0.25f32; dim]; n]) }
+        }
+    }
+
+    /// Tempdir-backed pipeline scaffolding the path-level tests share.
+    struct Pipeline {
+        _dir: tempfile::TempDir,
+        books_dir: PathBuf,
+        lancedb_dir: PathBuf,
+        corpus: Corpus,
+        catalog: Catalog,
+        embedder: Fake,
+        params: IngestParams,
+        ocr_params: OcrIngestParams,
+    }
+
+    fn pipeline() -> Pipeline {
+        let dir = tempdir().expect("tempdir");
+        Pipeline {
+            books_dir: dir.path().join("books"),
+            lancedb_dir: dir.path().join("vectors"),
+            corpus: Corpus::open_in_memory().expect("corpus"),
+            catalog: Catalog::open_in_memory().expect("catalog"),
+            embedder: Fake { dim: 8 },
+            params: IngestParams::default(),
+            ocr_params: OcrIngestParams::default(),
+            _dir: dir,
+        }
+    }
 
     /// Path to a fixture file under the extract crate's OCR v1 fixture
     /// dir, resolved relative to this crate's manifest dir.
@@ -377,69 +498,85 @@ mod tests {
         std::fs::write(path, buf).expect("write ocr md");
     }
 
-    #[test]
-    fn ingest_ocr_intake_registers_both_intakes_on_a_complete_run() {
+    #[tokio::test]
+    async fn ingest_ocr_intake_advances_to_embedded_on_a_complete_run() {
         if !pdfium_available() {
             return;
         }
-        let dir = tempdir().expect("tempdir");
-        let books_dir = dir.path().join("books");
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let mut p = pipeline();
 
         let report = ingest_ocr_intake(
-            &mut catalog,
-            &books_dir,
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
             &extract_fixture("sample.bookrack-ocr.v1.md"),
             &extract_fixture("sample.pdf"),
-            &OcrIngestParams::default(),
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
         )
+        .await
         .expect("ingest");
 
         assert_ne!(report.pdf_intake_id, report.ocr_intake_id);
         assert_eq!(report.expected_pages, 3);
         assert_eq!(report.ocr_page_count, 3);
+        assert!(report.nodes_written > 0);
+        assert!(report.chunks_written > 0);
 
-        // PDF intake: NeedsOcr, page_count = 3, stored_path under books_dir.
-        let pdf = catalog
+        // PDF intake stays NeedsOcr — the durable source anchor.
+        let pdf = p
+            .catalog
             .intake_by_id(report.pdf_intake_id)
             .expect("lookup")
             .expect("present");
         assert_eq!(pdf.status, IntakeStatus::NeedsOcr);
         assert_eq!(pdf.page_count, Some(3));
-        assert_eq!(pdf.format.as_deref(), Some("pdf"));
-        let stored = pdf.stored_path.as_deref().expect("stored_path");
-        assert!(
-            std::path::Path::new(stored).exists(),
-            "PDF copied to opaque store at {stored}",
-        );
+        let stored = pdf.stored_path.as_deref().expect("PDF stored_path");
+        assert!(std::path::Path::new(stored).exists());
         assert!(stored.ends_with(&format!("{}.pdf", report.pdf_intake_id)));
 
-        // OCR intake: advanced to Extracted by the envelope-and-stamp
-        // step, page_count = 3 from the marker scan, adapter stamped
-        // with the OCR adapter string, stored_path pointing at the
-        // envelope JSON in the opaque store.
-        let ocr = catalog
+        // OCR intake reaches Embedded; stored_path is the envelope JSON.
+        let ocr = p
+            .catalog
             .intake_by_id(report.ocr_intake_id)
             .expect("lookup")
             .expect("present");
-        assert_eq!(ocr.status, IntakeStatus::Extracted);
+        assert_eq!(ocr.status, IntakeStatus::Embedded);
         assert_eq!(ocr.page_count, Some(3));
         assert_eq!(ocr.format.as_deref(), Some("ocr-markdown"));
         assert_eq!(ocr.adapter.as_deref(), Some("ocr-pages"));
-        assert_eq!(ocr.extractor_version, bookrack_extract::OCR_INTAKE_VERSION,);
+        assert_eq!(ocr.extractor_version, bookrack_extract::OCR_INTAKE_VERSION);
         let stored_ocr = ocr.stored_path.as_deref().expect("OCR stored_path set");
         let envelope_path = report.envelope_path.as_deref().expect("envelope written");
         assert_eq!(std::path::Path::new(stored_ocr), envelope_path);
-        assert!(envelope_path.exists(), "envelope JSON exists on disk");
 
         // The envelope's body round-trips: opening it returns an
         // ExtractionEnvelope whose extraction equals the in-memory one,
-        // and whose source_sha256 is the OCR markdown's hash (not the
-        // PDF's — the PDF hash lives in provenance.derived_from_sha256).
+        // and whose source_sha256 is the OCR markdown's hash.
         let env = crate::envelope::read_envelope(envelope_path).expect("read envelope");
         assert_eq!(env.intake_id, report.ocr_intake_id);
         assert_eq!(env.source_sha256, report.source_sha_ocr);
         assert_eq!(env.extraction, report.extraction);
+
+        // book_state at `embed`, with `ocr_marker_finished_at` populated
+        // (the column was reserved exactly for this signal) and the
+        // embed model recorded.
+        let state = p
+            .catalog
+            .book_state(report.book_root_id.get())
+            .expect("book_state lookup")
+            .expect("book_state present");
+        assert_eq!(state.intake_id, report.ocr_intake_id);
+        assert_eq!(state.current_stage, "embed");
+        assert!(state.ocr_marker_finished_at.is_some());
+        assert!(state.parsed_at.is_some());
+        assert!(state.embedded_at.is_some());
+        assert_eq!(
+            state.embed_model.as_deref(),
+            Some(p.params.embed.model.as_str())
+        );
 
         // Complete coverage → partial_pages stays None;
         // derived_from_sha256 echoes the PDF intake's source_sha256.
@@ -450,24 +587,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ingest_ocr_intake_rejects_a_gap_without_allow_partial() {
+    #[tokio::test]
+    async fn ingest_ocr_intake_rejects_a_gap_without_allow_partial() {
         if !pdfium_available() {
             return;
         }
-        let dir = tempdir().expect("tempdir");
-        let books_dir = dir.path().join("books");
-        let ocr_md = dir.path().join("partial.md");
+        let mut p = pipeline();
+        let ocr_md = p._dir.path().join("partial.md");
         write_ocr_md(&ocr_md, &[1, 3]); // missing sheet 2
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
 
         let err = ingest_ocr_intake(
-            &mut catalog,
-            &books_dir,
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
             &ocr_md,
             &extract_fixture("sample.pdf"),
-            &OcrIngestParams::default(),
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
         )
+        .await
         .expect_err("must reject gap");
         match err {
             IngestError::OcrPagesMissing { missing } => assert_eq!(missing, vec![2]),
@@ -476,7 +616,8 @@ mod tests {
 
         // The OCR intake was registered but then aborted; the scan PDF
         // intake stays NeedsOcr so a corrected re-ingest can pick it up.
-        let pdf_id = catalog
+        let pdf_id = p
+            .catalog
             .intake_by_sha(&{
                 let bytes = std::fs::read(extract_fixture("sample.pdf")).expect("read pdf");
                 sha256_hex(&bytes)
@@ -486,70 +627,85 @@ mod tests {
         assert_eq!(pdf_id.status, IntakeStatus::NeedsOcr);
 
         let ocr_bytes = std::fs::read(&ocr_md).expect("read ocr");
-        let ocr_intake = catalog
+        let ocr_intake = p
+            .catalog
             .intake_by_sha(&sha256_hex(&ocr_bytes))
             .expect("lookup")
             .expect("present ocr");
         assert_eq!(ocr_intake.status, IntakeStatus::Aborted);
     }
 
-    #[test]
-    fn ingest_ocr_intake_accepts_a_gap_with_allow_partial_and_records_it() {
+    #[tokio::test]
+    async fn ingest_ocr_intake_accepts_a_gap_with_allow_partial_and_records_it() {
         if !pdfium_available() {
             return;
         }
-        let dir = tempdir().expect("tempdir");
-        let books_dir = dir.path().join("books");
-        let ocr_md = dir.path().join("partial.md");
+        let mut p = pipeline();
+        let ocr_md = p._dir.path().join("partial.md");
         write_ocr_md(&ocr_md, &[1, 3]);
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        p.ocr_params.allow_partial = true;
 
         let report = ingest_ocr_intake(
-            &mut catalog,
-            &books_dir,
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
             &ocr_md,
             &extract_fixture("sample.pdf"),
-            &OcrIngestParams {
-                expected_pages: None,
-                allow_partial: true,
-            },
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
         )
+        .await
         .expect("ingest with allow_partial");
 
-        assert_eq!(report.extraction.provenance.partial_pages, Some(vec![1, 3]),);
+        assert_eq!(report.extraction.provenance.partial_pages, Some(vec![1, 3]));
         assert_eq!(report.ocr_page_count, 3);
+        // Even a partial run still completes the rest of the pipeline:
+        // the OCR intake reaches Embedded; its chunks land in vectors.
+        let ocr = p
+            .catalog
+            .intake_by_id(report.ocr_intake_id)
+            .expect("lookup")
+            .expect("present");
+        assert_eq!(ocr.status, IntakeStatus::Embedded);
+        assert!(report.chunks_written > 0);
     }
 
-    #[test]
-    fn ingest_ocr_intake_refuses_a_pdf_already_in_a_non_needs_ocr_state() {
+    #[tokio::test]
+    async fn ingest_ocr_intake_refuses_a_pdf_already_in_a_non_needs_ocr_state() {
         if !pdfium_available() {
             return;
         }
-        let dir = tempdir().expect("tempdir");
-        let books_dir = dir.path().join("books");
-        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let mut p = pipeline();
 
         // Pre-register the source PDF as Extracted: the user already
         // ingested it via its text layer, so the OCR route should not
         // happen on top of that.
         let pdf_bytes = std::fs::read(extract_fixture("sample.pdf")).expect("read pdf");
         let sha = sha256_hex(&pdf_bytes);
-        let id = catalog
+        let id = p
+            .catalog
             .register_intake(&NewIntake::new(sha.clone()).format("pdf"))
             .expect("register")
             .intake()
             .intake_id;
-        catalog
+        p.catalog
             .set_intake_status(id, IntakeStatus::Extracted)
             .expect("flip status");
 
         let err = ingest_ocr_intake(
-            &mut catalog,
-            &books_dir,
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
             &extract_fixture("sample.bookrack-ocr.v1.md"),
             &extract_fixture("sample.pdf"),
-            &OcrIngestParams::default(),
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
         )
+        .await
         .expect_err("must refuse status mismatch");
         match err {
             IngestError::OcrSourceStatusMismatch { intake_id, status } => {

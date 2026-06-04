@@ -811,7 +811,7 @@ pub async fn resume_from_chunk<E: Embedder>(
 /// Build a per-invocation pipeline run id: a short source-hash prefix for
 /// readability, plus a nanosecond timestamp so repeated ingests of the
 /// same file stay distinct runs.
-fn new_run_id(source_sha: &str) -> String {
+pub(crate) fn new_run_id(source_sha: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -1365,7 +1365,7 @@ fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
 
 /// Upsert a book's pipeline state, best-effort for the same reason as
 /// [`audit`].
-fn set_state(catalog: &Catalog, state: NewBookState) {
+pub(crate) fn set_state(catalog: &Catalog, state: NewBookState) {
     if let Err(e) = catalog.upsert_book_state(&state) {
         tracing::warn!(error = %e, "failed to update book state");
     }
