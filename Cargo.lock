@@ -842,6 +842,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "bookrack-core",
+ "bookrack-dbkit",
  "futures",
  "lancedb",
  "serde",

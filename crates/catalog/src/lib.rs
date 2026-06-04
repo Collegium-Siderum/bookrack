@@ -101,6 +101,22 @@ pub enum CatalogError {
         expected: i64,
     },
 
+    /// The database carries a `min_reader_version` stamp this binary
+    /// cannot meet. The writer required a reader at version `required`
+    /// or higher; this build is at `current`. Opening fails so the
+    /// operator can run a newer build rather than serve stale or
+    /// misinterpreted data.
+    #[error(
+        "catalog requires a newer reader: stamp demands v{required}, \
+         this build is at v{current}"
+    )]
+    ReaderTooOld {
+        /// The `min_reader_version` value recorded on disk.
+        required: u32,
+        /// [`bookrack_dbkit::READER_VERSION`] this build was compiled at.
+        current: u32,
+    },
+
     /// A schema migration failed to apply.
     #[error("catalog migration failed: {0}")]
     Migrate(#[from] rusqlite_migration::Error),

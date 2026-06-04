@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-use bookrack_dbkit::{OpenDecision, TableSpec, TimedConnection, apply_schema};
+use bookrack_dbkit::{
+    OpenDecision, READER_VERSION, TableSpec, TimedConnection, apply_schema, reader_version_decision,
+};
 use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
@@ -19,6 +21,18 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// `index_meta` key under which [`SCHEMA_VERSION`] is recorded.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
+
+/// The `min_reader_version` value this binary stamps when writing
+/// `corpus.db`.
+///
+/// Bump when a writer-side change to `corpus.db` would make older
+/// readers misinterpret the data — e.g. repurposing a column or changing
+/// the meaning of a stamp value. Additive changes to the node tree or
+/// new `index_meta` keys do not require a bump.
+pub const MIN_READER_VERSION: u32 = 1;
+
+/// `index_meta` key under which [`MIN_READER_VERSION`] is recorded.
+const MIN_READER_VERSION_KEY: &str = "min_reader_version";
 
 /// Every table `corpus.db` owns, in creation order. The schema is built
 /// by rendering these specs, and the same list drives the conformance
@@ -73,7 +87,37 @@ impl Corpus {
             conn: TimedConnection::new(conn, "corpus"),
         };
         corpus.reconcile_schema_version()?;
+        corpus.reconcile_reader_version()?;
         Ok(corpus)
+    }
+
+    /// Refuse a `min_reader_version` stamp this build cannot meet, and
+    /// seed the stamp when missing.
+    fn reconcile_reader_version(&self) -> Result<()> {
+        let stored = self.read_min_reader_version()?;
+        match reader_version_decision(stored) {
+            OpenDecision::Refuse { .. } => Err(CorpusError::ReaderTooOld {
+                required: stored.expect("Refuse implies a stamp was present"),
+                current: READER_VERSION,
+            }),
+            OpenDecision::Match => {
+                if stored.is_none() {
+                    self.meta_set(MIN_READER_VERSION_KEY, &MIN_READER_VERSION.to_string())?;
+                }
+                Ok(())
+            }
+            OpenDecision::Migrate { .. } | OpenDecision::Rederive { .. } => {
+                unreachable!("reader_version_decision emits only Match or Refuse")
+            }
+        }
+    }
+
+    /// Read the recorded `min_reader_version` stamp from `index_meta`,
+    /// returning `None` if no row has been written yet.
+    fn read_min_reader_version(&self) -> Result<Option<u32>> {
+        Ok(self
+            .meta_get(MIN_READER_VERSION_KEY)?
+            .and_then(|s| s.parse::<u32>().ok()))
     }
 
     /// Stamp the schema version on a fresh database, or verify it on an
@@ -135,6 +179,42 @@ mod tests {
             corpus.meta_get(SCHEMA_VERSION_KEY).expect("read"),
             Some(SCHEMA_VERSION.to_string())
         );
+    }
+
+    #[test]
+    fn fresh_database_stamps_the_min_reader_version() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        assert_eq!(
+            corpus.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+            Some(MIN_READER_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_stamp_above_this_binarys_reader_version() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-reader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("corpus.db");
+
+        let too_new = READER_VERSION + 1;
+        {
+            let corpus = Corpus::open(&path).expect("first open");
+            corpus
+                .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
+                .expect("overwrite stamp with a too-new value");
+        }
+
+        let Err(err) = Corpus::open(&path) else {
+            panic!("reopen must refuse")
+        };
+        assert!(
+            matches!(err, CorpusError::ReaderTooOld { required, current }
+                if required == too_new && current == READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

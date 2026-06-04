@@ -131,7 +131,30 @@ pub enum VectorsError {
         /// The configured PQ sub-vector count.
         num_sub_vectors: usize,
     },
+
+    /// `vectors_meta.json` carried a `min_reader_version` stamp this
+    /// binary cannot meet. The writer required a reader at version
+    /// `required` or higher; this build is at `current`.
+    #[error(
+        "vectors_meta requires a newer reader: stamp demands v{required}, \
+         this build is at v{current}"
+    )]
+    ReaderTooOld {
+        /// The `min_reader_version` value recorded on disk.
+        required: u32,
+        /// [`bookrack_dbkit::READER_VERSION`] this build was compiled at.
+        current: u32,
+    },
 }
+
+/// The `min_reader_version` value this binary stamps when writing
+/// `vectors_meta.json`.
+///
+/// Bump when a writer-side change to the meta or to the chunk-row
+/// schema would make older readers misinterpret what they load — e.g.
+/// repurposing an existing field, or changing the meaning of an
+/// `AnnKind` label. New optional JSON fields do not require a bump.
+pub const MIN_READER_VERSION: u32 = 1;
 
 /// A fallible `vectors` operation.
 pub type Result<T> = std::result::Result<T, VectorsError>;
@@ -285,6 +308,7 @@ impl AnnConfig {
     ) -> VectorsMeta {
         VectorsMeta {
             schema_version: SCHEMA_VERSION,
+            min_reader_version: Some(MIN_READER_VERSION),
             kind: self.kind.as_str().to_string(),
             num_partitions: self.num_partitions,
             num_sub_vectors: self.num_sub_vectors,
@@ -381,6 +405,19 @@ impl ChunkStore {
     /// read — a directory must be reused only with one embedding model.
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
+        // Reader-version axis: a meta file written by a future binary
+        // may demand a stamp this build cannot meet. The check runs
+        // before the table is opened so a refused open never touches
+        // the on-disk lancedb state.
+        let stored_min_reader = meta::load(lancedb_dir)?.and_then(|m| m.min_reader_version);
+        if let bookrack_dbkit::OpenDecision::Refuse { .. } =
+            bookrack_dbkit::reader_version_decision(stored_min_reader)
+        {
+            return Err(VectorsError::ReaderTooOld {
+                required: stored_min_reader.expect("Refuse implies a stamp was present"),
+                current: bookrack_dbkit::READER_VERSION,
+            });
+        }
         let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
             .execute()
             .await?;
@@ -996,6 +1033,39 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn open_refuses_a_meta_stamp_above_this_binarys_reader_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let too_new = bookrack_dbkit::READER_VERSION + 1;
+        // Write a sidecar whose `min_reader_version` exceeds this
+        // build's cap; the open guard must refuse before touching
+        // lancedb.
+        let forged = meta::VectorsMeta {
+            schema_version: meta::SCHEMA_VERSION,
+            min_reader_version: Some(too_new),
+            kind: "ivf-flat".to_string(),
+            num_partitions: 64,
+            num_sub_vectors: None,
+            num_bits: None,
+            default_nprobes: 40,
+            default_refine_factor: None,
+            built_at: "2026-06-04T00:00:00Z".to_string(),
+            built_at_chunk_count: 0,
+            churn_since_rebuild: 0,
+            lance_index_name: crate::DEFAULT_INDEX_NAME.to_string(),
+        };
+        meta::store(dir.path(), &forged).expect("store forged meta");
+
+        let Err(err) = ChunkStore::open(dir.path(), DIM).await else {
+            panic!("open must refuse a too-new reader stamp")
+        };
+        assert!(
+            matches!(err, VectorsError::ReaderTooOld { required, current }
+                if required == too_new && current == bookrack_dbkit::READER_VERSION),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

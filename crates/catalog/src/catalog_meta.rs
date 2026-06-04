@@ -26,10 +26,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 };
 
 impl Catalog {
-    /// Read a `catalog_meta` scalar, or `None` if the key is unset. The
-    /// `user_version` is authoritative for schema state, so this reader is
-    /// exercised only by tests today.
-    #[cfg(test)]
+    /// Read a `catalog_meta` scalar, or `None` if the key is unset.
     pub(crate) fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(bookrack_dbkit::meta_get(&self.conn, SPEC.name, key)?)
     }

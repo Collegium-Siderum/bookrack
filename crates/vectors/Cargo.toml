@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 bookrack-core = { path = "../core" }
+bookrack-dbkit = { path = "../dbkit" }
 lancedb.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true

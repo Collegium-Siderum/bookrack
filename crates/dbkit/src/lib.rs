@@ -23,7 +23,7 @@ mod verify;
 
 pub use ddl::render_ddl;
 pub use meta::{apply_schema, meta_get, meta_set};
-pub use open::OpenDecision;
+pub use open::{OpenDecision, READER_VERSION, reader_version_decision};
 pub use row::decode;
 pub use spec::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, PkRole, SqlType, TableSpec};
 pub use timing::{DEFAULT_SLOW_QUERY_THRESHOLD, TimedConnection};

@@ -56,6 +56,21 @@ pub enum CorpusError {
         expected: u32,
     },
 
+    /// The database carries a `min_reader_version` stamp this binary
+    /// cannot meet. The writer required a reader at version `required`
+    /// or higher; this build is at `current`. Opening fails so the
+    /// operator can run a newer build rather than serve stale data.
+    #[error(
+        "corpus requires a newer reader: stamp demands v{required}, \
+         this build is at v{current}"
+    )]
+    ReaderTooOld {
+        /// The `min_reader_version` value recorded on disk.
+        required: u32,
+        /// [`bookrack_dbkit::READER_VERSION`] this build was compiled at.
+        current: u32,
+    },
+
     /// An intake already owns a partition. Partition allocation happens
     /// exactly once per intake; a book is re-ingested by removing it
     /// first, not by allocating a second partition.

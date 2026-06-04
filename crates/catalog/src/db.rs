@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_dbkit::{OpenDecision, TableSpec, TimedConnection};
+use bookrack_dbkit::{
+    OpenDecision, READER_VERSION, TableSpec, TimedConnection, reader_version_decision,
+};
 use rusqlite::Connection;
 
 use crate::migrate::{TARGET_VERSION, migrations};
@@ -21,6 +23,18 @@ pub const SCHEMA_VERSION: u32 = TARGET_VERSION as u32;
 
 /// `catalog_meta` key under which [`SCHEMA_VERSION`] is mirrored.
 const SCHEMA_VERSION_KEY: &str = "schema_version";
+
+/// The `min_reader_version` value this binary stamps when writing
+/// `catalog.db`.
+///
+/// Bump when a writer-side change to `catalog.db` produces content that
+/// older binaries could misinterpret — e.g. reinterpreting an enum
+/// value or repurposing a column. Adding a column or a table is
+/// transparent and does not require a bump.
+pub const MIN_READER_VERSION: u32 = 1;
+
+/// `catalog_meta` key under which [`MIN_READER_VERSION`] is recorded.
+const MIN_READER_VERSION_KEY: &str = "min_reader_version";
 
 /// How many database backups to retain in the backup directory; older
 /// ones are pruned after a successful backup.
@@ -140,9 +154,39 @@ impl Catalog {
             conn: TimedConnection::new(conn, "catalog"),
             read_only: false,
         };
+
+        // Reader-version axis: refuse a stamp this build cannot meet,
+        // seed the stamp when missing. Runs after `verify_all` so the
+        // `catalog_meta` table is guaranteed to exist.
+        let stored = catalog.read_min_reader_version()?;
+        match reader_version_decision(stored) {
+            OpenDecision::Refuse { .. } => {
+                return Err(CatalogError::ReaderTooOld {
+                    required: stored.expect("Refuse implies a stamp was present"),
+                    current: READER_VERSION,
+                });
+            }
+            OpenDecision::Match => {
+                if stored.is_none() {
+                    catalog.meta_set(MIN_READER_VERSION_KEY, &MIN_READER_VERSION.to_string())?;
+                }
+            }
+            OpenDecision::Migrate { .. } | OpenDecision::Rederive { .. } => {
+                unreachable!("reader_version_decision emits only Match or Refuse")
+            }
+        }
+
         // Mirror the authoritative version into `catalog_meta` for audit.
         catalog.meta_set(SCHEMA_VERSION_KEY, &SCHEMA_VERSION.to_string())?;
         Ok(catalog)
+    }
+
+    /// Read the recorded `min_reader_version` stamp from `catalog_meta`,
+    /// returning `None` if no row has been written yet.
+    fn read_min_reader_version(&self) -> Result<Option<u32>> {
+        Ok(self
+            .meta_get(MIN_READER_VERSION_KEY)?
+            .and_then(|s| s.parse::<u32>().ok()))
     }
 
     /// Open the `catalog.db` at `path` for read-only access.
@@ -168,10 +212,23 @@ impl Catalog {
         }
         conn.pragma_update(None, "query_only", "ON")?;
         bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
-        Ok(Catalog {
+        let catalog = Catalog {
             conn: TimedConnection::new(conn, "catalog"),
             read_only: true,
-        })
+        };
+        // Reader-version axis: refuse a stamp this build cannot meet.
+        // The seed step from the read-write path is intentionally
+        // skipped here — the read-only contract forbids mutating the
+        // database. A missing stamp resolves to Match and the open
+        // proceeds, leaving seeding to the next read-write open.
+        let stored = catalog.read_min_reader_version()?;
+        if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
+            return Err(CatalogError::ReaderTooOld {
+                required: stored.expect("Refuse implies a stamp was present"),
+                current: READER_VERSION,
+            });
+        }
+        Ok(catalog)
     }
 
     /// Whether this handle was opened read-only.
@@ -281,6 +338,50 @@ mod tests {
             catalog.meta_get(SCHEMA_VERSION_KEY).expect("read"),
             Some(SCHEMA_VERSION.to_string())
         );
+    }
+
+    #[test]
+    fn fresh_database_stamps_the_min_reader_version() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        assert_eq!(
+            catalog.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+            Some(MIN_READER_VERSION.to_string())
+        );
+    }
+
+    #[test]
+    fn open_refuses_a_stamp_above_this_binarys_reader_version() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-catalog-reader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("catalog.db");
+
+        let too_new = READER_VERSION + 1;
+        {
+            let catalog = Catalog::open(&path).expect("first open");
+            catalog
+                .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
+                .expect("overwrite stamp with a too-new value");
+        }
+
+        let Err(err) = Catalog::open(&path) else {
+            panic!("reopen must refuse")
+        };
+        assert!(
+            matches!(err, CatalogError::ReaderTooOld { required, current }
+                if required == too_new && current == READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("read-only reopen must refuse")
+        };
+        assert!(
+            matches!(err, CatalogError::ReaderTooOld { required, current }
+                if required == too_new && current == READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

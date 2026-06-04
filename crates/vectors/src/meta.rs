@@ -47,6 +47,12 @@ pub struct VectorsMeta {
     /// Schema version of this file. Readers may warn on mismatch but
     /// should still try to deserialize — fields are added as optional.
     pub schema_version: u32,
+    /// Lowest [`bookrack_dbkit::READER_VERSION`] a reader must be at to
+    /// safely interpret this file and the chunk rows it points to.
+    /// `None` on files written before the field landed; new writes
+    /// stamp it with [`crate::MIN_READER_VERSION`].
+    #[serde(default)]
+    pub min_reader_version: Option<u32>,
     /// Kebab-case label of the index family —
     /// `"ivf-flat" / "ivf-sq" / "ivf-pq" / "ivf-hnsw-flat" /
     /// "ivf-hnsw-sq" / "ivf-hnsw-pq" / "brute-force"`.
@@ -128,6 +134,7 @@ mod tests {
     fn sample_meta() -> VectorsMeta {
         VectorsMeta {
             schema_version: SCHEMA_VERSION,
+            min_reader_version: Some(crate::MIN_READER_VERSION),
             kind: "ivf-flat".to_string(),
             num_partitions: 64,
             num_sub_vectors: None,

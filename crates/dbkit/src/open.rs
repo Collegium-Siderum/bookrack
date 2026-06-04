@@ -30,6 +30,14 @@
 //! sees, and the `&'static str` reason on [`OpenDecision::Rederive`] and
 //! [`OpenDecision::Refuse`] flows into the log line so a triaged crash
 //! report names the trigger.
+//!
+//! ## Reader version
+//!
+//! Alongside the per-store schema and stamp axes, every store also
+//! consults a single workspace-wide [`READER_VERSION`]. Each store
+//! records a `min_reader_version` value the writer last stamped; an
+//! older binary opening data written by a newer binary is refused at
+//! the same seam — see [`reader_version_decision`].
 
 /// The outcome of inspecting a database at `open()` time.
 ///
@@ -79,6 +87,39 @@ impl OpenDecision {
     }
 }
 
+/// The highest reader-version number this binary knows how to interpret.
+///
+/// Each store stamps a `min_reader_version` value into its on-disk meta
+/// at write time; an `open()` whose stamped value exceeds this number is
+/// refused at the seam, with the message "stored data requires a newer
+/// reader version". The stamped value rises only when a store's writer
+/// makes a format change older readers cannot handle, so this number
+/// rises in lockstep with the binaries that introduce such changes.
+///
+/// A separate axis from each store's own `schema_version`: an additive
+/// column or a new optional JSON field advances a store's schema
+/// version without touching the reader version, because old binaries
+/// can still interpret what they see and ignore what they do not.
+pub const READER_VERSION: u32 = 1;
+
+/// Reduce a possibly-missing on-disk `min_reader_version` stamp to one
+/// of the open-time verdicts.
+///
+/// A `None` stamp — the database carries no record of a minimum reader
+/// — resolves to [`OpenDecision::Match`]: either the file predates the
+/// guard or its writer chose not to stamp, and the open proceeds. A
+/// `Some(min)` stamp resolves to [`OpenDecision::Refuse`] iff `min`
+/// exceeds [`READER_VERSION`]; otherwise the open proceeds.
+pub fn reader_version_decision(stored_min_reader: Option<u32>) -> OpenDecision {
+    match stored_min_reader {
+        None => OpenDecision::Match,
+        Some(min) if min > READER_VERSION => OpenDecision::Refuse {
+            reason: "stored data requires a newer reader version",
+        },
+        Some(_) => OpenDecision::Match,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +139,25 @@ mod tests {
                 reason: "schema written by a newer binary"
             }
             .is_match()
+        );
+    }
+
+    #[test]
+    fn reader_version_decision_accepts_missing_or_compatible_stamps() {
+        assert_eq!(reader_version_decision(None), OpenDecision::Match);
+        assert_eq!(
+            reader_version_decision(Some(READER_VERSION)),
+            OpenDecision::Match
+        );
+    }
+
+    #[test]
+    fn reader_version_decision_refuses_a_stamp_above_this_binarys_cap() {
+        assert_eq!(
+            reader_version_decision(Some(READER_VERSION + 1)),
+            OpenDecision::Refuse {
+                reason: "stored data requires a newer reader version",
+            }
         );
     }
 
