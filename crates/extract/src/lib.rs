@@ -15,6 +15,7 @@ mod detect;
 mod epub;
 mod html;
 mod html_parse;
+pub mod ocr;
 mod pdf;
 mod quality;
 mod txt;
@@ -34,6 +35,18 @@ use bookrack_audit_profile::ExtractToggles;
 /// The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
 pub const EXTRACTOR_VERSION: u32 = 1;
+
+/// Monotonic version of the OCR adapter's output. Stored on the OCR
+/// intake's `intake.extractor_version`, decoupled from
+/// [`EXTRACTOR_VERSION`] so a bump on one side does not mark partitions
+/// on the other side stale. The catalog's
+/// `stale_partitions` / `stale_ocr_partitions` queries make that split
+/// load-bearing.
+///
+/// Bumped whenever the OCR adapter's parsing rules change in a way that
+/// could shift block boundaries: the marker grammar, the frontmatter
+/// handling, or the paragraph segmentation.
+pub const OCR_INTAKE_VERSION: u32 = 1;
 
 /// SHA-256 of the sorted `name@version` lines of the behaviour-
 /// sensitive crates the extractor depends on. Refreshed in lockstep
