@@ -1604,10 +1604,15 @@ async fn run_ingest(
         .await
         {
             Ok(report) => {
+                let needs_work_tag = if report.audit_verdict.as_deref() == Some("needs_work") {
+                    " \u{26a0} needs_work"
+                } else {
+                    ""
+                };
                 if report.no_op {
                     skipped_noop += 1;
                     println!(
-                        "  = {} (intake {}, already up to date)",
+                        "  = {} (intake {}, already up to date{needs_work_tag})",
                         file.display(),
                         report.intake_id,
                     );
@@ -1619,7 +1624,7 @@ async fn run_ingest(
                         "stamp drift"
                     };
                     println!(
-                        "  ~ {} (intake {}, refreshed [{marker}], {} chunks)",
+                        "  ~ {} (intake {}, refreshed [{marker}], {} chunks{needs_work_tag})",
                         file.display(),
                         report.intake_id,
                         report.chunks_written,
@@ -1627,7 +1632,7 @@ async fn run_ingest(
                 } else {
                     newly_ingested += 1;
                     println!(
-                        "  + {} (intake {}, {} chunks)",
+                        "  + {} (intake {}, {} chunks{needs_work_tag})",
                         file.display(),
                         report.intake_id,
                         report.chunks_written,

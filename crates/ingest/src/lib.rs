@@ -288,6 +288,18 @@ pub struct IngestReport {
     /// pipeline therefore ran end-to-end even though the source was
     /// already on file. Mutually exclusive with `no_op`.
     pub forced: bool,
+    /// The audit's plausibility verdict for the book's effective
+    /// metadata, as a stable token (`clean` / `needs_work`). `None`
+    /// when no audit ran — either the active profile disabled it
+    /// (`trust-source`) or the book was held at the metadata gate
+    /// before the audit completed. Lets the caller surface a
+    /// `needs_work` book to the operator from the run summary instead
+    /// of leaving the signal in stderr only.
+    pub audit_verdict: Option<String>,
+    /// The audit's confidence in that verdict (`high` / `medium` /
+    /// `low`), paired with `audit_verdict`. `None` whenever
+    /// `audit_verdict` is `None`.
+    pub audit_confidence: Option<String>,
 }
 
 /// Ingest one source file end to end: extract it, register it, build its
@@ -506,7 +518,7 @@ pub async fn ingest_book<E: Embedder>(
     let source_stem = file.file_stem().and_then(|s| s.to_str());
     let filename_biblio = source_stem
         .map(|stem| bookrack_metadata::parse_filename(stem, &params.audit_profile.filename_parser));
-    let verdict = run_metadata_substep(
+    let outcome = run_metadata_substep(
         catalog,
         intake_id,
         book_root_id,
@@ -519,11 +531,15 @@ pub async fn ingest_book<E: Embedder>(
         &run_id,
         &source_sha,
     );
+    let needs_work = outcome.as_ref().is_some_and(|o| o.verdict == "needs_work");
+    let (audit_verdict, audit_confidence) = match &outcome {
+        Some(o) => (Some(o.verdict.clone()), Some(o.confidence.clone())),
+        None => (None, None),
+    };
 
     // Optional hold gate: when the caller asked for it AND the audit
     // flagged the record, park the book in the metadata stage and
     // hand control back. CHUNK/EMBED run on a later `advance` call.
-    let needs_work = matches!(verdict, Some(bookrack_metadata::Verdict::NeedsWork));
     if params.hold_for_metadata && needs_work {
         set_state(
             catalog,
@@ -542,6 +558,8 @@ pub async fn ingest_book<E: Embedder>(
             already_registered,
             no_op: false,
             forced: params.force,
+            audit_verdict,
+            audit_confidence,
         });
     }
 
@@ -568,6 +586,8 @@ pub async fn ingest_book<E: Embedder>(
         already_registered,
         no_op: false,
         forced: params.force,
+        audit_verdict,
+        audit_confidence,
     })
 }
 
@@ -596,6 +616,12 @@ fn noop_if_up_to_date(
     if state.embed_model.as_deref() != Some(embed_model) {
         return Ok(None);
     }
+    // Surface the audit outcome stored on the row at the previous
+    // ingest so a noop run still tells the operator whether the book
+    // landed `clean` or `needs_work`.
+    let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+    let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
+    let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
     Ok(Some(IngestReport {
         intake_id: intake.intake_id,
         book_root_id,
@@ -605,6 +631,8 @@ fn noop_if_up_to_date(
         already_registered: true,
         no_op: true,
         forced: false,
+        audit_verdict,
+        audit_confidence,
     }))
 }
 
@@ -801,6 +829,18 @@ const METADATA_BODY_SAMPLE_CHARS: usize = 4096;
 /// the run continues. Best-effort, like [`audit`]: a failure to
 /// persist the verdict is logged but does not abort the ingest, since
 /// the sub-step is consultative and EMBED is unconditional.
+/// The audit outcome the metadata sub-step bubbles up: the same
+/// `verdict` and `confidence` tokens that get stamped on the
+/// publication-attrs row, in stable string form so a downstream
+/// renderer can use them without a metadata-crate type dependency.
+#[derive(Debug, Clone)]
+pub struct AuditOutcome {
+    /// Audit verdict token (`clean` or `needs_work`).
+    pub verdict: String,
+    /// Confidence token (`high` / `medium` / `low`).
+    pub confidence: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_metadata_substep(
     catalog: &Catalog,
@@ -814,7 +854,7 @@ fn run_metadata_substep(
     audit_profile: &bookrack_metadata::AuditProfile,
     run_id: &str,
     source_sha: &str,
-) -> Option<bookrack_metadata::Verdict> {
+) -> Option<AuditOutcome> {
     let started = std::time::Instant::now();
 
     // Real ingest discards the action trail; only the dryrun consumes it.
@@ -963,7 +1003,10 @@ fn run_metadata_substep(
         Some(metric),
         None,
     );
-    Some(report.verdict)
+    Some(AuditOutcome {
+        verdict: report.verdict.as_token().to_string(),
+        confidence: report.confidence.as_str().to_string(),
+    })
 }
 
 /// Persist contributors from the adapter-extracted biblio and the
@@ -1832,6 +1875,10 @@ mod book_pipeline_tests {
         .await
         .expect("ingest");
         assert!(report.chunks_written > 0);
+        // A bare .txt yields no biblio: the audit lands `needs_work`,
+        // and the report bubbles it so the CLI can warn on stdout.
+        assert_eq!(report.audit_verdict.as_deref(), Some("needs_work"));
+        assert_eq!(report.audit_confidence.as_deref(), Some("low"));
 
         let root = report.book_root_id.get();
         let state = catalog.book_state(root).expect("state").expect("present");
@@ -1970,6 +2017,10 @@ mod book_pipeline_tests {
         assert_eq!(second.nodes_written, 0);
         assert!(second.already_registered);
         assert!(!second.forced);
+        // A noop run still surfaces the stored audit outcome so the
+        // operator sees the historical verdict on a re-ingest.
+        assert_eq!(second.audit_verdict, first.audit_verdict);
+        assert_eq!(second.audit_confidence, first.audit_confidence);
 
         // The pipeline audit must not have grown: no new stage rows.
         let after = catalog

@@ -33,6 +33,7 @@ pub fn ingest(report: &IngestReport) {
             report.intake_id,
         );
         println!("  (Pass --force to re-extract, re-chunk, and re-embed anyway.)");
+        print_audit_warning(report);
         return;
     }
     if report.forced {
@@ -52,6 +53,22 @@ pub fn ingest(report: &IngestReport) {
         "  nodes: {} ({} prose leaves)\n  chunks embedded: {}",
         report.nodes_written, report.prose_leaves, report.chunks_written,
     );
+    print_audit_warning(report);
+}
+
+/// Surface a `needs_work` audit verdict on stdout so the operator
+/// notices it without having to scan stderr. `clean` and the
+/// audit-skipped state stay silent — the warning is reserved for the
+/// case that actually wants follow-up.
+fn print_audit_warning(report: &IngestReport) {
+    if report.audit_verdict.as_deref() == Some("needs_work") {
+        let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
+        println!(
+            "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
+             Run `bookrack metadata show {}` to inspect.",
+            report.intake_id,
+        );
+    }
 }
 
 /// Print the metadata audit report for one book as a human-readable
