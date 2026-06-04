@@ -43,7 +43,7 @@
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
 use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
-use crate::{BOOK_SCOPE, Catalog, Result, count_as_u64};
+use crate::{BOOK_SCOPE, Catalog, Result, STATUS_PENDING, count_as_u64};
 
 /// The single source of truth for the `intake` table's schema. Its DDL
 /// is rendered from this spec.
@@ -181,6 +181,16 @@ pub struct IntakeFilter<'a> {
     /// Exact-equality match against `intake.format`. Rows whose `format`
     /// is `NULL` never match.
     pub format: Option<&'a str>,
+    /// Match the root `node_publication_attrs.confidence` value against
+    /// this set. An empty slice means "no filter". Rows whose
+    /// `node_publication_attrs` is absent or whose `confidence` is `NULL`
+    /// never match — only the audit-graded books surface.
+    pub confidence_in: &'a [&'a str],
+    /// Match the root `node_reviews.status` value against this set. An
+    /// empty slice means "no filter". A missing `node_reviews` row is
+    /// treated as `"pending"`, so filtering on `"pending"` returns the
+    /// never-reviewed books as well as the explicitly-pending ones.
+    pub review_status_in: &'a [&'a str],
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -203,7 +213,8 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
     let mut where_parts: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
-    if filter.title_substring.is_some() {
+    let need_npa = filter.title_substring.is_some() || !filter.confidence_in.is_empty();
+    if need_npa {
         joins.push_str(
             " LEFT JOIN node_publication_attrs npa \
              ON npa.intake_id = i.intake_id AND npa.scope = ?",
@@ -214,6 +225,13 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         joins.push_str(
             " LEFT JOIN node_contributors nc \
              ON nc.intake_id = i.intake_id AND nc.scope = ?",
+        );
+        params.push(Box::new(BOOK_SCOPE.to_string()));
+    }
+    if !filter.review_status_in.is_empty() {
+        joins.push_str(
+            " LEFT JOIN node_reviews nr \
+             ON nr.intake_id = i.intake_id AND nr.scope = ?",
         );
         params.push(Box::new(BOOK_SCOPE.to_string()));
     }
@@ -245,6 +263,32 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
     if let Some(format) = filter.format {
         where_parts.push("i.format = ?".to_string());
         params.push(Box::new(format.to_string()));
+    }
+    if !filter.confidence_in.is_empty() {
+        debug_assert!(
+            filter.confidence_in.len() <= 8,
+            "IntakeFilter.confidence_in takes at most 8 entries, got {}",
+            filter.confidence_in.len()
+        );
+        let placeholders = vec!["?"; filter.confidence_in.len()].join(", ");
+        where_parts.push(format!("npa.confidence IN ({placeholders})"));
+        for value in filter.confidence_in {
+            params.push(Box::new((*value).to_string()));
+        }
+    }
+    if !filter.review_status_in.is_empty() {
+        debug_assert!(
+            filter.review_status_in.len() <= 8,
+            "IntakeFilter.review_status_in takes at most 8 entries, got {}",
+            filter.review_status_in.len()
+        );
+        let placeholders = vec!["?"; filter.review_status_in.len()].join(", ");
+        where_parts.push(format!(
+            "COALESCE(nr.status, '{STATUS_PENDING}') IN ({placeholders})"
+        ));
+        for value in filter.review_status_in {
+            params.push(Box::new((*value).to_string()));
+        }
     }
 
     let where_clause = if where_parts.is_empty() {
@@ -657,6 +701,7 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NewReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED};
 
     fn catalog() -> Catalog {
         Catalog::open_in_memory().expect("open")
@@ -993,6 +1038,127 @@ mod tests {
         assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 2);
     }
 
+    /// Set the root `node_publication_attrs.confidence` for an existing
+    /// seeded book.
+    fn set_confidence(catalog: &mut Catalog, intake_id: i64, confidence: &str) {
+        use crate::NewPublicationAttrs;
+        let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+        attrs.title = Some(format!("Book {intake_id}"));
+        attrs.confidence = Some(confidence.to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+    }
+
+    #[test]
+    fn find_intakes_confidence_filter_narrows_to_audit_grade() {
+        let mut catalog = catalog();
+        let a = seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        let b = seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        let _c = seed_book(&mut catalog, "sha-c", "Gamma", "Cal");
+        set_confidence(&mut catalog, a, "high");
+        set_confidence(&mut catalog, b, "low");
+        // _c is left with confidence = NULL.
+
+        let filter = IntakeFilter {
+            confidence_in: &["low", "medium"],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-b");
+        assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 1);
+
+        // A NULL confidence never matches an `IN` predicate, so `c` is
+        // excluded even when every concrete grade is asked for.
+        let every_grade = IntakeFilter {
+            confidence_in: &["high", "medium", "low"],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog
+            .find_intakes(&every_grade, 10, 0)
+            .expect("find every grade");
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|i| i.source_sha256 != "sha-c"));
+    }
+
+    #[test]
+    fn find_intakes_review_status_filter_treats_missing_row_as_pending() {
+        let mut catalog = catalog();
+        let a = seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        let b = seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        let _c = seed_book(&mut catalog, "sha-c", "Gamma", "Cal");
+        // a explicitly approved, b explicitly pending, _c left without any
+        // review row at all (the never-reviewed case).
+        catalog
+            .upsert_review(&NewReview::new(
+                a,
+                BOOK_SCOPE,
+                "human:test",
+                STATUS_APPROVED,
+            ))
+            .expect("a approved");
+        catalog
+            .upsert_review(&NewReview::new(
+                b,
+                BOOK_SCOPE,
+                "bookrack-ingest:default",
+                STATUS_PENDING,
+            ))
+            .expect("b pending");
+
+        // Filtering on "pending" pulls in both the explicitly-pending
+        // row and the never-reviewed row.
+        let pending = IntakeFilter {
+            review_status_in: &[STATUS_PENDING],
+            ..IntakeFilter::default()
+        };
+        let mut hits = catalog.find_intakes(&pending, 10, 0).expect("find pending");
+        hits.sort_by_key(|x| x.intake_id);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].source_sha256, "sha-b");
+        assert_eq!(hits[1].source_sha256, "sha-c");
+        assert_eq!(catalog.count_find_intakes(&pending).expect("count"), 2);
+
+        // Filtering on "approved" excludes the never-reviewed row.
+        let approved = IntakeFilter {
+            review_status_in: &[STATUS_APPROVED],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog
+            .find_intakes(&approved, 10, 0)
+            .expect("find approved");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-a");
+    }
+
+    #[test]
+    fn find_intakes_confidence_and_review_status_compose() {
+        let mut catalog = catalog();
+        let a = seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        let b = seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        set_confidence(&mut catalog, a, "low");
+        set_confidence(&mut catalog, b, "low");
+        catalog
+            .upsert_review(&NewReview::new(
+                a,
+                BOOK_SCOPE,
+                "human:test",
+                STATUS_APPROVED,
+            ))
+            .expect("a approved");
+        // b is never reviewed: counts as `pending`.
+
+        let needs_review = IntakeFilter {
+            confidence_in: &["low"],
+            review_status_in: &[STATUS_PENDING, STATUS_ACKNOWLEDGED],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog
+            .find_intakes(&needs_review, 10, 0)
+            .expect("find needs review");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-b");
+    }
+
     #[test]
     fn find_intakes_combines_title_and_contributor_without_duplicating_rows() {
         use crate::NewContributor;
@@ -1089,6 +1255,7 @@ mod tests {
             contributor_role: Some("author"),
             statuses: &[IntakeStatus::Pending],
             format: Some("epub"),
+            ..IntakeFilter::default()
         };
         let start = std::time::Instant::now();
         let hits = catalog

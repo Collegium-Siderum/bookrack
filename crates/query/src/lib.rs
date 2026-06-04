@@ -246,6 +246,7 @@ impl<E: Embedder> Library<E> {
             contributor_role: filter.contributor_role.as_deref(),
             statuses: filter.statuses.as_slice(),
             format: filter.format.as_deref(),
+            ..IntakeFilter::default()
         };
         let intakes = catalog.find_intakes(&catalog_filter, effective_limit, offset)?;
         let total = catalog.count_find_intakes(&catalog_filter)?;
