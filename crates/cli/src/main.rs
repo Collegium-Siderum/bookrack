@@ -1549,6 +1549,12 @@ async fn run_ingest(
     };
 
     if !recursive {
+        if path.is_dir() {
+            anyhow::bail!(
+                "{} is a directory; pass --recursive to walk it instead",
+                path.display(),
+            );
+        }
         let report = ingest_book(
             path,
             &mut corpus,
