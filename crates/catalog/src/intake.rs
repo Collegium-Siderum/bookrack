@@ -123,16 +123,27 @@ pub enum IntakeStatus {
     Embedded,
     /// Processing failed and was abandoned.
     Aborted,
+    /// A scanned source whose text layer was rejected by the quality
+    /// gate, registered as an identity anchor for a derived OCR
+    /// manifestation. A `NeedsOcr` intake holds the source bytes and
+    /// never itself enters STRUCTURE or EMBED: the OCR product is a
+    /// separate intake whose provenance points back to this row.
+    NeedsOcr,
 }
 
 impl IntakeStatus {
-    /// Every status, in lifecycle order.
-    pub const ALL: [IntakeStatus; 5] = [
+    /// Every status, in lifecycle order. `NeedsOcr` sits outside the
+    /// linear `Pending -> Extracted -> Embedded` track, but the array
+    /// must list every variant so [`from_db_str`] can round-trip them.
+    ///
+    /// [`from_db_str`]: IntakeStatus::from_db_str
+    pub const ALL: [IntakeStatus; 6] = [
         IntakeStatus::Pending,
         IntakeStatus::Extracted,
         IntakeStatus::DedupHold,
         IntakeStatus::Embedded,
         IntakeStatus::Aborted,
+        IntakeStatus::NeedsOcr,
     ];
 
     /// The database string form.
@@ -143,6 +154,7 @@ impl IntakeStatus {
             IntakeStatus::DedupHold => "dedup_hold",
             IntakeStatus::Embedded => "embedded",
             IntakeStatus::Aborted => "aborted",
+            IntakeStatus::NeedsOcr => "needs_ocr",
         }
     }
 
@@ -850,6 +862,35 @@ mod tests {
 
         assert!(catalog.intake_by_sha("absent").expect("lookup").is_none());
         assert!(catalog.intake_by_id(9999).expect("lookup").is_none());
+    }
+
+    #[test]
+    fn needs_ocr_status_round_trips_through_the_database() {
+        let mut catalog = catalog();
+        let id = catalog
+            .register_intake(&NewIntake::new("sha-scan").format("pdf"))
+            .expect("register")
+            .intake()
+            .intake_id;
+        assert!(
+            catalog
+                .set_intake_status(id, IntakeStatus::NeedsOcr)
+                .expect("set status")
+        );
+
+        let read = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(read.status, IntakeStatus::NeedsOcr);
+
+        // The string the row carries is the exact append-only token.
+        let stored: String = catalog
+            .conn
+            .query_row(
+                "SELECT status FROM intake WHERE intake_id = :id",
+                named_params! { ":id": id },
+                |row| row.get(0),
+            )
+            .expect("read status text");
+        assert_eq!(stored, "needs_ocr");
     }
 
     #[test]
