@@ -760,7 +760,25 @@ async fn run_stamps_reconcile(cfg: &Config) -> Result<()> {
 }
 
 fn run_verify(cfg: &Config) -> Result<()> {
+    let report = build_verify_report(cfg);
+    render::verify(&report);
+    if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
+        anyhow::bail!("one or more stores failed verification");
+    }
+    Ok(())
+}
+
+/// Collect verifiable findings for every store under `cfg`. A data
+/// directory whose `catalog.db` does not yet exist is reported as
+/// `not_initialised` and no stores are opened, so verify stays
+/// side-effect-free on a freshly created directory.
+fn build_verify_report(cfg: &Config) -> render::VerifyReport {
     let mut report = render::VerifyReport::default();
+
+    if !cfg.catalog_db().exists() {
+        report.not_initialised = true;
+        return report;
+    }
 
     // Schema verification happens inside the open paths; surface success
     // as a one-liner per database, and any failure as a multi-line block.
@@ -789,11 +807,7 @@ fn run_verify(cfg: &Config) -> Result<()> {
         report.vectors_built_at_chunk_count = Some(meta.built_at_chunk_count);
         report.vectors_churn = Some(meta.churn_since_rebuild);
     }
-    render::verify(&report);
-    if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
-        anyhow::bail!("one or more stores failed verification");
-    }
-    Ok(())
+    report
 }
 
 /// Walk every intake row, resolve its `stored_path` under `books/`, and
@@ -2328,6 +2342,28 @@ mod tests {
             Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
         }
+    }
+
+    #[test]
+    fn verify_short_circuits_on_an_uninitialised_data_dir() {
+        // A freshly mkdir'd data directory has no catalog.db on disk
+        // yet. Verify must NOT try to open one (that would create an
+        // empty file and then fail schema verification), and must NOT
+        // open corpus.db either (that would write tables into a store
+        // verify is supposed to only read).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(tmp.path().to_path_buf(), "http://localhost:0".to_string());
+        let report = build_verify_report(&cfg);
+        assert!(report.not_initialised);
+        assert!(!report.catalog_schema_ok);
+        assert!(report.catalog_schema_error.is_none());
+        assert!(!report.corpus_schema_ok);
+        assert!(report.corpus_schema_error.is_none());
+        assert!(report.vectors_built_at_chunk_count.is_none());
+        // The data dir is unchanged — no stores were created as a
+        // side effect of the verify call.
+        assert!(!cfg.catalog_db().exists());
+        assert!(!cfg.corpus_db().exists());
     }
 
     #[test]

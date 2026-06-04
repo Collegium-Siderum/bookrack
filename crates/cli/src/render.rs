@@ -809,6 +809,9 @@ fn format_size(bytes: Option<u64>) -> String {
 /// counts that depend on it.
 #[derive(Default)]
 pub struct VerifyReport {
+    /// Set when the data directory has no `catalog.db` yet — verify
+    /// short-circuits in that case and reports nothing else.
+    pub not_initialised: bool,
     pub catalog_schema_ok: bool,
     pub catalog_schema_error: Option<String>,
     pub corpus_schema_ok: bool,
@@ -823,6 +826,12 @@ pub struct VerifyReport {
 /// failure: the report itself decides what landed, the renderer only
 /// translates.
 pub fn verify(report: &VerifyReport) {
+    if report.not_initialised {
+        println!("data directory not initialised yet.");
+        println!("  no catalog.db / corpus.db / lancedb on disk;");
+        println!("  run `bookrack ingest <path>` to create them, then verify again.");
+        return;
+    }
     println!("catalog.db:");
     if report.catalog_schema_ok {
         println!("  schema:         ok");
