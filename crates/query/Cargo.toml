@@ -13,6 +13,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-search = { path = "../search" }
 bookrack-vectors = { path = "../vectors" }
 bookrack-ingest = { path = "../ingest" }
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

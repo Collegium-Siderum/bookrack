@@ -5,7 +5,9 @@
 //! through [`Library`] with a stub embedder — no Ollama, no PDFium.
 
 use std::future::Future;
+use std::path::Path;
 
+use bookrack_catalog::Catalog;
 use bookrack_core::NodeType;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
@@ -15,6 +17,13 @@ use bookrack_extract::{
 use bookrack_ingest::{StructureParams, current_index_stamps, ingest_structure};
 use bookrack_query::Library;
 use bookrack_vectors::{ChunkRow, ChunkStore};
+
+/// Bring `catalog.db` into existence at the current schema so the
+/// facade's read-only opens succeed. The facade refuses to open a
+/// non-existent catalog file.
+fn seed_catalog(catalog_db: &Path) {
+    drop(Catalog::open(catalog_db).expect("seed catalog"));
+}
 
 const DIM: usize = 4;
 const MODEL: &str = "test-model";
@@ -74,6 +83,7 @@ async fn search_returns_a_cited_passage_through_the_facade() {
     let corpus_db = dir.path().join("corpus.db");
     let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
 
     // Build a one-chapter book in an on-disk corpus.
     let leaf_id = {
@@ -182,6 +192,7 @@ async fn opening_with_a_different_model_is_refused() {
     let corpus_db = dir.path().join("corpus.db");
     let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
     build_stamped_index(&corpus_db, &lancedb_dir).await;
 
     // The index was stamped with MODEL; opening it to serve with another
@@ -209,6 +220,7 @@ async fn an_empty_index_is_served_without_stamps() {
     let corpus_db = dir.path().join("corpus.db");
     let catalog_db = dir.path().join("catalog.db");
     let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
 
     // No book ingested, no stamps written: an empty index has no provenance
     // to check, so the facade opens it without complaint.
@@ -225,4 +237,107 @@ async fn an_empty_index_is_served_without_stamps() {
     assert_eq!(library.dimension(), DIM);
     let hits = library.search("anything", None).await.expect("search");
     assert!(hits.is_empty());
+}
+
+#[tokio::test]
+async fn show_book_and_show_toc_round_trip_through_the_facade() {
+    use bookrack_catalog::{BOOK_SCOPE, NewIntake, NewPublicationAttrs};
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+
+    // Seed an ingested book with a title, then seed the catalog
+    // separately with the matching biblio so show_book can find it.
+    {
+        let mut corpus = Corpus::open(&corpus_db).expect("open corpus");
+        ingest_structure(
+            &mut corpus,
+            1,
+            NodeType::Work,
+            &extraction(),
+            &StructureParams::default(),
+        )
+        .expect("structure");
+        corpus
+            .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+            .expect("stamp");
+    }
+    {
+        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
+        catalog
+            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .expect("register");
+        let mut attrs = NewPublicationAttrs::new(1, BOOK_SCOPE);
+        attrs.title = Some("A Test Book".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+    }
+
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+    )
+    .await
+    .expect("open library");
+
+    let detail = library.show_book(1).expect("show book").expect("present");
+    assert_eq!(detail.intake_id, 1);
+    assert_eq!(detail.title.as_deref(), Some("A Test Book"));
+    assert_eq!(detail.format.as_deref(), Some("epub"));
+
+    assert!(library.show_book(404).expect("missing").is_none());
+
+    let toc = library.show_toc(1).expect("show toc").expect("present");
+    let titles: Vec<&str> = toc
+        .nodes
+        .iter()
+        .filter_map(|n| n.title.as_deref())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.contains("Chapter")),
+        "expected the chapter in the TOC: {titles:?}"
+    );
+    assert!(!toc.truncated);
+
+    assert!(library.show_toc(404).expect("missing").is_none());
+}
+
+#[tokio::test]
+async fn list_books_clamps_to_max_list_limit() {
+    use bookrack_catalog::NewIntake;
+    use bookrack_query::dto::MAX_LIST_LIMIT;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+
+    {
+        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
+        catalog
+            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .expect("register");
+    }
+
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+    )
+    .await
+    .expect("open library");
+    let page = library
+        .list_books(MAX_LIST_LIMIT + 100, 0)
+        .expect("list books");
+    assert!(page.truncated, "overrun must mark the page as truncated");
+    assert_eq!(page.total, 1);
+    assert_eq!(page.books.len(), 1);
 }
