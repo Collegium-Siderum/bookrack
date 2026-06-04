@@ -128,10 +128,14 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     params: &IngestParams,
     ocr_params: &OcrIngestParams,
 ) -> Result<OcrIngestReport> {
-    // 1. Read and hash both files.
-    let ocr_bytes = std::fs::read(ocr_md_path)?;
+    // 1. Read and hash both files. The OCR product can be a single
+    //    markdown file or a polyocr `dir/` output; `read_source`
+    //    returns the canonical text either way, and the OCR intake's
+    //    sha256 / byte_size are computed over those bytes.
+    let ocr_text = bookrack_extract::ocr::read_source(ocr_md_path)?;
+    let ocr_bytes = ocr_text.as_bytes();
     let pdf_bytes = std::fs::read(source_pdf_path)?;
-    let source_sha_ocr = sha256_hex(&ocr_bytes);
+    let source_sha_ocr = sha256_hex(ocr_bytes);
     let source_sha_pdf = sha256_hex(&pdf_bytes);
 
     // 2. Determine the expected page count: an explicit override wins,
@@ -177,11 +181,15 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     )?;
     let ocr_intake_id = ocr_reg.intake().intake_id;
 
-    // 5. Run the OCR adapter. The source PDF is passed so /Outline and
-    //    /Info are lifted in the same call; the SHA goes into
+    // 5. Run the OCR adapter against the in-memory canonical text:
+    //    the source PDF is passed so /Outline and /Info are lifted in
+    //    the same call; the PDF's SHA goes into
     //    `Provenance.derived_from_sha256`.
-    let mut extraction =
-        bookrack_extract::ocr::extract(ocr_md_path, Some(source_pdf_path), Some(&source_sha_pdf))?;
+    let mut extraction = bookrack_extract::ocr::extract_from_text(
+        &ocr_text,
+        Some(source_pdf_path),
+        Some(&source_sha_pdf),
+    )?;
 
     // 6. Completeness check. A failure aborts the OCR intake; the
     //    scan PDF intake is left as it was (NeedsOcr) so the user can

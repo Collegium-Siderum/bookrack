@@ -5,11 +5,26 @@
 //!
 //! # Format commitment
 //!
-//! The OCR adapter consumes a single Markdown file whose body is broken
-//! into pages by `<!-- page <label> (sheet <n>) -->` markers — the form
-//! polyocr's stdout / single-file output mode emits. The marker is the
-//! delimiter; everything between consecutive markers is body, attributed
-//! to the page's `(sheet n)` count.
+//! The OCR adapter consumes polyocr's Markdown product in either of
+//! the two on-disk shapes the tool emits:
+//!
+//! - **single file** — verbatim file bytes, the form `polyocr` writes
+//!   in `stdout` / single-file output mode.
+//! - **directory** — a folder of `page_*.md` files, the form
+//!   `polyocr book.pdf out_dir/` writes. [`read_source`] reads it as
+//!   the canonical concatenation of those files in filename order
+//!   joined by a single `\n`. The OCR intake's `source_sha256` and
+//!   `byte_size` are computed against that canonical text, so two
+//!   ingests of the same directory always register the same intake.
+//!
+//! Both shapes share `intake.format = "ocr-markdown"`: the format
+//! describes the *content shape* (the marker grammar below), not the
+//! on-disk container.
+//!
+//! The page body is broken into pages by
+//! `<!-- page <label> (sheet <n>) -->` markers. The marker is the
+//! delimiter; everything between consecutive markers is body,
+//! attributed to the page's `(sheet n)` count.
 //!
 //! Optional YAML frontmatter at the head of the file carries advisory
 //! provenance (engine name, preset, dpi, …). It is skipped over in this
@@ -55,22 +70,91 @@ use crate::pdf;
 /// carries this value, the binary keeps recognising it forever.
 pub const ADAPTER: &str = "ocr-pages";
 
+/// Read the OCR product's canonical text from `ocr_path`, accepting
+/// either form polyocr emits:
+///
+/// - A single file: read verbatim.
+/// - A directory: enumerate every regular file named `page_*.md`,
+///   sort by filename (so `page_001.md` < `page_002.md`), and join
+///   the contents with a single `\n` separator. The "canonical text"
+///   for a directory is this concatenation; downstream the OCR
+///   intake's `source_sha256` and `byte_size` are computed against
+///   it, so two runs against the same directory always register the
+///   same intake.
+///
+/// The two forms commit to the same `intake.format = "ocr-markdown"`:
+/// the format describes the *content shape* (polyocr's marker
+/// grammar), not the on-disk container.
+pub fn read_source(ocr_path: &Path) -> Result<String, ExtractError> {
+    if ocr_path.is_dir() {
+        read_dir_concat(ocr_path)
+    } else {
+        Ok(std::fs::read_to_string(ocr_path)?)
+    }
+}
+
+fn read_dir_concat(dir: &Path) -> Result<String, ExtractError> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with("page_") && name.ends_with(".md") {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        return Err(ExtractError::MalformedPackage {
+            detail: format!("no `page_*.md` files in directory {}", dir.display()),
+        });
+    }
+    paths.sort();
+    let mut out = String::new();
+    for path in paths {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&std::fs::read_to_string(path)?);
+    }
+    Ok(out)
+}
+
 /// Extract one OCR-intake product into an [`Extraction`].
 ///
-/// `ocr_path` is the polyocr single-file markdown. `source_pdf`, when
+/// `ocr_path` is the polyocr product — a single file, or a directory
+/// of `page_*.md` files (see [`read_source`]). `source_pdf`, when
 /// `Some`, is opened to lift `/Outline` and `/Info` via the shared PDF
 /// helpers; when `None`, TOC and biblio default to empty.
 /// `source_pdf_sha256` is recorded verbatim in
-/// `Provenance.derived_from_sha256`; computing the hash is the caller's
-/// responsibility because the same caller already needs it to register
-/// the source PDF intake.
+/// `Provenance.derived_from_sha256`; computing the hash is the
+/// caller's responsibility because the same caller already needs it
+/// to register the source PDF intake.
 pub fn extract(
     ocr_path: &Path,
     source_pdf: Option<&Path>,
     source_pdf_sha256: Option<&str>,
 ) -> Result<Extraction, ExtractError> {
-    let text = std::fs::read_to_string(ocr_path)?;
-    let body = strip_frontmatter(&text);
+    let text = read_source(ocr_path)?;
+    extract_from_text(&text, source_pdf, source_pdf_sha256)
+}
+
+/// Extract one OCR-intake product whose text is already in memory.
+///
+/// Same shape as [`extract`], minus the file/dir read step. Lets
+/// `ingest` compute the OCR intake's `source_sha256` and `byte_size`
+/// over the same canonical text the parser is about to consume,
+/// without round-tripping through a temp file.
+pub fn extract_from_text(
+    text: &str,
+    source_pdf: Option<&Path>,
+    source_pdf_sha256: Option<&str>,
+) -> Result<Extraction, ExtractError> {
+    let body = strip_frontmatter(text);
     let pages = scan_pages(body)?;
     let blocks = blocks_from_pages(&pages);
     if !blocks.iter().any(|b| matches!(b.kind, BlockKind::Body)) {
@@ -307,6 +391,64 @@ third page body
         let text = "<!-- page 1 (sheet abc) -->\n\nbody\n";
         let err = scan_pages(text).expect_err("must reject non-integer sheet");
         assert!(matches!(err, ExtractError::MalformedPackage { .. }));
+    }
+
+    #[test]
+    fn read_source_concatenates_a_polyocr_directory_in_filename_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write four files; one outside the page_* pattern stays out
+        // of the concat, and the kept files end up in numeric order.
+        std::fs::write(
+            dir.path().join("page_002.md"),
+            "<!-- page 2 (sheet 2) -->\n\nbody two\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("page_001.md"),
+            "<!-- page 1 (sheet 1) -->\n\nbody one\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("page_010.md"),
+            "<!-- page 10 (sheet 10) -->\n\nbody ten\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("README.md"), "ignore this\n").unwrap();
+
+        let text = read_source(dir.path()).expect("read dir");
+        // ASCII sort: page_001 < page_002 < page_010 ≪ README.
+        let body_positions = [
+            text.find("body one").expect("page 1 in concat"),
+            text.find("body two").expect("page 2 in concat"),
+            text.find("body ten").expect("page 10 in concat"),
+        ];
+        assert!(body_positions.windows(2).all(|w| w[0] < w[1]));
+        assert!(
+            !text.contains("ignore this"),
+            "README.md must not enter the concat",
+        );
+    }
+
+    #[test]
+    fn read_source_rejects_an_empty_polyocr_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No page_*.md files in the directory.
+        std::fs::write(dir.path().join("README.md"), "ignore\n").unwrap();
+        let err = read_source(dir.path()).expect_err("must reject empty dir");
+        assert!(matches!(err, ExtractError::MalformedPackage { .. }));
+    }
+
+    #[test]
+    fn extract_from_text_matches_extract_when_text_round_trips_via_a_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sample.md");
+        let text =
+            "<!-- page 1 (sheet 1) -->\n\nbody one\n\n<!-- page 2 (sheet 2) -->\n\nbody two\n";
+        std::fs::write(&path, text).unwrap();
+
+        let from_file = extract(&path, None, None).expect("extract file");
+        let from_text = extract_from_text(text, None, None).expect("extract text");
+        assert_eq!(from_file, from_text);
     }
 
     #[test]
