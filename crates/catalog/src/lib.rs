@@ -44,7 +44,7 @@ pub use book_state::{BookState, NewBookState};
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::EffectiveAttrs;
 pub use expressions::{Expression, NewExpression};
-pub use intake::{Intake, IntakeStatus, NewIntake, Registration};
+pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, Registration};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
 pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
 pub use node_categories::{NewCategory, NodeCategory};

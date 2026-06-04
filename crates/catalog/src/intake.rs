@@ -9,9 +9,9 @@
 //! existing row instead of creating a duplicate.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
-use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
+use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
-use crate::{Catalog, Result, count_as_u64};
+use crate::{BOOK_SCOPE, Catalog, Result, count_as_u64};
 
 /// The single source of truth for the `intake` table's schema. Its DDL
 /// is rendered from this spec.
@@ -52,6 +52,11 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         IndexSpec::on("idx_intake_format", &["format"]),
     ],
 };
+
+/// `LIKE` escape character used by [`Catalog::find_intakes`]'s title
+/// predicate, so user input containing `%` or `_` matches literally
+/// rather than acting as a wildcard.
+const LIKE_ESCAPE: &str = "\\";
 
 /// `INSERT` for a freshly registered intake. The columns absent here —
 /// `intake_id`, `stored_path`, `adapter`, `expression_id`, `notes` — are
@@ -109,6 +114,122 @@ impl IntakeStatus {
     pub fn from_db_str(s: &str) -> Option<IntakeStatus> {
         IntakeStatus::ALL.into_iter().find(|st| st.as_str() == s)
     }
+}
+
+/// What [`Catalog::find_intakes`] and [`Catalog::count_find_intakes`]
+/// filter on. Each field is an optional predicate AND-combined with the
+/// others; the default value (`IntakeFilter::default()`) imposes none and
+/// matches every row.
+///
+/// Strings are borrowed so callers do not need to `clone()` query
+/// fragments they already hold. `statuses` is an empty slice when no
+/// status filter is wanted.
+#[derive(Debug, Default, Clone)]
+pub struct IntakeFilter<'a> {
+    /// Case-sensitive substring match against the root publication-attrs
+    /// title, i.e. `node_publication_attrs.title LIKE '%' || ? || '%'`
+    /// joined on the book scope. `%` and `_` in the substring match
+    /// literally — the LIKE is escaped.
+    pub title_substring: Option<&'a str>,
+    /// Exact-equality match against the root contributor name in
+    /// `node_contributors.name`, joined on the book scope. Combined with
+    /// `contributor_role` when both are set.
+    pub contributor_name: Option<&'a str>,
+    /// Restrict the contributor JOIN to one role (`"author"`,
+    /// `"translator"`, ...). Only takes effect when
+    /// `contributor_name` is also set.
+    pub contributor_role: Option<&'a str>,
+    /// Match `intake.status` against this set. An empty slice means "no
+    /// filter".
+    pub statuses: &'a [IntakeStatus],
+    /// Exact-equality match against `intake.format`. Rows whose `format`
+    /// is `NULL` never match.
+    pub format: Option<&'a str>,
+}
+
+/// The list of `intake` columns qualified with the `i.` alias used by
+/// the find / count SQL.
+fn intake_columns_qualified() -> String {
+    SPEC.columns
+        .iter()
+        .map(|c| format!("i.{}", c.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Render the JOIN clauses, WHERE clause, and bind parameters for a
+/// filter. The JOIN and WHERE strings are empty when the filter is
+/// empty; `joins` always begins with a leading space when non-empty,
+/// and `where_clause` always begins with ` WHERE `, so they slot into
+/// the surrounding SELECT verbatim.
+fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box<dyn ToSql>>) {
+    let mut joins = String::new();
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn ToSql>> = Vec::new();
+
+    if filter.title_substring.is_some() {
+        joins.push_str(
+            " LEFT JOIN node_publication_attrs npa \
+             ON npa.intake_id = i.intake_id AND npa.scope = ?",
+        );
+        params.push(Box::new(BOOK_SCOPE.to_string()));
+    }
+    if filter.contributor_name.is_some() {
+        joins.push_str(
+            " LEFT JOIN node_contributors nc \
+             ON nc.intake_id = i.intake_id AND nc.scope = ?",
+        );
+        params.push(Box::new(BOOK_SCOPE.to_string()));
+    }
+
+    if let Some(needle) = filter.title_substring {
+        where_parts.push(format!("npa.title LIKE ? ESCAPE '{LIKE_ESCAPE}'"));
+        params.push(Box::new(format!("%{}%", like_escape(needle))));
+    }
+    if let Some(name) = filter.contributor_name {
+        where_parts.push("nc.name = ?".to_string());
+        params.push(Box::new(name.to_string()));
+        if let Some(role) = filter.contributor_role {
+            where_parts.push("nc.role = ?".to_string());
+            params.push(Box::new(role.to_string()));
+        }
+    }
+    if !filter.statuses.is_empty() {
+        debug_assert!(
+            filter.statuses.len() <= 8,
+            "IntakeFilter.statuses takes at most 8 entries, got {}",
+            filter.statuses.len()
+        );
+        let placeholders = vec!["?"; filter.statuses.len()].join(", ");
+        where_parts.push(format!("i.status IN ({placeholders})"));
+        for status in filter.statuses {
+            params.push(Box::new(status.as_str().to_string()));
+        }
+    }
+    if let Some(format) = filter.format {
+        where_parts.push("i.format = ?".to_string());
+        params.push(Box::new(format.to_string()));
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+    (where_clause, joins, params)
+}
+
+/// Escape SQL `LIKE` metacharacters (`%`, `_`, and the escape itself)
+/// using [`LIKE_ESCAPE`].
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            out.push_str(LIKE_ESCAPE);
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// One `intake` row read back from `catalog.db`.
@@ -315,6 +436,59 @@ impl Catalog {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Find intake rows matching `filter`, ordered by ascending
+    /// `intake_id`, paged by `limit` and `offset`. Each filter field is an
+    /// optional, AND-combined predicate; see [`IntakeFilter`] for what
+    /// each one matches.
+    ///
+    /// A `limit` of zero, or an `offset` past the end of the result set,
+    /// returns an empty `Vec` instead of an error.
+    pub fn find_intakes(
+        &self,
+        filter: &IntakeFilter<'_>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Intake>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let (where_clause, joins, mut params) = build_filter_fragments(filter);
+        let group_by = if filter.contributor_name.is_some() {
+            " GROUP BY i.intake_id"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {cols} FROM intake i{joins}{where_clause}{group_by} \
+             ORDER BY i.intake_id LIMIT ? OFFSET ?",
+            cols = intake_columns_qualified(),
+        );
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), Intake::from_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Number of intake rows matching `filter`, sharing the WHERE / JOIN
+    /// shape with [`Catalog::find_intakes`] so a `count` and a paged
+    /// `find` reach the same set.
+    pub fn count_find_intakes(&self, filter: &IntakeFilter<'_>) -> Result<u64> {
+        let (where_clause, joins, params) = build_filter_fragments(filter);
+        let sql = format!("SELECT COUNT(DISTINCT i.intake_id) FROM intake i{joins}{where_clause}",);
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let n: i64 = self
+            .conn
+            .query_row(&sql, refs.as_slice(), |row| row.get(0))?;
+        count_as_u64(n)
     }
 
     /// Total number of intake rows.
@@ -539,6 +713,273 @@ mod tests {
                 .expect("miss")
         );
         assert!(!catalog.set_stored_path(9999, "store/x").expect("miss"));
+    }
+
+    /// Seed an intake with title `title` and one author `author`,
+    /// returning the new intake id.
+    fn seed_book(catalog: &mut Catalog, sha: &str, title: &str, author: &str) -> i64 {
+        use crate::{NewContributor, NewPublicationAttrs};
+
+        let intake_id = catalog
+            .register_intake(&NewIntake::new(sha).format("epub"))
+            .expect("register")
+            .intake()
+            .intake_id;
+
+        let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+        attrs.title = Some(title.to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+
+        catalog
+            .add_contributor(&NewContributor::new(
+                intake_id,
+                BOOK_SCOPE,
+                "author",
+                0,
+                "extracted",
+                author,
+            ))
+            .expect("contributor");
+
+        intake_id
+    }
+
+    #[test]
+    fn find_intakes_with_empty_filter_lists_every_row() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        let hits = catalog
+            .find_intakes(&IntakeFilter::default(), 10, 0)
+            .expect("find");
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn find_intakes_title_substring_matches_case_sensitive_and_paginates() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha Bravo", "Ann");
+        seed_book(&mut catalog, "sha-b", "Bravo Charlie", "Ben");
+        seed_book(&mut catalog, "sha-c", "Charlie Delta", "Cal");
+
+        let filter = IntakeFilter {
+            title_substring: Some("Bravo"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            catalog.count_find_intakes(&filter).expect("count"),
+            hits.len() as u64
+        );
+
+        // Paged.
+        let first = catalog.find_intakes(&filter, 1, 0).expect("page1");
+        let second = catalog.find_intakes(&filter, 1, 1).expect("page2");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0].intake_id, second[0].intake_id);
+    }
+
+    #[test]
+    fn find_intakes_title_substring_escapes_like_metachars() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "100% Pure", "Ann");
+        seed_book(&mut catalog, "sha-b", "100 Pure", "Ben");
+        // The `%` in the needle must match the literal `%` row only.
+        let filter = IntakeFilter {
+            title_substring: Some("100%"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-a");
+    }
+
+    #[test]
+    fn find_intakes_contributor_name_uses_exact_equality() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        seed_book(&mut catalog, "sha-b", "Beta", "Anderson");
+        let filter = IntakeFilter {
+            contributor_name: Some("Ann"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-a");
+    }
+
+    #[test]
+    fn find_intakes_contributor_role_narrows_within_a_name() {
+        use crate::NewContributor;
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        // Same name as author on intake A, but a translator role.
+        catalog
+            .add_contributor(&NewContributor::new(
+                catalog
+                    .intake_by_sha("sha-a")
+                    .expect("lookup")
+                    .expect("present")
+                    .intake_id,
+                BOOK_SCOPE,
+                "translator",
+                0,
+                "extracted",
+                "Tia",
+            ))
+            .expect("translator");
+        seed_book(&mut catalog, "sha-b", "Beta", "Tia");
+
+        // Without a role, Tia hits both books.
+        let any = IntakeFilter {
+            contributor_name: Some("Tia"),
+            ..IntakeFilter::default()
+        };
+        assert_eq!(catalog.find_intakes(&any, 10, 0).expect("find").len(), 2);
+
+        // With role "translator", only the book where Tia is a translator.
+        let scoped = IntakeFilter {
+            contributor_name: Some("Tia"),
+            contributor_role: Some("translator"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&scoped, 10, 0).expect("find");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-a");
+    }
+
+    #[test]
+    fn find_intakes_statuses_filter_with_in_list() {
+        let mut catalog = catalog();
+        let a = seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        let b = seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        seed_book(&mut catalog, "sha-c", "Gamma", "Cal");
+        catalog
+            .set_intake_status(a, IntakeStatus::Extracted)
+            .expect("set");
+        catalog
+            .set_intake_status(b, IntakeStatus::Embedded)
+            .expect("set");
+
+        let filter = IntakeFilter {
+            statuses: &[IntakeStatus::Extracted, IntakeStatus::Embedded],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 2);
+    }
+
+    #[test]
+    fn find_intakes_combines_title_and_contributor_without_duplicating_rows() {
+        use crate::NewContributor;
+        let mut catalog = catalog();
+        let a = seed_book(&mut catalog, "sha-a", "Alpha Bravo", "Ann");
+        // Same author also listed as editor on the same book.
+        catalog
+            .add_contributor(&NewContributor::new(
+                a,
+                BOOK_SCOPE,
+                "editor",
+                0,
+                "extracted",
+                "Ann",
+            ))
+            .expect("editor row");
+        seed_book(&mut catalog, "sha-b", "Bravo Charlie", "Ben");
+
+        let filter = IntakeFilter {
+            title_substring: Some("Bravo"),
+            contributor_name: Some("Ann"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        // Despite two matching contributor rows, GROUP BY collapses to one.
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].intake_id, a);
+        assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 1);
+    }
+
+    #[test]
+    fn find_intakes_format_filter_excludes_null_format() {
+        let mut catalog = catalog();
+        catalog
+            .register_intake(&NewIntake::new("sha-no-format"))
+            .expect("register");
+        catalog
+            .register_intake(&NewIntake::new("sha-epub").format("epub"))
+            .expect("register");
+
+        let filter = IntakeFilter {
+            format: Some("epub"),
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 10, 0).expect("find");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_sha256, "sha-epub");
+    }
+
+    #[test]
+    fn find_intakes_limit_zero_and_offset_beyond_return_empty() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        assert!(
+            catalog
+                .find_intakes(&IntakeFilter::default(), 0, 0)
+                .expect("limit zero")
+                .is_empty()
+        );
+        assert!(
+            catalog
+                .find_intakes(&IntakeFilter::default(), 10, 99)
+                .expect("offset past end")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn count_find_intakes_matches_a_max_limit_find() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        seed_book(&mut catalog, "sha-c", "Gamma", "Cal");
+        let filter = IntakeFilter::default();
+        let count = catalog.count_find_intakes(&filter).expect("count");
+        let hits = catalog
+            .find_intakes(&filter, u32::MAX, 0)
+            .expect("find unbounded");
+        assert_eq!(count as usize, hits.len());
+    }
+
+    #[test]
+    fn find_intakes_runs_in_under_ten_millis_on_a_seven_field_filter() {
+        let mut catalog = catalog();
+        for i in 0..50u32 {
+            let sha = format!("sha-{i:03}");
+            let title = format!("Title {i:03}");
+            let author = format!("Author {i:03}");
+            seed_book(&mut catalog, &sha, &title, &author);
+        }
+        let filter = IntakeFilter {
+            title_substring: Some("Title"),
+            contributor_name: Some("Author 042"),
+            contributor_role: Some("author"),
+            statuses: &[IntakeStatus::Pending],
+            format: Some("epub"),
+        };
+        let start = std::time::Instant::now();
+        let hits = catalog
+            .find_intakes(&filter, 100, 0)
+            .expect("filtered find");
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), 1);
+        // 168-book scale sanity check from the manual; 10 ms is generous.
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "filtered find took {elapsed:?}"
+        );
     }
 
     #[test]
