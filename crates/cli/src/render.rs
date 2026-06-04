@@ -9,6 +9,7 @@ use bookrack_audit_profile::AuditProfile;
 use bookrack_catalog::{BookPipelineAudit, MetadataAudit};
 use bookrack_config::LibraryEntry;
 use bookrack_ingest::IngestReport;
+use bookrack_ingest::ocr::OcrIngestReport;
 use bookrack_metadata::{FieldGrade, FieldReport, MetadataReport};
 use bookrack_query::dto::{BookDetail, LibraryStats, ListBooksResult, Toc};
 use bookrack_search::Citation;
@@ -54,6 +55,44 @@ pub fn ingest(report: &IngestReport) {
         report.nodes_written, report.prose_leaves, report.chunks_written,
     );
     print_audit_warning(report);
+}
+
+/// Print the outcome of one `intake ocr` run.
+pub fn ocr_intake(report: &OcrIngestReport) {
+    println!(
+        "Ingested OCR product as intake {} (source PDF anchored as intake {}, needs_ocr).",
+        report.ocr_intake_id, report.pdf_intake_id,
+    );
+    println!(
+        "  pages: {}/{} covered",
+        report.ocr_page_count, report.expected_pages,
+    );
+    if let Some(partial) = report.extraction.provenance.partial_pages.as_deref() {
+        let head: String = partial
+            .iter()
+            .take(10)
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tail = if partial.len() > 10 {
+            format!(", \u{2026} ({} more)", partial.len() - 10)
+        } else {
+            String::new()
+        };
+        println!("  \u{26a0} partial ingest: present sheets {head}{tail}");
+    }
+    println!(
+        "  nodes: {} ({} prose leaves)\n  chunks embedded: {}",
+        report.nodes_written, report.prose_leaves, report.chunks_written,
+    );
+    if let Some(path) = &report.envelope_path {
+        println!("  envelope: {}", path.display());
+    } else {
+        println!(
+            "  \u{26a0} envelope write failed; `corpus rebuild --only {}` is unavailable.",
+            report.ocr_intake_id,
+        );
+    }
 }
 
 /// Surface a `needs_work` audit verdict on stdout so the operator

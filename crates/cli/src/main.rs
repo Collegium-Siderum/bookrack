@@ -24,6 +24,7 @@ use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
+use bookrack_ingest::ocr::{OcrIngestParams, ingest_ocr_intake};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::{AuditInput, AuditRules, TocStats};
 use bookrack_ops::dto::BookFilter;
@@ -112,6 +113,13 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Drive an intake from a derived source manifestation. The OCR
+    /// variant pairs a polyocr-style Markdown product with its source
+    /// PDF; future variants will cover other derived sources.
+    Intake {
+        #[command(subcommand)]
+        action: IntakeAction,
+    },
     /// Ingest and embed a single file (or, with `--recursive`, every
     /// supported file under a directory) into the library.
     #[command(after_help = INGEST_AFTER_HELP)]
@@ -251,6 +259,37 @@ enum Command {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum IntakeAction {
+    /// Bring an OCR product into the library as a derived source
+    /// manifestation. The scan PDF named by `--from-pdf` is registered
+    /// as the durable source anchor (status `needs_ocr`); the OCR
+    /// markdown is registered as its own intake whose `Provenance`
+    /// forensically references the PDF's hash and flows through
+    /// STRUCTURE / CHUNK / EMBED. The expected page count comes from
+    /// the source PDF's `/Pages`; pass `--expected-pages` to override
+    /// it when PDFium cannot read the source, and `--allow-partial`
+    /// to accept an OCR product whose sheets do not cover every page.
+    Ocr {
+        /// Path to the polyocr single-file Markdown product, with
+        /// page markers `<!-- page <label> (sheet <n>) -->`.
+        ocr_md: PathBuf,
+        /// Path to the scan PDF the OCR product was produced from.
+        #[arg(long, value_name = "PDF")]
+        from_pdf: PathBuf,
+        /// Override the expected page count rather than reading it
+        /// from the source PDF's `/Pages`.
+        #[arg(long, value_name = "N")]
+        expected_pages: Option<u32>,
+        /// Accept a partial OCR product. The present sheets are
+        /// recorded into `Provenance.partial_pages`; missing pages
+        /// surface in the OCR intake's `partial_pages` field rather
+        /// than being silently treated as blank.
+        #[arg(long)]
+        allow_partial: bool,
     },
 }
 
@@ -613,6 +652,24 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Command::Intake { action } => match action {
+            IntakeAction::Ocr {
+                ocr_md,
+                from_pdf,
+                expected_pages,
+                allow_partial,
+            } => {
+                run_intake_ocr(
+                    &cfg,
+                    &ocr_md,
+                    &from_pdf,
+                    expected_pages,
+                    allow_partial,
+                    profile_name.as_deref(),
+                )
+                .await
+            }
+        },
         Command::Query {
             text,
             in_book,
@@ -1751,6 +1808,50 @@ fn collect_supported_files(dir: &Path) -> Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+async fn run_intake_ocr(
+    cfg: &Config,
+    ocr_md: &Path,
+    from_pdf: &Path,
+    expected_pages: Option<u32>,
+    allow_partial: bool,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let embed_cfg = EmbedConfig::from_env();
+    let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let mut catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let embedder = embedder(cfg, &embed_cfg)?;
+    let audit_rules = load_audit_rules(cfg);
+    let audit_profile = load_audit_profile(cfg, profile_name);
+    let params = IngestParams {
+        embed: embed_cfg,
+        audit_rules,
+        audit_profile,
+        ..Default::default()
+    };
+    let ocr_params = OcrIngestParams {
+        expected_pages,
+        allow_partial,
+    };
+
+    let report = ingest_ocr_intake(
+        &mut corpus,
+        &mut catalog,
+        &cfg.lancedb_dir(),
+        &cfg.books_dir(),
+        ocr_md,
+        from_pdf,
+        &embedder,
+        &params,
+        &ocr_params,
+    )
+    .await
+    .context("ingest OCR")?;
+
+    render::ocr_intake(&report);
+    Ok(())
 }
 
 async fn run_query(
