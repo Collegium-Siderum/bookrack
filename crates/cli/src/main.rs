@@ -18,16 +18,16 @@ mod render;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
+use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_config::{Config, EmbedConfig, LibrarySelection, LogConfig, SearchConfig};
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_ingest::ocr::{OcrIngestParams, ingest_ocr_intake};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
-use bookrack_metadata::{AuditInput, AuditRules, TocStats};
+use bookrack_metadata::AuditRules;
 use bookrack_ops::dto::BookFilter;
+use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::{Caller, Ops, reads};
 use bookrack_vectors::ChunkStore;
 
@@ -644,7 +644,17 @@ fn natural_name_hint(typed: &str) -> Option<String> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let cli = parse_cli_with_natural_name_hints();
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
@@ -924,80 +934,66 @@ fn scan_intake_files(cfg: &Config, catalog: &Catalog) -> Result<Vec<i64>> {
 
 async fn run_info(cfg: &Config) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
-    let corpus_stamps = read_corpus_stamps(cfg).unwrap_or_default();
-    let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
-        .ok()
-        .flatten();
-    let current_chunks = read_current_chunk_count(cfg, &corpus_stamps).await;
-    let intake_count = open_read_only_catalog(cfg)
-        .and_then(|c| c.count_intakes().map_err(anyhow::Error::from))
-        .ok();
-    let ready_count = open_read_only_catalog(cfg)
-        .and_then(|c| {
-            c.count_book_states_by_stage("ready")
-                .map_err(anyhow::Error::from)
-        })
-        .ok();
-    let disk = disk_usage(cfg);
-    let snapshot = render::InfoSnapshot {
+    let ops = catalog_only_ops(cfg);
+    let ctx = LibraryInfoContext {
         data_dir: cfg.data_dir().display().to_string(),
-        library: cfg.library().map(str::to_string),
-        source: resolution_source_label(cfg.source()),
+        library_name: cfg.library().map(str::to_string),
+        resolution_source: resolution_source_label(cfg.source()).to_string(),
         ollama_url: cfg.ollama_url().to_string(),
         embed_model_configured: embed_cfg.model.clone(),
-        corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
-        catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
-        corpus_stamps,
-        vectors_meta,
-        current_chunks,
-        intake_count,
-        ready_book_count: ready_count,
-        disk,
     };
-    render::info(&snapshot);
+    let info = bookrack_ops::reads::info::show_library_info(&ops, ctx)
+        .await
+        .context("read library info")?;
+    render::info(&info_snapshot_from_ops(info));
     Ok(())
 }
 
-/// Best-effort live read of the vector store's row count. The corpus
-/// stamp pins the dimension the store was built with; a library that
-/// has never been ingested into has no stamp, no store, and no
-/// answer — return `None` and let the renderer say so. Errors are
-/// swallowed so `info` stays informational rather than failing on a
-/// half-built library.
-async fn read_current_chunk_count(
-    cfg: &Config,
-    corpus_stamps: &render::CorpusStamps,
-) -> Option<usize> {
-    let dim: usize = corpus_stamps.vector_dim.as_deref()?.parse().ok()?;
-    let store = ChunkStore::open(&cfg.lancedb_dir(), dim).await.ok()?;
-    store.count_rows().await.ok()
+/// Adapt the ops DTO into the snapshot the CLI renderer prints. The
+/// two shapes differ only in field naming and in `source` being a
+/// string here, so the conversion stays inline rather than mint a
+/// trait surface neither caller wants.
+fn info_snapshot_from_ops(info: bookrack_ops::dto::info::LibraryInfo) -> render::InfoSnapshot {
+    render::InfoSnapshot {
+        data_dir: info.data_dir,
+        library: info.library_name,
+        source: static_source_label(info.resolution_source.as_str()),
+        ollama_url: info.ollama_url,
+        embed_model_configured: info.embed_model_configured,
+        corpus_schema_version_expected: info.corpus_schema_version_expected,
+        catalog_schema_version_expected: info.catalog_schema_version_expected,
+        catalog_schema_version_on_disk: info.catalog_schema_version_on_disk,
+        corpus_stamps: render::CorpusStamps {
+            embed_model: info.corpus_stamps.embed_model,
+            vector_dim: info.corpus_stamps.vector_dim,
+            chunk_version: info.corpus_stamps.chunk_version,
+            normalize_version: info.corpus_stamps.normalize_version,
+            schema_version_on_disk: info.corpus_stamps.schema_version_on_disk,
+        },
+        vectors_meta: info.vectors_meta,
+        current_chunks: info.current_chunks,
+        intake_count: info.intake_count,
+        ready_book_count: info.ready_book_count,
+        disk: render::DiskUsage {
+            catalog_db: info.disk.catalog_db,
+            corpus_db: info.disk.corpus_db,
+            lancedb_dir: info.disk.lancedb_dir,
+        },
+    }
 }
 
-fn open_read_only_catalog(cfg: &Config) -> Result<Catalog> {
-    Catalog::open_read_only(&cfg.catalog_db()).map_err(anyhow::Error::from)
-}
-
-fn read_corpus_stamps(cfg: &Config) -> Result<render::CorpusStamps> {
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    Ok(render::CorpusStamps {
-        embed_model: corpus
-            .meta_get(bookrack_corpus::EMBED_MODEL_KEY)
-            .ok()
-            .flatten(),
-        vector_dim: corpus
-            .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
-            .ok()
-            .flatten(),
-        chunk_version: corpus
-            .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)
-            .ok()
-            .flatten(),
-        normalize_version: corpus
-            .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)
-            .ok()
-            .flatten(),
-        schema_version_on_disk: corpus.meta_get("schema_version").ok().flatten(),
-    })
+/// Resolve the runtime `resolution_source` string back to the
+/// `&'static str` the InfoSnapshot carries. Matches the labels
+/// produced by [`resolution_source_label`].
+fn static_source_label(source: &str) -> &'static str {
+    match source {
+        "--data-dir flag" => "--data-dir flag",
+        "--library flag" => "--library flag",
+        "BOOKRACK_DATA_DIR env" => "BOOKRACK_DATA_DIR env",
+        "registry default" => "registry default",
+        "explicit" => "explicit",
+        _ => "(unknown)",
+    }
 }
 
 fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'static str {
@@ -1011,42 +1007,48 @@ fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'stati
     }
 }
 
-fn disk_usage(cfg: &Config) -> render::DiskUsage {
-    render::DiskUsage {
-        catalog_db: file_size(&cfg.catalog_db()),
-        corpus_db: file_size(&cfg.corpus_db()),
-        lancedb_dir: dir_size(&cfg.lancedb_dir()),
-    }
+/// Lock filename held under the data root for the duration of one
+/// ingest run, serializing concurrent `bookrack ingest` and
+/// `bookrack intake ocr` invocations against the same library.
+const INGEST_LOCK_NAME: &str = ".ingest.lock";
+
+/// Acquire the per-data-root advisory write lock and return a guard
+/// that releases it on drop.
+///
+/// The lock is taken non-blocking: if another process already holds it,
+/// the call fails fast with a readable error rather than queueing. Two
+/// processes that point at the same data root and both run ingest would
+/// otherwise race on intake-id allocation and clobber each other's
+/// LanceDB partitions; the lock makes that race a clean refusal.
+fn acquire_ingest_lock(cfg: &Config) -> Result<IngestLockGuard> {
+    use fs2::FileExt;
+
+    let data_dir = cfg.data_dir();
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("create data root {} for ingest lock", data_dir.display()))?;
+    let lock_path = data_dir.join(INGEST_LOCK_NAME);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open ingest lock {}", lock_path.display()))?;
+    file.try_lock_exclusive().map_err(|err| {
+        anyhow::anyhow!(
+            "another bookrack process already holds the ingest lock at {} ({err})",
+            lock_path.display()
+        )
+    })?;
+    Ok(IngestLockGuard { file })
 }
 
-fn file_size(path: &Path) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|m| m.len())
-}
-
-fn dir_size(path: &Path) -> Option<u64> {
-    if !path.is_dir() {
-        return None;
-    }
-    let mut total = 0u64;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let metadata = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if metadata.is_dir() {
-                stack.push(entry.path());
-            } else {
-                total += metadata.len();
-            }
-        }
-    }
-    Some(total)
+/// Drop guard for the data-root ingest lock. The OS releases the flock
+/// when the underlying `File` is closed; on Drop the file handle goes
+/// out of scope and the lock with it. The lock file itself stays on
+/// disk so its inode is stable across runs.
+struct IngestLockGuard {
+    #[allow(dead_code)]
+    file: std::fs::File,
 }
 
 fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
@@ -1667,6 +1669,7 @@ async fn run_ingest(
     force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
+    let _lock = acquire_ingest_lock(cfg)?;
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
@@ -1852,6 +1855,7 @@ async fn run_intake_ocr(
     allow_partial: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
+    let _lock = acquire_ingest_lock(cfg)?;
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
@@ -1898,6 +1902,11 @@ async fn run_query(
 ) -> Result<()> {
     let embed_cfg = EmbedConfig::from_env();
     let search_cfg = SearchConfig::from_env();
+    if search_cfg.top_k == 0 {
+        anyhow::bail!(
+            "BOOKRACK_SEARCH_TOP_K must be at least 1; got 0 (queries return no rows when top_k is 0)"
+        );
+    }
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     // The catalog handle is opened beside the corpus so the breadcrumb
     // resolver can read the effective book title; it is used only
@@ -2008,13 +2017,9 @@ async fn run_metadata(
     // already-migrated database.
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let audit_rules = load_audit_rules(cfg);
-    let audit_profile = load_audit_profile(cfg, profile_name);
     let ops = catalog_only_ops(cfg);
     match action {
-        MetadataAction::Show { book, json } => {
-            run_metadata_show(&catalog, book, json, &audit_rules, &audit_profile)
-        }
+        MetadataAction::Show { book, json } => run_metadata_show(&ops, book, json),
         MetadataAction::Set { book, field, value } => run_metadata_set(&ops, book, &field, &value),
         MetadataAction::Clear { book, field } => run_metadata_clear(&ops, book, &field),
         MetadataAction::Ack { book, reason } => run_metadata_ack(&ops, book, &reason),
@@ -2027,8 +2032,8 @@ async fn run_metadata(
             limit,
             offset,
             json,
-        } => run_metadata_list(&catalog, needs_review, limit, offset, json),
-        MetadataAction::AuditTrail { book, json } => run_metadata_audit_trail(&catalog, book, json),
+        } => run_metadata_list(&ops, &catalog, needs_review, limit, offset, json),
+        MetadataAction::AuditTrail { book, json } => run_metadata_audit_trail(&ops, book, json),
         MetadataAction::Advance { .. } => unreachable!("handled above"),
         MetadataAction::AuditProfile { .. } => unreachable!("handled above"),
     }
@@ -2064,23 +2069,38 @@ fn run_metadata_audit_profile(action: AuditProfileAction) -> Result<()> {
 }
 
 fn run_metadata_list(
+    ops: &Ops<OllamaEmbedClient>,
     catalog: &Catalog,
     needs_review: bool,
     limit: u32,
     offset: u32,
     json: bool,
 ) -> Result<()> {
-    let needs_review_confidence: &[&str] = &["low", "medium"];
-    let needs_review_status: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
-    let filter = if needs_review {
-        IntakeFilter {
-            confidence_in: needs_review_confidence,
-            review_status_in: needs_review_status,
-            ..IntakeFilter::default()
+    if needs_review {
+        let page = bookrack_ops::reads::metadata::list_pending_reviews(ops, limit, offset)
+            .context("list pending reviews")?;
+        let rows: Vec<render::MetadataListRow> = page
+            .rows
+            .into_iter()
+            .map(|r| render::MetadataListRow {
+                intake_id: r.intake_id,
+                title: r.title,
+                confidence: r.confidence,
+                review_status: r.review_status,
+            })
+            .collect();
+        if json {
+            render::metadata_list_json(&rows, page.total);
+        } else {
+            render::metadata_list(&rows, page.total, true);
         }
-    } else {
-        IntakeFilter::default()
-    };
+        return Ok(());
+    }
+    // The unfiltered listing has no ops wrapper yet; it stays direct
+    // and is not recorded in `mcp_tool_calls`. Switching it through
+    // ops needs a new `list_books_for_review` read that surfaces
+    // confidence and review status, which is out of scope here.
+    let filter = IntakeFilter::default();
     let intakes = catalog
         .find_intakes(&filter, limit, offset)
         .context("find intakes")?;
@@ -2116,23 +2136,9 @@ fn run_metadata_list(
     Ok(())
 }
 
-fn run_metadata_audit_trail(catalog: &Catalog, book: i64, json: bool) -> Result<()> {
-    // `metadata_audit` rows outlive the `intake` row by design — see
-    // the matching contract in `bookrack_ops::reads::metadata`. Read
-    // first, then only consult `intake_by_id` to disambiguate the
-    // empty result.
-    let node_id = PartitionIdx::new(book).root().get();
-    let rows = catalog
-        .metadata_audit_for_node(node_id)
+fn run_metadata_audit_trail(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
+    let rows = bookrack_ops::reads::metadata::show_audit_trail(ops, book)
         .context("read metadata audit")?;
-    if rows.is_empty()
-        && catalog
-            .intake_by_id(book)
-            .context("look up intake")?
-            .is_none()
-    {
-        anyhow::bail!("no intake registered for book {book}");
-    }
     if json {
         render::metadata_audit_trail_json(book, &rows);
     } else {
@@ -2142,24 +2148,13 @@ fn run_metadata_audit_trail(catalog: &Catalog, book: i64, json: bool) -> Result<
 }
 
 fn run_pipeline_trail(cfg: &Config, book: i64, json: bool) -> Result<()> {
-    let catalog =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    // `book_pipeline_audit` rows outlive the `intake` row by design —
-    // see the matching contract in `bookrack_ops::reads::pipeline`.
-    // Read first, then only consult `intake_by_id` to disambiguate
-    // the empty result.
-    let book_root_id = PartitionIdx::new(book).root().get();
-    let rows = catalog
-        .pipeline_audit_for_book(book_root_id)
+    // Trigger any pending catalog migration up front (the read-only
+    // open inside ops does not migrate), then dispatch through ops so
+    // the read lands in `mcp_tool_calls` like every other audited read.
+    Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let ops = catalog_only_ops(cfg);
+    let rows = bookrack_ops::reads::pipeline::show_pipeline_trail(&ops, book)
         .context("read pipeline audit")?;
-    if rows.is_empty()
-        && catalog
-            .intake_by_id(book)
-            .context("look up intake")?
-            .is_none()
-    {
-        anyhow::bail!("no intake registered for book {book}");
-    }
     if json {
         render::pipeline_trail_json(book, &rows);
     } else {
@@ -2168,75 +2163,13 @@ fn run_pipeline_trail(cfg: &Config, book: i64, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_metadata_show(
-    catalog: &Catalog,
-    book: i64,
-    json: bool,
-    rules: &AuditRules,
-    profile: &bookrack_metadata::AuditProfile,
-) -> Result<()> {
-    catalog
-        .intake_by_id(book)
-        .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
-    let effective = catalog
-        .effective_publication_attrs(book, BOOK_SCOPE)
-        .context("read effective metadata")?;
-    let attrs = catalog
-        .publication_attrs(book, BOOK_SCOPE)
-        .context("read publication attrs")?;
-    let review_status = catalog
-        .review(book, BOOK_SCOPE)
-        .context("read review row")?
-        .map(|r| r.status);
-    // The audit needs an adapter so its source-format prior can fire;
-    // reuse the one stamped on the base row at ingest time, falling
-    // back to a neutral marker when the row has not been written yet.
-    let adapter = attrs
-        .as_ref()
-        .and_then(|a| a.source_format.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let biblio = Biblio::default();
-    let provenance = Provenance {
-        adapter,
-        // 0 marks a synthesized provenance: no extractor produced this,
-        // so any current `EXTRACTOR_VERSION` will compare as mismatched.
-        extractor_version: 0,
-        text_layer_quality: TextLayerQuality::BornDigital,
-        skipped_units: Vec::new(),
-        derived_from_sha256: None,
-        partial_pages: None,
-    };
-    let toc_stats = TocStats::default();
-    let input = AuditInput {
-        biblio: &biblio,
-        provenance: &provenance,
-        effective: &effective,
-        toc_stats: &toc_stats,
-        body_sample: "",
-        total_blocks: 0,
-        source_stem: None,
-        rules,
-    };
-    let report = bookrack_metadata::audit(&input, profile);
-    let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
-    let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
+fn run_metadata_show(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
+    let report = bookrack_ops::reads::metadata::show_metadata_audit(ops, book)
+        .context("read metadata audit")?;
     if json {
-        render::metadata_show_json(
-            book,
-            &report,
-            review_status.as_deref(),
-            stored_verdict.as_deref(),
-            stored_confidence.as_deref(),
-        );
+        render::metadata_show_json(&report);
     } else {
-        render::metadata_show(
-            book,
-            &report,
-            review_status.as_deref(),
-            stored_verdict.as_deref(),
-            stored_confidence.as_deref(),
-        );
+        render::metadata_show(&report);
     }
     Ok(())
 }

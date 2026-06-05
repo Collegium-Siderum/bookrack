@@ -255,6 +255,11 @@ fn prose_en_transcribes_clean_info_metadata() {
     assert_eq!(ex.biblio.title.as_deref(), Some("The Printed Page"));
     // The /Info CreationDate is pinned in the fixture source.
     assert_eq!(ex.biblio.year, Some(2011));
+    // The raw CreationDate is kept verbatim so the audit's
+    // timestamp-shape gate can override a build-time date with a
+    // filename year.
+    let year_raw = ex.biblio.year_raw.as_deref().expect("year_raw");
+    assert!(year_raw.starts_with("D:2011"), "got {year_raw:?}");
     assert_eq!(ex.biblio.contributors.len(), 1, "one /Info author");
     assert_eq!(ex.biblio.contributors[0].role, ContributorRole::Author);
 }

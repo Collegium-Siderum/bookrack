@@ -54,12 +54,21 @@ pub async fn show_library_info<E: Embedder>(
             .ok()
             .flatten();
         let current_chunks = read_current_chunk_count(ops.lancedb_dir(), &corpus_stamps).await;
-        let intake_count = Catalog::open_read_only(ops.catalog_db())
-            .and_then(|c| c.count_intakes())
-            .ok();
-        let ready_book_count = Catalog::open_read_only(ops.catalog_db())
-            .and_then(|c| c.count_book_states_by_stage("ready"))
-            .ok();
+        // Open the catalog only when its file is on disk: rusqlite's
+        // open creates the file on demand, which on a fresh data root
+        // would materialise `catalog.db` just to read three numbers off it.
+        let catalog = if ops.catalog_db().exists() {
+            Catalog::open_read_only(ops.catalog_db()).ok()
+        } else {
+            None
+        };
+        let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
+        let ready_book_count = catalog
+            .as_ref()
+            .and_then(|c| c.count_book_states_by_stage("ready").ok());
+        let catalog_schema_version_on_disk = catalog
+            .as_ref()
+            .and_then(|c| c.schema_version_on_disk().ok().flatten());
         Ok(LibraryInfo {
             data_dir: ctx.data_dir,
             library_name: ctx.library_name,
@@ -68,6 +77,7 @@ pub async fn show_library_info<E: Embedder>(
             embed_model_configured: ctx.embed_model_configured,
             corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
             catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
+            catalog_schema_version_on_disk,
             corpus_stamps,
             vectors_meta,
             current_chunks,
@@ -79,7 +89,10 @@ pub async fn show_library_info<E: Embedder>(
 }
 
 fn read_corpus_stamps(corpus_db: &Path) -> Result<CorpusStamps> {
-    let corpus = Corpus::open(corpus_db)?;
+    if !corpus_db.exists() {
+        return Ok(CorpusStamps::default());
+    }
+    let corpus = Corpus::open_read_only(corpus_db)?;
     Ok(CorpusStamps {
         embed_model: corpus.meta_get(EMBED_MODEL_KEY).ok().flatten(),
         vector_dim: corpus.meta_get(VECTOR_DIM_KEY).ok().flatten(),
@@ -89,9 +102,8 @@ fn read_corpus_stamps(corpus_db: &Path) -> Result<CorpusStamps> {
     })
 }
 
-async fn read_current_chunk_count(lancedb_dir: &Path, stamps: &CorpusStamps) -> Option<usize> {
-    let dim: usize = stamps.vector_dim.as_deref()?.parse().ok()?;
-    let store = ChunkStore::open(lancedb_dir, dim).await.ok()?;
+async fn read_current_chunk_count(lancedb_dir: &Path, _stamps: &CorpusStamps) -> Option<usize> {
+    let store = ChunkStore::try_open(lancedb_dir).await.ok()??;
     store.count_rows().await.ok()
 }
 

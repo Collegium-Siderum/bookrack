@@ -7,7 +7,7 @@ use std::path::Path;
 use bookrack_dbkit::{
     OpenDecision, READER_VERSION, TableSpec, TimedConnection, apply_schema, reader_version_decision,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::{CorpusError, Result};
 
@@ -68,6 +68,35 @@ impl Corpus {
     /// The database vanishes when the handle is dropped.
     pub fn open_in_memory() -> Result<Corpus> {
         Corpus::from_connection(Connection::open_in_memory()?)
+    }
+
+    /// Open the `corpus.db` at `path` without creating it and without
+    /// writing through the connection.
+    ///
+    /// Mirrors [`Catalog::open_read_only`][bookrack_catalog::Catalog::open_read_only]:
+    /// the `query_only` PRAGMA blocks writes, the schema-apply and the
+    /// version-reconciliation writers are skipped, and the table-spec
+    /// conformance check still runs so a drifted file is refused at open.
+    /// A missing file is reported as a SQLite open failure rather than
+    /// silently materialized.
+    pub fn open_read_only(path: &Path) -> Result<Corpus> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.pragma_update(None, "query_only", "ON")?;
+        bookrack_dbkit::verify_all(&conn, SPECS).map_err(CorpusError::Verify)?;
+        let corpus = Corpus {
+            conn: TimedConnection::new(conn, "corpus"),
+        };
+        let stored = corpus.read_min_reader_version()?;
+        if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
+            return Err(CorpusError::ReaderTooOld {
+                required: stored.expect("Refuse implies a stamp was present"),
+                current: READER_VERSION,
+            });
+        }
+        Ok(corpus)
     }
 
     /// Apply per-connection pragmas, ensure the schema is present, and

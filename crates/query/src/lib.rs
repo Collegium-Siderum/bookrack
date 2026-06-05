@@ -71,7 +71,8 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// database file is cheap, and it keeps this type free to be shared across
 /// concurrent requests behind an `Arc`.
 pub struct Library<E: Embedder> {
-    store: ChunkStore,
+    store: Option<ChunkStore>,
+    probed_dim: usize,
     embedder: E,
     corpus_db: PathBuf,
     catalog_db: PathBuf,
@@ -98,17 +99,20 @@ impl<E: Embedder> Library<E> {
         embed_model: String,
         default_top_k: usize,
     ) -> Result<Library<E>> {
-        let dim = probe_dimension(&embedder).await?;
-        let store = ChunkStore::open(lancedb_dir, dim).await?;
-        if store.count_rows().await? > 0 {
+        let probed_dim = probe_dimension(&embedder).await?;
+        let store = ChunkStore::try_open(lancedb_dir).await?;
+        if let Some(s) = &store
+            && s.count_rows().await? > 0
+        {
             let corpus = Corpus::open(&corpus_db)?;
             corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
                 &embed_model,
-                dim as u32,
+                probed_dim as u32,
             ))?;
         }
         Ok(Library {
             store,
+            probed_dim,
             embedder,
             corpus_db,
             catalog_db,
@@ -117,9 +121,9 @@ impl<E: Embedder> Library<E> {
         })
     }
 
-    /// The embedding dimension the vector store was opened at.
+    /// The embedding dimension probed from the configured embedder.
     pub fn dimension(&self) -> usize {
-        self.store.dimension()
+        self.probed_dim
     }
 
     /// Search the library for passages matching `query`, nearest first.
@@ -131,10 +135,13 @@ impl<E: Embedder> Library<E> {
     /// non-`Sync` handle is ever held across an await, so this future
     /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
+        let Some(store) = &self.store else {
+            return Ok(Vec::new());
+        };
         let top_k = top_k.unwrap_or(self.default_top_k);
         let hits = retrieve_with(
             query,
-            &self.store,
+            store,
             &self.embedder,
             &self.lancedb_dir,
             env_overrides(),
@@ -158,11 +165,14 @@ impl<E: Embedder> Library<E> {
         query: &str,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
+        let Some(store) = &self.store else {
+            return Ok(Vec::new());
+        };
         let top_k = top_k.unwrap_or(self.default_top_k);
         let partition = PartitionIdx::new(intake_id);
         let hits = retrieve_with_partition(
             query,
-            &self.store,
+            store,
             &self.embedder,
             &self.lancedb_dir,
             env_overrides(),

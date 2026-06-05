@@ -29,6 +29,10 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// filter comes from [`LogConfig::directive`]; an unparseable directive is
 /// dropped rather than fatal.
 ///
+/// When the logs directory cannot be created or is not writable, the file
+/// layer is omitted and a notice is printed to stderr; stderr logging
+/// continues. The returned guard is then `None`.
+///
 /// Also installs a panic hook that writes a crash report under the same
 /// logs directory (see [`install_crash_hook`]).
 ///
@@ -36,27 +40,54 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// thread. The caller must hold it for the program's lifetime — typically
 /// `let _guard = bookrack_obs::init(&cfg, &log);` in `main` — so buffered
 /// lines flush on exit.
-pub fn init(cfg: &Config, log: &LogConfig) -> WorkerGuard {
+pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
     let logs_dir = cfg.logs_dir();
     // The data root is validated to exist, but its `logs/` subdirectory
     // may not; the appender does not create it, so do it here.
-    let _ = std::fs::create_dir_all(&logs_dir);
+    let logs_dir_writable = std::fs::create_dir_all(&logs_dir).is_ok() && probe_writable(&logs_dir);
 
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "bookrack.log");
-    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let (file_layer, guard) = if logs_dir_writable {
+        let file_appender = tracing_appender::rolling::daily(&logs_dir, "bookrack.log");
+        let (file_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
+        let file = fmt::layer().json().with_writer(file_writer);
+        (Some(file), Some(worker_guard))
+    } else {
+        eprintln!(
+            "bookrack: file logging disabled; {} is not writable",
+            logs_dir.display()
+        );
+        (None, None)
+    };
 
     let console = fmt::layer().with_writer(io::stderr);
-    let file = fmt::layer().json().with_writer(file_writer);
 
     tracing_subscriber::registry()
         .with(EnvFilter::new(&log.directive))
         .with(console)
-        .with(file)
+        .with(file_layer)
         .init();
 
     install_crash_hook(logs_dir);
 
     guard
+}
+
+/// Probe whether `dir` accepts file creation by writing and removing a
+/// short-named sentinel file. Returns `true` on success.
+fn probe_writable(dir: &Path) -> bool {
+    let probe = dir.join(".bookrack-writable-probe");
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&probe);
+    match opened {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// Install a panic hook that writes a crash report to `logs_dir` before
@@ -160,6 +191,40 @@ mod tests {
         assert!(report.contains("location:       src/lib.rs:42:9"));
         assert!(report.contains("panic:          something went wrong"));
         assert!(report.contains("backtrace:\n  0: some::frame"));
+    }
+
+    #[test]
+    fn probe_writable_returns_true_for_a_writable_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "bookrack-obs-writable-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        assert!(probe_writable(&dir));
+        assert!(!dir.join(".bookrack-writable-probe").exists());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_writable_returns_false_for_a_read_only_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "bookrack-obs-readonly-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let mut perms = std::fs::metadata(&dir).expect("read perms").permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).expect("chmod 555");
+        let result = probe_writable(&dir);
+        let mut restore = std::fs::metadata(&dir).expect("read perms").permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&dir, restore).expect("chmod 755");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+        assert!(!result);
     }
 
     #[test]

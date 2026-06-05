@@ -11,6 +11,7 @@ bookrack-config = { path = "../config" }
 bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
+bookrack-catalog = { path = "../catalog" }
 rmcp.workspace = true
 axum.workspace = true
 clap.workspace = true

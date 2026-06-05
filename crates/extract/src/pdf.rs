@@ -283,9 +283,12 @@ pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
         });
     }
 
+    let creation_date = find("CreationDate");
+    let year = creation_date.as_deref().and_then(parse_pdf_year);
     Biblio {
         title: find("Title"),
-        year: find("CreationDate").and_then(|d| parse_pdf_year(&d)),
+        year,
+        year_raw: creation_date,
         contributors,
         ..Biblio::default()
     }

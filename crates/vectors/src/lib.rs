@@ -414,6 +414,12 @@ impl ChunkStore {
     /// newer binary refuses the open.
     pub async fn try_open(lancedb_dir: &Path) -> Result<Option<ChunkStore>> {
         ensure_lance_env();
+        // `lancedb::connect` materializes the directory it is pointed at,
+        // even when the table is missing. Short-circuit so a read-only
+        // probe never leaves a half-built lancedb layout on disk.
+        if !lancedb_dir.exists() {
+            return Ok(None);
+        }
         let stored_min_reader = meta::load(lancedb_dir)?.and_then(|m| m.min_reader_version);
         if let bookrack_dbkit::OpenDecision::Refuse { .. } =
             bookrack_dbkit::reader_version_decision(stored_min_reader)
@@ -450,6 +456,10 @@ impl ChunkStore {
                 current: bookrack_dbkit::READER_VERSION,
             });
         }
+        // `lancedb::connect` creates the directory on demand; create it
+        // explicitly so the side effect on a fresh data root is intended
+        // and visible at this call site rather than buried in the FFI.
+        std::fs::create_dir_all(lancedb_dir)?;
         let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
             .execute()
             .await?;

@@ -124,4 +124,10 @@ pub enum CorpusError {
     /// corpus.
     #[error("index carries no build stamps; rebuild the corpus")]
     IndexNotStamped,
+
+    /// The on-disk schema disagrees with the compiled-in specs. Surfaces
+    /// from the read-only open path so a drifted file is refused at open
+    /// rather than discovered mid-query.
+    #[error("corpus schema verification failed: {0}")]
+    Verify(#[from] bookrack_dbkit::VerifyError),
 }

@@ -102,6 +102,14 @@ impl<'a> Recorder<'a> {
             ),
         };
 
+        // Skip recording on a fresh data root that holds no catalog yet.
+        // `Catalog::open` would otherwise materialize `catalog.db` just to
+        // hold a single audit row, which turns `bookrack info` on an empty
+        // root into a write — exactly what the read-only contract refuses.
+        if !self.catalog_db.exists() {
+            return;
+        }
+
         let mut row = NewMcpToolCall::new(self.source, self.tool, status);
         row.duration_ms = Some(duration_ms);
         row.args = self.args;

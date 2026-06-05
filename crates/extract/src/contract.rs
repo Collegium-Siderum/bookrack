@@ -130,8 +130,10 @@ pub struct Biblio {
     /// EPUBs in particular often store a build-time `<dc:date>` whose
     /// shape (`YYYY-MM-DDThh:mm:ss...`) is a strong hint that the year
     /// is the file's production date rather than the work's publication
-    /// year. Kept verbatim so the audit can inspect it; absent when the
-    /// adapter never saw a date string (PDF /Info, HTML, TXT).
+    /// year. The PDF adapter mirrors this with `/Info CreationDate` —
+    /// the standard `D:YYYYMMDDHHmmSSOHH'mm'` shape that PDF writers
+    /// stamp at export time. Kept verbatim so the audit can inspect it;
+    /// absent when the adapter never saw a date string (HTML, TXT).
     pub year_raw: Option<String>,
     pub isbn: Option<String>,
     pub series: Option<String>,

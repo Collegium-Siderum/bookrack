@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
 };
@@ -41,7 +42,17 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let selection = LibrarySelection {
         data_dir: cli.data_dir,
@@ -59,6 +70,16 @@ async fn main() -> Result<()> {
         embed_cfg.backoff_base,
     )
     .context("build embedding client")?;
+
+    // Reject a catalog the binary cannot serve before the listener binds.
+    // Lazy opens inside tool handlers used to let the daemon accept
+    // connections and then fail every catalog-touching call with
+    // SchemaTooNew or ReaderTooOld; this preflight surfaces the mismatch
+    // at startup instead.
+    let catalog_db = cfg.catalog_db();
+    if catalog_db.exists() {
+        Catalog::open_read_only(&catalog_db).context("preflight catalog schema check failed")?;
+    }
 
     let search_cfg = SearchConfig::from_env();
     let library = Library::open(

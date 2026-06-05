@@ -29,6 +29,10 @@ pub struct LibraryInfo {
     pub corpus_schema_version_expected: u32,
     /// `catalog.db` schema version the binary expects.
     pub catalog_schema_version_expected: u32,
+    /// `catalog.db` schema version stamped in `catalog_meta`, or `None`
+    /// if no row has been written yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_schema_version_on_disk: Option<String>,
     /// Stamps the corpus carries about the index it was built with.
     pub corpus_stamps: CorpusStamps,
     /// Persisted vector-store metadata (ANN configuration, snapshot at

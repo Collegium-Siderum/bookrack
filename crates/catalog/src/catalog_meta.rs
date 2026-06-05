@@ -36,4 +36,11 @@ impl Catalog {
         bookrack_dbkit::meta_set(&self.conn, SPEC.name, key, value)?;
         Ok(())
     }
+
+    /// The `schema_version` value recorded in `catalog_meta`, or `None`
+    /// if no row has been written. Surfaced for `info`-style read paths
+    /// that want to show the on-disk version next to the binary's.
+    pub fn schema_version_on_disk(&self) -> Result<Option<String>> {
+        self.meta_get("schema_version")
+    }
 }

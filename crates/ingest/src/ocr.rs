@@ -29,8 +29,8 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{Catalog, IntakeStatus, NewBookState, NewIntake};
-use bookrack_core::{NodeId, NodeType};
+use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeStatus, NewBookState, NewIntake};
+use bookrack_core::{NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
@@ -58,6 +58,17 @@ pub struct OcrIngestParams {
 /// later pipeline stages need to chain on.
 #[derive(Debug, Clone)]
 pub struct OcrIngestReport {
+    /// `true` when the run short-circuited because the catalog already
+    /// holds an embedded OCR intake for these inputs with matching
+    /// stamps. The stage counters (`nodes_written`, `prose_leaves`,
+    /// `chunks_written`) are zero in that case; `extraction` is
+    /// reloaded from the rebuild-cache envelope so the report shape
+    /// mirrors a fresh run.
+    pub no_op: bool,
+    /// `true` when the run was requested with `params.force`. Distinct
+    /// from `no_op` (set when the noop short-circuit fired) so the
+    /// caller can tell a forced re-run from an idempotent one.
+    pub forced: bool,
     /// The scan PDF's intake id. Status is [`IntakeStatus::NeedsOcr`],
     /// `page_count` carries the source's expected sheet count.
     pub pdf_intake_id: i64,
@@ -180,6 +191,30 @@ pub async fn ingest_ocr_intake<E: Embedder>(
             .original_path(ocr_md_path.to_string_lossy().into_owned()),
     )?;
     let ocr_intake_id = ocr_reg.intake().intake_id;
+
+    // 4a. Idempotent fast path: if the OCR intake already reached
+    //     `Embedded` with current OCR_INTAKE_VERSION and the configured
+    //     embed model, the run has nothing left to do. Mirrors the
+    //     short-circuit `ingest_book` runs after registering its intake.
+    //     `force` is the operator's opt-out; with it set, drop through
+    //     to the full pipeline so a re-extract / re-embed runs.
+    if !params.force
+        && let Some(report) = ocr_noop_if_up_to_date(
+            catalog,
+            ocr_intake_id,
+            pdf_intake_id,
+            &source_sha_pdf,
+            &source_sha_ocr,
+            expected_pages,
+            &params.embed.model,
+        )?
+    {
+        tracing::info!(
+            ocr_intake_id = report.ocr_intake_id,
+            "intake ocr noop: OCR product unchanged and stamps current",
+        );
+        return Ok(report);
+    }
 
     // 5. Run the OCR adapter against the in-memory canonical text:
     //    the source PDF is passed so /Outline and /Info are lifted in
@@ -319,6 +354,8 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     .await?;
 
     Ok(OcrIngestReport {
+        no_op: false,
+        forced: params.force,
         pdf_intake_id,
         ocr_intake_id,
         book_root_id: structure.book_root_id,
@@ -334,6 +371,74 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         audit_confidence,
         extraction,
     })
+}
+
+/// Build the noop report when the OCR intake is already embedded with
+/// matching stamps. Returns `None` when any precondition fails — in
+/// which case the caller falls through to the full pipeline.
+///
+/// Mirrors [`noop_if_up_to_date`](crate::noop_if_up_to_date) but on
+/// the OCR side: the dimensions checked are the OCR intake's status,
+/// `OCR_INTAKE_VERSION`, the configured embed model, and the
+/// rebuild-cache envelope's presence (so the reloaded
+/// [`Extraction`] is honest, not a stub).
+#[allow(clippy::too_many_arguments)]
+fn ocr_noop_if_up_to_date(
+    catalog: &Catalog,
+    ocr_intake_id: i64,
+    pdf_intake_id: i64,
+    source_sha_pdf: &str,
+    source_sha_ocr: &str,
+    expected_pages: u32,
+    embed_model: &str,
+) -> Result<Option<OcrIngestReport>> {
+    let Some(ocr_intake) = catalog.intake_by_sha(source_sha_ocr)? else {
+        return Ok(None);
+    };
+    if ocr_intake.status != IntakeStatus::Embedded {
+        return Ok(None);
+    }
+    if ocr_intake.extractor_version != bookrack_extract::OCR_INTAKE_VERSION {
+        return Ok(None);
+    }
+    let book_root_id = PartitionIdx::new(ocr_intake_id).root();
+    let Some(state) = catalog.book_state(book_root_id.get())? else {
+        return Ok(None);
+    };
+    if state.embed_model.as_deref() != Some(embed_model) {
+        return Ok(None);
+    }
+    let stored_path = match ocr_intake.stored_path.as_deref() {
+        Some(p) => Path::new(p).to_path_buf(),
+        None => return Ok(None),
+    };
+    let envelope = match crate::envelope::read_envelope(&stored_path) {
+        Ok(env) => env,
+        Err(_) => return Ok(None),
+    };
+    let extraction = envelope.extraction;
+    let ocr_page_count = present_sheets(&extraction).last().copied().unwrap_or(0);
+    let attrs = catalog.publication_attrs(ocr_intake_id, BOOK_SCOPE)?;
+    let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
+    let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
+    Ok(Some(OcrIngestReport {
+        no_op: true,
+        forced: false,
+        pdf_intake_id,
+        ocr_intake_id,
+        book_root_id,
+        source_sha_pdf: source_sha_pdf.to_string(),
+        source_sha_ocr: source_sha_ocr.to_string(),
+        expected_pages,
+        ocr_page_count,
+        envelope_path: Some(stored_path),
+        nodes_written: 0,
+        prose_leaves: 0,
+        chunks_written: 0,
+        audit_verdict,
+        audit_confidence,
+        extraction,
+    }))
 }
 
 /// Outcome of the coverage comparison: either the OCR product covers
@@ -782,5 +887,54 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn re_ingesting_the_same_ocr_intake_is_a_noop() {
+        if !pdfium_available() {
+            return;
+        }
+        let mut p = pipeline();
+        let ocr_md = extract_fixture("sample.bookrack-ocr.v1.md");
+        let source_pdf = extract_fixture("sample.pdf");
+
+        let first = ingest_ocr_intake(
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
+            &ocr_md,
+            &source_pdf,
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
+        )
+        .await
+        .expect("first ingest");
+        assert!(!first.no_op);
+        assert!(first.chunks_written > 0);
+
+        let second = ingest_ocr_intake(
+            &mut p.corpus,
+            &mut p.catalog,
+            &p.lancedb_dir,
+            &p.books_dir,
+            &ocr_md,
+            &source_pdf,
+            &p.embedder,
+            &p.params,
+            &p.ocr_params,
+        )
+        .await
+        .expect("re-ingest");
+
+        assert!(second.no_op);
+        assert!(!second.forced);
+        assert_eq!(second.ocr_intake_id, first.ocr_intake_id);
+        assert_eq!(second.pdf_intake_id, first.pdf_intake_id);
+        assert_eq!(second.chunks_written, 0);
+        assert_eq!(second.nodes_written, 0);
+        assert_eq!(second.expected_pages, first.expected_pages);
+        assert_eq!(second.extraction, first.extraction);
     }
 }

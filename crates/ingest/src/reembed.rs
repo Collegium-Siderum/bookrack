@@ -313,8 +313,12 @@ mod tests {
         seed_catalog_embedded(&mut catalog, &[1, 2]);
         seed_partition(dir.path(), 1, 3).await;
         seed_partition(dir.path(), 2, 2).await;
-        // Mark intake 2 as stale by setting its extractor_version to
-        // a value below this binary's `EXTRACTOR_VERSION`.
+        // Pin intake 1 at the current `EXTRACTOR_VERSION` so the
+        // default-zero state cannot be mistaken for stale, then mark
+        // intake 2 stale by stamping a version below it.
+        catalog
+            .set_extraction(1, "fake", EXTRACTOR_VERSION)
+            .expect("pin extractor_version on intake 1");
         catalog
             .set_extraction(2, "fake", EXTRACTOR_VERSION.saturating_sub(1))
             .expect("override extractor_version on intake 2");

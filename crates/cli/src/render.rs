@@ -6,11 +6,11 @@
 //! stream never interleave.
 
 use bookrack_audit_profile::AuditProfile;
-use bookrack_catalog::{BookPipelineAudit, MetadataAudit};
 use bookrack_config::LibraryEntry;
 use bookrack_ingest::IngestReport;
 use bookrack_ingest::ocr::OcrIngestReport;
-use bookrack_metadata::{FieldGrade, FieldReport, MetadataReport};
+use bookrack_ops::dto::audit::{AuditTrailEntry, PipelineAuditEntry};
+use bookrack_ops::dto::metadata_report::MetadataReport as OpsMetadataReport;
 use bookrack_query::dto::{BookDetail, LibraryStats, ListBooksResult, Toc};
 use bookrack_search::Citation;
 use bookrack_vectors::VectorsMeta;
@@ -59,6 +59,13 @@ pub fn ingest(report: &IngestReport) {
 
 /// Print the outcome of one `intake ocr` run.
 pub fn ocr_intake(report: &OcrIngestReport) {
+    if report.no_op {
+        println!(
+            "OCR intake {} already up to date (source PDF anchored as intake {}, needs_ocr). No work done.",
+            report.ocr_intake_id, report.pdf_intake_id,
+        );
+        return;
+    }
     println!(
         "Ingested OCR product as intake {} (source PDF anchored as intake {}, needs_ocr).",
         report.ocr_intake_id, report.pdf_intake_id,
@@ -132,92 +139,70 @@ fn print_audit_warning(report: &IngestReport) {
 /// below are labelled as a live re-grade so the reader does not
 /// mistake them for the historical per-field grades the headline
 /// summarises.
-pub fn metadata_show(
-    book: i64,
-    report: &MetadataReport,
-    review_status: Option<&str>,
-    stored_verdict: Option<&str>,
-    stored_confidence: Option<&str>,
-) {
-    let status = review_status.unwrap_or("(no review row)");
-    println!("Book {book}: review status {status}");
+pub fn metadata_show(report: &OpsMetadataReport) {
+    let status = report.review_status.as_deref().unwrap_or("(no review row)");
+    println!("Book {}: review status {status}", report.intake_id);
     println!(
         "  audit verdict {} (confidence {})",
-        stored_verdict.unwrap_or("(not audited)"),
-        stored_confidence.unwrap_or("(not audited)"),
+        report.stored_verdict.as_deref().unwrap_or("(not audited)"),
+        report
+            .stored_confidence
+            .as_deref()
+            .unwrap_or("(not audited)"),
     );
-    println!("  live re-grade vs current effective metadata:");
-    for field in &report.fields {
-        let grade = grade_label(field.grade);
-        let flags = if field.flags.is_empty() {
-            String::new()
-        } else {
-            let tokens: Vec<&str> = field.flags.iter().map(|f| f.token()).collect();
-            format!(" [{}]", tokens.join(", "))
-        };
-        println!("    {:>10}  {grade}{flags}", field.field);
-        if !field.hint.is_empty() {
-            println!("                {}", field.hint);
+    let title = report.book.title.as_deref().unwrap_or("(untitled)");
+    println!("  title: {title}");
+    for (key, value) in &report.book.effective_biblio {
+        if key == "title" {
+            continue;
         }
+        println!("  {key:>11}: {value}");
     }
-    if !report.copyright_blocks.is_empty() {
-        let blocks: Vec<String> = report
-            .copyright_blocks
+    if !report.book.contributors.is_empty() {
+        let names: Vec<&str> = report
+            .book
+            .contributors
             .iter()
-            .map(|b| b.to_string())
+            .map(|c| c.name.as_str())
             .collect();
-        println!("  copyright-page candidates: {}", blocks.join(", "));
+        println!("  contributors: {}", names.join(", "));
     }
 }
 
 /// Print the same report as a single-line JSON object. Hand-emitted
 /// so the metadata crate stays free of a serde dependency. The
 /// `audit_verdict` and `confidence` keys carry the stored audit
-/// outcome; `live_regrade` holds the per-field grades against the
-/// current effective metadata.
-pub fn metadata_show_json(
-    book: i64,
-    report: &MetadataReport,
-    review_status: Option<&str>,
-    stored_verdict: Option<&str>,
-    stored_confidence: Option<&str>,
-) {
+/// outcome.
+pub fn metadata_show_json(report: &OpsMetadataReport) {
     let mut out = String::new();
     out.push('{');
-    write_string_field(&mut out, "review_status", review_status.unwrap_or(""));
+    write_string_field(
+        &mut out,
+        "review_status",
+        report.review_status.as_deref().unwrap_or(""),
+    );
     out.push(',');
-    write_string_field(&mut out, "audit_verdict", stored_verdict.unwrap_or(""));
+    write_string_field(
+        &mut out,
+        "audit_verdict",
+        report.stored_verdict.as_deref().unwrap_or(""),
+    );
     out.push(',');
-    write_string_field(&mut out, "confidence", stored_confidence.unwrap_or(""));
+    write_string_field(
+        &mut out,
+        "confidence",
+        report.stored_confidence.as_deref().unwrap_or(""),
+    );
     out.push(',');
-    out.push_str(&format!("\"book\":{book}"));
+    out.push_str(&format!("\"book\":{}", report.intake_id));
     out.push(',');
-    out.push_str("\"live_regrade\":[");
-    for (i, field) in report.fields.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&field_to_json(field));
-    }
-    out.push(']');
-    out.push(',');
-    let blocks: Vec<String> = report
-        .copyright_blocks
-        .iter()
-        .map(|b| b.to_string())
-        .collect();
-    out.push_str(&format!("\"copyright_blocks\":[{}]", blocks.join(",")));
+    write_string_field(
+        &mut out,
+        "title",
+        report.book.title.as_deref().unwrap_or(""),
+    );
     out.push('}');
     println!("{out}");
-}
-
-fn grade_label(grade: FieldGrade) -> &'static str {
-    match grade {
-        FieldGrade::Missing => "missing",
-        FieldGrade::Weak => "weak",
-        FieldGrade::Medium => "medium",
-        FieldGrade::Strong => "strong",
-    }
 }
 
 fn write_string_field(out: &mut String, key: &str, value: &str) {
@@ -226,28 +211,6 @@ fn write_string_field(out: &mut String, key: &str, value: &str) {
     out.push_str("\":\"");
     out.push_str(&escape_json(value));
     out.push('"');
-}
-
-fn field_to_json(field: &FieldReport) -> String {
-    let mut out = String::from("{");
-    write_string_field(&mut out, "field", &field.field);
-    out.push(',');
-    write_string_field(&mut out, "grade", grade_label(field.grade));
-    out.push(',');
-    out.push_str("\"flags\":[");
-    for (i, flag) in field.flags.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('"');
-        out.push_str(flag.token());
-        out.push('"');
-    }
-    out.push(']');
-    out.push(',');
-    write_string_field(&mut out, "hint", &field.hint);
-    out.push('}');
-    out
 }
 
 /// Quote-escape a string for embedding in a JSON literal.
@@ -412,7 +375,7 @@ pub fn metadata_list_json(rows: &[MetadataListRow], total: u64) {
 }
 
 /// Print the `metadata_audit` rows for one book, oldest first.
-pub fn metadata_audit_trail(book: i64, rows: &[MetadataAudit]) {
+pub fn metadata_audit_trail(book: i64, rows: &[AuditTrailEntry]) {
     println!("Book {book}: {} metadata audit rows", rows.len());
     for row in rows {
         let actor = row.actor_kind.as_str();
@@ -440,7 +403,7 @@ pub fn metadata_audit_trail(book: i64, rows: &[MetadataAudit]) {
 }
 
 /// Same trail as a JSON object.
-pub fn metadata_audit_trail_json(book: i64, rows: &[MetadataAudit]) {
+pub fn metadata_audit_trail_json(book: i64, rows: &[AuditTrailEntry]) {
     let mut out = String::from("{");
     out.push_str(&format!("\"book\":{book}"));
     out.push_str(",\"rows\":[");
@@ -466,7 +429,7 @@ pub fn metadata_audit_trail_json(book: i64, rows: &[MetadataAudit]) {
         out.push_str("\"new_value\":");
         write_opt_string(&mut out, row.new_value.as_deref());
         out.push(',');
-        write_string_field(&mut out, "actor_kind", row.actor_kind.as_str());
+        write_string_field(&mut out, "actor_kind", &row.actor_kind);
         out.push(',');
         out.push_str("\"actor_detail\":");
         write_opt_string(&mut out, row.actor_detail.as_deref());
@@ -480,7 +443,7 @@ pub fn metadata_audit_trail_json(book: i64, rows: &[MetadataAudit]) {
 }
 
 /// Print the `book_pipeline_audit` rows for one book, oldest first.
-pub fn pipeline_trail(book: i64, rows: &[BookPipelineAudit]) {
+pub fn pipeline_trail(book: i64, rows: &[PipelineAuditEntry]) {
     println!("Book {book}: {} pipeline audit rows", rows.len());
     for row in rows {
         let adapter = row.adapter.as_deref().unwrap_or("-");
@@ -506,7 +469,7 @@ pub fn pipeline_trail(book: i64, rows: &[BookPipelineAudit]) {
 }
 
 /// Same trail as a JSON object.
-pub fn pipeline_trail_json(book: i64, rows: &[BookPipelineAudit]) {
+pub fn pipeline_trail_json(book: i64, rows: &[PipelineAuditEntry]) {
     let mut out = String::from("{");
     out.push_str(&format!("\"book\":{book}"));
     out.push_str(",\"rows\":[");
@@ -694,6 +657,7 @@ pub struct InfoSnapshot {
     pub embed_model_configured: String,
     pub corpus_schema_version_expected: u32,
     pub catalog_schema_version_expected: u32,
+    pub catalog_schema_version_on_disk: Option<String>,
     pub corpus_stamps: CorpusStamps,
     pub vectors_meta: Option<VectorsMeta>,
     /// Live chunk-row count from the vector store. `None` when the
@@ -785,8 +749,12 @@ pub fn info(snapshot: &InfoSnapshot) {
     println!();
     println!("catalog.db:");
     println!(
-        "  schema_version: binary {} (run a write to refresh the on-disk row)",
+        "  schema_version: binary {}, on-disk {}",
         snapshot.catalog_schema_version_expected,
+        snapshot
+            .catalog_schema_version_on_disk
+            .as_deref()
+            .unwrap_or("(empty)"),
     );
     if let Some(n) = snapshot.intake_count {
         println!("  intakes:        {n}");
