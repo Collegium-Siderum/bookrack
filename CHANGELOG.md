@@ -8,6 +8,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.1.0-rc4] - 2026-06-05
+
+Re-cut of `v0.1.0-rc3` to drop the `x86_64-apple-darwin` build target.
+No behaviour change in the shipped binaries.
+
+### Removed
+
+- Native `x86_64-apple-darwin` release tarball. `lance-linalg`'s build
+  script hard-codes `-march=native` for its AVX-512 `dist_table`
+  kernel, which is incompatible with cross-compiling on the Apple
+  Silicon runner, and the previously-used `macos-13` Intel runner pool
+  is being deprecated. Intel macOS users run the
+  `aarch64-apple-darwin` binary under Rosetta 2 instead.
+
 ## [0.1.0-rc3] - 2026-06-05
 
 Re-cut of `v0.1.0-rc2` to harden the release pipeline. No behaviour

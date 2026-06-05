@@ -34,9 +34,11 @@ neighbour indexing, metadata) is still in progress.
    | Platform | Tarball |
    | --- | --- |
    | macOS (Apple Silicon) | `bookrack-X.Y.Z-aarch64-apple-darwin.tar.gz` |
-   | macOS (Intel) | `bookrack-X.Y.Z-x86_64-apple-darwin.tar.gz` |
    | Linux x86_64 | `bookrack-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
    | Windows x86_64 | `bookrack-X.Y.Z-x86_64-pc-windows-msvc.zip` |
+
+   Intel macOS users run the Apple Silicon binary under Rosetta 2; a
+   native `x86_64-apple-darwin` build is not shipped.
 
 3. **Extract and run the wizard.**
 

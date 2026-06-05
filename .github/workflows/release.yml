@@ -3,11 +3,15 @@ on:
   push:
     tags: ['v*']
 
-# Builds four platform tarballs (macOS arm64 / macOS x86_64 / Linux
-# x86_64 / Windows x86_64) and creates a GitHub Release whose body is
-# the section of CHANGELOG.md matching the tag's semver. The tag must
-# be `vX.Y.Z` (or `vX.Y.Z-foo` for a prerelease — the workflow detects
-# the hyphen and flags the release accordingly).
+# Builds three platform tarballs (macOS arm64 / Linux x86_64 / Windows
+# x86_64) and creates a GitHub Release whose body is the section of
+# CHANGELOG.md matching the tag's semver. The tag must be `vX.Y.Z` (or
+# `vX.Y.Z-foo` for a prerelease — the workflow detects the hyphen and
+# flags the release accordingly). Intel macOS users run the arm64
+# binary under Rosetta 2; a dedicated x86_64-apple-darwin target is not
+# shipped because `lance-linalg`'s build script hard-codes
+# `-march=native` for AVX-512 codegen, which is incompatible with
+# cross-compiling on the Apple Silicon runner.
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,17 +35,6 @@ jobs:
             runs-on: macos-14
             pdfium_archive: pdfium-mac-arm64.tgz
             pdfium_sha: 9acf49e46c68992cd40810e88264b1ad171805d02fd41c4cca336aad6653b333
-            pdfium_path_in_archive: lib/libpdfium.dylib
-            pdfium_lib_name: libpdfium.dylib
-            archive_kind: tar.gz
-          - target: x86_64-apple-darwin
-            # Cross-compiled from Apple Silicon. The macos-13 Intel runner
-            # pool is being deprecated and queues for hours under load;
-            # the host x86_64-apple-darwin target is a first-class Apple
-            # toolchain target, so the cross build is uneventful.
-            runs-on: macos-14
-            pdfium_archive: pdfium-mac-x64.tgz
-            pdfium_sha: f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb
             pdfium_path_in_archive: lib/libpdfium.dylib
             pdfium_lib_name: libpdfium.dylib
             archive_kind: tar.gz
