@@ -94,3 +94,36 @@ fn a_non_archive_is_a_corrupt_file() {
         "got {err:?}"
     );
 }
+
+#[test]
+fn a_zip_missing_the_ocf_container_xml_is_a_corrupt_file() {
+    use std::fs::File;
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    // A valid ZIP that even carries the OCF mimetype entry, yet omits
+    // `META-INF/container.xml`. rbook can open the archive but cannot
+    // locate the package document, which surfaces from `Epub::open` and
+    // is mapped to `ExtractError::CorruptFile`.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("no_container.epub");
+    {
+        let mut zip = ZipWriter::new(File::create(&path).expect("create epub"));
+        zip.start_file(
+            "mimetype",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+        )
+        .expect("mimetype entry");
+        zip.write_all(b"application/epub+zip")
+            .expect("write mimetype");
+        zip.finish().expect("finish archive");
+    }
+
+    let err = extract(&path, &common::default_extract_toggles())
+        .expect_err("missing container.xml must fail");
+    assert!(
+        matches!(err, ExtractError::CorruptFile { .. }),
+        "got {err:?}"
+    );
+}
