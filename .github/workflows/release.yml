@@ -46,7 +46,7 @@ jobs:
             pdfium_lib_name: pdfium.dll
             archive_kind: zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -122,7 +122,7 @@ jobs:
             shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bookrack-${{ matrix.target }}
           path: |
@@ -138,10 +138,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Download all platform artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
