@@ -24,6 +24,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+mod probe;
+
+pub use probe::{
+    DEFAULT_PROBE_TIMEOUT, ProbeError, ProbeReport, probe_ollama, probe_ollama_with_timeout,
+};
+
 /// Why an embed request failed. Callers branch on the variant, not the
 /// message text.
 #[derive(Debug, thiserror::Error)]
@@ -392,5 +398,77 @@ mod tests {
         let wrapped = build_query_input("dragons");
         assert!(wrapped.starts_with("Instruct:"));
         assert!(wrapped.ends_with("Query: dragons"));
+    }
+
+    #[tokio::test]
+    async fn probe_reports_models_on_a_healthy_daemon() {
+        let url = mock_once(
+            "200 OK",
+            r#"{"models":[{"name":"qwen3-embedding:0.6b"},{"name":"llama3.2:3b"}]}"#,
+        )
+        .await;
+        let report = probe_ollama(&url).await.expect("probe ok");
+        assert!(report.reachable);
+        assert_eq!(
+            report.models,
+            vec![
+                "qwen3-embedding:0.6b".to_string(),
+                "llama3.2:3b".to_string()
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_reports_reachable_with_no_models_for_an_empty_install() {
+        let url = mock_once("200 OK", r#"{"models":[]}"#).await;
+        let report = probe_ollama(&url).await.expect("probe ok");
+        assert!(report.reachable);
+        assert!(report.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_tolerates_a_missing_models_field() {
+        // A daemon answering `{}` is unusual but should not crash the
+        // wizard: treat it as reachable with zero models.
+        let url = mock_once("200 OK", "{}").await;
+        let report = probe_ollama(&url).await.expect("probe ok");
+        assert!(report.reachable);
+        assert!(report.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_resolves_a_refused_connection_to_unreachable() {
+        let url = dead_address().await;
+        let report = probe_ollama(&url).await.expect("probe returns ok");
+        assert!(!report.reachable);
+        assert!(report.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_resolves_a_5xx_to_unreachable() {
+        let url = mock_once("503 Service Unavailable", "down for maintenance").await;
+        let report = probe_ollama(&url).await.expect("probe returns ok");
+        assert!(!report.reachable);
+        assert!(report.models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_surfaces_a_malformed_body_as_an_error() {
+        let url = mock_once("200 OK", "this is not json").await;
+        let err = probe_ollama(&url).await.unwrap_err();
+        assert!(
+            matches!(err, ProbeError::MalformedResponse(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_trims_a_trailing_slash_from_base_url() {
+        // A base URL written with a trailing slash must still produce
+        // `<base>/api/tags`, not `<base>//api/tags`.
+        let url = mock_once("200 OK", r#"{"models":[]}"#).await;
+        let with_slash = format!("{url}/");
+        let report = probe_ollama(&with_slash).await.expect("probe ok");
+        assert!(report.reachable);
     }
 }
