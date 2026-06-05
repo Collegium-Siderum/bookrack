@@ -18,7 +18,7 @@ use crate::Options;
 
 /// Bundle schema version. Bump when any file's shape changes, when a
 /// new scrub rule is added, or when the tarball layout rearranges.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 /// The top-level `manifest.json` document.
 #[derive(Debug, Serialize)]

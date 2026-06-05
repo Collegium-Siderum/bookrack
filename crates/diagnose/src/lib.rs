@@ -129,4 +129,4 @@ fn since_ts(now: SystemTime, days: u32) -> String {
 
 /// Re-export the public path placeholders so consumers (and the CLI's
 /// human-readable output) can recognise them.
-pub use scrub::{DATA_DIR_PLACEHOLDER, HOME_PLACEHOLDER};
+pub use scrub::{DATA_DIR_PLACEHOLDER, HOME_PLACEHOLDER, USER_PLACEHOLDER, VOL_PLACEHOLDER};
