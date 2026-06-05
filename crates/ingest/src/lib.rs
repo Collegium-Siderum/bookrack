@@ -3121,4 +3121,53 @@ mod book_pipeline_tests {
             .expect("user row preserved");
         assert_eq!(user_row.name, "Hand Curated Editor");
     }
+
+    #[tokio::test]
+    async fn two_paths_with_identical_bytes_share_one_intake_via_content_sha() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dup_a = dir.path().join("dup-a.txt");
+        let dup_b = dir.path().join("dup-b.txt");
+        let bytes = b"The same prose under two different filenames.\n\
+                      A second paragraph so the chunker has more than one block.\n\
+                      A third paragraph rounds the body out.\n";
+        std::fs::write(&dup_a, bytes).expect("write dup-a");
+        std::fs::write(&dup_b, bytes).expect("write dup-b");
+
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let embedder = Fake { dim: 8 };
+
+        let first = ingest_book(
+            &dup_a,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &embedder,
+            &IngestParams::default(),
+        )
+        .await
+        .expect("first ingest");
+        assert!(!first.no_op, "first ingest of new bytes must run");
+        assert!(!first.already_registered);
+        assert!(first.chunks_written > 0);
+
+        let second = ingest_book(
+            &dup_b,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &embedder,
+            &IngestParams::default(),
+        )
+        .await
+        .expect("second ingest");
+        assert!(second.no_op, "second ingest of identical bytes must noop");
+        assert!(second.already_registered);
+        assert_eq!(second.intake_id, first.intake_id);
+        assert_eq!(second.chunks_written, 0);
+        assert_eq!(second.nodes_written, 0);
+        assert_eq!(second.prose_leaves, 0);
+    }
 }
