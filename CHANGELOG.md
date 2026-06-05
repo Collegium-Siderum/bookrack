@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.1.0-rc2] - 2026-06-05
+
+Re-cut of `v0.1.0-rc1` to fix the release pipeline on Windows. No
+behaviour change in the shipped binaries.
+
+### Fixed
+
+- Release workflow: SHA-256 verification of the PDFium archive and the
+  packaged release tarball now picks `sha256sum` when present and falls
+  back to `shasum -a 256`. Git Bash on Windows runners has no `shasum`,
+  which broke the Windows job at the verification step.
+
 ## [0.1.0-rc1] - 2026-06-05
 
 First release candidate. Pre-release while pre-production hardening

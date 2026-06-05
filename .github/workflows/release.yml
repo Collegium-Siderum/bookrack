@@ -90,7 +90,13 @@ jobs:
         run: |
           curl -L -o pdfium.tgz \
             "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/${{ matrix.pdfium_archive }}"
-          actual=$(shasum -a 256 pdfium.tgz | awk '{print $1}')
+          # macOS ships shasum (Perl); Linux and Git Bash on Windows ship
+          # sha256sum (coreutils). Pick whichever is on PATH.
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual=$(sha256sum pdfium.tgz | awk '{print $1}')
+          else
+            actual=$(shasum -a 256 pdfium.tgz | awk '{print $1}')
+          fi
           expected="${{ matrix.pdfium_sha }}"
           if [ "$actual" != "$expected" ]; then
             echo "::error::PDFium archive SHA mismatch: expected $expected, got $actual" >&2
@@ -135,12 +141,17 @@ jobs:
 
           # Pack
           cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha_cmd="sha256sum"
+          else
+            sha_cmd="shasum -a 256"
+          fi
           if [ "${{ matrix.archive_kind }}" = "zip" ]; then
             7z a "${stage}.zip" "${stage}" >/dev/null
-            shasum -a 256 "${stage}.zip" > "${stage}.zip.sha256"
+            $sha_cmd "${stage}.zip" > "${stage}.zip.sha256"
           else
             tar -czf "${stage}.tar.gz" "${stage}"
-            shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+            $sha_cmd "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
           fi
 
       - uses: actions/upload-artifact@v7
