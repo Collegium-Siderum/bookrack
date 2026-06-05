@@ -3220,4 +3220,133 @@ mod book_pipeline_tests {
         assert!(!report.no_op);
         assert!(report.prose_leaves > 1);
     }
+
+    /// An embedder that succeeds for the first `fail_after_calls` batches
+    /// then errors on every subsequent batch. Simulates a process that
+    /// crashed mid-EMBED with some batches already committed to the
+    /// vector store.
+    struct PartiallyFailing {
+        dim: usize,
+        calls: std::sync::atomic::AtomicUsize,
+        fail_after_calls: usize,
+    }
+
+    impl Embedder for PartiallyFailing {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let prior = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dim = self.dim;
+            let n = texts.len();
+            let fail = prior >= self.fail_after_calls;
+            async move {
+                if fail {
+                    Err(EmbedError::Unreachable(
+                        "simulated mid-EMBED crash".to_string(),
+                    ))
+                } else {
+                    Ok(vec![vec![0.25f32; dim]; n])
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resumed_ingest_after_a_mid_embed_failure_lands_clean() {
+        // Build the same chunk-crossing input the I7 test uses, so the
+        // first run hits more than one embed batch and the partial
+        // failure leaves real rows behind in the vector store.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("resume.txt");
+        let mut f = std::fs::File::create(&file).expect("create");
+        let paragraph = "The quick brown fox jumps over the lazy dog. \
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+            Curabitur fermentum, ipsum at lobortis dapibus, quam mi \
+            tincidunt arcu, vitae fringilla magna libero non risus. \
+            Mauris consectetur, libero sit amet faucibus aliquam, justo \
+            sapien viverra urna, eget pharetra purus risus a augue.\n\n";
+        for _ in 0..220 {
+            f.write_all(paragraph.as_bytes()).expect("write paragraph");
+        }
+        f.sync_all().expect("flush");
+
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        // First run: fails after the first batch commits. The embed
+        // stage opens with a one-call dimension probe and then issues
+        // one `embed_batch` per chunk batch; failing after the second
+        // call lets the probe succeed and the first real batch commit,
+        // then the second batch fails before its append runs.
+        let partial = PartiallyFailing {
+            dim: 8,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_after_calls: 2,
+        };
+        let err = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &partial,
+            &IngestParams::default(),
+        )
+        .await
+        .expect_err("embed must fail mid-run");
+        assert!(matches!(err, IngestError::Embed(_)));
+
+        let intake_after_crash = catalog
+            .intake_by_id(1)
+            .expect("intake row")
+            .expect("present");
+        assert_ne!(intake_after_crash.status, IntakeStatus::Embedded);
+
+        let rows_after_crash = {
+            let store = bookrack_vectors::ChunkStore::open(dir.path(), 8)
+                .await
+                .expect("open store");
+            store.count_rows().await.expect("count")
+        };
+        assert!(
+            rows_after_crash > 0,
+            "the first run must have committed at least one batch",
+        );
+
+        // Second run: the same file with a working embedder. The
+        // partition delete inside the EMBED stage wipes the crashed
+        // run's rows before writing the fresh batches.
+        let report = ingest_book(
+            &file,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("resume must succeed");
+        assert!(!report.no_op);
+        assert!(report.chunks_written > 0);
+
+        let intake_after_resume = catalog
+            .intake_by_id(report.intake_id)
+            .expect("intake row")
+            .expect("present");
+        assert_eq!(intake_after_resume.status, IntakeStatus::Embedded);
+
+        let rows_after_resume = {
+            let store = bookrack_vectors::ChunkStore::open(dir.path(), 8)
+                .await
+                .expect("open store");
+            store.count_rows().await.expect("count")
+        };
+        assert_eq!(
+            rows_after_resume, report.chunks_written,
+            "final row count must equal the resumed chunks_written; \
+             a leftover from the crashed run would inflate this number",
+        );
+    }
 }
