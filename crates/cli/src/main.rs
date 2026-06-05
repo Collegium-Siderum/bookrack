@@ -991,7 +991,9 @@ fn static_source_label(source: &str) -> &'static str {
         "--data-dir flag" => "--data-dir flag",
         "--library flag" => "--library flag",
         "BOOKRACK_DATA_DIR env" => "BOOKRACK_DATA_DIR env",
+        "portable layout" => "portable layout",
         "registry default" => "registry default",
+        "default registry default" => "default registry default",
         "explicit" => "explicit",
         _ => "(unknown)",
     }
@@ -1003,7 +1005,9 @@ fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'stati
         DataDirFlag => "--data-dir flag",
         LibraryFlag => "--library flag",
         EnvVar => "BOOKRACK_DATA_DIR env",
+        PortableExeNeighbor => "portable layout",
         RegistryDefault => "registry default",
+        DefaultRegistryDefault => "default registry default",
         Explicit => "explicit",
     }
 }

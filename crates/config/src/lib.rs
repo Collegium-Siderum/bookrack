@@ -50,6 +50,7 @@ pub struct Config {
     ollama_url: String,
     library: Option<String>,
     source: ResolutionSource,
+    root_config: RootConfig,
 }
 
 /// How the data root in a resolved [`Config`] was selected.
@@ -65,8 +66,15 @@ pub enum ResolutionSource {
     LibraryFlag,
     /// Won by the [`DATA_DIR_ENV`] environment variable.
     EnvVar,
-    /// Won by the registry's `default = "<name>"` entry.
+    /// Won by a `bookrack-data` directory next to the running binary —
+    /// the portable layout a self-contained tarball ships with.
+    PortableExeNeighbor,
+    /// Won by the registry's `default = "<name>"` entry — the registry
+    /// named by [`REGISTRY_ENV`].
     RegistryDefault,
+    /// Won by the `default` entry of the registry at the platform
+    /// config-directory path. Written by `bookrack init`.
+    DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
 }
@@ -85,8 +93,12 @@ pub struct LibrarySelection {
 /// Why configuration resolution failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// The data-root variable is unset or empty.
-    #[error("{DATA_DIR_ENV} is not set (copy .env.example to .env and fill it in)")]
+    /// No source selected a data root: no flag, no env var, no portable
+    /// layout, and no registry default. The wizard creates one.
+    #[error(
+        "no library configured: run `bookrack init` to set one up, \
+         or pass --data-dir, or set {DATA_DIR_ENV}"
+    )]
     MissingDataDir,
     /// The selected data root is not an existing directory — usually a
     /// typo in a flag, the registry, or the data-root variable.
@@ -123,6 +135,20 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    /// `<data_root>/config.toml` exists but could not be read.
+    #[error("cannot read the root config at {}", .path.display())]
+    RootConfigUnreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// `<data_root>/config.toml` is not valid TOML or has the wrong shape.
+    #[error("the root config at {} is malformed", .path.display())]
+    RootConfigMalformed {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
 }
 
 impl Config {
@@ -141,18 +167,25 @@ impl Config {
     ///
     /// The data root is chosen by precedence: `--data-dir`, then
     /// `--library` (looked up in the registry), then [`DATA_DIR_ENV`],
-    /// then the registry's default library. Fails if no source yields a
-    /// root, the chosen root is not an existing directory, or a
-    /// `--library` name is not registered. The Ollama endpoint falls
-    /// back to [`DEFAULT_OLLAMA_URL`] when unset.
+    /// then a `bookrack-data` directory beside the running binary, then
+    /// the registry's default library, then the platform-default
+    /// registry's default. Fails if no source yields a root, the chosen
+    /// root is not an existing directory, or a `--library` name is not
+    /// registered. The Ollama endpoint falls back to
+    /// [`DEFAULT_OLLAMA_URL`] when neither the env var nor the data
+    /// root's `config.toml` sets it.
     pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
         // A missing .env is fine: the variables may be set directly.
         dotenvy::dotenv().ok();
         let registry = load_registry(std::env::var(REGISTRY_ENV).ok())?;
+        let default_registry = load_default_registry()?;
+        let portable = portable_data_dir();
         let data_dir = select_root(
             selection,
             std::env::var(DATA_DIR_ENV).ok(),
             registry.as_ref(),
+            portable,
+            default_registry.as_ref(),
         )?;
         finish(data_dir, std::env::var(OLLAMA_URL_ENV).ok())
     }
@@ -168,7 +201,14 @@ impl Config {
             ollama_url,
             library: None,
             source: ResolutionSource::Explicit,
+            root_config: RootConfig::default(),
         }
+    }
+
+    /// Per-data-root configuration loaded from `<data_root>/config.toml`,
+    /// or the default (every field `None`) when the file was absent.
+    pub fn root_config(&self) -> &RootConfig {
+        &self.root_config
     }
 
     /// The data root that every other path is derived from.
@@ -301,6 +341,48 @@ fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {
         .collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     entries
+}
+
+/// Filename of the per-data-root configuration TOML, written by
+/// `bookrack init` next to the catalog and corpus databases.
+pub const ROOT_CONFIG_NAME: &str = "config.toml";
+
+/// Per-data-root configuration loaded from `<data_root>/config.toml`.
+///
+/// Carries runtime knobs that vary by library: the Ollama endpoint, the
+/// embed model, the MCP listen address, the log filter directive. Each
+/// field is `None` when the file does not set it; the matching env var
+/// (where one exists) overrides this layer, and the hardcoded default
+/// wins when both are absent. Written by `bookrack init`; safe to edit
+/// by hand.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RootConfig {
+    /// Ollama HTTP endpoint for embeddings.
+    pub ollama_url: Option<String>,
+    /// Embedding model tag.
+    pub embed_model: Option<String>,
+    /// Address the MCP server binds.
+    pub mcp_addr: Option<String>,
+    /// `EnvFilter` directive for tracing verbosity.
+    pub log_directive: Option<String>,
+}
+
+/// Read `<data_root>/config.toml`. A missing file resolves to the
+/// default (every field `None`) so a fresh data root is no error; a
+/// malformed file surfaces as [`ConfigError::RootConfigMalformed`].
+pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
+    let path = data_dir.join(ROOT_CONFIG_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RootConfig::default());
+        }
+        Err(source) => {
+            return Err(ConfigError::RootConfigUnreadable { path, source });
+        }
+    };
+    toml::from_str(&text).map_err(|source| ConfigError::RootConfigMalformed { path, source })
 }
 
 /// Embedding model served by the local Ollama daemon, used when
@@ -606,14 +688,22 @@ struct Resolved {
 
 /// Pick the data root by precedence, without checking that the chosen
 /// path exists. Pure over its inputs so the precedence rules can be
-/// tested without mutating the environment or writing registry files.
+/// tested without mutating the environment, writing registry files, or
+/// touching the running executable's directory.
 ///
-/// Order: `--data-dir`, then `--library` (registry lookup), then the
-/// data-root variable, then the registry's default library.
+/// Order, highest first:
+/// 1. the `--data-dir` flag,
+/// 2. the `--library` flag (looked up in the registry),
+/// 3. the data-root environment variable,
+/// 4. a `bookrack-data` directory probed beside the running binary,
+/// 5. the registry's default library,
+/// 6. the platform-default registry's default library.
 fn select_root(
     selection: &LibrarySelection,
     env_data_dir: Option<String>,
     registry: Option<&Registry>,
+    portable_dir: Option<PathBuf>,
+    default_registry: Option<&Registry>,
 ) -> Result<Resolved, ConfigError> {
     if let Some(dir) = &selection.data_dir {
         return Ok(Resolved {
@@ -638,6 +728,13 @@ fn select_root(
             library: None,
         });
     }
+    if let Some(dir) = portable_dir {
+        return Ok(Resolved {
+            data_dir: dir,
+            source: ResolutionSource::PortableExeNeighbor,
+            library: None,
+        });
+    }
     if let Some(registry) = registry
         && let Some(name) = &registry.default
     {
@@ -645,6 +742,16 @@ fn select_root(
         return Ok(Resolved {
             data_dir,
             source: ResolutionSource::RegistryDefault,
+            library: Some(name.clone()),
+        });
+    }
+    if let Some(registry) = default_registry
+        && let Some(name) = &registry.default
+    {
+        let data_dir = lookup_library(registry, name)?;
+        return Ok(Resolved {
+            data_dir,
+            source: ResolutionSource::DefaultRegistryDefault,
             library: Some(name.clone()),
         });
     }
@@ -664,8 +771,11 @@ fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigErro
 }
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
-/// existing directory; the Ollama endpoint falls back to its default.
-fn finish(resolved: Resolved, ollama_url: Option<String>) -> Result<Config, ConfigError> {
+/// existing directory. The Ollama endpoint is resolved by precedence
+/// `env var > <data_root>/config.toml > hardcoded default`, so a
+/// per-library override in the TOML still loses to an explicit
+/// environment variable.
+fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, ConfigError> {
     let Resolved {
         data_dir,
         source,
@@ -674,12 +784,16 @@ fn finish(resolved: Resolved, ollama_url: Option<String>) -> Result<Config, Conf
     if !data_dir.is_dir() {
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
-    let ollama_url = env_trimmed(ollama_url).unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    let root_config = load_root_config(&data_dir)?;
+    let ollama_url = env_trimmed(ollama_url_env)
+        .or_else(|| env_trimmed(root_config.ollama_url.clone()))
+        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
     Ok(Config {
         data_dir,
         ollama_url,
         library,
         source,
+        root_config,
     })
 }
 
@@ -696,6 +810,71 @@ fn load_registry(path: Option<String>) -> Result<Option<Registry>, ConfigError> 
             path: path.clone(),
             source,
         })?;
+    let registry =
+        parse_registry(&text).map_err(|source| ConfigError::RegistryMalformed { path, source })?;
+    Ok(Some(registry))
+}
+
+/// Directory name probed beside the running binary as a portable-mode
+/// data root. A self-contained tarball that ships with a
+/// `bookrack-data/` subdirectory next to the binary is then movable
+/// (and the directory remains writable) without any environment
+/// configuration.
+pub const PORTABLE_DATA_NAME: &str = "bookrack-data";
+
+/// Probe for a portable-mode data root beside the running binary.
+///
+/// Returns `Some(<exe_dir>/bookrack-data)` when that directory exists,
+/// and `None` otherwise. The directory must already exist — a missing
+/// one is treated as the user opting out of portable mode; the resolver
+/// then falls through to the next precedence rung. A failure to locate
+/// the executable returns `None` too, so the resolver continues rather
+/// than treating it as an error.
+pub fn portable_data_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    portable_data_dir_from(exe_dir)
+}
+
+/// Pure resolution logic for [`portable_data_dir`], factored out so it
+/// can be tested without locating the running executable.
+fn portable_data_dir_from(exe_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let candidate = exe_dir?.join(PORTABLE_DATA_NAME);
+    candidate.is_dir().then_some(candidate)
+}
+
+/// Filename of the platform-default registry written by `bookrack init`.
+pub const DEFAULT_REGISTRY_NAME: &str = "registry.toml";
+
+/// Path of the platform-default registry: the file `bookrack init`
+/// writes so a freshly installed binary can find its data root without
+/// an exported environment variable.
+///
+/// Returns `None` only when the platform config directory itself cannot
+/// be located, which is unusual.
+pub fn default_registry_path() -> Option<PathBuf> {
+    default_registry_path_from(dirs::config_dir())
+}
+
+/// Pure form of [`default_registry_path`], factored out so the join
+/// shape can be tested without depending on the host's HOME.
+fn default_registry_path_from(config_dir: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir.map(|d| d.join("bookrack").join(DEFAULT_REGISTRY_NAME))
+}
+
+/// Load the platform-default registry, if present. A missing file is
+/// not an error: the resolver simply falls through to
+/// [`ConfigError::MissingDataDir`].
+fn load_default_registry() -> Result<Option<Registry>, ConfigError> {
+    let Some(path) = default_registry_path() else {
+        return Ok(None);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(ConfigError::RegistryUnreadable { path, source }),
+    };
     let registry =
         parse_registry(&text).map_err(|source| ConfigError::RegistryMalformed { path, source })?;
     Ok(Some(registry))
@@ -740,14 +919,15 @@ mod tests {
         std::env::temp_dir().to_string_lossy().into_owned()
     }
 
-    /// The env-only resolution path (empty selection, no registry),
-    /// exercising [`select_root`] + [`finish`] without touching the
-    /// process environment.
+    /// The env-only resolution path (empty selection, no registry, no
+    /// portable layout, no platform-default registry), exercising
+    /// [`select_root`] + [`finish`] without touching the process
+    /// environment.
     fn resolve(
         data_dir: Option<String>,
         ollama_url: Option<String>,
     ) -> Result<Config, ConfigError> {
-        let root = select_root(&LibrarySelection::default(), data_dir, None)?;
+        let root = select_root(&LibrarySelection::default(), data_dir, None, None, None)?;
         finish(root, ollama_url)
     }
 
@@ -794,6 +974,8 @@ mod tests {
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
+            None,
+            None,
         )
         .expect("the flag resolves");
         assert_eq!(resolved.data_dir, PathBuf::from("/explicit/root"));
@@ -812,6 +994,8 @@ mod tests {
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
+            None,
+            None,
         )
         .expect("the library resolves");
         assert_eq!(resolved.data_dir, PathBuf::from("/roots/test"));
@@ -825,7 +1009,7 @@ mod tests {
             data_dir: None,
             library: Some("staging".to_string()),
         };
-        match select_root(&selection, None, Some(&sample_registry())) {
+        match select_root(&selection, None, Some(&sample_registry()), None, None) {
             Err(ConfigError::UnknownLibrary { name, available }) => {
                 assert_eq!(name, "staging");
                 // sample_registry holds `prod` and `test`, sorted.
@@ -872,7 +1056,7 @@ mod tests {
             library: Some("prod".to_string()),
         };
         assert!(matches!(
-            select_root(&selection, Some("/env/root".to_string()), None),
+            select_root(&selection, Some("/env/root".to_string()), None, None, None),
             Err(ConfigError::RegistryNotConfigured)
         ));
     }
@@ -884,6 +1068,8 @@ mod tests {
             &selection,
             Some("/env/root".to_string()),
             Some(&sample_registry()),
+            None,
+            None,
         )
         .expect("the variable resolves");
         assert_eq!(resolved.data_dir, PathBuf::from("/env/root"));
@@ -895,8 +1081,8 @@ mod tests {
     fn registry_default_is_the_last_resort() {
         let selection = LibrarySelection::default();
         // No flag, no data-root variable: fall to the registry default.
-        let resolved =
-            select_root(&selection, None, Some(&sample_registry())).expect("the default resolves");
+        let resolved = select_root(&selection, None, Some(&sample_registry()), None, None)
+            .expect("the default resolves");
         assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
         assert_eq!(resolved.source, ResolutionSource::RegistryDefault);
         assert_eq!(resolved.library.as_deref(), Some("prod"));
@@ -905,7 +1091,7 @@ mod tests {
     #[test]
     fn no_source_at_all_is_missing_data_dir() {
         assert!(matches!(
-            select_root(&LibrarySelection::default(), None, None),
+            select_root(&LibrarySelection::default(), None, None, None, None),
             Err(ConfigError::MissingDataDir)
         ));
     }
@@ -916,7 +1102,13 @@ mod tests {
             .expect("registry without a default parses");
         assert!(registry.default.is_none());
         assert!(matches!(
-            select_root(&LibrarySelection::default(), None, Some(&registry)),
+            select_root(
+                &LibrarySelection::default(),
+                None,
+                Some(&registry),
+                None,
+                None,
+            ),
             Err(ConfigError::MissingDataDir)
         ));
     }
@@ -1169,5 +1361,188 @@ mod tests {
         // directory (the running executable's own folder), never an
         // empty path the loader could not use.
         assert!(!pdfium_lib_dir_from(None).as_os_str().is_empty());
+    }
+
+    #[test]
+    fn missing_data_dir_error_points_at_init_wizard() {
+        let rendered = format!("{}", ConfigError::MissingDataDir);
+        assert!(
+            rendered.contains("bookrack init"),
+            "missing init pointer: {rendered}"
+        );
+        assert!(
+            rendered.contains("--data-dir"),
+            "missing data-dir option: {rendered}"
+        );
+        assert!(
+            rendered.contains(DATA_DIR_ENV),
+            "missing env var name: {rendered}"
+        );
+    }
+
+    #[test]
+    fn portable_data_dir_detects_a_neighbouring_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let exe_dir = tmp.path().to_path_buf();
+        // Without the sibling directory, portable mode is off.
+        assert!(portable_data_dir_from(Some(exe_dir.clone())).is_none());
+        // Create the marker directory; portable mode is now on.
+        let marker = exe_dir.join(PORTABLE_DATA_NAME);
+        std::fs::create_dir(&marker).expect("create marker");
+        assert_eq!(portable_data_dir_from(Some(exe_dir)), Some(marker));
+    }
+
+    #[test]
+    fn portable_data_dir_returns_none_when_exe_dir_is_unknown() {
+        assert!(portable_data_dir_from(None).is_none());
+    }
+
+    #[test]
+    fn portable_data_dir_ignores_a_neighbouring_file() {
+        // A file (not a directory) at the marker name must not be picked
+        // up as a data root, even though it exists.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let exe_dir = tmp.path().to_path_buf();
+        std::fs::write(exe_dir.join(PORTABLE_DATA_NAME), b"").expect("write marker");
+        assert!(portable_data_dir_from(Some(exe_dir)).is_none());
+    }
+
+    #[test]
+    fn default_registry_path_joins_under_the_platform_config_dir() {
+        let parent = PathBuf::from("/abs/config");
+        assert_eq!(
+            default_registry_path_from(Some(parent.clone())),
+            Some(parent.join("bookrack").join(DEFAULT_REGISTRY_NAME)),
+        );
+        assert!(default_registry_path_from(None).is_none());
+    }
+
+    #[test]
+    fn portable_data_dir_beats_registry_default_but_loses_to_env_var() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let portable = tmp.path().to_path_buf();
+        // With no env var, the portable layout wins over the registry.
+        let resolved = select_root(
+            &LibrarySelection::default(),
+            None,
+            Some(&sample_registry()),
+            Some(portable.clone()),
+            None,
+        )
+        .expect("portable resolves");
+        assert_eq!(resolved.data_dir, portable);
+        assert_eq!(resolved.source, ResolutionSource::PortableExeNeighbor);
+        assert_eq!(resolved.library, None);
+        // With the env var set, the env var still wins.
+        let resolved = select_root(
+            &LibrarySelection::default(),
+            Some("/env/root".to_string()),
+            Some(&sample_registry()),
+            Some(portable),
+            None,
+        )
+        .expect("env wins");
+        assert_eq!(resolved.data_dir, PathBuf::from("/env/root"));
+        assert_eq!(resolved.source, ResolutionSource::EnvVar);
+    }
+
+    #[test]
+    fn default_registry_is_the_last_resort_before_missing_data_dir() {
+        // No flag, no env var, no portable layout, no explicit registry:
+        // the platform-default registry takes over.
+        let resolved = select_root(
+            &LibrarySelection::default(),
+            None,
+            None,
+            None,
+            Some(&sample_registry()),
+        )
+        .expect("default registry resolves");
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
+        assert_eq!(resolved.source, ResolutionSource::DefaultRegistryDefault);
+        assert_eq!(resolved.library.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn registry_default_beats_default_registry_default() {
+        // The explicit registry (named by BOOKRACK_REGISTRY) wins over
+        // the platform-default registry, so a user who opts in to a
+        // named registry never has their choice silently overridden.
+        let explicit = parse_registry(
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("explicit registry parses");
+        let resolved = select_root(
+            &LibrarySelection::default(),
+            None,
+            Some(&explicit),
+            None,
+            Some(&sample_registry()),
+        )
+        .expect("explicit wins");
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/alpha"));
+        assert_eq!(resolved.source, ResolutionSource::RegistryDefault);
+    }
+
+    #[test]
+    fn root_config_missing_file_is_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = load_root_config(tmp.path()).expect("missing file resolves to default");
+        assert!(cfg.ollama_url.is_none());
+        assert!(cfg.embed_model.is_none());
+        assert!(cfg.mcp_addr.is_none());
+        assert!(cfg.log_directive.is_none());
+    }
+
+    #[test]
+    fn root_config_parses_known_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(ROOT_CONFIG_NAME),
+            "ollama_url = \"http://elsewhere:1234\"\n\
+             embed_model = \"alt-model\"\n",
+        )
+        .expect("write root config");
+        let cfg = load_root_config(tmp.path()).expect("root config parses");
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
+        assert_eq!(cfg.embed_model.as_deref(), Some("alt-model"));
+        assert!(cfg.mcp_addr.is_none());
+    }
+
+    #[test]
+    fn root_config_rejects_unknown_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(ROOT_CONFIG_NAME),
+            "ollama_url = \"http://x\"\n\
+             not_a_known_field = \"oops\"\n",
+        )
+        .expect("write root config");
+        assert!(matches!(
+            load_root_config(tmp.path()),
+            Err(ConfigError::RootConfigMalformed { .. })
+        ));
+    }
+
+    #[test]
+    fn ollama_url_env_var_beats_root_config_beats_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        std::fs::write(
+            root.join(ROOT_CONFIG_NAME),
+            "ollama_url = \"http://from-file:5555\"\n",
+        )
+        .expect("write root config");
+        let env_value = root.to_string_lossy().into_owned();
+
+        // No env var: root config wins over the hardcoded default.
+        let cfg = resolve(Some(env_value.clone()), None).expect("resolve with root config");
+        assert_eq!(cfg.ollama_url(), "http://from-file:5555");
+        // With env var set: env var wins over the root config.
+        let cfg = resolve(Some(env_value), Some("http://from-env:7777".to_string()))
+            .expect("resolve with env override");
+        assert_eq!(cfg.ollama_url(), "http://from-env:7777");
     }
 }

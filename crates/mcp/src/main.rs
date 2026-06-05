@@ -118,7 +118,9 @@ fn resolution_source_label(source: ResolutionSource) -> &'static str {
         ResolutionSource::DataDirFlag => "--data-dir flag",
         ResolutionSource::LibraryFlag => "--library flag",
         ResolutionSource::EnvVar => "BOOKRACK_DATA_DIR env",
+        ResolutionSource::PortableExeNeighbor => "portable layout",
         ResolutionSource::RegistryDefault => "registry default",
+        ResolutionSource::DefaultRegistryDefault => "default registry default",
         ResolutionSource::Explicit => "explicit",
     }
 }

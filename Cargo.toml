@@ -18,6 +18,10 @@ serde_json = "1"
 # TOML decoder for the `config` crate's library registry, a name->root
 # map deserialized through serde. Decode only.
 toml = "1"
+# Platform config-directory discovery for the `config` crate: locates the
+# platform-conventional `<config>/bookrack/registry.toml` so a freshly
+# installed binary can find its data root without an exported variable.
+dirs = "5"
 # `net` and `signal` are for the MCP daemon: a TCP listener and a
 # Ctrl-C graceful-shutdown signal. Additive — other crates ignore them.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
