@@ -37,23 +37,23 @@ pub use bookrack_search::Citation;
 #[non_exhaustive]
 pub enum QueryError {
     /// The embedder failed while embedding the dimension probe.
-    #[error("embed error: {0}")]
+    #[error("embed error")]
     Embed(#[from] bookrack_embed::EmbedError),
 
     /// The vector store could not be opened or queried.
-    #[error("vector store error: {0}")]
+    #[error("vector store error")]
     Vectors(#[from] bookrack_vectors::VectorsError),
 
     /// A read-only corpus handle could not be opened.
-    #[error("corpus error: {0}")]
+    #[error("corpus error")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
     /// The catalog database could not be opened or queried.
-    #[error("catalog error: {0}")]
+    #[error("catalog error")]
     Catalog(#[from] bookrack_catalog::CatalogError),
 
     /// The underlying search operation failed.
-    #[error("search error: {0}")]
+    #[error("search error")]
     Search(#[from] bookrack_search::SearchError),
 
     /// The embedder returned no vector for the dimension probe.
@@ -354,4 +354,20 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
         .embed_batch(&["dimension probe".to_string()])
         .await?;
     probe.first().map(Vec::len).ok_or(QueryError::EmptyProbe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn wrapper_variant_display_does_not_embed_source_message() {
+        let inner = bookrack_embed::EmbedError::Unreachable("boom".to_string());
+        let outer = QueryError::Embed(inner);
+
+        assert_eq!(outer.to_string(), "embed error");
+        let src = outer.source().expect("source set by #[from]");
+        assert_eq!(src.to_string(), "Ollama unreachable: boom");
+    }
 }
