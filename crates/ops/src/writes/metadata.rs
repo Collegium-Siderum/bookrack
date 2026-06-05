@@ -22,6 +22,7 @@ use crate::dto::writes::{
     AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
     RejectMetadataRequest, SetMetadataFieldRequest, WriteOutcome,
 };
+use crate::recorder::record_call_sync;
 
 /// Set an override on one bibliographic field of the book root, writing
 /// the audit row that records the change.
@@ -29,36 +30,43 @@ pub fn set_metadata_field<E: Embedder>(
     ops: &Ops<E>,
     req: SetMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
-    let catalog = Catalog::open(ops.catalog_db())?;
-    require_intake(&catalog, req.intake_id)?;
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "field": req.field,
+        "value": req.value,
+    });
+    record_call_sync!(ops, "library.metadata.set", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
 
-    let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
-    let old_value = effective.get(&req.field).map(str::to_string);
+        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let old_value = effective.get(&req.field).map(str::to_string);
 
-    let caller = ops.caller();
-    let curated_by = caller.actor_kind.as_str();
+        let caller = ops.caller();
+        let curated_by = caller.actor_kind.as_str();
 
-    catalog.set_override(&NewOverride::new(
-        req.intake_id,
-        BOOK_SCOPE,
-        req.field.clone(),
-        Some(req.value.clone()),
-        curated_by,
-    ))?;
+        catalog.set_override(&NewOverride::new(
+            req.intake_id,
+            BOOK_SCOPE,
+            req.field.clone(),
+            Some(req.value.clone()),
+            curated_by,
+        ))?;
 
-    let audit = build_audit(
-        ops,
-        "node_publication_attrs",
-        "update",
-        Some(req.intake_id),
-        Some(req.field.clone()),
-        old_value,
-        Some(req.value.clone()),
-        None,
-    );
-    let audit_id = catalog.record_metadata_audit(&audit)?;
+        let audit = build_audit(
+            ops,
+            "node_publication_attrs",
+            "update",
+            Some(req.intake_id),
+            Some(req.field.clone()),
+            old_value,
+            Some(req.value.clone()),
+            None,
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(ops, audit_id, true))
+    })
 }
 
 /// Remove an override on one field, reverting to the extracted value.
@@ -66,28 +74,34 @@ pub fn clear_metadata_field<E: Embedder>(
     ops: &Ops<E>,
     req: ClearMetadataFieldRequest,
 ) -> Result<WriteOutcome> {
-    let catalog = Catalog::open(ops.catalog_db())?;
-    require_intake(&catalog, req.intake_id)?;
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "field": req.field,
+    });
+    record_call_sync!(ops, "library.metadata.clear", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
 
-    let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
-    let old_value = effective.get(&req.field).map(str::to_string);
+        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let old_value = effective.get(&req.field).map(str::to_string);
 
-    let existed = catalog.clear_override(req.intake_id, BOOK_SCOPE, &req.field)?;
+        let existed = catalog.clear_override(req.intake_id, BOOK_SCOPE, &req.field)?;
 
-    // Audit either way: the trail records that someone tried.
-    let audit = build_audit(
-        ops,
-        "node_publication_attrs",
-        "delete",
-        Some(req.intake_id),
-        Some(req.field),
-        if existed { old_value } else { None },
-        None,
-        None,
-    );
-    let audit_id = catalog.record_metadata_audit(&audit)?;
+        // Audit either way: the trail records that someone tried.
+        let audit = build_audit(
+            ops,
+            "node_publication_attrs",
+            "delete",
+            Some(req.intake_id),
+            Some(req.field),
+            if existed { old_value } else { None },
+            None,
+            None,
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    Ok(write_outcome(ops, audit_id, existed))
+        Ok(write_outcome(ops, audit_id, existed))
+    })
 }
 
 /// Acknowledge a metadata gap: leaves the audit verdict alone but flips
@@ -96,30 +110,36 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
     ops: &Ops<E>,
     req: AcknowledgeMetadataGapRequest,
 ) -> Result<WriteOutcome> {
-    let catalog = Catalog::open(ops.catalog_db())?;
-    require_intake(&catalog, req.intake_id)?;
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.ack", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
 
-    let audit = build_audit(
-        ops,
-        "node_reviews",
-        "acknowledge_gate",
-        Some(req.intake_id),
-        None,
-        None,
-        None,
-        Some(req.reason.clone()),
-    );
-    let audit_id = catalog.record_metadata_audit(&audit)?;
+        let audit = build_audit(
+            ops,
+            "node_reviews",
+            "acknowledge_gate",
+            Some(req.intake_id),
+            None,
+            None,
+            None,
+            Some(req.reason.clone()),
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    let caller = ops.caller();
-    catalog.upsert_review(&NewReview::new(
-        req.intake_id,
-        BOOK_SCOPE,
-        caller.actor_kind.as_str(),
-        STATUS_ACKNOWLEDGED,
-    ))?;
+        let caller = ops.caller();
+        catalog.upsert_review(&NewReview::new(
+            req.intake_id,
+            BOOK_SCOPE,
+            caller.actor_kind.as_str(),
+            STATUS_ACKNOWLEDGED,
+        ))?;
 
-    Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(ops, audit_id, true))
+    })
 }
 
 /// Approve the record. The audit verdict is unchanged; the review row
@@ -128,34 +148,40 @@ pub fn approve_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: ApproveMetadataRequest,
 ) -> Result<WriteOutcome> {
-    let catalog = Catalog::open(ops.catalog_db())?;
-    require_intake(&catalog, req.intake_id)?;
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.approve", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
 
-    let audit = build_audit(
-        ops,
-        "node_reviews",
-        "approve",
-        Some(req.intake_id),
-        None,
-        None,
-        None,
-        req.reason.clone(),
-    );
-    let audit_id = catalog.record_metadata_audit(&audit)?;
+        let audit = build_audit(
+            ops,
+            "node_reviews",
+            "approve",
+            Some(req.intake_id),
+            None,
+            None,
+            None,
+            req.reason.clone(),
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    let caller = ops.caller();
-    let mut review = NewReview::new(
-        req.intake_id,
-        BOOK_SCOPE,
-        caller.actor_kind.as_str(),
-        STATUS_APPROVED,
-    );
-    if let Some(r) = req.reason {
-        review = review.notes(r);
-    }
-    catalog.upsert_review(&review)?;
+        let caller = ops.caller();
+        let mut review = NewReview::new(
+            req.intake_id,
+            BOOK_SCOPE,
+            caller.actor_kind.as_str(),
+            STATUS_APPROVED,
+        );
+        if let Some(r) = req.reason {
+            review = review.notes(r);
+        }
+        catalog.upsert_review(&review)?;
 
-    Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(ops, audit_id, true))
+    })
 }
 
 /// Reject the book. Pipeline rows stay in place so downstream consumers
@@ -164,33 +190,39 @@ pub fn reject_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: RejectMetadataRequest,
 ) -> Result<WriteOutcome> {
-    let catalog = Catalog::open(ops.catalog_db())?;
-    require_intake(&catalog, req.intake_id)?;
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.reject", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
 
-    let audit = build_audit(
-        ops,
-        "node_reviews",
-        "reject",
-        Some(req.intake_id),
-        None,
-        None,
-        None,
-        Some(req.reason.clone()),
-    );
-    let audit_id = catalog.record_metadata_audit(&audit)?;
+        let audit = build_audit(
+            ops,
+            "node_reviews",
+            "reject",
+            Some(req.intake_id),
+            None,
+            None,
+            None,
+            Some(req.reason.clone()),
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
 
-    let caller = ops.caller();
-    catalog.upsert_review(
-        &NewReview::new(
-            req.intake_id,
-            BOOK_SCOPE,
-            caller.actor_kind.as_str(),
-            STATUS_REJECTED,
-        )
-        .notes(req.reason),
-    )?;
+        let caller = ops.caller();
+        catalog.upsert_review(
+            &NewReview::new(
+                req.intake_id,
+                BOOK_SCOPE,
+                caller.actor_kind.as_str(),
+                STATUS_REJECTED,
+            )
+            .notes(req.reason),
+        )?;
 
-    Ok(write_outcome(ops, audit_id, true))
+        Ok(write_outcome(ops, audit_id, true))
+    })
 }
 
 fn require_intake(catalog: &Catalog, intake_id: i64) -> Result<()> {

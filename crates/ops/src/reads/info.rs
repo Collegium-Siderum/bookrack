@@ -20,6 +20,7 @@ use bookrack_vectors::ChunkStore;
 use crate::Ops;
 use crate::Result;
 use crate::dto::info::{CorpusStamps, DiskUsage, LibraryInfo};
+use crate::recorder::record_call_async;
 
 /// Static facts about the library being inspected. The caller fills
 /// this from its [`bookrack_config::Config`] before calling
@@ -47,31 +48,33 @@ pub async fn show_library_info<E: Embedder>(
     ops: &Ops<E>,
     ctx: LibraryInfoContext,
 ) -> Result<LibraryInfo> {
-    let corpus_stamps = read_corpus_stamps(ops.corpus_db()).unwrap_or_default();
-    let vectors_meta = bookrack_vectors::meta::load(ops.lancedb_dir())
-        .ok()
-        .flatten();
-    let current_chunks = read_current_chunk_count(ops.lancedb_dir(), &corpus_stamps).await;
-    let intake_count = Catalog::open_read_only(ops.catalog_db())
-        .and_then(|c| c.count_intakes())
-        .ok();
-    let ready_book_count = Catalog::open_read_only(ops.catalog_db())
-        .and_then(|c| c.count_book_states_by_stage("ready"))
-        .ok();
-    Ok(LibraryInfo {
-        data_dir: ctx.data_dir,
-        library_name: ctx.library_name,
-        resolution_source: ctx.resolution_source,
-        ollama_url: ctx.ollama_url,
-        embed_model_configured: ctx.embed_model_configured,
-        corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
-        catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
-        corpus_stamps,
-        vectors_meta,
-        current_chunks,
-        intake_count,
-        ready_book_count,
-        disk: disk_usage(ops.catalog_db(), ops.corpus_db(), ops.lancedb_dir()),
+    record_call_async!(ops, "library.info", serde_json::Value::Null, {
+        let corpus_stamps = read_corpus_stamps(ops.corpus_db()).unwrap_or_default();
+        let vectors_meta = bookrack_vectors::meta::load(ops.lancedb_dir())
+            .ok()
+            .flatten();
+        let current_chunks = read_current_chunk_count(ops.lancedb_dir(), &corpus_stamps).await;
+        let intake_count = Catalog::open_read_only(ops.catalog_db())
+            .and_then(|c| c.count_intakes())
+            .ok();
+        let ready_book_count = Catalog::open_read_only(ops.catalog_db())
+            .and_then(|c| c.count_book_states_by_stage("ready"))
+            .ok();
+        Ok(LibraryInfo {
+            data_dir: ctx.data_dir,
+            library_name: ctx.library_name,
+            resolution_source: ctx.resolution_source,
+            ollama_url: ctx.ollama_url,
+            embed_model_configured: ctx.embed_model_configured,
+            corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
+            catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
+            corpus_stamps,
+            vectors_meta,
+            current_chunks,
+            intake_count,
+            ready_book_count,
+            disk: disk_usage(ops.catalog_db(), ops.corpus_db(), ops.lancedb_dir()),
+        })
     })
 }
 

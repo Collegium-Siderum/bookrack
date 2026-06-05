@@ -185,6 +185,21 @@ impl Catalog {
             .collect::<rusqlite::Result<Vec<McpToolCall>>>()?;
         Ok(rows)
     }
+
+    /// Tool calls with `ts >= since_ts`, newest first, capped at `limit`
+    /// rows. The forensic time window the diagnose command consumes.
+    pub fn recent_tool_calls(&self, since_ts: &str, limit: u32) -> Result<Vec<McpToolCall>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE ts >= :since_ts ORDER BY ts DESC, call_id DESC LIMIT :limit",
+        ))?;
+        let rows = stmt
+            .query_map(
+                named_params! { ":since_ts": since_ts, ":limit": limit },
+                McpToolCall::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<McpToolCall>>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +277,53 @@ mod tests {
                 .expect("read")
                 .is_empty()
         );
+    }
+
+    /// Insert a row, then back-date its `ts` so the cutoff query has
+    /// something deterministic to compare against. The default `ts` is
+    /// `now`, which would make a `since_ts` filter useless in a unit test.
+    fn record_at(catalog: &Catalog, ts: &str, tool: &str, status: &str) -> i64 {
+        let id = catalog
+            .record_tool_call(&NewMcpToolCall::new("cli", tool, status))
+            .expect("record");
+        catalog
+            .conn
+            .execute(
+                "UPDATE mcp_tool_calls SET ts = ?1 WHERE call_id = ?2",
+                rusqlite::params![ts, id],
+            )
+            .expect("backdate ts");
+        id
+    }
+
+    #[test]
+    fn recent_tool_calls_returns_rows_since_cutoff_newest_first() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        record_at(&catalog, "2026-06-01T00:00:00Z", "tool_a", "ok");
+        record_at(&catalog, "2026-06-02T00:00:00Z", "tool_b", "ok");
+        record_at(&catalog, "2026-06-03T00:00:00Z", "tool_c", "error");
+
+        let rows = catalog
+            .recent_tool_calls("2026-06-02T00:00:00Z", 10)
+            .expect("read");
+        let tools: Vec<&str> = rows.iter().map(|r| r.tool.as_str()).collect();
+        assert_eq!(tools, ["tool_c", "tool_b"]);
+    }
+
+    #[test]
+    fn recent_tool_calls_respects_the_limit() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        for day in 1..=5 {
+            record_at(
+                &catalog,
+                &format!("2026-06-0{day}T00:00:00Z"),
+                "tool_x",
+                "ok",
+            );
+        }
+        let rows = catalog
+            .recent_tool_calls("2026-06-01T00:00:00Z", 2)
+            .expect("read");
+        assert_eq!(rows.len(), 2);
     }
 }

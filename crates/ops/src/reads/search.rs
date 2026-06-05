@@ -16,6 +16,7 @@ use bookrack_query::Citation;
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
+use crate::recorder::record_call_async;
 
 /// Search the library and return cited passages, nearest first.
 pub async fn search<E: Embedder>(
@@ -23,8 +24,15 @@ pub async fn search<E: Embedder>(
     query: &str,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
-    Ok(library.search(query, top_k).await?)
+    record_call_async!(
+        ops,
+        "library.search",
+        serde_json::json!({ "query": query, "top_k": top_k }),
+        {
+            let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
+            Ok(library.search(query, top_k).await?)
+        }
+    )
 }
 
 /// Search inside one book's partition.
@@ -38,10 +46,21 @@ pub async fn search_in_book<E: Embedder>(
     query: &str,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
-    let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
-    let catalog = Catalog::open_read_only(ops.catalog_db())?;
-    if catalog.intake_by_id(intake_id)?.is_none() {
-        return Err(OpsError::IntakeNotFound { intake_id });
-    }
-    Ok(library.search_in_book(intake_id, query, top_k).await?)
+    record_call_async!(
+        ops,
+        "library.search_in_book",
+        serde_json::json!({
+            "intake_id": intake_id,
+            "query": query,
+            "top_k": top_k,
+        }),
+        {
+            let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
+            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            if catalog.intake_by_id(intake_id)?.is_none() {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            }
+            Ok(library.search_in_book(intake_id, query, top_k).await?)
+        }
+    )
 }
