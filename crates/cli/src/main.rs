@@ -11,6 +11,7 @@
 //! command surface carries no tuning flags, so there is a single source of
 //! truth for every default.
 
+mod doctor;
 mod dryrun;
 mod remove;
 mod render;
@@ -259,6 +260,16 @@ enum Command {
     /// tables. Preserves `metadata_audit` and `book_pipeline_audit` as a
     /// forensic record. Vector rows are tombstoned; their space is
     /// reclaimed by the next ingest's optimize pass.
+    /// Run a one-screen health check: data root resolution, schema
+    /// versions, PDFium library presence, Ollama daemon reachability,
+    /// and whether the configured embed model is pulled. Exits with a
+    /// non-zero status when any row fails, so a script can branch on the
+    /// result.
+    Doctor {
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
     #[command(after_help = REMOVE_AFTER_HELP)]
     Remove {
         /// Intake id of the book to remove. Mutually exclusive with
@@ -657,6 +668,14 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<()> {
     let cli = parse_cli_with_natural_name_hints();
+
+    // `doctor` runs before `Config::resolve` so an unconfigured install
+    // surfaces as a row in its report instead of a hard error from the
+    // resolver -- the very diagnosis the operator needs.
+    if let Command::Doctor { json } = &cli.command {
+        return doctor::run(&cli.selection(), *json).await;
+    }
+
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
@@ -808,6 +827,7 @@ async fn run() -> Result<()> {
             )
             .await
         }
+        Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
     }
 }
 
