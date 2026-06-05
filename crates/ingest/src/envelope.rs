@@ -51,9 +51,9 @@ pub struct ExtractionEnvelope {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnvelopeError {
-    #[error("I/O error: {0}")]
+    #[error("I/O error")]
     Io(#[from] io::Error),
-    #[error("JSON error: {0}")]
+    #[error("JSON error")]
     Json(#[from] serde_json::Error),
     #[error("envelope schema_version mismatch: expected {expected}, found {found}")]
     SchemaMismatch { expected: u32, found: u32 },

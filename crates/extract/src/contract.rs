@@ -264,7 +264,7 @@ pub enum ExtractError {
     #[error("extraction produced no body blocks")]
     EmptyExtraction,
     /// An underlying I/O error.
-    #[error("I/O error: {0}")]
+    #[error("I/O error")]
     Io(#[from] std::io::Error),
 }
 

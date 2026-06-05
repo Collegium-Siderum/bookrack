@@ -85,7 +85,7 @@ pub type Result<T> = std::result::Result<T, CatalogError>;
 #[non_exhaustive]
 pub enum CatalogError {
     /// The underlying SQLite layer reported an error.
-    #[error("catalog database error: {0}")]
+    #[error("catalog database error")]
     Sqlite(#[from] rusqlite::Error),
 
     /// The database was written by a newer schema revision than this
@@ -120,14 +120,14 @@ pub enum CatalogError {
     },
 
     /// A schema migration failed to apply.
-    #[error("catalog migration failed: {0}")]
+    #[error("catalog migration failed")]
     Migrate(#[from] rusqlite_migration::Error),
 
     /// The migrated schema does not match the compiled-in specs.
-    #[error("catalog schema verification failed: {0}")]
+    #[error("catalog schema verification failed")]
     Verify(#[from] bookrack_dbkit::VerifyError),
 
     /// A filesystem error while writing or pruning a database backup.
-    #[error("catalog backup error: {0}")]
+    #[error("catalog backup error")]
     Io(#[from] std::io::Error),
 }

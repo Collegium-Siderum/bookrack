@@ -34,20 +34,20 @@ const BREADCRUMB_SEP: &str = " \u{203a} ";
 #[non_exhaustive]
 pub enum SearchError {
     /// The corpus layer reported an error while building a breadcrumb.
-    #[error("corpus error: {0}")]
+    #[error("corpus error")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
     /// The catalog layer reported an error while reading the effective
     /// book title for a breadcrumb.
-    #[error("catalog error: {0}")]
+    #[error("catalog error")]
     Catalog(#[from] bookrack_catalog::CatalogError),
 
     /// The embed client failed to embed the query.
-    #[error("embed error: {0}")]
+    #[error("embed error")]
     Embed(#[from] bookrack_embed::EmbedError),
 
     /// The vector store reported an error.
-    #[error("vector store error: {0}")]
+    #[error("vector store error")]
     Vectors(#[from] bookrack_vectors::VectorsError),
 
     /// The embedder returned no vector for the query.

@@ -44,7 +44,7 @@ impl std::error::Error for SchemaMismatch {}
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     /// A database error occurred while introspecting the schema.
-    #[error("database error during schema verification: {0}")]
+    #[error("database error during schema verification")]
     Sqlite(#[from] rusqlite::Error),
     /// The live schema does not match the spec.
     #[error("{0}")]

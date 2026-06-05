@@ -40,7 +40,7 @@ pub type Result<T> = std::result::Result<T, CorpusError>;
 #[non_exhaustive]
 pub enum CorpusError {
     /// The underlying SQLite layer reported an error.
-    #[error("corpus database error: {0}")]
+    #[error("corpus database error")]
     Sqlite(#[from] rusqlite::Error),
 
     /// The database was built by a different schema revision than this
@@ -128,6 +128,6 @@ pub enum CorpusError {
     /// The on-disk schema disagrees with the compiled-in specs. Surfaces
     /// from the read-only open path so a drifted file is refused at open
     /// rather than discovered mid-query.
-    #[error("corpus schema verification failed: {0}")]
+    #[error("corpus schema verification failed")]
     Verify(#[from] bookrack_dbkit::VerifyError),
 }

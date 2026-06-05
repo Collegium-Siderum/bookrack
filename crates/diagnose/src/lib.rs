@@ -36,16 +36,16 @@ pub use scrub::Scrubber;
 #[non_exhaustive]
 pub enum DiagnoseError {
     /// A filesystem error.
-    #[error("io: {0}")]
+    #[error("io")]
     Io(#[from] std::io::Error),
     /// A catalog read failed.
-    #[error("catalog: {0}")]
+    #[error("catalog")]
     Catalog(#[from] bookrack_catalog::CatalogError),
     /// A corpus read failed.
-    #[error("corpus: {0}")]
+    #[error("corpus")]
     Corpus(#[from] bookrack_corpus::CorpusError),
     /// JSON serialization failed.
-    #[error("json: {0}")]
+    #[error("json")]
     Json(#[from] serde_json::Error),
 }
 

@@ -68,11 +68,11 @@ fn ensure_lance_env() {
 #[non_exhaustive]
 pub enum VectorsError {
     /// The underlying LanceDB layer reported an error.
-    #[error("LanceDB error: {0}")]
+    #[error("LanceDB error")]
     Lance(#[from] lancedb::Error),
 
     /// An Arrow record batch could not be built or decoded.
-    #[error("Arrow error: {0}")]
+    #[error("Arrow error")]
     Arrow(#[from] ArrowError),
 
     /// A chunk's vector length does not match the dimension the store
@@ -93,12 +93,12 @@ pub enum VectorsError {
 
     /// IO failure on the `vectors_meta.json` sidecar — read, write, or
     /// rename.
-    #[error("vectors_meta IO error: {0}")]
+    #[error("vectors_meta IO error")]
     MetaIo(#[from] std::io::Error),
 
     /// `vectors_meta.json` was unparseable: malformed JSON, an unknown
     /// `kind`, or a field whose type does not match the schema.
-    #[error("vectors_meta parse error: {0}")]
+    #[error("vectors_meta parse error")]
     MetaParse(#[from] serde_json::Error),
 
     /// `vectors_meta.json` carried a `kind` string this build does not

@@ -105,7 +105,7 @@ pub use bookrack_metadata::TocStats;
 pub enum IngestError {
     /// The corpus layer reported an error — allocation, validation, or
     /// the underlying database.
-    #[error("corpus error: {0}")]
+    #[error("corpus error")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
     /// The extraction yielded no prose leaf, so there is no searchable
@@ -114,11 +114,11 @@ pub enum IngestError {
     EmptyExtraction,
 
     /// Reading the source file failed.
-    #[error("reading the source file failed: {0}")]
+    #[error("reading the source file failed")]
     Io(#[from] std::io::Error),
 
     /// The `extract` stage failed to parse the source file.
-    #[error("extract error: {0}")]
+    #[error("extract error")]
     Extract(#[from] bookrack_extract::ExtractError),
 
     /// The source has no usable text layer and must go through OCR, which
@@ -130,16 +130,16 @@ pub enum IngestError {
     },
 
     /// The catalog layer reported an error.
-    #[error("catalog error: {0}")]
+    #[error("catalog error")]
     Catalog(#[from] bookrack_catalog::CatalogError),
 
     /// The embed client reported an error that could not be recovered by
     /// shrinking the batch.
-    #[error("embed error: {0}")]
+    #[error("embed error")]
     Embed(#[from] bookrack_embed::EmbedError),
 
     /// The vector store reported an error.
-    #[error("vector store error: {0}")]
+    #[error("vector store error")]
     Vectors(#[from] bookrack_vectors::VectorsError),
 
     /// The embedder returned no vector for a non-empty batch, so the

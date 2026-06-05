@@ -41,15 +41,15 @@ pub use dto::audit::Caller;
 #[non_exhaustive]
 pub enum OpsError {
     /// The underlying read facade returned an error.
-    #[error("query error: {0}")]
+    #[error("query error")]
     Query(#[from] QueryError),
 
     /// A catalog read or write failed.
-    #[error("catalog error: {0}")]
+    #[error("catalog error")]
     Catalog(#[from] bookrack_catalog::CatalogError),
 
     /// A corpus read failed.
-    #[error("corpus error: {0}")]
+    #[error("corpus error")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
     /// The named intake does not exist.
