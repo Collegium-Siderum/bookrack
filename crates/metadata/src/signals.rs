@@ -1023,11 +1023,11 @@ mod tests {
 
     #[test]
     fn bracketed_segment_classifies_trailing_series_suffix() {
-        // "placeholder series example"
-        // — a trailing parenthetical series-marker block without a
-        // volume suffix and without sentence-end punctuation.
-        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1} \
-                     (\u{5E9A}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{4E11}\u{5BC5}\u{536F}\u{8FB0}\u{5DF3})";
+        // `XXXXX (YYYYYYY)` — a trailing ASCII-parenthetical block of
+        // CJK content without a volume suffix and without sentence-end
+        // punctuation reads as a series-marker block.
+        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A} \
+                     (\u{5DF1}\u{5E9A}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{4E11})";
         assert_eq!(
             classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
             Some(BracketSubtype::Series)
@@ -1036,11 +1036,11 @@ mod tests {
 
     #[test]
     fn bracketed_segment_classifies_fullwidth_volume_marker() {
-        // "placeholder volume example" —
-        // ends with the CJK volume suffix `ce`, so the segment is a
-        // volume marker rather than a series name.
-        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1}\u{5E9A}\
-                     \u{FF08}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{518C}\u{FF09}";
+        // `XXXXX（YYYY\u{518C}）` — fullwidth parens whose content ends
+        // with the CJK volume suffix `\u{518C}` resolve to a volume
+        // marker rather than a series name.
+        let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\
+                     \u{FF08}\u{5DF1}\u{5E9A}\u{8F9B}\u{58EC}\u{518C}\u{FF09}";
         assert_eq!(
             classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
             Some(BracketSubtype::Volume)
@@ -1049,9 +1049,9 @@ mod tests {
 
     #[test]
     fn bracketed_segment_classifies_lenticular_trailing_marketing_block() {
-        // `Title\u{3010}xxx\u{3011}` — lenticular brackets at the
+        // `XXXXXX\u{3010}YYYYYYY\u{3011}` — lenticular brackets at the
         // tail are read as marketing copy.
-        let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\u{6CB3}\
+        let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\
                      \u{3010}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{3011}";
         assert_eq!(
             classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
@@ -1061,9 +1061,9 @@ mod tests {
 
     #[test]
     fn bracketed_segment_classifies_square_aggregator_head() {
-        // `[xxx]yyy` — leading square brackets read as an aggregator
+        // `[XXXX]YYYY` — leading square brackets read as an aggregator
         // header.
-        let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{5408}\u{96C6}";
+        let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{8FB0}\u{5DF3}\u{5348}\u{672A}";
         assert_eq!(
             classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
             Some(BracketSubtype::Aggregator)
@@ -1075,7 +1075,7 @@ mod tests {
         // A trailing parenthetical block carrying CJK sentence-end
         // punctuation reads as marketing copy, not a series name.
         let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\
-                     \u{FF08}\u{5C71}\u{5DDD}\u{6CB3}\u{6D77}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{5DE6}\u{53F3}\u{FF1F}\u{FF09}";
+                     \u{FF08}\u{5C71}\u{5DDD}\u{6CB3}\u{6D77}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{FF1F}\u{FF09}";
         assert_eq!(
             classify_bracketed_segment(title, DEFAULT_BRACKETED_MIN),
             Some(BracketSubtype::Marketing)

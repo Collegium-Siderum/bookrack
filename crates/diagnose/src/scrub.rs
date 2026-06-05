@@ -408,13 +408,14 @@ mod tests {
         assert_eq!(out, "config at <HOME>/.bookrackrc");
     }
 
-    /// A four-character CJK run (U+5510 U+5F8B U+758F U+8B70), kept as
-    /// an escape so this source file complies with the workspace's
-    /// "no CJK bytes outside fixtures" leak-check rule.
+    /// A four-character CJK run (U+7532 U+4E59 U+4E19 U+4E01) used as
+    /// a generic placeholder, kept as an escape so this source file
+    /// complies with the workspace's "no CJK bytes outside fixtures"
+    /// leak-check rule.
     const CJK_RUN: &str = "\u{7532}\u{4E59}\u{4E19}\u{4E01}";
-    /// A single CJK character (U+5E74) — the "won't be hashed because
+    /// A single CJK character (U+7532) — the "won't be hashed because
     /// it is a lone code point" case.
-    const SINGLE_CJK: &str = "\u{5E74}";
+    const SINGLE_CJK: &str = "\u{7532}";
 
     #[test]
     fn cjk_runs_are_hashed_deterministically() {

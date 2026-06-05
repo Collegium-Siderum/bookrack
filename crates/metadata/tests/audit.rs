@@ -1118,8 +1118,8 @@ fn title_with_trailing_series_paren_raises_series_flag() {
 #[test]
 fn title_with_lenticular_tail_raises_marketing_flag() {
     let profile = AuditProfile::default();
-    // `Title\u{3010}xxxxxx\u{3011}` — lenticular brackets at the tail.
-    let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\u{6CB3}\
+    // `XXXXXX\u{3010}YYYYYYY\u{3011}` — lenticular brackets at the tail.
+    let title = "\u{6625}\u{590F}\u{79CB}\u{51AC}\u{5C71}\u{5DDD}\
                  \u{3010}\u{4E1C}\u{5357}\u{897F}\u{5317}\u{4E0A}\u{4E0B}\u{3011}";
     let report = run_with(&profile, Some(title), None, None, Some("zh"), "", "epub");
     let f = field(&report, "title");
@@ -1129,8 +1129,8 @@ fn title_with_lenticular_tail_raises_marketing_flag() {
 #[test]
 fn title_with_leading_square_brackets_raises_aggregator_flag() {
     let profile = AuditProfile::default();
-    // `[xxxx]yyyy` — square brackets at the head.
-    let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{5408}\u{96C6}";
+    // `[XXXX]YYYY` — square brackets at the head.
+    let title = "[\u{5B50}\u{4E11}\u{5BC5}\u{536F}]\u{8FB0}\u{5DF3}\u{5348}\u{672A}";
     let report = run_with(&profile, Some(title), None, None, Some("zh"), "", "epub");
     let f = field(&report, "title");
     assert!(f.flags.contains(&Flag::TitleAggregatorMarker));
@@ -1139,9 +1139,9 @@ fn title_with_leading_square_brackets_raises_aggregator_flag() {
 #[test]
 fn title_with_volume_marker_raises_volume_flag_without_weakening() {
     let profile = AuditProfile::default();
-    // Trailing volume marker: fullwidth parens around `xxxxx\u{518C}`.
-    let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\u{5DF1}\u{5E9A}\
-                 \u{FF08}\u{8F9B}\u{58EC}\u{7678}\u{5B50}\u{518C}\u{FF09}";
+    // Trailing volume marker: fullwidth parens around `YYYY\u{518C}`.
+    let title = "\u{7532}\u{4E59}\u{4E19}\u{4E01}\u{620A}\
+                 \u{FF08}\u{5DF1}\u{5E9A}\u{8F9B}\u{58EC}\u{518C}\u{FF09}";
     let report = run_with(&profile, Some(title), None, None, Some("zh"), "", "epub");
     let f = field(&report, "title");
     assert!(f.flags.contains(&Flag::TitleVolumeMarker));
