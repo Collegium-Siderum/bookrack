@@ -15,6 +15,9 @@ env:
   # new incremental dir) without helping CI, where the cache key is the
   # Cargo.lock hash, not the source.
   CARGO_INCREMENTAL: "0"
+  # Pinned protoc release for the inline install step below. Bumping this
+  # variable is the only place the workflow needs to learn a new version.
+  PROTOC_VERSION: "35.0"
 
 jobs:
   build:
@@ -32,7 +35,11 @@ jobs:
             pdfium_lib_name: libpdfium.dylib
             archive_kind: tar.gz
           - target: x86_64-apple-darwin
-            runs-on: macos-13
+            # Cross-compiled from Apple Silicon. The macos-13 Intel runner
+            # pool is being deprecated and queues for hours under load;
+            # the host x86_64-apple-darwin target is a first-class Apple
+            # toolchain target, so the cross build is uneventful.
+            runs-on: macos-14
             pdfium_archive: pdfium-mac-x64.tgz
             pdfium_sha: f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb
             pdfium_path_in_archive: lib/libpdfium.dylib
@@ -46,7 +53,10 @@ jobs:
             pdfium_lib_name: libpdfium.so
             archive_kind: tar.gz
           - target: x86_64-pc-windows-msvc
-            runs-on: windows-latest
+            # Pinned image; `windows-latest` is being redirected to
+            # `windows-2025-vs2026` mid-June 2026, and an explicit pin
+            # keeps tag-time builds reproducible across that transition.
+            runs-on: windows-2025-vs2026
             pdfium_archive: pdfium-win-x64.tgz
             pdfium_sha: 45c4cc5d052ef8ec6380b946b548a76100f4675e38362000a4c732e16d5e8eda
             pdfium_path_in_archive: bin/pdfium.dll
@@ -66,12 +76,27 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
 
-      # Single prebuilt-binary install across all three OSes. Replaces
-      # `apt-get install` / `brew install` / `choco install` — the last
-      # of which costs 5–10 minutes on the Windows runner.
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Inline protoc install. arduino/setup-protoc still runs on Node 20
+      # and has been unmaintained since early 2024; the official
+      # protocolbuffers/protobuf release zips are tiny, fast, and host the
+      # universal macOS binary so the same archive serves both Apple
+      # targets. PATH is exported via $GITHUB_PATH so prost-build's
+      # protoc lookup picks it up in the next step.
+      - name: Install protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Linux)   archive="protoc-${PROTOC_VERSION}-linux-x86_64.zip" ;;
+            macOS)   archive="protoc-${PROTOC_VERSION}-osx-universal_binary.zip" ;;
+            Windows) archive="protoc-${PROTOC_VERSION}-win64.zip" ;;
+            *) echo "::error::unsupported runner OS: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          curl -L -o protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${archive}"
+          mkdir -p "${RUNNER_TEMP}/protoc"
+          unzip -q protoc.zip -d "${RUNNER_TEMP}/protoc"
+          echo "${RUNNER_TEMP}/protoc/bin" >> "$GITHUB_PATH"
 
       - name: Cache PDFium archive
         # The cache key is tied to the pinned chromium build, so a hit

@@ -8,6 +8,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.1.0-rc3] - 2026-06-05
+
+Re-cut of `v0.1.0-rc2` to harden the release pipeline. No behaviour
+change in the shipped binaries.
+
+### Changed
+
+- Release workflow: `x86_64-apple-darwin` is now cross-compiled on the
+  `macos-14` Apple Silicon runner instead of running natively on
+  `macos-13`. GitHub's Intel macOS runner pool is being deprecated and
+  was queuing for hours.
+- Release workflow: `windows-latest` pinned to `windows-2025-vs2026`,
+  pre-empting GitHub's mid-June 2026 implicit redirect.
+- Release workflow: protoc is installed inline from
+  `protocolbuffers/protobuf` GitHub releases instead of via
+  `arduino/setup-protoc`. The third-party action has been unmaintained
+  since early 2024 and still runs on Node 20.
+
 ## [0.1.0-rc2] - 2026-06-05
 
 Re-cut of `v0.1.0-rc1` to fix the release pipeline on Windows. No
