@@ -3170,4 +3170,54 @@ mod book_pipeline_tests {
         assert_eq!(second.nodes_written, 0);
         assert_eq!(second.prose_leaves, 0);
     }
+
+    #[tokio::test]
+    async fn a_large_text_input_chunks_into_more_than_one_embed_batch() {
+        // Build a paragraph-per-block .txt big enough to cross at least
+        // one embed batch boundary at the default `batch_max_chunks` cap.
+        // Each paragraph is ~700 chars of synthetic prose; 220 paragraphs
+        // yields more than `batch_max_chunks` (64) chunks at the default
+        // `target_chars` (1000).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("huge.txt");
+        let mut file = std::fs::File::create(&path).expect("create huge.txt");
+        let paragraph = "The quick brown fox jumps over the lazy dog. \
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+            Curabitur fermentum, ipsum at lobortis dapibus, quam mi \
+            tincidunt arcu, vitae fringilla magna libero non risus. \
+            Mauris consectetur, libero sit amet faucibus aliquam, justo \
+            sapien viverra urna, eget pharetra purus risus a augue. \
+            Praesent in feugiat orci. Sed at facilisis nibh, vitae \
+            interdum justo. Integer sit amet sapien at velit semper \
+            iaculis. Vivamus ut dictum lectus, in vehicula ipsum.\n\n";
+        for _ in 0..220 {
+            file.write_all(paragraph.as_bytes())
+                .expect("write paragraph");
+        }
+        file.sync_all().expect("flush huge.txt");
+
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let report = ingest_book(
+            &path,
+            &mut corpus,
+            &mut catalog,
+            dir.path(),
+            dir.path(),
+            &Fake { dim: 8 },
+            &IngestParams::default(),
+        )
+        .await
+        .expect("ingest huge.txt");
+
+        let batch_max_chunks = EmbedConfig::default().batch_max_chunks;
+        assert!(
+            report.chunks_written > batch_max_chunks,
+            "expected more chunks than one batch fits ({}), got {}",
+            batch_max_chunks,
+            report.chunks_written,
+        );
+        assert!(!report.no_op);
+        assert!(report.prose_leaves > 1);
+    }
 }
