@@ -23,8 +23,10 @@ fn test_rules() -> &'static AuditRules {
         contact_tokens: Vec::new(),
         promo_tokens: Vec::new(),
         ascii_distribution_tokens: Vec::new(),
-        // "placeholder watermark example" — pirate brand observed verbatim in
-        // real EPUB metadata. Encoded with `\u{...}` per repo policy.
+        // A synthetic CJK token (U+7532 U+4E59 U+4E19 U+4E01) that
+        // exercises the substring path in `watermark_cjk_tokens`.
+        // Real brand strings live in the operator's `watermarks.toml`,
+        // never in the source tree.
         watermark_cjk_tokens: vec!["\u{7532}\u{4E59}\u{4E19}\u{4E01}".to_string()],
     })
 }
@@ -509,8 +511,9 @@ fn watermark_publisher_is_flagged() {
 #[test]
 fn cjk_watermark_publisher_is_flagged() {
     let catalog = Catalog::open_in_memory().expect("open");
-    // "placeholder epub watermark example" — pirate brand observed verbatim
-    // in real EPUB metadata.
+    // ASCII prefix followed by the synthetic CJK token from
+    // `test_rules().watermark_cjk_tokens` — exercises the substring
+    // match without naming any real distribution brand.
     let watermark = "epub\u{7532}\u{4E59}\u{4E19}\u{4E01}";
     seed_base(
         &catalog,
