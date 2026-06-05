@@ -34,6 +34,8 @@ fails loudly.
 | --- | --- |
 | `pdfium-win-x64.tgz` | `45c4cc5d052ef8ec6380b946b548a76100f4675e38362000a4c732e16d5e8eda` |
 | `pdfium-linux-x64.tgz` | `e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d` |
+| `pdfium-mac-arm64.tgz` | `9acf49e46c68992cd40810e88264b1ad171805d02fd41c4cca336aad6653b333` |
+| `pdfium-mac-x64.tgz` | `f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb` |
 
 Download URL template:
 
@@ -42,7 +44,8 @@ https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/p
 ```
 
 The Windows archive holds the library at `bin/pdfium.dll`; the Linux
-archive at `lib/libpdfium.so`.
+archive at `lib/libpdfium.so`; the macOS archives at
+`lib/libpdfium.dylib`.
 
 ## Local development
 

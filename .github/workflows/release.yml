@@ -1,0 +1,189 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+# Builds four platform tarballs (macOS arm64 / macOS x86_64 / Linux
+# x86_64 / Windows x86_64) and creates a GitHub Release whose body is
+# the section of CHANGELOG.md matching the tag's semver. The tag must
+# be `vX.Y.Z` (or `vX.Y.Z-foo` for a prerelease — the workflow detects
+# the hyphen and flags the release accordingly).
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+            pdfium_archive: pdfium-mac-arm64.tgz
+            pdfium_sha: 9acf49e46c68992cd40810e88264b1ad171805d02fd41c4cca336aad6653b333
+            pdfium_path_in_archive: lib/libpdfium.dylib
+            pdfium_lib_name: libpdfium.dylib
+            archive_kind: tar.gz
+          - target: x86_64-apple-darwin
+            runs-on: macos-13
+            pdfium_archive: pdfium-mac-x64.tgz
+            pdfium_sha: f455e0868ef7e5174a315de8789ee2b7a5544638d0ac7a3312ea7b68ebbc99cb
+            pdfium_path_in_archive: lib/libpdfium.dylib
+            pdfium_lib_name: libpdfium.dylib
+            archive_kind: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-latest
+            pdfium_archive: pdfium-linux-x64.tgz
+            pdfium_sha: e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d
+            pdfium_path_in_archive: lib/libpdfium.so
+            pdfium_lib_name: libpdfium.so
+            archive_kind: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-latest
+            pdfium_archive: pdfium-win-x64.tgz
+            pdfium_sha: 45c4cc5d052ef8ec6380b946b548a76100f4675e38362000a4c732e16d5e8eda
+            pdfium_path_in_archive: bin/pdfium.dll
+            pdfium_lib_name: pdfium.dll
+            archive_kind: zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc -y --no-progress
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} -p bookrack-cli -p bookrack-mcp
+
+      - name: Fetch and verify PDFium
+        shell: bash
+        run: |
+          curl -L -o pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/${{ matrix.pdfium_archive }}"
+          actual=$(shasum -a 256 pdfium.tgz | awk '{print $1}')
+          expected="${{ matrix.pdfium_sha }}"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::PDFium archive SHA mismatch: expected $expected, got $actual" >&2
+            exit 1
+          fi
+          mkdir -p pdfium-extracted
+          tar -xzf pdfium.tgz -C pdfium-extracted
+
+      - name: Assemble release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          stage="bookrack-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+
+          # Native binaries
+          bin_suffix=""
+          if [ "${{ runner.os }}" = "Windows" ]; then bin_suffix=".exe"; fi
+          cp "target/${{ matrix.target }}/release/bookrack${bin_suffix}" "dist/${stage}/"
+          cp "target/${{ matrix.target }}/release/bookrack-mcp${bin_suffix}" "dist/${stage}/"
+
+          # PDFium loaded by the adapter from the binary's own directory
+          # when BOOKRACK_PDFIUM_LIB is unset, so place it beside the
+          # binaries inside the tarball.
+          cp "pdfium-extracted/${{ matrix.pdfium_path_in_archive }}" \
+             "dist/${stage}/${{ matrix.pdfium_lib_name }}"
+
+          # Project documentation and license
+          cp LICENSE README.md CHANGELOG.md "dist/${stage}/"
+
+          # PDFium upstream license (the archives ship one). The PDFium
+          # static-link bundle (FreeType, LCMS2, libjpeg-turbo, libpng,
+          # zlib, libtiff, OpenJPEG, etc.) is permissively licensed; the
+          # archive's LICENSE file carries every required attribution.
+          if [ -f pdfium-extracted/LICENSE ]; then
+            cp pdfium-extracted/LICENSE "dist/${stage}/LICENSE-PDFIUM"
+          fi
+
+          # Pack
+          cd dist
+          if [ "${{ matrix.archive_kind }}" = "zip" ]; then
+            7z a "${stage}.zip" "${stage}" >/dev/null
+            shasum -a 256 "${stage}.zip" > "${stage}.zip.sha256"
+          else
+            tar -czf "${stage}.tar.gz" "${stage}"
+            shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bookrack-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    name: create-github-release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract release notes for ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Capture the lines under `## [<version>] - <date>` up to (but
+          # excluding) the next `## [...]` heading.
+          awk -v ver="$version" '
+            /^## \[/ {
+              if (found) exit
+              if ($0 ~ "\\[" ver "\\]") { found = 1; next }
+            }
+            found
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section" >&2
+            exit 1
+          fi
+          echo "--- RELEASE_NOTES.md ---"
+          cat RELEASE_NOTES.md
+
+      - name: Detect prerelease from tag
+        id: kind
+        shell: bash
+        run: |
+          # Semver prereleases carry a hyphen: v0.1.0-rc1, v0.2.0-beta.
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            ${{ steps.kind.outputs.flag }} \
+            dist/*
