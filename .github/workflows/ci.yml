@@ -1,33 +1,84 @@
 name: ci
 on: [push, pull_request]
 
+# A second push to the same branch cancels the still-running CI for the
+# previous push. Saves runner minutes on rapid-fire pushes; the final
+# push always gets a clean, current result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation in CI thrashes the cache (every commit
+  # produces a new incremental dir) without speeding anything up,
+  # because the cache key is the Cargo.lock hash, not the source.
+  CARGO_INCREMENTAL: "0"
+
 jobs:
-  build:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: rustfmt, clippy
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy
+      # Caches ~/.cargo/{registry,git} and target/. Key derives from
+      # Cargo.lock + rustc version + shared-key suffix. clippy and test
+      # use different cargo profiles, so they get separate caches to
+      # avoid invalidation churn.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
       - name: Install protoc
         # protoc: build dependency of lancedb (lance-encoding).
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Cache PDFium archive
+        # The cache key is tied to the pinned chromium build, so a hit
+        # always carries the right ABI for the pdfium_NNNN cargo feature
+        # in extract/Cargo.toml. Bump the key when PDFIUM_VERSION.md
+        # bumps; otherwise stale binaries persist.
+        id: pdfium-cache
+        uses: actions/cache@v4
+        with:
+          path: .pdfium
+          key: pdfium-chromium-7763-linux-x64
       - name: Fetch pinned PDFium
         # The PDF adapter binds PDFium at runtime, so its tests need the
         # native library. Pinned to one build — see
         # crates/extract/PDFIUM_VERSION.md. The sha256 check makes a
         # corrupt download or a silently re-cut upstream asset fail
         # loudly here, so PDF test coverage is never quietly lost.
-        # clippy needs no binary (it links nothing), so this runs after.
+        if: steps.pdfium-cache.outputs.cache-hit != 'true'
         run: |
           curl -L -o pdfium.tgz \
             https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7763/pdfium-linux-x64.tgz
           echo "e3f0c66b2daad710cb6c8edd4a8c45c8902995e359dc0775917fc16e2e56349d  pdfium.tgz" | sha256sum -c -
           mkdir -p "$GITHUB_WORKSPACE/.pdfium"
           tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
-          echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
+      - name: Export PDFium lib path
+        run: echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
       - run: cargo test --workspace
 
   leak-gate:
