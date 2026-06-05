@@ -8,11 +8,11 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-06-05
+## [0.1.0-rc1] - 2026-06-05
 
-First public release. Pre-release while pre-production hardening
+First release candidate. Pre-release while pre-production hardening
 (schema migrations, approximate-nearest-neighbour indexing, metadata)
-is finalised.
+is finalised; small-batch testing precedes a stable v0.1.0 cut.
 
 ### Added
 
@@ -71,5 +71,5 @@ is finalised.
   per-platform SHA-256 checksums (Linux x86_64, Windows x86_64, macOS
   arm64, macOS x86_64).
 
-[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/Collegium-Siderum/bookrack/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.1.0-rc1...HEAD
+[0.1.0-rc1]: https://github.com/Collegium-Siderum/bookrack/releases/tag/v0.1.0-rc1
