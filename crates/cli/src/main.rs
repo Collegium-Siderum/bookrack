@@ -13,6 +13,7 @@
 
 mod doctor;
 mod dryrun;
+mod init;
 mod remove;
 mod render;
 
@@ -269,6 +270,30 @@ enum Command {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
+    },
+    /// Walk the operator through a five-step install: pick a data root,
+    /// check the PDFium library, probe Ollama, smoke-test the
+    /// ingest -> embed -> query pipeline end-to-end in a tempdir, and
+    /// finally write `<data_root>/config.toml` plus a pointer in the
+    /// platform-default registry. Run after a fresh tarball install.
+    Init {
+        /// Where the library's data root should live. Required in
+        /// `--non-interactive` mode; otherwise the wizard prompts.
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<PathBuf>,
+        /// Skip every prompt. Requires `--data-dir`.
+        #[arg(long)]
+        non_interactive: bool,
+        /// Accept an existing data root that already holds a
+        /// `catalog.db`. Without this flag the wizard refuses, so a
+        /// misconfigured run cannot silently graft itself onto a
+        /// populated library.
+        #[arg(long)]
+        force: bool,
+        /// Skip the end-to-end smoke step. Useful when developing the
+        /// wizard itself or when Ollama is intentionally offline.
+        #[arg(long)]
+        no_smoke: bool,
     },
     #[command(after_help = REMOVE_AFTER_HELP)]
     Remove {
@@ -671,9 +696,26 @@ async fn run() -> Result<()> {
 
     // `doctor` runs before `Config::resolve` so an unconfigured install
     // surfaces as a row in its report instead of a hard error from the
-    // resolver -- the very diagnosis the operator needs.
+    // resolver -- the very diagnosis the operator needs. `init` runs
+    // before resolve for the same reason: it is the wizard that turns
+    // an unconfigured install into a configured one.
     if let Command::Doctor { json } = &cli.command {
         return doctor::run(&cli.selection(), *json).await;
+    }
+    if let Command::Init {
+        data_dir,
+        non_interactive,
+        force,
+        no_smoke,
+    } = &cli.command
+    {
+        return init::run(init::Args {
+            data_dir: data_dir.clone(),
+            non_interactive: *non_interactive,
+            force: *force,
+            no_smoke: *no_smoke,
+        })
+        .await;
     }
 
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
@@ -828,6 +870,7 @@ async fn run() -> Result<()> {
             .await
         }
         Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
+        Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
     }
 }
 

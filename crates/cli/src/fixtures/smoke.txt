@@ -1,0 +1,11 @@
+Bookrack installation verification fixture.
+
+This short synthetic text exists so the install wizard can exercise the
+full ingest, embed, and query path against the user's locally running
+Ollama daemon. It carries the unique identifier grommet-zarpkin-3147 so
+a query for that token returns at least one hit from this very chunk.
+
+The passage is otherwise filler. A few more sentences of substantive
+English follow so the text-splitter produces a coherent prose chunk for
+the embedding model to work on, rather than a single short line whose
+embedding would be dominated by the marker phrase alone.
