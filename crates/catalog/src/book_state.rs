@@ -39,6 +39,9 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 
 /// Insert or replace a book's pipeline state. The row is keyed by
 /// `book_root_id`, so re-recording a book overwrites its previous state.
+/// `ocr_marker_finished_at` is an append-only audit stamp: an update
+/// that does not provide a new value keeps the existing one rather
+/// than clearing it.
 const UPSERT_SQL: &str = "INSERT INTO book_state \
      (book_root_id, intake_id, current_stage, embed_model, parsed_at, \
       embedded_at, ocr_marker_finished_at, last_error) \
@@ -50,7 +53,7 @@ const UPSERT_SQL: &str = "INSERT INTO book_state \
        embed_model = excluded.embed_model, \
        parsed_at = excluded.parsed_at, \
        embedded_at = excluded.embedded_at, \
-       ocr_marker_finished_at = excluded.ocr_marker_finished_at, \
+       ocr_marker_finished_at = COALESCE(excluded.ocr_marker_finished_at, ocr_marker_finished_at), \
        last_error = excluded.last_error";
 
 /// A `SELECT` of every column with `tail` (a `WHERE` clause) appended.
