@@ -9,6 +9,13 @@ on:
 # be `vX.Y.Z` (or `vX.Y.Z-foo` for a prerelease — the workflow detects
 # the hyphen and flags the release accordingly).
 
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation thrashes the cache (every commit produces a
+  # new incremental dir) without helping CI, where the cache key is the
+  # Cargo.lock hash, not the source.
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   build:
     name: build-${{ matrix.target }}
@@ -52,22 +59,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install protoc (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Caches ~/.cargo/{registry,git} and target/. Key derives from
+      # Cargo.lock + rustc + target triple + shared-key. Successive tags
+      # (rc1 → rc2 → final) reuse the dependency-compilation tree.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
 
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
+      # Single prebuilt-binary install across all three OSes. Replaces
+      # `apt-get install` / `brew install` / `choco install` — the last
+      # of which costs 5–10 minutes on the Windows runner.
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc -y --no-progress
-
-      - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p bookrack-cli -p bookrack-mcp
+      - name: Cache PDFium archive
+        # The cache key is tied to the pinned chromium build, so a hit
+        # always carries the right ABI for the pdfium_NNNN cargo feature
+        # in extract/Cargo.toml. Bump the key when PDFIUM_VERSION.md
+        # bumps; otherwise stale binaries persist.
+        id: pdfium-cache
+        uses: actions/cache@v5
+        with:
+          path: pdfium-extracted
+          key: pdfium-chromium-7763-${{ matrix.target }}
 
       - name: Fetch and verify PDFium
+        if: steps.pdfium-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -L -o pdfium.tgz \
@@ -80,6 +98,9 @@ jobs:
           fi
           mkdir -p pdfium-extracted
           tar -xzf pdfium.tgz -C pdfium-extracted
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }} -p bookrack-cli -p bookrack-mcp
 
       - name: Assemble release archive
         shell: bash

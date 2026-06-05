@@ -60,7 +60,7 @@ jobs:
         # in extract/Cargo.toml. Bump the key when PDFIUM_VERSION.md
         # bumps; otherwise stale binaries persist.
         id: pdfium-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .pdfium
           key: pdfium-chromium-7763-linux-x64
