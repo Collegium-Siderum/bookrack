@@ -135,6 +135,12 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    /// The registry file parses as TOML but a key the writer needs to
+    /// edit is the wrong type — e.g. `libraries` is a string rather
+    /// than a table. The writer refuses to overwrite a file it does
+    /// not understand; the operator fixes it (or removes it) by hand.
+    #[error("the registry at {} cannot be merged: {reason}", .path.display())]
+    RegistryShape { path: PathBuf, reason: String },
     /// `<data_root>/config.toml` exists but could not be read.
     #[error("cannot read the root config at {}", .path.display())]
     RootConfigUnreadable {
@@ -794,6 +800,110 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         library,
         source,
         root_config,
+    })
+}
+
+/// Merge a single entry into the registry at `path`, creating the file
+/// (and its parent directories) when absent. Existing entries are
+/// preserved; the entry's data root is overwritten when the name
+/// matches an existing one. The `default = "..."` field is set to
+/// `name` only when no default is currently recorded — an operator who
+/// has already chosen a default is never silently overridden.
+///
+/// `bookrack init` is the only writer; the function is exposed so the
+/// platform-default registry under the OS config directory can be
+/// produced by the wizard without crates outside `config` rebuilding
+/// the file format.
+pub fn merge_library_into_registry(
+    path: &Path,
+    name: &str,
+    data_dir: &Path,
+) -> Result<(), ConfigError> {
+    let mut doc = read_registry_table(path)?;
+    upsert_library_in_table(&mut doc, name, data_dir, path)?;
+    write_registry_table(path, &doc)?;
+    Ok(())
+}
+
+/// Read the registry at `path` as a free-form TOML table. A missing
+/// file resolves to an empty table so [`merge_library_into_registry`]
+/// can write a fresh file without a separate branch.
+fn read_registry_table(path: &Path) -> Result<toml::Table, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(source) => {
+            return Err(ConfigError::RegistryUnreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    text.parse::<toml::Table>()
+        .map_err(|source| ConfigError::RegistryMalformed {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// Mutate `doc` to carry the new library entry, preserving every other
+/// table field. Errors when an existing `libraries` or `default` key
+/// has the wrong type — the writer refuses to clobber a file it does
+/// not understand.
+fn upsert_library_in_table(
+    doc: &mut toml::Table,
+    name: &str,
+    data_dir: &Path,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    if let Some(existing) = doc.get("libraries")
+        && !existing.is_table()
+    {
+        return Err(ConfigError::RegistryShape {
+            path: path.to_path_buf(),
+            reason: "`libraries` is not a table".to_string(),
+        });
+    }
+    if let Some(existing) = doc.get("default")
+        && !existing.is_str()
+    {
+        return Err(ConfigError::RegistryShape {
+            path: path.to_path_buf(),
+            reason: "`default` is not a string".to_string(),
+        });
+    }
+    let libraries = doc
+        .entry("libraries".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .expect("ensured to be a table by the check above");
+    libraries.insert(
+        name.to_string(),
+        toml::Value::String(data_dir.display().to_string()),
+    );
+    if !doc.contains_key("default") {
+        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+    }
+    Ok(())
+}
+
+/// Serialize `doc` and overwrite `path`, creating its parent directory
+/// as needed. Errors map to [`ConfigError::RegistryUnreadable`] so the
+/// caller renders a single uniform reason regardless of which I/O step
+/// failed.
+fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| ConfigError::RegistryUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let serialised = toml::to_string_pretty(doc).expect("toml::Table is always serialisable");
+    std::fs::write(path, serialised).map_err(|source| ConfigError::RegistryUnreadable {
+        path: path.to_path_buf(),
+        source,
     })
 }
 
@@ -1544,5 +1654,106 @@ mod tests {
         let cfg = resolve(Some(env_value), Some("http://from-env:7777".to_string()))
             .expect("resolve with env override");
         assert_eq!(cfg.ollama_url(), "http://from-env:7777");
+    }
+
+    #[test]
+    fn merge_library_creates_fresh_registry_with_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        let data_root = tmp.path().join("a");
+        std::fs::create_dir_all(&data_root).expect("create data root");
+        merge_library_into_registry(&path, "default", &data_root).expect("merge");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert_eq!(registry.default.as_deref(), Some("default"));
+        assert_eq!(registry.libraries.get("default"), Some(&data_root));
+    }
+
+    #[test]
+    fn merge_library_creates_parent_directories() {
+        // The platform default registry sits two directories deep
+        // (`<config>/bookrack/registry.toml`); the writer creates them
+        // so a fresh user does not have to mkdir first.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp
+            .path()
+            .join("nested")
+            .join("under")
+            .join("registry.toml");
+        let data_root = tmp.path().join("a");
+        std::fs::create_dir_all(&data_root).expect("create data root");
+        merge_library_into_registry(&path, "default", &data_root).expect("merge");
+        assert!(path.is_file());
+    }
+
+    #[test]
+    fn merge_library_preserves_existing_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        // Existing registry already names `alpha` as default.
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        let beta_root = tmp.path().join("beta");
+        std::fs::create_dir_all(&beta_root).expect("create beta");
+        merge_library_into_registry(&path, "beta", &beta_root).expect("merge");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        // The default is untouched; both libraries are present.
+        assert_eq!(registry.default.as_deref(), Some("alpha"));
+        assert_eq!(
+            registry.libraries.get("alpha"),
+            Some(&PathBuf::from("/roots/alpha"))
+        );
+        assert_eq!(registry.libraries.get("beta"), Some(&beta_root));
+    }
+
+    #[test]
+    fn merge_library_overwrites_an_existing_entry_with_the_same_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"default\"\n\
+             [libraries]\n\
+             default = \"/old/root\"\n",
+        )
+        .expect("seed");
+        let new_root = tmp.path().join("new");
+        std::fs::create_dir_all(&new_root).expect("create new");
+        merge_library_into_registry(&path, "default", &new_root).expect("merge");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert_eq!(registry.libraries.get("default"), Some(&new_root));
+    }
+
+    #[test]
+    fn merge_library_rejects_a_libraries_key_of_the_wrong_type() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "libraries = \"not-a-table\"\n").expect("seed");
+        let err =
+            merge_library_into_registry(&path, "default", tmp.path()).expect_err("should refuse");
+        assert!(
+            matches!(err, ConfigError::RegistryShape { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn merge_library_rejects_a_malformed_existing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "this is not = valid = toml").expect("seed");
+        let err =
+            merge_library_into_registry(&path, "default", tmp.path()).expect_err("should refuse");
+        assert!(
+            matches!(err, ConfigError::RegistryMalformed { .. }),
+            "got {err:?}"
+        );
     }
 }
