@@ -195,6 +195,22 @@ impl Catalog {
             .collect::<rusqlite::Result<Vec<MetadataAudit>>>()?;
         Ok(rows)
     }
+
+    /// Metadata-audit rows with `changed_at >= since_ts`, newest first,
+    /// capped at `limit` rows. The forensic time window the diagnose
+    /// collector consumes.
+    pub fn recent_metadata_audit(&self, since_ts: &str, limit: u32) -> Result<Vec<MetadataAudit>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE changed_at >= :since_ts ORDER BY changed_at DESC, audit_id DESC LIMIT :limit",
+        ))?;
+        let rows = stmt
+            .query_map(
+                named_params! { ":since_ts": since_ts, ":limit": limit },
+                MetadataAudit::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<MetadataAudit>>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +271,38 @@ mod tests {
             .map(|row| row.action)
             .collect();
         assert_eq!(actions, ["insert", "update", "delete"]);
+    }
+
+    /// Insert a row, then back-date its `changed_at` so a cutoff filter
+    /// has something deterministic to compare against. The default
+    /// `changed_at` is `now`, which would defeat a `since_ts` filter in
+    /// a unit test.
+    fn record_at(catalog: &Catalog, ts: &str, action: &str) -> i64 {
+        let mut audit = NewMetadataAudit::new("node_overrides", action, ActorKind::Human);
+        audit.node_id = Some(100_000_001);
+        let id = catalog.record_metadata_audit(&audit).expect("record");
+        catalog
+            .conn
+            .execute(
+                "UPDATE metadata_audit SET changed_at = ?1 WHERE audit_id = ?2",
+                rusqlite::params![ts, id],
+            )
+            .expect("backdate changed_at");
+        id
+    }
+
+    #[test]
+    fn recent_metadata_audit_returns_rows_since_cutoff_newest_first() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        record_at(&catalog, "2026-06-01T00:00:00Z", "insert");
+        record_at(&catalog, "2026-06-02T00:00:00Z", "update");
+        record_at(&catalog, "2026-06-03T00:00:00Z", "delete");
+
+        let rows = catalog
+            .recent_metadata_audit("2026-06-02T00:00:00Z", 10)
+            .expect("read");
+        let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, ["delete", "update"]);
     }
 
     #[test]

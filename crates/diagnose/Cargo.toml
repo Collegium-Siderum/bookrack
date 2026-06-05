@@ -1,0 +1,20 @@
+[package]
+name = "bookrack-diagnose"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bookrack-catalog = { path = "../catalog" }
+bookrack-config = { path = "../config" }
+bookrack-corpus = { path = "../corpus" }
+bookrack-vectors = { path = "../vectors" }
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

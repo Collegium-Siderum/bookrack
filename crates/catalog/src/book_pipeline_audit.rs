@@ -248,6 +248,26 @@ impl Catalog {
             .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
         Ok(rows)
     }
+
+    /// Pipeline-audit rows with `ts >= since_ts`, newest first, capped at
+    /// `limit` rows. The forensic time window the diagnose collector
+    /// consumes.
+    pub fn recent_pipeline_audit(
+        &self,
+        since_ts: &str,
+        limit: u32,
+    ) -> Result<Vec<BookPipelineAudit>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE ts >= :since_ts ORDER BY ts DESC, audit_id DESC LIMIT :limit",
+        ))?;
+        let rows = stmt
+            .query_map(
+                named_params! { ":since_ts": since_ts, ":limit": limit },
+                BookPipelineAudit::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +361,43 @@ mod tests {
                 .expect("read")
                 .is_empty()
         );
+    }
+
+    /// Insert a row, then back-date its `ts` so a cutoff filter has
+    /// something deterministic to compare against. The default `ts` is
+    /// `now`, which would defeat a `since_ts` filter in a unit test.
+    fn record_at(catalog: &Catalog, ts: &str, sub_step: &str) -> i64 {
+        let id = catalog
+            .record_pipeline_audit(&NewBookPipelineAudit::new(
+                "structure",
+                sub_step,
+                "ok",
+                "run-1",
+                ActorKind::Pipeline,
+            ))
+            .expect("record");
+        catalog
+            .conn
+            .execute(
+                "UPDATE book_pipeline_audit SET ts = ?1 WHERE audit_id = ?2",
+                rusqlite::params![ts, id],
+            )
+            .expect("backdate ts");
+        id
+    }
+
+    #[test]
+    fn recent_pipeline_audit_returns_rows_since_cutoff_newest_first() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        record_at(&catalog, "2026-06-01T00:00:00Z", "step_a");
+        record_at(&catalog, "2026-06-02T00:00:00Z", "step_b");
+        record_at(&catalog, "2026-06-03T00:00:00Z", "step_c");
+
+        let rows = catalog
+            .recent_pipeline_audit("2026-06-02T00:00:00Z", 10)
+            .expect("read");
+        let steps: Vec<&str> = rows.iter().map(|r| r.sub_step.as_str()).collect();
+        assert_eq!(steps, ["step_c", "step_b"]);
     }
 
     #[test]

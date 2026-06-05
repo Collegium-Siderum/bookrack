@@ -98,3 +98,10 @@ bookrack-audit-profile = { path = "crates/audit-profile" }
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
 zip = "8"
+# TAR archive writer for the `diagnose` crate. The diagnose tarball
+# packages crash reports, audit-table excerpts, and metadata snapshots
+# into one byte-stable bundle; this crate writes the archive entries.
+tar = "0.4"
+# DEFLATE compression for the same diagnose tarball, used to gzip-wrap
+# the TAR stream before write-out.
+flate2 = "1"

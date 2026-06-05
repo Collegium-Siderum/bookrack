@@ -603,6 +603,18 @@ impl Catalog {
         count_as_u64(n)
     }
 
+    /// The first `limit` intake rows by ascending `intake_id`. The
+    /// forensic head the diagnose collector captures.
+    pub fn intakes_head(&self, limit: u32) -> Result<Vec<Intake>> {
+        let mut stmt = self
+            .conn
+            .prepare(&select_sql("ORDER BY intake_id LIMIT :limit"))?;
+        let rows = stmt
+            .query_map(named_params! { ":limit": limit }, Intake::from_row)?
+            .collect::<rusqlite::Result<Vec<Intake>>>()?;
+        Ok(rows)
+    }
+
     /// Number of intake rows whose `status` falls in `statuses`. An empty
     /// slice means "no filter" and counts every row.
     pub fn count_intakes_by_status(&self, statuses: &[IntakeStatus]) -> Result<u64> {
@@ -803,6 +815,25 @@ mod tests {
         assert_eq!(intake.status, IntakeStatus::Pending);
         assert_eq!(intake.stored_path, None);
         assert!(!intake.intake_at.is_empty());
+    }
+
+    #[test]
+    fn intakes_head_returns_the_first_n_intake_rows() {
+        let mut catalog = catalog();
+        for n in 1..=5 {
+            catalog
+                .register_intake(&NewIntake::new(format!("sha-{n}")))
+                .expect("register");
+        }
+        let rows = catalog.intakes_head(3).expect("head");
+        let shas: Vec<&str> = rows.iter().map(|r| r.source_sha256.as_str()).collect();
+        assert_eq!(shas, ["sha-1", "sha-2", "sha-3"]);
+    }
+
+    #[test]
+    fn intakes_head_returns_empty_when_table_is_empty() {
+        let catalog = catalog();
+        assert!(catalog.intakes_head(50).expect("head").is_empty());
     }
 
     #[test]
