@@ -105,3 +105,12 @@ tar = "0.4"
 # DEFLATE compression for the same diagnose tarball, used to gzip-wrap
 # the TAR stream before write-out.
 flate2 = "1"
+
+# Test binaries link the full lance / datafusion / arrow / rustls
+# dependency tree once per crate under test. Full debug info pushes the
+# linker's peak resident memory past the GitHub-hosted runner's budget,
+# producing SIGBUS at link time. Line tables keep enough symbol data for
+# panic backtraces while cutting debug-section size by an order of
+# magnitude.
+[profile.test]
+debug = "line-tables-only"
