@@ -28,7 +28,8 @@ use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
 use bookrack_metadata::AuditRules;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::{Caller, Ops, reads};
+use bookrack_ops::{Caller, Ops, OpsError, SearchOptions, reads};
+use bookrack_query::Library;
 use bookrack_vectors::ChunkStore;
 
 /// Trailing block shown by `bookrack --help`. Names the environment
@@ -1955,85 +1956,68 @@ async fn run_query(
     }
     let owned_text = truncate_query_with_warning(text);
     let text = owned_text.as_str();
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    // The catalog handle is opened beside the corpus so the breadcrumb
-    // resolver can read the effective book title; it is used only
-    // synchronously for citation and dropped at the end of this scope.
-    let catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
     // Refuse a `--in-book` against an unknown or already-removed intake
     // up front, before the embedder probe and the vector store open.
     // Without this guard the query silently returns zero hits and reads
     // as "this book is fine, it just has no matches" — which is the
     // opposite of what happened.
-    if let Some(intake_id) = in_book
-        && catalog
+    if let Some(intake_id) = in_book {
+        let catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
+        if catalog
             .intake_by_id(intake_id)
             .context("look up intake")?
             .is_none()
-    {
-        anyhow::bail!("no intake registered for book {intake_id}");
+        {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
     }
     let embedder = embedder(cfg, &embed_cfg)?;
 
-    // The store's vector width is fixed at creation and must match the
-    // model. Probe the embedder once to learn it before reopening.
-    let probe = embedder
-        .embed_batch(&["dimension probe".to_string()])
-        .await
-        .context("probe embedding dimension")?;
-    let dim = probe
-        .first()
-        .map(Vec::len)
-        .context("embedder returned no vector")?;
+    // The query facade probes the embedder for its vector width, opens
+    // the chunk store at that dimension, and verifies the index stamps
+    // against this binary when the store is non-empty.
+    let library = Library::open(
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        embedder,
+        embed_cfg.model.clone(),
+        search_cfg.top_k,
+    )
+    .await
+    .context("open query library")?;
+    let ops = Ops::with_library(
+        library,
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        Caller::cli(),
+    );
 
-    let store = ChunkStore::open(&cfg.lancedb_dir(), dim)
-        .await
-        .context("open vector store")?;
-    // Refuse to serve an index built with a different model or a stale
-    // algorithm version; an empty index has no provenance to check.
-    if store.count_rows().await.context("count vector rows")? > 0 {
-        corpus
-            .verify_index_stamps(&bookrack_ingest::current_index_stamps(
-                &embed_cfg.model,
-                dim as u32,
-            ))
-            .context("verify index stamps")?;
-    }
     // CLI flags win over env, which wins over meta defaults inside
     // retrieve_with.
     let env = bookrack_search::env_overrides();
-    let overrides = bookrack_vectors::SearchOptions {
+    let overrides = SearchOptions {
         bypass_index: bypass_ann || env.bypass_index,
         nprobes: nprobes.or(env.nprobes),
         refine_factor: refine_factor.or(env.refine_factor),
     };
-    let hits = if let Some(intake_id) = in_book {
-        let partition = PartitionIdx::new(intake_id);
-        let raw = bookrack_search::retrieve_with_partition(
-            text,
-            &store,
-            &embedder,
-            &cfg.lancedb_dir(),
-            overrides,
-            search_cfg.top_k,
-            partition,
-        )
-        .await
-        .context("run query in book")?;
-        bookrack_search::cite(&corpus, &catalog, raw).context("cite passages")?
-    } else {
-        bookrack_search::search_with(
-            text,
-            &corpus,
-            &catalog,
-            &store,
-            &embedder,
-            &cfg.lancedb_dir(),
-            overrides,
-            search_cfg.top_k,
-        )
-        .await
-        .context("run query")?
+    let hits = match in_book {
+        Some(intake_id) => {
+            match reads::search::search_in_book(&ops, intake_id, text, overrides, None).await {
+                Ok(hits) => hits,
+                // The pre-check above already refused unknown intakes;
+                // a races-with-remove path falls through to the same
+                // diagnostic instead of an anyhow chain.
+                Err(OpsError::IntakeNotFound { intake_id }) => {
+                    anyhow::bail!("no intake registered for book {intake_id}");
+                }
+                Err(e) => return Err(anyhow::Error::from(e).context("run query in book")),
+            }
+        }
+        None => reads::search::search(&ops, text, overrides, None)
+            .await
+            .context("run query")?,
     };
     render::citations(&hits, search_cfg.weak_distance_threshold);
     Ok(())

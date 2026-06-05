@@ -19,6 +19,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
 use bookrack_vectors::ChunkStore;
+pub use bookrack_vectors::SearchOptions;
 
 use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
@@ -135,6 +136,21 @@ impl<E: Embedder> Library<E> {
     /// non-`Sync` handle is ever held across an await, so this future
     /// is `Send` and can serve requests on a multi-threaded runtime.
     pub async fn search(&self, query: &str, top_k: Option<usize>) -> Result<Vec<Citation>> {
+        self.search_with(query, env_overrides(), top_k).await
+    }
+
+    /// Variant of [`Self::search`] that layers per-call overrides on top
+    /// of the persisted meta defaults — see
+    /// [`bookrack_search::retrieve_with`] for the merge order. Callers
+    /// that already source overrides themselves (CLI flags, MCP tool
+    /// arguments) pass them through here instead of reading the
+    /// `BOOKRACK_VECTORS_*` env vars again.
+    pub async fn search_with(
+        &self,
+        query: &str,
+        overrides: SearchOptions,
+        top_k: Option<usize>,
+    ) -> Result<Vec<Citation>> {
         let Some(store) = &self.store else {
             return Ok(Vec::new());
         };
@@ -144,7 +160,7 @@ impl<E: Embedder> Library<E> {
             store,
             &self.embedder,
             &self.lancedb_dir,
-            env_overrides(),
+            overrides,
             top_k,
         )
         .await?;
@@ -165,6 +181,20 @@ impl<E: Embedder> Library<E> {
         query: &str,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
+        self.search_in_book_with(intake_id, query, env_overrides(), top_k)
+            .await
+    }
+
+    /// Variant of [`Self::search_in_book`] that layers per-call overrides
+    /// on top of the persisted meta defaults — see
+    /// [`bookrack_search::retrieve_with_partition`] for the merge order.
+    pub async fn search_in_book_with(
+        &self,
+        intake_id: i64,
+        query: &str,
+        overrides: SearchOptions,
+        top_k: Option<usize>,
+    ) -> Result<Vec<Citation>> {
         let Some(store) = &self.store else {
             return Ok(Vec::new());
         };
@@ -175,7 +205,7 @@ impl<E: Embedder> Library<E> {
             store,
             &self.embedder,
             &self.lancedb_dir,
-            env_overrides(),
+            overrides,
             top_k,
             partition,
         )

@@ -14,7 +14,7 @@ use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::{Ops, OpsError, reads, writes};
+use bookrack_ops::{Ops, OpsError, SearchOptions, reads, writes};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -35,6 +35,19 @@ pub struct SearchArgs {
     /// Maximum number of passages to return. Defaults to the server's
     /// configured top-k when omitted.
     pub top_k: Option<usize>,
+    /// Force a brute-force scan, ignoring any ANN index. Useful for
+    /// ground-truth checks.
+    #[serde(default)]
+    pub bypass_index: bool,
+    /// Override the IVF probe count for this query only. Higher values
+    /// trade latency for recall; the persisted meta default applies when
+    /// omitted.
+    #[serde(default)]
+    pub nprobes: Option<usize>,
+    /// Override the IVF-PQ refinement multiplier for this query only.
+    /// The persisted meta default applies when omitted.
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
 }
 
 /// Arguments for the `library.search_in_book` tool.
@@ -46,6 +59,39 @@ pub struct SearchInBookArgs {
     pub query: String,
     /// Maximum number of passages to return.
     pub top_k: Option<usize>,
+    /// Force a brute-force scan, ignoring any ANN index.
+    #[serde(default)]
+    pub bypass_index: bool,
+    /// Override the IVF probe count for this query only.
+    #[serde(default)]
+    pub nprobes: Option<usize>,
+    /// Override the IVF-PQ refinement multiplier for this query only.
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
+}
+
+impl SearchArgs {
+    /// Project the override fields onto the underlying [`SearchOptions`]
+    /// struct the ops layer consumes.
+    fn overrides(&self) -> SearchOptions {
+        SearchOptions {
+            bypass_index: self.bypass_index,
+            nprobes: self.nprobes,
+            refine_factor: self.refine_factor,
+        }
+    }
+}
+
+impl SearchInBookArgs {
+    /// Project the override fields onto the underlying [`SearchOptions`]
+    /// struct the ops layer consumes.
+    fn overrides(&self) -> SearchOptions {
+        SearchOptions {
+            bypass_index: self.bypass_index,
+            nprobes: self.nprobes,
+            refine_factor: self.refine_factor,
+        }
+    }
 }
 
 /// Arguments for the `library.list_books` tool.
@@ -190,7 +236,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let hits = reads::search::search(&self.ops, &args.query, args.top_k)
+        let overrides = args.overrides();
+        let hits = reads::search::search(&self.ops, &args.query, overrides, args.top_k)
             .await
             .map_err(ops_error_to_internal)?;
         tracing::info!(hits = hits.len(), "mcp library.search");
@@ -209,8 +256,15 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchInBookArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let result =
-            reads::search::search_in_book(&self.ops, args.intake_id, &args.query, args.top_k).await;
+        let overrides = args.overrides();
+        let result = reads::search::search_in_book(
+            &self.ops,
+            args.intake_id,
+            &args.query,
+            overrides,
+            args.top_k,
+        )
+        .await;
         match result {
             Ok(hits) => {
                 tracing::info!(

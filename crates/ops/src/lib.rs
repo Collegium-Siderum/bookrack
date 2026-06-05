@@ -33,7 +33,7 @@ use bookrack_catalog::ActorKind;
 use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 
-pub use bookrack_query::Citation;
+pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
 
 /// Why an op failed.
