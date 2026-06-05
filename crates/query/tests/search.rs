@@ -343,3 +343,79 @@ async fn list_books_clamps_to_max_list_limit() {
     assert_eq!(page.total, 1);
     assert_eq!(page.books.len(), 1);
 }
+
+/// Walk `root` and remove the first regular file under any `*.lance/data/`
+/// directory. Returns the removed path for diagnostics; panics if no such
+/// file exists. Used by the missing-fragment test below to simulate a
+/// vector store whose backing data has been disturbed out-of-band.
+fn remove_one_lance_data_file(root: &Path) -> std::path::PathBuf {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else if path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "data")
+                && path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".lance"))
+            {
+                out.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut candidates = Vec::new();
+    walk(root, &mut candidates).expect("walk lancedb dir");
+    let chosen = candidates
+        .into_iter()
+        .next()
+        .expect("at least one fragment file under chunks.lance/data");
+    std::fs::remove_file(&chosen).expect("remove fragment");
+    chosen
+}
+
+#[tokio::test]
+async fn search_returns_a_readable_error_when_a_lance_data_file_is_missing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
+    build_stamped_index(&corpus_db, &lancedb_dir).await;
+
+    let removed = remove_one_lance_data_file(&lancedb_dir);
+    assert!(!removed.exists(), "fragment must be gone before opening");
+
+    // Opening may succeed (the manifest is still readable); the failure
+    // surfaces when the search actually scans the fragment. Either outcome
+    // must be a readable error, never a panic.
+    let outcome = match Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+    )
+    .await
+    {
+        Ok(library) => library.search("anything", None).await.err(),
+        Err(err) => Some(err),
+    };
+    let err = outcome.expect("a disturbed fragment must surface an error");
+    let chain = format!("{err:#}");
+    assert!(
+        matches!(
+            err,
+            bookrack_query::QueryError::Vectors(_) | bookrack_query::QueryError::Search(_),
+        ),
+        "expected a vectors / search error, got: {chain}",
+    );
+}
