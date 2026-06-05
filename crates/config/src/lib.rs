@@ -93,8 +93,19 @@ pub enum ConfigError {
     #[error("the data root {} is not an existing directory", .0.display())]
     DataDirNotFound(PathBuf),
     /// `--library` names a library the registry does not define.
-    #[error("no library named {0:?} in the registry")]
-    UnknownLibrary(String),
+    /// `available` lists the names the registry does carry, so the
+    /// operator can pick the right one without a separate
+    /// `libraries list` call.
+    #[error(
+        "no library named {name:?} in the registry (available: {})",
+        if available.is_empty() { "<none>".to_string() } else { available.join(", ") }
+    )]
+    UnknownLibrary {
+        /// The name passed to `--library`.
+        name: String,
+        /// Library names the registry currently carries, sorted.
+        available: Vec<String>,
+    },
     /// `--library` was given but no registry is configured.
     #[error("--library needs a registry; set {REGISTRY_ENV} to a TOML file")]
     RegistryNotConfigured,
@@ -326,10 +337,18 @@ pub const LOG_ENV: &str = "BOOKRACK_LOG";
 /// bookrack's own crates log at `info`; the vector-store dependencies
 /// (`lance*`, `datafusion`) are pinned to `warn` because they emit a high
 /// volume of `info` events — manifest loads, plan runs, file audits — that
-/// would otherwise bury the pipeline's own diagnostics. Override the whole
-/// directive with [`LOG_ENV`] to see them.
+/// would otherwise bury the pipeline's own diagnostics.
+///
+/// `lance_index::vector::kmeans` is pinned a step lower (`error`) because
+/// its empty-cluster warnings are expected at small chunk counts with
+/// `num_partitions > 1`; the misleading "duplicate vectors" hint they
+/// carry is a known false positive for the IVF training step and not
+/// actionable for an operator.
+///
+/// Override the whole directive with [`LOG_ENV`] to see the suppressed
+/// events.
 pub const DEFAULT_LOG: &str = "info,lance=warn,lance_namespace_impls=warn,lance_table=warn,\
-     datafusion=warn,rusqlite_migration=warn";
+     lance_index=error,datafusion=warn,rusqlite_migration=warn";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
@@ -578,6 +597,7 @@ fn env_f32(value: Option<String>, default: f32) -> f32 {
 
 /// Outcome of [`select_root`]: the chosen data root paired with the
 /// metadata `bookrack info` needs to explain how it was chosen.
+#[cfg_attr(test, derive(Debug))]
 struct Resolved {
     data_dir: PathBuf,
     source: ResolutionSource,
@@ -633,11 +653,14 @@ fn select_root(
 
 /// Look up a named library's root in the registry.
 fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigError> {
-    registry
-        .libraries
-        .get(name)
-        .cloned()
-        .ok_or_else(|| ConfigError::UnknownLibrary(name.to_string()))
+    registry.libraries.get(name).cloned().ok_or_else(|| {
+        let mut available: Vec<String> = registry.libraries.keys().cloned().collect();
+        available.sort();
+        ConfigError::UnknownLibrary {
+            name: name.to_string(),
+            available,
+        }
+    })
 }
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
@@ -802,10 +825,44 @@ mod tests {
             data_dir: None,
             library: Some("staging".to_string()),
         };
-        assert!(matches!(
-            select_root(&selection, None, Some(&sample_registry())),
-            Err(ConfigError::UnknownLibrary(name)) if name == "staging"
-        ));
+        match select_root(&selection, None, Some(&sample_registry())) {
+            Err(ConfigError::UnknownLibrary { name, available }) => {
+                assert_eq!(name, "staging");
+                // sample_registry holds `prod` and `test`, sorted.
+                assert_eq!(available, vec!["prod".to_string(), "test".to_string()]);
+            }
+            other => panic!("expected UnknownLibrary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_library_error_message_lists_available_names() {
+        let err = ConfigError::UnknownLibrary {
+            name: "ghost".to_string(),
+            available: vec!["alpha".to_string(), "beta".to_string()],
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("no library named \"ghost\""),
+            "missing name: {rendered}"
+        );
+        assert!(
+            rendered.contains("available: alpha, beta"),
+            "missing available list: {rendered}"
+        );
+    }
+
+    #[test]
+    fn unknown_library_error_renders_none_marker_when_registry_is_empty() {
+        let err = ConfigError::UnknownLibrary {
+            name: "ghost".to_string(),
+            available: Vec::new(),
+        };
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("available: <none>"),
+            "expected <none> marker: {rendered}"
+        );
     }
 
     #[test]

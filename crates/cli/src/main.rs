@@ -1012,6 +1012,37 @@ fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'stati
 /// `bookrack intake ocr` invocations against the same library.
 const INGEST_LOCK_NAME: &str = ".ingest.lock";
 
+/// Hard cap on the query text the embedder is asked to vectorize. The
+/// embedding model has its own context window; sending tens of
+/// kilobytes of text yields a low-quality vector and silently masks
+/// the operator's intent. The cap is generous — long-form passages
+/// commonly fit under 4 KiB — but bounded so a paste of an entire
+/// document is recognized as user error rather than rolling forward
+/// with a noisy hit set.
+const MAX_QUERY_BYTES: usize = 4096;
+
+/// Truncate a `query` string at [`MAX_QUERY_BYTES`] and warn on stderr
+/// when truncation happened. Returns the truncated text as an owned
+/// `String`; short inputs are echoed verbatim so callers can borrow
+/// it without conditional handling. The cut respects a UTF-8 char
+/// boundary so the embedder never sees a half-encoded glyph.
+fn truncate_query_with_warning(query: &str) -> String {
+    if query.len() <= MAX_QUERY_BYTES {
+        return query.to_string();
+    }
+    let mut boundary = MAX_QUERY_BYTES;
+    while boundary > 0 && !query.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let truncated = &query[..boundary];
+    eprintln!(
+        "bookrack: query was {} bytes, longer than the {} byte limit; truncated before embedding",
+        query.len(),
+        MAX_QUERY_BYTES
+    );
+    truncated.to_string()
+}
+
 /// Acquire the per-data-root advisory write lock and return a guard
 /// that releases it on drop.
 ///
@@ -1058,7 +1089,7 @@ fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
             limit,
             offset,
             json,
-        } => run_books_list(&ops, BookFilter::default(), limit, offset, json),
+        } => run_books_list_all(&ops, limit, offset, json),
         BooksAction::Find {
             title,
             contributor,
@@ -1075,7 +1106,7 @@ fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
                 statuses: Vec::new(),
                 format,
             };
-            run_books_list(&ops, filter, limit, offset, json)
+            run_books_find(&ops, filter, limit, offset, json)
         }
         BooksAction::Show { book, json } => run_books_show(&ops, book, json),
         BooksAction::Toc { book, json } => run_books_toc(&ops, book, json),
@@ -1083,7 +1114,22 @@ fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
     }
 }
 
-fn run_books_list(
+fn run_books_list_all(
+    ops: &Ops<OllamaEmbedClient>,
+    limit: u32,
+    offset: u32,
+    json: bool,
+) -> Result<()> {
+    let result = reads::books::list_books(ops, limit, offset).context("list books via ops")?;
+    if json {
+        render::books_list_json(&result);
+    } else {
+        render::books_list(&result);
+    }
+    Ok(())
+}
+
+fn run_books_find(
     ops: &Ops<OllamaEmbedClient>,
     filter: BookFilter,
     limit: u32,
@@ -1907,6 +1953,8 @@ async fn run_query(
             "BOOKRACK_SEARCH_TOP_K must be at least 1; got 0 (queries return no rows when top_k is 0)"
         );
     }
+    let owned_text = truncate_query_with_warning(text);
+    let text = owned_text.as_str();
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     // The catalog handle is opened beside the corpus so the breadcrumb
     // resolver can read the effective book title; it is used only
