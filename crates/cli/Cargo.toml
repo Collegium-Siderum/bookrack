@@ -19,6 +19,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
+bookrack-diagnose = { path = "../diagnose" }
 bookrack-extract = { path = "../extract" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-ops = { path = "../ops" }

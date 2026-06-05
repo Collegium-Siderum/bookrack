@@ -154,24 +154,33 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A synthetic data dir used as the `data_dir_path` argument to
+    /// [`Scrubber::new`]. The path is invented for the test and never
+    /// touched on disk; the segment shape is deliberately *not* a
+    /// real OS-level user-home pattern so the leak-check rule for
+    /// real filesystem paths does not match.
+    const FAKE_DATA_DIR: &str = "/a/store/bookrack";
+    /// A synthetic home dir. Same caveat as [`FAKE_DATA_DIR`].
+    const FAKE_HOME_DIR: &str = "/a/profile";
+
     fn scrubber() -> Scrubber {
         Scrubber::new(
-            Some(&PathBuf::from("/Volumes/Disk/bookrack")),
-            Some(&PathBuf::from("/Users/jane")),
+            Some(&PathBuf::from(FAKE_DATA_DIR)),
+            Some(&PathBuf::from(FAKE_HOME_DIR)),
         )
     }
 
     #[test]
     fn data_dir_is_replaced_with_a_placeholder() {
         let s = scrubber();
-        let out = s.scrub_string("opened /Volumes/Disk/bookrack/catalog.db");
+        let out = s.scrub_string(&format!("opened {FAKE_DATA_DIR}/catalog.db"));
         assert_eq!(out, "opened <DATA_DIR>/catalog.db");
     }
 
     #[test]
     fn home_dir_is_replaced_with_a_placeholder() {
         let s = scrubber();
-        let out = s.scrub_string("config at /Users/jane/.bookrackrc");
+        let out = s.scrub_string(&format!("config at {FAKE_HOME_DIR}/.bookrackrc"));
         assert_eq!(out, "config at <HOME>/.bookrackrc");
     }
 
@@ -205,19 +214,21 @@ mod tests {
     #[test]
     fn passthrough_does_not_alter_the_input() {
         let s = Scrubber::passthrough();
-        let input = format!("/Users/jane / {CJK_RUN}");
+        let input = format!("{FAKE_HOME_DIR} / {CJK_RUN}");
         assert_eq!(s.scrub_string(&input), input);
     }
 
     #[test]
     fn scrub_value_walks_nested_strings_and_leaves_numbers_alone() {
         let s = scrubber();
+        let home_path = format!("{FAKE_HOME_DIR}/foo");
+        let data_path = format!("{FAKE_DATA_DIR}/x");
         let mut v = serde_json::json!({
             "intake_id": 42,
             "title": CJK_RUN,
             "items": [
-                {"path": "/Users/jane/foo"},
-                {"path": "/Volumes/Disk/bookrack/x"},
+                {"path": home_path},
+                {"path": data_path},
                 {"sha256": "ab1234"},
                 {"limit": 50}
             ],

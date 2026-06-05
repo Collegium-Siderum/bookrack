@@ -644,6 +644,7 @@ dependencies = [
  "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
+ "bookrack-diagnose",
  "bookrack-embed",
  "bookrack-extract",
  "bookrack-ingest",

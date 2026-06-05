@@ -238,6 +238,21 @@ enum Command {
         #[command(subcommand)]
         action: LibrariesAction,
     },
+    /// Bundle the data root's crash reports, recent logs, and a small
+    /// catalog snapshot into a scrubbed `.tar.gz` for a bug report.
+    Diagnose {
+        /// Output path for the bundle. Defaults to
+        /// `<data_dir>/diagnostics/diagnose-<unix_ms>.tar.gz`.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+        /// Time window for recent logs and audit rows, in days.
+        #[arg(long, default_value_t = bookrack_diagnose::DEFAULT_DAYS)]
+        days: u32,
+        /// Skip the scrubber so paths and book titles ride through
+        /// verbatim. Appropriate only for bundles kept locally.
+        #[arg(long)]
+        no_scrub: bool,
+    },
     /// Drop a book from every store — intake row, opaque envelope,
     /// corpus partition, vectors partition, and the cascaded catalog
     /// tables. Preserves `metadata_audit` and `book_pipeline_audit` as a
@@ -760,6 +775,11 @@ async fn main() -> Result<()> {
         Command::Libraries { action } => match action {
             LibrariesAction::List { json } => run_libraries_list(json),
         },
+        Command::Diagnose {
+            out,
+            days,
+            no_scrub,
+        } => run_diagnose(&cfg, out, days, no_scrub),
         Command::Remove {
             intake_id,
             sha,
@@ -787,6 +807,20 @@ fn run_libraries_list(json: bool) -> Result<()> {
     } else {
         render::libraries_list(entries.as_deref());
     }
+    Ok(())
+}
+
+fn run_diagnose(cfg: &Config, out: Option<PathBuf>, days: u32, no_scrub: bool) -> Result<()> {
+    let opts = bookrack_diagnose::Options {
+        days,
+        scrub: !no_scrub,
+        out,
+        now: None,
+    };
+    let report = bookrack_diagnose::collect(cfg, &opts).context("collect diagnose bundle")?;
+    println!("diagnose bundle: {}", report.out_path.display());
+    println!("  files: {}", report.files);
+    println!("  scrubbed: {}", report.scrubbed);
     Ok(())
 }
 
@@ -2528,5 +2562,48 @@ mod tests {
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
         assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("list"));
+    }
+
+    #[test]
+    fn diagnose_subcommand_parses() {
+        for argv in [
+            vec!["bookrack", "diagnose"],
+            vec!["bookrack", "diagnose", "--days", "14"],
+            vec!["bookrack", "diagnose", "--no-scrub"],
+            vec!["bookrack", "diagnose", "--out", "/tmp/d.tar.gz"],
+            vec![
+                "bookrack",
+                "diagnose",
+                "--out",
+                "/tmp/d.tar.gz",
+                "--days",
+                "3",
+                "--no-scrub",
+            ],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn diagnose_default_days_is_seven() {
+        let cli = Cli::try_parse_from(["bookrack", "diagnose"]).expect("parse");
+        let Command::Diagnose { days, no_scrub, .. } = cli.command else {
+            panic!("expected the Diagnose variant");
+        };
+        assert_eq!(days, 7);
+        assert!(!no_scrub);
+    }
+
+    #[test]
+    fn diagnose_emits_a_bundle_at_the_explicit_out_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(data_dir.join("logs")).unwrap();
+        let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
+        let out = tmp.path().join("custom.tar.gz");
+        run_diagnose(&cfg, Some(out.clone()), 7, false).expect("collect");
+        assert!(out.exists());
     }
 }
