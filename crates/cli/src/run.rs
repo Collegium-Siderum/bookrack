@@ -219,9 +219,16 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     Ok(())
 }
 
+/// File name of the session-scoped lock under the runtime directory.
+/// Exposed so siblings (e.g. `bookrack exec`) discover the active
+/// session through the same path the daemon writes.
+pub(crate) fn tty_lock_name() -> &'static str {
+    TTY_LOCK_NAME
+}
+
 /// Resolve the runtime directory. Precedence: explicit override, then
 /// [`RUNTIME_DIR_ENV`], then platform default.
-fn resolve_runtime_dir(override_path: Option<&Path>) -> Result<PathBuf> {
+pub(crate) fn resolve_runtime_dir(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = override_path {
         return Ok(p.to_path_buf());
     }

@@ -13,6 +13,7 @@
 
 mod doctor;
 mod dryrun;
+mod exec;
 mod init;
 mod remove;
 mod render;
@@ -277,6 +278,20 @@ enum Command {
         /// `BOOKRACK_RUNTIME_DIR` or the platform default.
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
+    },
+    /// Discover the running bookrack session and probe its MCP
+    /// surface. Subcommands:
+    ///   `info` (default)  — print the session pid + MCP address.
+    ///   `tools`           — list the MCP tool names this server
+    ///                       exposes today.
+    /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to find the
+    /// session; never opens a database, never makes an HTTP call.
+    /// The full MCP HTTP client (so `bookrack exec library.search
+    /// '{...}'` actually dispatches) lands in a follow-up.
+    Exec {
+        /// Subcommand and its positional arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Drop a book from every store — intake row, opaque envelope,
     /// corpus partition, vectors partition, and the cascaded catalog
@@ -760,6 +775,15 @@ async fn run() -> Result<()> {
         .await;
     }
 
+    // `exec` is the discovery surface for an already-running daemon.
+    // It must NOT open a database — the "no DB handle outside the
+    // scheduler" invariant is what gives the daemon-REPL session its
+    // single-writer guarantee — so it dispatches before Config::resolve
+    // as well.
+    if let Command::Exec { args } = &cli.command {
+        return exec::run(args, None);
+    }
+
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
@@ -914,6 +938,7 @@ async fn run() -> Result<()> {
         Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
         Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
         Command::Run { .. } => unreachable!("Run is dispatched before Config::resolve"),
+        Command::Exec { .. } => unreachable!("Exec is dispatched before Config::resolve"),
     }
 }
 
