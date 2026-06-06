@@ -20,15 +20,13 @@
 mod filename;
 mod publishers;
 mod report;
-mod rules;
 mod signals;
 
-pub use bookrack_audit_profile::AuditProfile;
+pub use bookrack_audit_profile::{AuditData, AuditProfile, DataLoadError as AuditDataLoadError};
 pub use filename::{FilenameBiblio, parse as parse_filename};
 pub use report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
 };
-pub use rules::{AuditRules, LoadError as RulesLoadError};
 pub use signals::{is_valid_isbn, looks_like_timestamp};
 
 /// Run the audit over one prepared input set under the given profile.

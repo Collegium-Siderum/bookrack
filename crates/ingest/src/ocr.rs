@@ -326,7 +326,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         &structure.toc_stats,
         pdf_stem,
         filename_biblio.as_ref(),
-        &params.audit_rules,
+        &params.audit_data,
         &params.audit_profile,
         &run_id,
         &source_sha_ocr,

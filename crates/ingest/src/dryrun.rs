@@ -30,12 +30,8 @@ use crate::{
     StructureParams, body_sample, build_base_attrs, ingest_structure, plan_book_chunks,
 };
 
-/// Extensions the dryrun walker picks up under a directory.
-pub const SUPPORTED_EXTENSIONS: &[&str] =
-    &["epub", "pdf", "txt", "html", "htm", "mobi", "azw3", "djvu"];
-
 /// Knobs for one dryrun.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DryrunParams {
     /// STRUCTURE tuning.
     pub structure: StructureParams,
@@ -44,14 +40,27 @@ pub struct DryrunParams {
     /// When true, the CHUNK step is skipped and `chunks` stays `None` in
     /// every book report. Useful if a caller only needs the audit verdict.
     pub skip_chunks: bool,
-    /// Runtime-loaded rule set the metadata audit consults. Defaults
-    /// to an empty set; load real rules from
-    /// `Config::audit_rules_dir()` and assign.
-    pub audit_rules: bookrack_metadata::AuditRules,
+    /// Runtime-loaded data set the metadata audit consults. Defaults
+    /// to [`bookrack_metadata::AuditData::default_data`]; load the
+    /// runtime overlay from `Config::audit_rules_dir()` for
+    /// operator-curated lists.
+    pub audit_data: bookrack_metadata::AuditData,
     /// Active audit profile. Drives the toggle and threshold reads in
     /// the EPUB / TXT half-rules, the filename parser, and the
     /// downstream audit. Defaults to the shipped profile.
     pub audit_profile: bookrack_metadata::AuditProfile,
+}
+
+impl Default for DryrunParams {
+    fn default() -> DryrunParams {
+        DryrunParams {
+            structure: StructureParams::default(),
+            chunk: ChunkParams::default(),
+            skip_chunks: false,
+            audit_data: bookrack_metadata::AuditData::default_data(),
+            audit_profile: bookrack_metadata::AuditProfile::default(),
+        }
+    }
 }
 
 /// One book's dryrun outcome.
@@ -295,9 +304,11 @@ pub struct DryrunSummary {
 }
 
 /// Walk a path, dryrun every supported file under it, and accumulate a
-/// summary. `path` may be a single file or a directory.
+/// summary. `path` may be a single file or a directory. The accepted
+/// extension list is sourced from
+/// [`bookrack_audit_profile::AuditData::book_extensions`].
 pub fn dryrun_path(path: &Path, params: &DryrunParams) -> Vec<DryrunBookReport> {
-    let files = collect_files(path);
+    let files = collect_files(path, &params.audit_data.book_extensions);
     files.iter().map(|p| dryrun_book(p, params)).collect()
 }
 
@@ -465,7 +476,7 @@ fn run_pipeline(
             body_sample: &body,
             total_blocks: extraction.blocks.len(),
             source_stem: Some(stem),
-            rules: &params.audit_rules,
+            data: &params.audit_data,
         },
         &params.audit_profile,
     );
@@ -506,34 +517,35 @@ fn run_pipeline(
     Ok(())
 }
 
-/// Recursively collect every file under `path` whose extension matches one
-/// of [`SUPPORTED_EXTENSIONS`]. A single-file `path` returns that file
-/// when the extension matches and an empty list otherwise.
-pub fn collect_files(path: &Path) -> Vec<PathBuf> {
-    fn matches(p: &Path) -> bool {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
-            .unwrap_or(false)
+/// Recursively collect every file under `path` whose extension is in
+/// `extensions` (case-insensitive). A single-file `path` returns that
+/// file when its extension matches and an empty list otherwise.
+pub fn collect_files(path: &Path, extensions: &[String]) -> Vec<PathBuf> {
+    fn matches(p: &Path, extensions: &[String]) -> bool {
+        let Some(ext) = p.extension().and_then(|e| e.to_str()) else {
+            return false;
+        };
+        let lower = ext.to_ascii_lowercase();
+        extensions.iter().any(|e| e.eq_ignore_ascii_case(&lower))
     }
-    fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+    fn visit(dir: &Path, out: &mut Vec<PathBuf>, extensions: &[String]) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                visit(&p, out);
-            } else if matches(&p) {
+                visit(&p, out, extensions);
+            } else if matches(&p, extensions) {
                 out.push(p);
             }
         }
     }
     let mut out = Vec::new();
     if path.is_dir() {
-        visit(path, &mut out);
+        visit(path, &mut out, extensions);
         out.sort();
-    } else if matches(path) {
+    } else if matches(path, extensions) {
         out.push(path.to_path_buf());
     }
     out

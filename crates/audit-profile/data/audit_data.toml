@@ -1,0 +1,68 @@
+# Default audit data shipped with bookrack.
+#
+# Schema-locked data lists the metadata audit, the diagnose scrubber,
+# and the ingest dryrun walker consult at evaluation time. This file
+# replaces the older `publishers.toml` / `watermarks.toml` split: every
+# list lives here, in one schema.
+#
+# A runtime overlay at `<data_root>/audit-rules/audit_data.toml` is
+# merged on top: any field present there REPLACES the default,
+# missing fields fall through to the value declared here. Operators who
+# want to add to a shipped default list copy it across in full and edit
+# in place.
+#
+# This file is loaded through `include_str!` at build time. Do not
+# remove fields; downstream code reads every key.
+
+schema_version = 1
+
+[publishers]
+# Reputable-imprint whitelist; matches strengthen the publisher field's
+# grade after the abbreviation pass normalises both sides. The shipped
+# default ships empty — operators curate the list for their corpus.
+whitelist = []
+
+[watermarks]
+# Closed-form substrings the publisher-shape sniffer treats as
+# distribution-watermark giveaways. Substring match, case-insensitive.
+url_substrings = ["http://", "https://", "www.", ".com", ".net", ".org", ".cn"]
+email_substrings = ["@"]
+# Operator-curated token lists for handles, promo verbs, brand handles,
+# and CJK fragments that occupy a publisher field as watermark text.
+# Empty by default — every list is opt-in.
+contact_tokens = []
+promo_tokens = []
+ascii_distribution_tokens = []
+cjk_tokens = []
+
+[abbreviations]
+# Expansion rules applied to both sides of the whitelist comparison.
+# Each key is one whitespace-bounded token in the normalised publisher
+# value; the value is the substituted token. Gated by the audit
+# profile's `publisher.whitelist_normalize_abbreviations` toggle.
+univ = "university"
+publ = "publishing"
+pub  = "publishing"
+co   = "company"
+intl = "international"
+
+[title]
+# Case-insensitive placeholder-title words. A trimmed title whose
+# alphanumeric core matches any entry is flagged as a placeholder.
+placeholder_words = ["unknown", "untitled", "no title", "anonymous", "n a", "na"]
+# Suffix tokens that mark a trailing bracketed segment as a volume /
+# edition / printing marker rather than a series name. Matches by
+# `ends_with` against the trimmed bracketed content. Empty by default —
+# the bracketed classifier then routes through series / marketing /
+# aggregator branches only. Typical CJK entries cover the volume,
+# edition, and printing suffix characters at U+518C / U+7248 / U+672C;
+# the Japanese volume suffix sits at U+5DFB.
+volume_suffix_tokens = []
+
+[io]
+# Extensions the ingest dryrun walker picks up under a directory.
+book_extensions = ["epub", "pdf", "txt", "html", "htm", "mobi", "azw3", "djvu"]
+# Extensions whose basenames the diagnose scrubber hashes for redaction.
+# Narrower than `book_extensions`: text-y siblings (txt / html / htm)
+# usually carry pipeline state worth keeping legible.
+scrub_book_extensions = ["pdf", "epub", "djvu", "mobi", "md", "azw3"]

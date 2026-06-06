@@ -33,7 +33,8 @@ pub fn run(
     no_chunk: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let files = collect_files(path);
+    let audit_data = crate::load_audit_data(cfg);
+    let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
         anyhow::bail!("no supported files found under {}", path.display());
     }
@@ -45,7 +46,7 @@ pub fn run(
 
     let params = DryrunParams {
         skip_chunks: no_chunk,
-        audit_rules: crate::load_audit_rules(cfg),
+        audit_data,
         audit_profile: crate::load_audit_profile(cfg, profile_name),
         ..Default::default()
     };

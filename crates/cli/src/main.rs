@@ -27,7 +27,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::ocr::{OcrIngestParams, ingest_ocr_intake};
 use bookrack_ingest::{IngestParams, ingest_book, resume_from_chunk};
-use bookrack_metadata::AuditRules;
+use bookrack_metadata::AuditData;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::{Caller, Ops, OpsError, SearchOptions, reads};
@@ -1732,16 +1732,20 @@ fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> 
     .context("build embedding client")
 }
 
-/// Load the metadata audit's runtime rule set from
+/// Load the metadata audit's runtime data set from
 /// `cfg.audit_rules_dir()`. A missing directory or malformed file is
-/// logged and yields an empty set; the audit then treats every value
-/// as neutral.
-pub(crate) fn load_audit_rules(cfg: &Config) -> AuditRules {
-    match AuditRules::load_from(&cfg.audit_rules_dir()) {
-        Ok(rules) => rules,
+/// logged and the shipped default is returned, so the audit still
+/// runs against the in-repo URL / abbreviation / placeholder / extension
+/// defaults; only the operator-curated token lists fall back to empty.
+pub(crate) fn load_audit_data(cfg: &Config) -> AuditData {
+    match AuditData::load_from(&cfg.audit_rules_dir()) {
+        Ok(data) => data,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to load audit rules; using empty set");
-            AuditRules::empty()
+            tracing::warn!(
+                error = %e,
+                "failed to load audit data overlay; using shipped default",
+            );
+            AuditData::default_data()
         }
     }
 }
@@ -1789,13 +1793,13 @@ async fn run_ingest(
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
-    let audit_rules = load_audit_rules(cfg);
+    let audit_data = load_audit_data(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
     let params = IngestParams {
         embed: embed_cfg,
         hold_for_metadata,
         force,
-        audit_rules,
+        audit_data,
         audit_profile,
         ..Default::default()
     };
@@ -1975,11 +1979,11 @@ async fn run_intake_ocr(
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let embedder = embedder(cfg, &embed_cfg)?;
-    let audit_rules = load_audit_rules(cfg);
+    let audit_data = load_audit_data(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
     let params = IngestParams {
         embed: embed_cfg,
-        audit_rules,
+        audit_data,
         audit_profile,
         ..Default::default()
     };

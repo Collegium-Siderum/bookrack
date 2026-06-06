@@ -28,8 +28,7 @@ pub use bookrack_corpus::IndexStamps;
 pub use chunk::{CHUNK_VERSION, ChunkParams, ChunkPlan};
 pub use dryrun::{
     BiblioOut, ChunkStatsOut, DryrunBookReport, DryrunParams, DryrunSummary, FieldOut,
-    SUPPORTED_EXTENSIONS, StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path,
-    summarize,
+    StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
 };
 pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
 pub use envelope::{
@@ -272,7 +271,7 @@ pub fn plan_book_chunks(
 
 /// Tuning for one [`ingest_book`] run: the STRUCTURE, CHUNK, and EMBED
 /// knobs, gathered so a caller passes one value.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IngestParams {
     /// STRUCTURE tuning.
     pub structure: StructureParams,
@@ -285,10 +284,11 @@ pub struct IngestParams {
     /// caller resumes the run later with [`resume_from_chunk`].
     /// Off by default: the audit is purely advisory.
     pub hold_for_metadata: bool,
-    /// Runtime-loaded rule set the metadata audit consults. Defaults
-    /// to an empty set; load real rules from
-    /// `Config::audit_rules_dir()` and assign.
-    pub audit_rules: bookrack_metadata::AuditRules,
+    /// Runtime-loaded data set the metadata audit consults. Defaults
+    /// to [`bookrack_metadata::AuditData::default_data`]; load the
+    /// runtime overlay from `Config::audit_rules_dir()` and assign for
+    /// operator-curated lists.
+    pub audit_data: bookrack_metadata::AuditData,
     /// Active audit profile. Drives the toggle and threshold reads in
     /// the EPUB / TXT half-rules, the filename parser, and the
     /// downstream audit. Defaults to the shipped profile so an
@@ -300,6 +300,20 @@ pub struct IngestParams {
     /// Off by default — a re-ingest of an up-to-date source returns a
     /// no-op report instead of re-extracting and re-embedding.
     pub force: bool,
+}
+
+impl Default for IngestParams {
+    fn default() -> IngestParams {
+        IngestParams {
+            structure: StructureParams::default(),
+            chunk: ChunkParams::default(),
+            embed: EmbedConfig::default(),
+            hold_for_metadata: false,
+            audit_data: bookrack_metadata::AuditData::default_data(),
+            audit_profile: bookrack_metadata::AuditProfile::default(),
+            force: false,
+        }
+    }
 }
 
 /// What one [`ingest_book`] run produced.
@@ -566,7 +580,7 @@ pub async fn ingest_book<E: Embedder>(
         &structure.toc_stats,
         source_stem,
         filename_biblio.as_ref(),
-        &params.audit_rules,
+        &params.audit_data,
         &params.audit_profile,
         &run_id,
         &source_sha,
@@ -890,7 +904,7 @@ pub(crate) fn run_metadata_substep(
     toc_stats: &TocStats,
     source_stem: Option<&str>,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
-    audit_rules: &bookrack_metadata::AuditRules,
+    audit_data: &bookrack_metadata::AuditData,
     audit_profile: &bookrack_metadata::AuditProfile,
     run_id: &str,
     source_sha: &str,
@@ -983,7 +997,7 @@ pub(crate) fn run_metadata_substep(
         body_sample: &body_sample,
         total_blocks: extraction.blocks.len(),
         source_stem,
-        rules: audit_rules,
+        data: audit_data,
     };
     let report = bookrack_metadata::audit(&input, audit_profile);
 
@@ -2251,7 +2265,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some("a-complete-book"),
             None,
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
@@ -2319,7 +2333,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some("a-complete-book"),
             None,
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::trust_source(),
             "run-1",
             "dummy-sha",
@@ -2393,7 +2407,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
@@ -2457,7 +2471,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
@@ -2520,7 +2534,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
@@ -2582,7 +2596,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",
@@ -2642,7 +2656,7 @@ mod book_pipeline_tests {
             &TocStats::default(),
             Some(stem),
             Some(&filename_biblio),
-            &bookrack_metadata::AuditRules::empty(),
+            &bookrack_metadata::AuditData::empty(),
             &bookrack_metadata::AuditProfile::default(),
             "run-1",
             "dummy-sha",

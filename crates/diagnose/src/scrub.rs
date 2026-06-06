@@ -38,6 +38,7 @@ pub struct Scrubber {
     enabled: bool,
     data_dir_str: Option<String>,
     home_dir_str: Option<String>,
+    book_extensions: Vec<String>,
 }
 
 impl Scrubber {
@@ -45,11 +46,22 @@ impl Scrubber {
     /// configured BOOKRACK_DATA_DIR; `home_dir_path` is `$HOME` (or
     /// platform equivalent). Either may be `None` if the host did not
     /// expose one — the scrubber simply skips that substitution.
-    pub fn new(data_dir_path: Option<&Path>, home_dir_path: Option<&Path>) -> Scrubber {
+    ///
+    /// `book_extensions` is the list of basename extensions hashed by
+    /// rule 4. Sourced from
+    /// [`bookrack_audit_profile::AuditData::scrub_book_extensions`] so
+    /// an operator broadens or narrows the redaction set without
+    /// recompiling.
+    pub fn new(
+        data_dir_path: Option<&Path>,
+        home_dir_path: Option<&Path>,
+        book_extensions: Vec<String>,
+    ) -> Scrubber {
         Scrubber {
             enabled: true,
             data_dir_str: data_dir_path.map(|p| p.to_string_lossy().into_owned()),
             home_dir_str: home_dir_path.map(|p| p.to_string_lossy().into_owned()),
+            book_extensions,
         }
     }
 
@@ -60,6 +72,7 @@ impl Scrubber {
             enabled: false,
             data_dir_str: None,
             home_dir_str: None,
+            book_extensions: Vec::new(),
         }
     }
 
@@ -91,7 +104,7 @@ impl Scrubber {
         // cannot ride through inside a path string. Runs after the
         // prefix rules so the basename scan only fires on already-
         // shortened paths and never on a raw `/Volumes/<seg>/…` form.
-        out = hash_book_basenames(&out);
+        out = hash_book_basenames(&out, &self.book_extensions);
         // Rule 5: CJK hashing, last so it operates on what remains.
         out = hash_cjk_runs(&out);
         out
@@ -128,14 +141,6 @@ pub const VOL_PLACEHOLDER: &str = "<VOL>";
 /// it fires regardless of `$HOME`, catching user paths that ended up
 /// in logs from outside this process.
 pub const USER_PLACEHOLDER: &str = "<USER>";
-
-/// Path basenames with one of these extensions are hashed by rule 4.
-/// Extensions are matched case-insensitively. The list deliberately
-/// only covers book containers, not arbitrary file types: a `.json`
-/// or `.log` basename almost always describes pipeline state worth
-/// keeping legible for triage, while a `.pdf` / `.epub` / `.djvu`
-/// basename is almost always a private book title.
-const BOOK_EXTENSIONS: &[&str] = &["pdf", "epub", "djvu", "mobi", "md", "azw3"];
 
 /// Scan `input` for known OS path prefixes and replace each match with
 /// its placeholder. Pure function, deterministic.
@@ -243,16 +248,18 @@ fn next_char_len(s: &str) -> usize {
     s.chars().next().map(char::len_utf8).unwrap_or(1)
 }
 
-/// Hash any path basename whose extension is in [`BOOK_EXTENSIONS`].
+/// Hash any path basename whose extension is in `book_extensions`.
 /// The extension is preserved for triage value; the stem is replaced
 /// with a 12-hex-char sha256 prefix wrapped in `<file:…>`. A
 /// basename without a path separator before it is also matched.
-fn hash_book_basenames(input: &str) -> String {
+fn hash_book_basenames(input: &str, book_extensions: &[String]) -> String {
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        if let Some((basename_start, basename_end, ext)) = match_book_basename(bytes, i) {
+        if let Some((basename_start, basename_end, ext)) =
+            match_book_basename(bytes, i, book_extensions)
+        {
             out.push_str(&input[i..basename_start]);
             // SAFETY: basename_start..basename_end is ASCII-bounded by
             // the path separator scan; the slice is still valid UTF-8.
@@ -262,7 +269,7 @@ fn hash_book_basenames(input: &str) -> String {
             out.push_str(&sha8(stem));
             out.push('>');
             out.push('.');
-            out.push_str(ext);
+            out.push_str(&ext);
             i = basename_end;
         } else {
             let ch_len = next_char_len(&input[i..]);
@@ -274,11 +281,15 @@ fn hash_book_basenames(input: &str) -> String {
 }
 
 /// Look for a `<basename>.<ext>` span starting at `cursor` where
-/// `<ext>` is one of [`BOOK_EXTENSIONS`] (case-insensitive). The
+/// `<ext>` is one of `book_extensions` (case-insensitive). The
 /// basename must be preceded by a path separator (`/` or `\`) or by
 /// the start of the input. Returns `(basename_start, basename_end,
 /// canonical_lowercase_ext)`.
-fn match_book_basename(bytes: &[u8], cursor: usize) -> Option<(usize, usize, &'static str)> {
+fn match_book_basename(
+    bytes: &[u8],
+    cursor: usize,
+    book_extensions: &[String],
+) -> Option<(usize, usize, String)> {
     // Anchor: the cursor sits either at position 0 or right after a
     // path separator. Anywhere else, this is not a basename boundary.
     if cursor != 0 {
@@ -309,9 +320,9 @@ fn match_book_basename(bytes: &[u8], cursor: usize) -> Option<(usize, usize, &'s
         return None;
     }
     let raw_ext = &basename[dot + 1..];
-    for &candidate in BOOK_EXTENSIONS {
+    for candidate in book_extensions {
         if raw_ext.eq_ignore_ascii_case(candidate.as_bytes()) {
-            return Some((cursor, end, candidate));
+            return Some((cursor, end, candidate.to_ascii_lowercase()));
         }
     }
     None
@@ -391,6 +402,7 @@ mod tests {
         Scrubber::new(
             Some(&PathBuf::from(FAKE_DATA_DIR)),
             Some(&PathBuf::from(FAKE_HOME_DIR)),
+            bookrack_audit_profile::AuditData::default_data().scrub_book_extensions,
         )
     }
 

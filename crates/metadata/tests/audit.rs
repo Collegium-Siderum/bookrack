@@ -8,39 +8,40 @@
 use bookrack_catalog::{Catalog, EffectiveAttrs, NewPublicationAttrs};
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
-    AuditInput, AuditProfile, AuditRules, Confidence, FieldGrade, FieldReport, Flag,
-    MetadataReport, TocStats, Verdict, audit,
+    AuditData, AuditInput, AuditProfile, Confidence, FieldGrade, FieldReport, Flag, MetadataReport,
+    TocStats, Verdict, audit,
 };
 
-/// Shared rule set the audit tests use: one whitelist entry that the
-/// "Oxford University Press" cases depend on, plus the CJK
-/// distribution-brand token the watermark test exercises.
-fn test_rules() -> &'static AuditRules {
+/// Shared data set the audit tests use: starts from the shipped
+/// default (so URL / abbreviation / placeholder / extension defaults
+/// stay in scope) and adds the whitelist entry the
+/// "Oxford University Press" cases depend on, a synthetic CJK
+/// watermark token from a fixture, and the CJK volume-suffix tokens
+/// the bracketed-title classifier exercises.
+fn test_data() -> &'static AuditData {
     use std::sync::OnceLock;
-    static RULES: OnceLock<AuditRules> = OnceLock::new();
-    RULES.get_or_init(|| AuditRules {
-        publisher_whitelist: vec!["Oxford University Press".to_string()],
-        contact_tokens: Vec::new(),
-        promo_tokens: Vec::new(),
-        ascii_distribution_tokens: Vec::new(),
+    static DATA: OnceLock<AuditData> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let mut data = AuditData::default_data();
+        data.publisher_whitelist = vec!["Oxford University Press".to_string()];
         // A synthetic CJK token loaded from a fixture. Exercises the
         // substring path in `watermark_cjk_tokens`. Real brand strings
-        // live in the operator's `watermarks.toml`, never in the
-        // source tree.
-        watermark_cjk_tokens: vec![
+        // live in the operator's `audit_data.toml`, never in source.
+        data.watermark_cjk_tokens = vec![
             include_str!("fixtures/watermarks/synthetic_cjk_token.txt")
                 .trim()
                 .to_string(),
-        ],
+        ];
         // CJK volume / edition / printing suffixes recognised by the
         // bracketed-title classifier: `\u{518C}` / `\u{7248}` /
-        // `\u{672C}`. In production these come from
-        // `volume_suffix_tokens` in the operator's `watermarks.toml`.
-        volume_suffix_tokens: vec![
+        // `\u{672C}`. In production these come from the operator's
+        // `audit_data.toml`.
+        data.volume_suffix_tokens = vec![
             "\u{518C}".to_string(),
             "\u{7248}".to_string(),
             "\u{672C}".to_string(),
-        ],
+        ];
+        data
     })
 }
 
@@ -128,7 +129,7 @@ fn epub_with_complete_record_grades_clean_and_high() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::Clean);
@@ -177,7 +178,7 @@ fn epub_year_from_timestamp_shaped_dc_date_is_downgraded() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Medium);
@@ -219,7 +220,7 @@ fn epub_year_from_a_plain_year_string_stays_strong() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -271,7 +272,7 @@ fn user_override_year_skips_the_timestamp_shape_signal() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 100,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -298,7 +299,7 @@ fn empty_record_grades_needs_work_and_low() {
         body_sample: "",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::NeedsWork);
@@ -333,7 +334,7 @@ fn title_equal_to_filename_is_flagged() {
         body_sample: "Sample English body text.",
         total_blocks: 10,
         source_stem: Some("the-source-stem"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -369,7 +370,7 @@ fn placeholder_title_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -406,7 +407,7 @@ fn invalid_isbn_checksum_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -441,7 +442,7 @@ fn year_outside_range_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "year").flags.contains(&Flag::YearOutOfRange));
@@ -472,7 +473,7 @@ fn pdf_year_is_flagged_as_likely_file_date() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -507,7 +508,7 @@ fn watermark_publisher_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -551,7 +552,7 @@ fn cjk_watermark_publisher_is_flagged() {
         body_sample: "Sample body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -590,7 +591,7 @@ fn doubtful_text_layer_downgrades_present_fields() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -631,7 +632,7 @@ fn language_disagreeing_with_body_is_flagged() {
         body_sample: body,
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -668,7 +669,7 @@ fn cjk_body_agrees_with_zh_language() {
         body_sample: body,
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -703,7 +704,7 @@ fn non_bcp47_language_is_flagged() {
         body_sample: "Some English body.",
         total_blocks: 10,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "language").flags.contains(&Flag::NonBcp47));
@@ -734,7 +735,7 @@ fn copyright_blocks_are_the_leading_indices() {
         body_sample: "Some English body.",
         total_blocks: 3,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.copyright_blocks, vec![0, 1, 2]);
@@ -782,7 +783,7 @@ fn audit_toc_shape_clean_yields_no_flags() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 50,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.is_empty());
@@ -810,7 +811,7 @@ fn audit_toc_shape_severe_pulls_verdict_and_confidence_down() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 200,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.contains(&Flag::TocUnanchoredSome));
@@ -842,7 +843,7 @@ fn audit_toc_shape_mild_caps_confidence_at_medium() {
         body_sample: "The quick brown fox jumps over the lazy dog.",
         total_blocks: 80,
         source_stem: Some("a-test-book"),
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.shape_flags, vec![Flag::TocSuspiciousFlat]);
@@ -871,7 +872,7 @@ fn audit_toc_shape_never_strengthens() {
             body_sample: "",
             total_blocks: 10,
             source_stem: None,
-            rules: test_rules(),
+            data: test_data(),
         };
         audit(&input, &AuditProfile::default())
     };
@@ -917,7 +918,7 @@ fn audit_toc_shape_never_strengthens() {
             body_sample: "",
             total_blocks: blocks,
             source_stem: None,
-            rules: test_rules(),
+            data: test_data(),
         };
         let report = audit(&input, &AuditProfile::default());
         assert_eq!(
@@ -954,7 +955,7 @@ fn audit_input_carries_no_review_status_field() {
         body_sample: "",
         total_blocks: 0,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let AuditInput {
         biblio: _,
@@ -964,7 +965,7 @@ fn audit_input_carries_no_review_status_field() {
         body_sample: _,
         total_blocks: _,
         source_stem: _,
-        rules: _,
+        data: _,
     } = input;
 }
 
@@ -993,7 +994,7 @@ fn run_with(
         body_sample,
         total_blocks: 0,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     audit(&input, profile)
 }
@@ -1194,7 +1195,7 @@ fn toggle_off_toc_shape_suppresses_empty_large_body_flag() {
         // toggle disabled this would emit Flag::TocEmptyLargeBody.
         total_blocks: 500,
         source_stem: None,
-        rules: test_rules(),
+        data: test_data(),
     };
     let report = audit(&input, &profile);
     assert!(!report.shape_flags.contains(&Flag::TocEmptyLargeBody));

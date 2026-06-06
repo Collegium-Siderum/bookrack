@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Audit profile — the toggle and threshold set the metadata audit and
-//! the upstream half-rules consult at evaluation time.
+//! Audit profile and data sets — the configuration the metadata audit,
+//! the diagnose scrubber, and the ingest dryrun walker consult at
+//! evaluation time.
 //!
-//! A profile is a flat data structure with one sub-table per audit
-//! domain (year, title, language, publisher, TOC shape, source prior,
-//! copyright block window, filename parser, extract half-rules). Every
-//! sub-table holds a small set of booleans and numeric thresholds; no
-//! list-typed data lives here (publisher whitelists and watermark
-//! token lists remain in [`bookrack_metadata::AuditRules`]).
+//! Two on-disk schemas sit side by side under `<data_root>/audit-rules/`:
+//!
+//! - [`AuditProfile`] — toggles and numeric thresholds, one sub-table
+//!   per audit domain (year, title, language, publisher, TOC shape,
+//!   source prior, copyright block window, filename parser, extract
+//!   half-rules). Reads `audit_profile.toml` plus an optional
+//!   `audit_profile.local.toml` overlay.
+//! - [`AuditData`] — runtime-loaded data lists (publisher whitelist,
+//!   watermark patterns and tokens, abbreviation expansions,
+//!   placeholder titles, book extensions). Reads `audit_data.toml`,
+//!   replacing `publishers.toml` / `watermarks.toml` from the older
+//!   layout.
 //!
 //! ## Loading
 //!
@@ -38,8 +45,12 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+mod data;
 mod load;
 
+pub use data::{
+    AuditData, DATA_OVERLAY_FILE, DATA_SCHEMA_VERSION, DEFAULT_DATA_TOML, DataLoadError,
+};
 pub use load::LoadError;
 
 /// File name of the runtime overlay, looked up under

@@ -78,7 +78,13 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
 
     let scrubber = if opts.scrub {
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        Scrubber::new(Some(cfg.data_dir()), home.as_deref())
+        let data = bookrack_audit_profile::AuditData::load_from(&cfg.audit_rules_dir())
+            .unwrap_or_else(|_| bookrack_audit_profile::AuditData::default_data());
+        Scrubber::new(
+            Some(cfg.data_dir()),
+            home.as_deref(),
+            data.scrub_book_extensions,
+        )
     } else {
         Scrubber::passthrough()
     };

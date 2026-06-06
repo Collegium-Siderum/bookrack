@@ -242,7 +242,9 @@ fn audit_title(
                 grade = FieldGrade::Missing;
                 flags.push(Flag::Empty);
             } else {
-                if profile.title.placeholder_check && is_placeholder(trimmed) {
+                if profile.title.placeholder_check
+                    && is_placeholder(trimmed, &input.data.placeholder_titles)
+                {
                     weaken(&mut grade);
                     flags.push(Flag::PlaceholderValue);
                 }
@@ -268,7 +270,7 @@ fn audit_title(
                     && let Some(sub) = classify_bracketed_segment(
                         trimmed,
                         profile.title.bracketed_min_chars,
-                        &input.rules.volume_suffix_tokens,
+                        &input.data.volume_suffix_tokens,
                     )
                 {
                     let toggle = match sub {
@@ -390,7 +392,7 @@ fn audit_publisher(
             } else {
                 match publishers::evaluate(
                     trimmed,
-                    input.rules,
+                    input.data,
                     profile.publisher.url_watermark,
                     profile.publisher.whitelist_normalize_abbreviations,
                 ) {
@@ -695,13 +697,10 @@ fn title_hint(flags: &[Flag], grade: FieldGrade) -> String {
     }
 }
 
-fn is_placeholder(value: &str) -> bool {
+fn is_placeholder(value: &str, words: &[String]) -> bool {
     let lower = value.to_lowercase();
     let stripped = lower.trim_matches(|c: char| !c.is_alphanumeric());
-    matches!(
-        stripped,
-        "unknown" | "untitled" | "no title" | "anonymous" | "n a" | "na"
-    )
+    words.iter().any(|w| w.eq_ignore_ascii_case(stripped))
 }
 
 /// Bracket subtype the title classifier resolves a leading or trailing
