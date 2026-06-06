@@ -39,6 +39,7 @@ earlier ones already happened.
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
+| `reedline`, `shlex` | none — REPL input layer only | none | open the library |
 
 ## Commands and when to use each
 
