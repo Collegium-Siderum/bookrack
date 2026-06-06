@@ -6,20 +6,23 @@
 //! acquires the machine-wide [`TtyLock`], opens the [`LibraryRegistry`]
 //! that every later subsystem routes through, mounts the MCP listener
 //! as an in-process task, and joins a coordinated shutdown channel
-//! that signal handlers, the REPL (later phase), and the queue worker
-//! (later phase) all write to.
+//! that signal handlers, the REPL, and (later phase) the queue worker
+//! all write to.
 //!
-//! This phase ships the daemon skeleton without the REPL: the
-//! foreground task is an `await` on the shutdown channel, so the
-//! process stays alive until one of the signal handlers (or a future
-//! REPL `exit`) flips it. The structure is the final one — only the
-//! foreground task gets swapped for a real reedline loop later.
+//! The foreground task is the [`repl_loop`] on `spawn_blocking`:
+//! reedline is synchronous, so we keep it off the async runtime and
+//! let the underlying OS thread own stdin. The loop reads a line,
+//! routes built-in commands directly (`exit`, `use`, `status`, ...),
+//! and falls back to `Cli::try_parse_from` for grammar validation;
+//! external-subcommand dispatch wires through in phase 5.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use bookrack_catalog::Catalog;
@@ -31,7 +34,13 @@ use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
+use clap::CommandFactory;
+use clap::Parser;
 use fs2::FileExt;
+use reedline::{
+    FileBackedHistory, History, Prompt, PromptEditMode, PromptHistorySearch,
+    PromptHistorySearchStatus, Reedline, Signal,
+};
 use tokio::sync::broadcast;
 
 /// Environment variable naming the session runtime directory (lock
@@ -165,23 +174,47 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         }
     };
 
-    // Phase 2 foreground task: idle until shutdown. Phase 3 replaces
-    // this with the reedline REPL on a `spawn_blocking` thread.
+    // Foreground task: reedline REPL on a `spawn_blocking` thread. The
+    // synchronous read_line blocks an OS thread — keeping it off the
+    // async runtime is critical (a parked async task would starve the
+    // signal listener and the MCP server).
+    let mcp_label_for_repl = mcp_label.clone();
+    let lock_path_for_repl = lock_path.clone();
+    let runtime_dir_for_repl = runtime_dir.clone();
+    let registry_for_repl = Arc::clone(&registry);
+    let shutdown_tx_for_repl = shutdown_tx.clone();
+    let started_at = Instant::now();
+    let repl_handle = tokio::task::spawn_blocking(move || {
+        repl_loop(
+            registry_for_repl,
+            shutdown_tx_for_repl,
+            runtime_dir_for_repl,
+            lock_path_for_repl,
+            mcp_label_for_repl,
+            started_at,
+        )
+    });
+
+    // Wait for any subscriber to signal shutdown — the REPL on
+    // `exit` / `Ctrl-D`, the signal listener on SIGINT / SIGTERM /
+    // SIGHUP, or the MCP task if it bails out on its own.
     let mut foreground_rx = shutdown_tx.subscribe();
     let _ = foreground_rx.recv().await;
     tracing::info!("shutdown signalled, joining session tasks");
 
     if let Some(handle) = mcp_handle {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::warn!(error = %err, "MCP task returned error"),
-            Err(err) => tracing::warn!(error = %err, "MCP task join failed"),
+        match tokio::time::timeout(Duration::from_secs(3), handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => tracing::warn!(error = %err, "MCP task returned error"),
+            Ok(Err(err)) => tracing::warn!(error = %err, "MCP task join failed"),
+            Err(_) => tracing::warn!("MCP task did not exit within 3s; abandoning"),
         }
     }
-    // Signal listener has already fired (it sent shutdown) or never
-    // will (e.g. process being torn down by the REPL in phase 3);
-    // either way an abort is the right cleanup.
     signal_handle.abort();
+    // REPL thread may still be blocked on read_line if shutdown came
+    // from a signal — abort the join handle (the OS thread is reaped
+    // on process exit) and don't wait for it.
+    repl_handle.abort();
 
     Ok(())
 }
@@ -328,6 +361,319 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// REPL surface
+// ---------------------------------------------------------------------------
+
+const HISTORY_FILE: &str = ".bookrack-history";
+const HISTORY_CAPACITY: usize = 1000;
+
+/// Reedline [`Prompt`] backed by the live registry: the prompt label
+/// reads the current default-library name on every render, so a
+/// `use <lib>` change is visible on the next prompt line without any
+/// repaint plumbing.
+struct BookrackPrompt {
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+}
+
+impl Prompt for BookrackPrompt {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        let name = self
+            .registry
+            .default_name()
+            .unwrap_or_else(|_| "?".to_string());
+        Cow::Owned(format!("bookrack:{name}"))
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _prompt_mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("› ")
+    }
+
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed(":: ")
+    }
+
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: PromptHistorySearch,
+    ) -> Cow<'_, str> {
+        let prefix = match history_search.status {
+            PromptHistorySearchStatus::Passing => "",
+            PromptHistorySearchStatus::Failing => "failing ",
+        };
+        Cow::Owned(format!(
+            "({prefix}reverse-i-search: '{}') ",
+            history_search.term
+        ))
+    }
+}
+
+/// What the REPL should do after evaluating one input line.
+#[derive(Debug, PartialEq, Eq)]
+enum ReplOutcome {
+    /// Stay in the REPL, render the prompt again.
+    Continue,
+    /// Leave the REPL — the user typed `exit` / `quit`. The caller
+    /// signals shutdown on the shared broadcast.
+    Exit,
+}
+
+/// The REPL main loop.
+///
+/// Runs synchronously on a [`tokio::task::spawn_blocking`] worker so
+/// reedline's blocking stdin reads never park the async runtime.
+fn repl_loop(
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+    shutdown_tx: broadcast::Sender<()>,
+    runtime_dir: PathBuf,
+    lock_path: PathBuf,
+    mcp_label: String,
+    started_at: Instant,
+) -> Result<()> {
+    let history_path = runtime_dir.join(HISTORY_FILE);
+    let history: Box<dyn History> = match FileBackedHistory::with_file(
+        HISTORY_CAPACITY,
+        history_path.clone(),
+    ) {
+        Ok(h) => Box::new(h),
+        Err(err) => {
+            eprintln!(
+                "bookrack: history file {} unavailable ({err}); session running without history",
+                history_path.display()
+            );
+            Box::<FileBackedHistory>::default()
+        }
+    };
+    let mut editor = Reedline::create().with_history(history);
+    let prompt = BookrackPrompt {
+        registry: Arc::clone(&registry),
+    };
+    let mut shutdown_rx = shutdown_tx.subscribe();
+
+    print_startup_banner(&registry, &lock_path, &mcp_label);
+
+    loop {
+        // Drain a shutdown that arrived while the previous command was
+        // running, before we block on read_line again.
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+        match editor.read_line(&prompt) {
+            Ok(Signal::Success(line)) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match handle_line(trimmed, &registry, &lock_path, &mcp_label, started_at) {
+                    ReplOutcome::Continue => {}
+                    ReplOutcome::Exit => {
+                        let _ = shutdown_tx.send(());
+                        break;
+                    }
+                }
+            }
+            Ok(Signal::CtrlD) => {
+                println!();
+                let _ = shutdown_tx.send(());
+                break;
+            }
+            Ok(Signal::CtrlC) => {
+                println!("^C  (type `exit` or Ctrl-D to leave)");
+                continue;
+            }
+            Ok(_) => continue,
+            Err(err) => {
+                eprintln!("bookrack: REPL read_line error: {err}");
+                let _ = shutdown_tx.send(());
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Print the session header — version, registered libraries, MCP
+/// listener address, lock path. Called once before the REPL takes
+/// over stdin; afterwards the lines scroll up into the terminal
+/// scrollback naturally.
+fn print_startup_banner(
+    registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
+    lock_path: &Path,
+    mcp_label: &str,
+) {
+    let version = env!("CARGO_PKG_VERSION");
+    let libs = registry.list().unwrap_or_default();
+    let lib_line = libs
+        .iter()
+        .map(|s| {
+            if s.is_default {
+                format!("{} (default)", s.name)
+            } else {
+                s.name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    println!("╭──────────────────────────────────────────────────────────────╮");
+    println!("│  bookrack v{version}");
+    println!("│  libraries: {lib_line}");
+    println!("│  MCP        {mcp_label}");
+    println!("│  lock       {}", lock_path.display());
+    println!("╰──────────────────────────────────────────────────────────────╯");
+    println!(" Type `help` for commands, `exit` or Ctrl-D to leave.");
+    println!();
+}
+
+/// Evaluate one tokenised input line. Built-in commands (`exit`,
+/// `help`, `status`, `libs`, `use`) execute directly; anything else
+/// is fed through `Cli::try_parse_from` so the user sees the
+/// grammar's actual error messages and discovers structure via
+/// `--help` — even though external-subcommand dispatch from the REPL
+/// is not wired until phase 5.
+fn handle_line(
+    line: &str,
+    registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
+    lock_path: &Path,
+    mcp_label: &str,
+    started_at: Instant,
+) -> ReplOutcome {
+    let tokens = match shlex::split(line) {
+        Some(tokens) if !tokens.is_empty() => tokens,
+        Some(_) => return ReplOutcome::Continue,
+        None => {
+            eprintln!("bookrack: cannot parse input (unclosed quote?)");
+            return ReplOutcome::Continue;
+        }
+    };
+
+    let head = tokens[0].clone();
+    match head.as_str() {
+        "exit" | "quit" => return ReplOutcome::Exit,
+        "help" => {
+            print_repl_help();
+            return ReplOutcome::Continue;
+        }
+        "status" => {
+            print_status(registry, lock_path, mcp_label, started_at);
+            return ReplOutcome::Continue;
+        }
+        "libs" => {
+            print_libraries(registry);
+            return ReplOutcome::Continue;
+        }
+        "use" => {
+            handle_use(registry, &tokens);
+            return ReplOutcome::Continue;
+        }
+        _ => {}
+    }
+
+    // Not a built-in. Validate the grammar via the same clap parser
+    // the binary uses; execution is parked until phase 5.
+    let argv: Vec<String> = std::iter::once("bookrack".to_string())
+        .chain(tokens)
+        .collect();
+    match crate::Cli::try_parse_from(&argv) {
+        Ok(_) => {
+            println!(
+                "bookrack: REPL dispatch for `{head}` is not yet wired; \
+                 run `bookrack {head} ...` from another terminal until phase 5 lands."
+            );
+        }
+        Err(err) => {
+            let _ = err.print();
+        }
+    }
+    ReplOutcome::Continue
+}
+
+fn handle_use(registry: &Arc<LibraryRegistry<OllamaEmbedClient>>, tokens: &[String]) {
+    if tokens.len() != 2 {
+        eprintln!("bookrack: usage: use <library>");
+        return;
+    }
+    let name = &tokens[1];
+    match registry.set_default(name) {
+        Ok(()) => println!("default → {name}"),
+        Err(err) => eprintln!("bookrack: {err}"),
+    }
+}
+
+fn print_repl_help() {
+    println!("Built-in commands:");
+    println!("  exit, quit       Leave the bookrack session");
+    println!("  help             Show this help");
+    println!("  status           Show session pid, uptime, libraries, MCP address");
+    println!("  libs             List all registered libraries");
+    println!("  use <lib>        Switch the default library");
+    println!();
+    println!("Other subcommands are parsed against the bookrack CLI grammar;");
+    println!("execution from the REPL is wired in a later phase.");
+    println!();
+    let mut cmd = crate::Cli::command();
+    let _ = cmd.print_long_help();
+    println!();
+}
+
+fn print_status(
+    registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
+    lock_path: &Path,
+    mcp_label: &str,
+    started_at: Instant,
+) {
+    let pid = std::process::id();
+    let uptime = format_uptime(started_at.elapsed());
+    let default = registry.default_name().unwrap_or_else(|_| "?".to_string());
+
+    println!("session   pid={pid}  uptime={uptime}");
+    println!("lock      {}", lock_path.display());
+    println!("mcp       {mcp_label}");
+    println!("default   {default}");
+    print!("libraries");
+    match registry.list() {
+        Ok(libs) => {
+            for s in &libs {
+                let marker = if s.is_default { "*" } else { " " };
+                print!("  {marker}{}", s.name);
+            }
+            println!();
+        }
+        Err(err) => {
+            println!();
+            eprintln!("bookrack: list libraries: {err}");
+        }
+    }
+}
+
+fn print_libraries(registry: &Arc<LibraryRegistry<OllamaEmbedClient>>) {
+    match registry.list() {
+        Ok(libs) => {
+            for s in libs {
+                let marker = if s.is_default { "*" } else { " " };
+                let dim = match s.dimension {
+                    Some(d) => format!("  dim {d}"),
+                    None => String::new(),
+                };
+                println!(" {marker} {}{dim}", s.name);
+            }
+        }
+        Err(err) => eprintln!("bookrack: {err}"),
+    }
+}
+
+fn format_uptime(d: Duration) -> String {
+    let secs = d.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +734,18 @@ mod tests {
     fn resolve_runtime_dir_prefers_explicit_override() {
         let path = PathBuf::from("/tmp/bookrack-test-override");
         assert_eq!(resolve_runtime_dir(Some(&path)).unwrap(), path);
+    }
+
+    #[test]
+    fn format_uptime_renders_hours_minutes_seconds() {
+        assert_eq!(format_uptime(Duration::from_secs(0)), "00:00:00");
+        assert_eq!(format_uptime(Duration::from_secs(59)), "00:00:59");
+        assert_eq!(format_uptime(Duration::from_secs(60)), "00:01:00");
+        assert_eq!(format_uptime(Duration::from_secs(3_600)), "01:00:00");
+        assert_eq!(format_uptime(Duration::from_secs(3_725)), "01:02:05");
+        assert_eq!(
+            format_uptime(Duration::from_secs(36 * 3_600 + 17 * 60 + 9)),
+            "36:17:09"
+        );
     }
 }
