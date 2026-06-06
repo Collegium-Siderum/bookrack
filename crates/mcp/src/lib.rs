@@ -3,10 +3,12 @@
 //! bookrack MCP server: exposes the shared ops layer to agent clients
 //! over streamable HTTP.
 //!
-//! The server is a thin shell. It holds one warm [`Ops`] behind an `Arc`
-//! and maps each tool call onto an `ops::*` function; it depends only on
-//! `bookrack-ops`, never on the database crates behind it, so a schema
-//! change downstream leaves this crate untouched.
+//! The server is a thin shell. It holds the warm [`LibraryRegistry`]
+//! behind an `Arc` and routes every tool call through it — the
+//! tool's `library` selector picks the target handle, or falls back
+//! to the registry's current default when absent. The crate depends
+//! only on `bookrack-ops`, never on the database crates behind it, so
+//! a schema change downstream leaves it untouched.
 
 use std::sync::Arc;
 
@@ -14,8 +16,8 @@ use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::LibraryRegistry;
-use bookrack_ops::{Ops, OpsError, SearchOptions, reads, writes};
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::{OpsError, SearchOptions, reads, writes};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -25,9 +27,6 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-
-/// The warm ops state, shared across MCP sessions.
-type SharedOps = Arc<Ops<OllamaEmbedClient>>;
 
 /// Arguments for the `library.search` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -50,6 +49,10 @@ pub struct SearchArgs {
     /// The persisted meta default applies when omitted.
     #[serde(default)]
     pub refine_factor: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
 /// Arguments for the `library.search_in_book` tool.
@@ -70,6 +73,10 @@ pub struct SearchInBookArgs {
     /// Override the IVF-PQ refinement multiplier for this query only.
     #[serde(default)]
     pub refine_factor: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
 impl SearchArgs {
@@ -105,6 +112,10 @@ pub struct ListBooksArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
 /// Arguments for the `library.find_books` tool.
@@ -135,6 +146,10 @@ pub struct FindBooksArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
 /// Arguments for the `library.show_book` and `library.show_toc` tools.
@@ -142,6 +157,10 @@ pub struct FindBooksArgs {
 pub struct BookIdArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
 /// Arguments for `library.list_pending_reviews`.
@@ -153,9 +172,23 @@ pub struct ListPendingReviewsArgs {
     /// Number of leading rows to skip.
     #[serde(default)]
     pub offset: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
 }
 
-/// Arguments for `library.metadata.set`.
+/// Arguments for `library.stats`. Carries only the library selector;
+/// the tool itself accepts no other inputs.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct LibraryOnlyArgs {
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+/// Arguments for `library.metadata.set`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataSetArgs {
     /// Catalog intake id of the book.
@@ -164,27 +197,39 @@ pub struct MetadataSetArgs {
     pub field: String,
     /// The new value.
     pub value: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
 }
 
-/// Arguments for `library.metadata.clear`.
+/// Arguments for `library.metadata.clear`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataClearArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
     /// The field whose override should be removed.
     pub field: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
 }
 
-/// Arguments for `library.metadata.ack`.
+/// Arguments for `library.metadata.ack`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataAckArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
     /// Why the gap is being acknowledged; recorded on the audit row.
     pub reason: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
 }
 
-/// Arguments for `library.metadata.approve`.
+/// Arguments for `library.metadata.approve`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataApproveArgs {
     /// Catalog intake id of the book.
@@ -192,39 +237,69 @@ pub struct MetadataApproveArgs {
     /// Optional reason recorded on the audit row.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
 }
 
-/// Arguments for `library.metadata.reject`.
+/// Arguments for `library.metadata.reject`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataRejectArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
     /// Why the book is being rejected; recorded on the audit row.
     pub reason: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
 }
 
-/// MCP request handler. The streamable-HTTP service clones it per session;
-/// the heavy state sits behind an `Arc`, so a clone is cheap and every
-/// session shares one warm ops handle.
+/// MCP request handler. The streamable-HTTP service clones it per
+/// session; the heavy state sits behind an `Arc`, so a clone is cheap
+/// and every session shares one warm library registry.
 #[derive(Clone)]
 pub struct BookrackServer {
-    ops: SharedOps,
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     tool_router: ToolRouter<BookrackServer>,
 }
 
 #[tool_router(router = tool_router)]
 impl BookrackServer {
-    /// Build a handler over the given warm ops handle. `info_context`
+    /// Build a handler over the given library registry. `info_context`
     /// carries the static facts (data dir, library name, ollama url,
-    /// embed model) needed to fill `library.info` without re-reading the
-    /// process environment on every call.
-    pub fn new(ops: SharedOps, info_context: LibraryInfoContext) -> BookrackServer {
+    /// embed model) needed to fill `library.info` without re-reading
+    /// the process environment on every call. Tools route each call
+    /// through the registry, scoped to either an explicit `library`
+    /// selector or the current default when the selector is absent.
+    pub fn new(
+        registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
+        info_context: LibraryInfoContext,
+    ) -> BookrackServer {
         BookrackServer {
-            ops,
+            registry,
             info_context,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Resolve a [`LibraryHandle`] for the given selector. Read tools
+    /// pass `args.library.as_deref()`; write tools demand a name up
+    /// front (their args carry `library: String`, not `Option`) so the
+    /// resolution never falls back silently.
+    ///
+    /// An unknown name produces an MCP `InvalidParams` error carrying
+    /// the registry's listed available names — the same diagnostic
+    /// shape the CLI surface uses for `--library` typos.
+    fn resolve_handle(
+        &self,
+        library: Option<&str>,
+    ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
+        self.registry
+            .get(library)
+            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))
     }
 
     /// Search the library and return cited passages as a JSON array.
@@ -238,8 +313,9 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         let overrides = args.overrides();
-        let hits = reads::search::search(&self.ops, &args.query, overrides, args.top_k)
+        let hits = reads::search::search(handle.ops(), &args.query, overrides, args.top_k)
             .await
             .map_err(ops_error_to_internal)?;
         tracing::info!(hits = hits.len(), "mcp library.search");
@@ -258,9 +334,10 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<SearchInBookArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         let overrides = args.overrides();
         let result = reads::search::search_in_book(
-            &self.ops,
+            handle.ops(),
             args.intake_id,
             &args.query,
             overrides,
@@ -293,8 +370,12 @@ impl BookrackServer {
                        and format, book states by pipeline stage, and retrieval \
                        issues by triage status."
     )]
-    async fn library_stats(&self) -> Result<CallToolResult, ErrorData> {
-        let stats = reads::books::show_stats(&self.ops).map_err(ops_error_to_internal)?;
+    async fn library_stats(
+        &self,
+        Parameters(args): Parameters<LibraryOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let stats = reads::books::show_stats(handle.ops()).map_err(ops_error_to_internal)?;
         respond_with(&stats)
     }
 
@@ -309,10 +390,11 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<ListBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
         let page =
-            reads::books::list_books(&self.ops, limit, offset).map_err(ops_error_to_internal)?;
+            reads::books::list_books(handle.ops(), limit, offset).map_err(ops_error_to_internal)?;
         tracing::info!(
             returned = page.books.len(),
             total = page.total,
@@ -332,6 +414,7 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<FindBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         if let Some(cats) = &args.categories
             && !cats.is_empty()
         {
@@ -349,7 +432,7 @@ impl BookrackServer {
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = reads::books::find_books(&self.ops, filter, limit, offset)
+        let page = reads::books::find_books(handle.ops(), filter, limit, offset)
             .map_err(ops_error_to_internal)?;
         tracing::info!(
             returned = page.books.len(),
@@ -370,7 +453,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match reads::books::show_book(&self.ops, args.intake_id) {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::books::show_book(handle.ops(), args.intake_id) {
             Ok(detail) => respond_with(&Some(detail)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::BookDetail>>(&None)
@@ -391,7 +475,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match reads::books::show_toc(&self.ops, args.intake_id) {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::books::show_toc(handle.ops(), args.intake_id) {
             Ok(toc) => respond_with(&Some(toc)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
@@ -412,7 +497,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match reads::metadata::show_metadata_audit(&self.ops, args.intake_id) {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::metadata::show_metadata_audit(handle.ops(), args.intake_id) {
             Ok(report) => respond_with(&Some(report)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::metadata_report::MetadataReport>>(&None)
@@ -431,9 +517,10 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<ListPendingReviewsArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = reads::metadata::list_pending_reviews(&self.ops, limit, offset)
+        let page = reads::metadata::list_pending_reviews(handle.ops(), limit, offset)
             .map_err(ops_error_to_internal)?;
         respond_with(&page)
     }
@@ -448,7 +535,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match reads::metadata::show_audit_trail(&self.ops, args.intake_id) {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::metadata::show_audit_trail(handle.ops(), args.intake_id) {
             Ok(trail) => respond_with(&Some(trail)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
@@ -469,7 +557,8 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<BookIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        match reads::pipeline::show_pipeline_trail(&self.ops, args.intake_id) {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::pipeline::show_pipeline_trail(handle.ops(), args.intake_id) {
             Ok(trail) => respond_with(&Some(trail)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<Vec<bookrack_ops::dto::audit::PipelineAuditEntry>>>(&None)
@@ -485,9 +574,13 @@ impl BookrackServer {
                        versions, embedder configuration, stamped index parameters, \
                        live row count, intake counts, and approximate disk usage."
     )]
-    async fn library_info(&self) -> Result<CallToolResult, ErrorData> {
+    async fn library_info(
+        &self,
+        Parameters(args): Parameters<LibraryOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
         let ctx = self.info_context.clone();
-        let info = reads::info::show_library_info(&self.ops, ctx)
+        let info = reads::info::show_library_info(handle.ops(), ctx)
             .await
             .map_err(ops_error_to_internal)?;
         respond_with(&info)
@@ -505,13 +598,14 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<MetadataSetArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
             value: args.value,
         };
-        let outcome =
-            writes::metadata::set_metadata_field(&self.ops, req).map_err(ops_error_to_internal)?;
+        let outcome = writes::metadata::set_metadata_field(handle.ops(), req)
+            .map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
 
@@ -528,11 +622,12 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<MetadataClearArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
         };
-        let outcome = writes::metadata::clear_metadata_field(&self.ops, req)
+        let outcome = writes::metadata::clear_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
@@ -550,11 +645,12 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<MetadataAckArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let req = bookrack_ops::dto::writes::AcknowledgeMetadataGapRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
-        let outcome = writes::metadata::acknowledge_metadata_gap(&self.ops, req)
+        let outcome = writes::metadata::acknowledge_metadata_gap(handle.ops(), req)
             .map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
@@ -570,12 +666,13 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<MetadataApproveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let req = bookrack_ops::dto::writes::ApproveMetadataRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
         let outcome =
-            writes::metadata::approve_metadata(&self.ops, req).map_err(ops_error_to_internal)?;
+            writes::metadata::approve_metadata(handle.ops(), req).map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
 
@@ -590,12 +687,13 @@ impl BookrackServer {
         &self,
         Parameters(args): Parameters<MetadataRejectArgs>,
     ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
         let req = bookrack_ops::dto::writes::RejectMetadataRequest {
             intake_id: args.intake_id,
             reason: args.reason,
         };
         let outcome =
-            writes::metadata::reject_metadata(&self.ops, req).map_err(ops_error_to_internal)?;
+            writes::metadata::reject_metadata(handle.ops(), req).map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
 }
@@ -635,10 +733,10 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
 /// server pointed at `http://<addr>/mcp`.
 ///
-/// The registry is the in-process scheduler entry point. This phase
-/// pins each tool to the registry's default library — the registry
-/// reaches deeper into the tool surface in a later phase, when each
-/// tool accepts an explicit `library` selector.
+/// Every tool resolves its target library through the registry — by
+/// the `library` selector when present, by the registry's current
+/// default when absent. Write tools require an explicit `library`
+/// name in their input; read tools accept `library` as optional.
 ///
 /// `shutdown_rx` lets the caller drive graceful shutdown from a
 /// broadcast channel shared with sibling tasks (signal listener, REPL,
@@ -651,12 +749,8 @@ pub async fn serve(
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
-    let ops = registry
-        .get(None)
-        .context("resolve default library from registry")?
-        .ops_arc();
     let service = StreamableHttpService::new(
-        move || Ok(BookrackServer::new(ops.clone(), info_context.clone())),
+        move || Ok(BookrackServer::new(registry.clone(), info_context.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
