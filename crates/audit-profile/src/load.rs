@@ -71,6 +71,8 @@ pub(crate) fn parse_str(toml: &str, name: &str) -> Result<AuditProfile, LoadErro
         copyright_blocks: Default::default(),
         filename_parser: Default::default(),
         extract: Default::default(),
+        html: Default::default(),
+        quality: Default::default(),
     };
     apply_overlay(&mut profile, file);
     Ok(profile)
@@ -149,6 +151,21 @@ fn apply_overlay(profile: &mut AuditProfile, file: ProfileFile) {
         }
         if let Some(v) = s.body_script_match {
             profile.language.body_script_match = v;
+        }
+        if let Some(v) = s.cjk_codes {
+            profile.language.cjk_codes = v;
+        }
+        if let Some(v) = s.latin_codes {
+            profile.language.latin_codes = v;
+        }
+        if let Some(v) = s.body_cjk_min_ratio {
+            profile.language.body_cjk_min_ratio_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.body_latin_min_ratio {
+            profile.language.body_latin_min_ratio_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.body_cjk_max_ratio {
+            profile.language.body_cjk_max_ratio_bp = (v * 10_000.0) as u32;
         }
     }
     if let Some(s) = file.publisher {
@@ -230,6 +247,40 @@ fn apply_overlay(profile: &mut AuditProfile, file: ProfileFile) {
         }
         if let Some(v) = s.txt_toc_enabled {
             profile.extract.txt_toc_enabled = v;
+        }
+    }
+    if let Some(s) = file.html {
+        if let Some(v) = s.block_tags {
+            profile.html.block_tags = v;
+        }
+        if let Some(v) = s.skip_tags {
+            profile.html.skip_tags = v;
+        }
+    }
+    if let Some(s) = file.quality {
+        if let Some(v) = s.chars_per_page_ocr {
+            profile.quality.chars_per_page_ocr = v as u32;
+        }
+        if let Some(v) = s.chars_per_page_doubt {
+            profile.quality.chars_per_page_doubt = v as u32;
+        }
+        if let Some(v) = s.replacement_ocr {
+            profile.quality.replacement_ocr_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.pua_ocr {
+            profile.quality.pua_ocr_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.pua_doubt {
+            profile.quality.pua_doubt_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.control_ocr {
+            profile.quality.control_ocr_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.dual_layer {
+            profile.quality.dual_layer_bp = (v * 10_000.0) as u32;
+        }
+        if let Some(v) = s.cjk_space_doubt {
+            profile.quality.cjk_space_doubt_bp = (v * 10_000.0) as u32;
         }
     }
 }

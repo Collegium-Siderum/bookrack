@@ -55,13 +55,13 @@ fn html_extraction_is_deterministic() {
     let path = fixture("standalone.html");
     let first = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("first extract");
     let second = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("second extract");

@@ -55,13 +55,13 @@ fn txt_extraction_is_deterministic() {
     let path = fixture("web_novel.txt");
     let first = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("first extract");
     let second = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("second extract");
@@ -99,16 +99,17 @@ fn multilingual_fixture_emits_a_toc_across_supported_families() {
 
 #[test]
 fn disabling_txt_toc_collapses_headings_to_body() {
-    use bookrack_audit_profile::ExtractToggles;
+    use bookrack_audit_profile::{AuditProfile, ExtractToggles};
     use bookrack_extract::ExtractOutcome;
 
-    let toggles = ExtractToggles {
+    let mut profile = AuditProfile::default_profile();
+    profile.extract = ExtractToggles {
         txt_toc_enabled: false,
         ..ExtractToggles::default()
     };
     let outcome = extract(
         &fixture("web_novel.txt"),
-        &toggles,
+        &profile,
         &common::default_heading_patterns(),
     )
     .expect("extract");

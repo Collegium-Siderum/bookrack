@@ -36,7 +36,7 @@ fn joined_text(extraction: &Extraction) -> String {
 fn extracted(name: &str) -> Extraction {
     match extract(
         &pdf_fixture(name),
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     ) {
         Ok(ExtractOutcome::Extracted(e)) => e,
@@ -169,7 +169,7 @@ fn encrypted_userpw_pdf_is_drm_protected() {
     // it. This project does not decrypt — it rejects the file.
     let err = extract(
         &pdf_fixture("encrypted_userpw.pdf"),
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect_err("user password");
@@ -185,7 +185,7 @@ fn image_only_pdf_routes_to_ocr() {
     // adapter routes it to OCR rather than producing an empty success.
     match extract(
         &pdf_fixture("image_only.pdf"),
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     ) {
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
@@ -205,7 +205,7 @@ fn corrupt_pdf_is_reported_as_a_corrupt_file() {
     // layer.
     let err = extract(
         &pdf_fixture("corrupt.pdf"),
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect_err("corrupt file");
@@ -341,13 +341,13 @@ fn pdf_extraction_is_deterministic() {
         let path = pdf_fixture(name);
         let first = extract(
             &path,
-            &common::default_extract_toggles(),
+            &common::default_audit_profile(),
             &common::default_heading_patterns(),
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
         let second = extract(
             &path,
-            &common::default_extract_toggles(),
+            &common::default_audit_profile(),
             &common::default_heading_patterns(),
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));

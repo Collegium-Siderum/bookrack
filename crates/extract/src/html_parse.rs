@@ -19,35 +19,10 @@
 //! `<a id>` / `<a name>` between paragraphs, or on an inline element
 //! inside a paragraph — neither of which is a block of its own.
 
+use bookrack_audit_profile::HtmlToggles;
 use scraper::{ElementRef, Html, Selector};
 
 use crate::contract::{Block, BlockKind};
-
-/// Block-level tags. `div` is included so `<div>`-as-paragraph EPUBs
-/// split correctly; a `div` wrapping real blocks still recurses.
-const BLOCK_TAGS: &[&str] = &[
-    "p",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "li",
-    "blockquote",
-    "figcaption",
-    "pre",
-    "td",
-    "th",
-    "dd",
-    "dt",
-    "caption",
-    "div",
-];
-
-/// Tags whose subtrees carry no readable prose (scripts, styling, the
-/// in-document navigation list, vector graphics).
-const SKIP_TAGS: &[&str] = &["script", "style", "head", "nav", "template", "svg"];
 
 /// One document parsed: ordered blocks plus its anchor index.
 pub struct ParsedDoc {
@@ -74,8 +49,9 @@ struct State {
 }
 
 /// Parse one document's XHTML. `source_unit` is the document's
-/// reading-order index.
-pub fn parse_blocks(xhtml: &str, source_unit: u32) -> ParsedDoc {
+/// reading-order index. `html_toggles` carries the configurable
+/// block-level and skip-tag lists the DOM walk consults.
+pub fn parse_blocks(xhtml: &str, source_unit: u32, html_toggles: &HtmlToggles) -> ParsedDoc {
     let doc = Html::parse_document(xhtml);
     let body_sel = Selector::parse("body").expect("static selector");
     let root = doc
@@ -88,7 +64,7 @@ pub fn parse_blocks(xhtml: &str, source_unit: u32) -> ParsedDoc {
         blocks: Vec::new(),
         anchors: Vec::new(),
     };
-    walk(root, Ctx::default(), &mut st);
+    walk(root, Ctx::default(), &mut st, html_toggles);
 
     // An anchor recorded after the last block of the document points one
     // past the end; clamp it to the final block so it still resolves.
@@ -108,13 +84,13 @@ pub fn parse_blocks(xhtml: &str, source_unit: u32) -> ParsedDoc {
     }
 }
 
-fn walk(el: ElementRef, ctx: Ctx, st: &mut State) {
+fn walk(el: ElementRef, ctx: Ctx, st: &mut State, html_toggles: &HtmlToggles) {
     for child in el.children() {
         let Some(child) = ElementRef::wrap(child) else {
             continue;
         };
         let name = child.value().name();
-        if SKIP_TAGS.contains(&name) {
+        if html_toggles.skip_tags.iter().any(|t| t == name) {
             continue;
         }
         // The element's own anchor ids resolve to the next block emitted.
@@ -126,8 +102,8 @@ fn walk(el: ElementRef, ctx: Ctx, st: &mut State) {
             footnote: ctx.footnote || is_footnote(child),
             caption: ctx.caption || name == "figure",
         };
-        if has_block_descendant(child) {
-            walk(child, child_ctx, st);
+        if has_block_descendant(child, html_toggles) {
+            walk(child, child_ctx, st, html_toggles);
         } else {
             emit(child, child_ctx, st);
         }
@@ -190,11 +166,15 @@ fn element_ids(el: ElementRef) -> Vec<String> {
 }
 
 /// Whether `el` contains any block-level element other than itself.
-fn has_block_descendant(el: ElementRef) -> bool {
+fn has_block_descendant(el: ElementRef, html_toggles: &HtmlToggles) -> bool {
     let self_node = el.id();
-    el.descendants()
-        .filter_map(ElementRef::wrap)
-        .any(|d| d.id() != self_node && BLOCK_TAGS.contains(&d.value().name()))
+    el.descendants().filter_map(ElementRef::wrap).any(|d| {
+        d.id() != self_node
+            && html_toggles
+                .block_tags
+                .iter()
+                .any(|t| t == d.value().name())
+    })
 }
 
 /// All descendant text, with runs of whitespace (XML formatting

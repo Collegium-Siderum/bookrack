@@ -343,7 +343,7 @@ fn audit_language(
                     flags.push(Flag::NonBcp47);
                 }
                 if profile.language.body_script_match
-                    && !body_matches_language(trimmed, input.body_sample)
+                    && !body_matches_language(trimmed, input.body_sample, &profile.language)
                 {
                     weaken(&mut grade);
                     flags.push(Flag::LangMismatchesBody);
@@ -909,8 +909,15 @@ fn is_bcp47(tag: &str) -> bool {
 ///
 /// Conservative: only fires when the tag and the body strongly
 /// disagree. Returns true when nothing in the body sample
-/// contradicts the declaration.
-fn body_matches_language(tag: &str, body: &str) -> bool {
+/// contradicts the declaration. Both the language buckets
+/// (`cjk_codes`, `latin_codes`) and the per-bucket ratio thresholds
+/// come from the active profile so an operator retunes the check
+/// without recompiling.
+fn body_matches_language(
+    tag: &str,
+    body: &str,
+    lang: &bookrack_audit_profile::LanguageToggles,
+) -> bool {
     if body.is_empty() {
         return true;
     }
@@ -929,16 +936,16 @@ fn body_matches_language(tag: &str, body: &str) -> bool {
     let latin_ratio = latin as f64 / total as f64;
 
     let primary = tag.split('-').next().unwrap_or("").to_ascii_lowercase();
-    let declared_cjk = matches!(primary.as_str(), "zh" | "ja" | "ko");
-    let declared_latin = matches!(
-        primary.as_str(),
-        "en" | "fr" | "de" | "es" | "it" | "pt" | "nl" | "sv" | "no" | "da" | "fi" | "pl" | "ru"
-    );
+    let declared_cjk = lang.cjk_codes.iter().any(|c| c == &primary);
+    let declared_latin = lang.latin_codes.iter().any(|c| c == &primary);
 
-    if declared_cjk && cjk_ratio < 0.1 && latin_ratio > 0.6 {
+    if declared_cjk
+        && cjk_ratio < lang.body_cjk_min_ratio()
+        && latin_ratio > lang.body_latin_min_ratio()
+    {
         return false;
     }
-    if declared_latin && cjk_ratio > 0.4 {
+    if declared_latin && cjk_ratio > lang.body_cjk_max_ratio() {
         return false;
     }
     true

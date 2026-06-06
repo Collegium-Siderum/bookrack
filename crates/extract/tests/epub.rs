@@ -49,13 +49,13 @@ fn extraction_is_deterministic() {
     let epub = pack_epub("omnibus");
     let first = extract(
         &epub.path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("first extract");
     let second = extract(
         &epub.path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect("second extract");
@@ -90,7 +90,7 @@ fn headings_with_no_prose_is_empty_extraction() {
     let epub = pack_epub("headings_only");
     let err = extract(
         &epub.path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect_err("no body blocks");
@@ -105,7 +105,7 @@ fn a_non_archive_is_a_corrupt_file() {
 
     let err = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect_err("not an archive");
@@ -142,7 +142,7 @@ fn a_zip_missing_the_ocf_container_xml_is_a_corrupt_file() {
 
     let err = extract(
         &path,
-        &common::default_extract_toggles(),
+        &common::default_audit_profile(),
         &common::default_heading_patterns(),
     )
     .expect_err("missing container.xml must fail");

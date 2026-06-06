@@ -15,14 +15,20 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
+use bookrack_audit_profile::{AuditProfile, ExtractToggles, HeadingPatterns};
 use bookrack_extract::{ExtractError, ExtractOutcome, Extraction, extract};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-/// Default toggle bag the integration tests pass to `extract`. The
-/// helper avoids spelling out `ExtractToggles::default()` at every call
-/// site.
+/// Default audit profile the integration tests pass to `extract`.
+/// Provides the full shipped configuration (toggles, HTML tag lists,
+/// quality thresholds, language ratios) at one call site.
+pub fn default_audit_profile() -> AuditProfile {
+    AuditProfile::default_profile()
+}
+
+/// Default extract toggles for tests that drive an adapter directly
+/// instead of going through the top-level `extract` entry point.
 pub fn default_extract_toggles() -> ExtractToggles {
     ExtractToggles::default()
 }
@@ -38,11 +44,7 @@ pub fn default_heading_patterns() -> HeadingPatterns {
 /// fixtures always carry a usable text layer, so this keeps the success
 /// assertion sites uncluttered.
 pub fn extracted(path: &Path) -> Extraction {
-    match extract(
-        path,
-        &default_extract_toggles(),
-        &default_heading_patterns(),
-    ) {
+    match extract(path, &default_audit_profile(), &default_heading_patterns()) {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         other => panic!("expected a usable text layer, got {other:?}"),
     }
@@ -67,7 +69,7 @@ pub fn pdf_fixture(name: &str) -> PathBuf {
 pub fn pdfium_available() -> bool {
     match extract(
         &pdf_fixture("prose_en.pdf"),
-        &default_extract_toggles(),
+        &default_audit_profile(),
         &default_heading_patterns(),
     ) {
         Err(ExtractError::Io(e)) => {

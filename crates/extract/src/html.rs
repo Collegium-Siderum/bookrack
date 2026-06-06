@@ -19,6 +19,8 @@
 
 use std::path::Path;
 
+use bookrack_audit_profile::HtmlToggles;
+
 use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, Extraction, Provenance,
@@ -27,7 +29,7 @@ use crate::contract::{
 use crate::html_parse;
 
 /// Extract one standalone HTML file.
-pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
+pub fn extract(path: &Path, html_toggles: &HtmlToggles) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
     let content = match String::from_utf8(bytes) {
         Ok(s) => s,
@@ -37,7 +39,7 @@ pub fn extract(path: &Path) -> Result<Extraction, ExtractError> {
     };
 
     // The whole file is one source unit — there is no spine to index.
-    let parsed = html_parse::parse_blocks(&content, 0);
+    let parsed = html_parse::parse_blocks(&content, 0, html_toggles);
     if !parsed
         .blocks
         .iter()

@@ -23,6 +23,7 @@
 //! Verdicts lean conservative: a false "usable" feeds garbage into the
 //! index, far worse than a false "doubtful" or "route to OCR".
 
+use bookrack_audit_profile::QualityThresholds;
 use serde::Serialize;
 
 use crate::contract::TextLayerQuality;
@@ -72,24 +73,20 @@ pub struct QualityReport {
     pub latin_ratio: f64,
 }
 
-// Thresholds — calibrated against the spike's PDF corpus and frozen
-// here as crate-internal constants (the verdict ladder is a behaviour
-// dimension caller code re-extracts on, signalled through the global
-// `EXTRACTOR_VERSION`). Born-digital PDFs in that corpus carry images
-// on <=11% of pages; scans and dual-layer PDFs on >=99%, so the dual-
-// layer cut is wide of either cluster.
-const CPP_OCR: f64 = 50.0; // below → almost certainly a bare scan
-const CPP_DOUBT: f64 = 200.0; // below → a suspiciously sparse layer
-const REPLACEMENT_OCR: f64 = 0.05;
-const PUA_OCR: f64 = 0.10;
-const PUA_DOUBT: f64 = 0.01;
-const CONTROL_OCR: f64 = 0.02;
-const DUAL_LAYER: f64 = 0.5; // image on this share of pages → dual-layer
-const CJK_SPACE_DOUBT: f64 = 0.02;
+// Thresholds — calibrated against the spike's PDF corpus and exposed
+// through [`QualityThresholds`] in `bookrack_audit_profile`. Born-digital
+// PDFs in that corpus carry images on <=11% of pages; scans and dual-
+// layer PDFs on >=99%, so the dual-layer cut is wide of either cluster.
+// The verdict ladder is a behaviour dimension caller code re-extracts
+// on; the active values are stamped through `EXTRACTOR_VERSION`.
 
 /// Assess the per-page text of a candidate text layer. `image_pages` is
 /// how many of those pages carry an image object.
-pub fn assess(pages: &[String], image_pages: usize) -> QualityReport {
+pub fn assess(
+    pages: &[String],
+    image_pages: usize,
+    thresholds: &QualityThresholds,
+) -> QualityReport {
     let page_count = pages.len();
     let mut total = 0usize;
     let (mut repl, mut pua, mut control) = (0usize, 0usize, 0usize);
@@ -157,13 +154,13 @@ pub fn assess(pages: &[String], image_pages: usize) -> QualityReport {
         cjk_ratio: ratio(cjk, total),
         latin_ratio: ratio(latin, total),
     };
-    report.verdict = decide(&report);
+    report.verdict = decide(&report, thresholds);
     report
 }
 
 /// Apply the verdict ladder: unusable layers first, then the flags that
 /// merely demote a layer to `Doubtful`.
-fn decide(r: &QualityReport) -> QualityDecision {
+fn decide(r: &QualityReport, t: &QualityThresholds) -> QualityDecision {
     use QualityDecision::{Keep, RouteToOcr};
     use TextLayerQuality::{Doubtful, Usable};
 
@@ -173,7 +170,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             reason: "no extractable text — no text layer".to_string(),
         };
     }
-    if r.chars_per_page < CPP_OCR {
+    if r.chars_per_page < t.chars_per_page_ocr() {
         return RouteToOcr {
             reason: format!(
                 "only {:.0} chars/page — a scan with no text layer",
@@ -181,7 +178,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.replacement_ratio >= REPLACEMENT_OCR {
+    if r.replacement_ratio >= t.replacement_ocr() {
         return RouteToOcr {
             reason: format!(
                 "{:.1}% replacement characters — encoding corruption",
@@ -189,7 +186,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.pua_ratio >= PUA_OCR {
+    if r.pua_ratio >= t.pua_ocr() {
         return RouteToOcr {
             reason: format!(
                 "{:.1}% Private Use Area glyphs — broken font cmap",
@@ -197,14 +194,14 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.control_ratio >= CONTROL_OCR {
+    if r.control_ratio >= t.control_ocr() {
         return RouteToOcr {
             reason: format!("{:.1}% control characters", r.control_ratio * 100.0),
         };
     }
 
     // --- present but not fully trustworthy: extract, but flag --------
-    if r.image_page_ratio >= DUAL_LAYER {
+    if r.image_page_ratio >= t.dual_layer() {
         return Keep {
             grade: Doubtful,
             reason: format!(
@@ -214,7 +211,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.cjk_space_ratio >= CJK_SPACE_DOUBT {
+    if r.cjk_space_ratio >= t.cjk_space_doubt() {
         return Keep {
             grade: Doubtful,
             reason: format!(
@@ -223,7 +220,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.chars_per_page < CPP_DOUBT {
+    if r.chars_per_page < t.chars_per_page_doubt() {
         return Keep {
             grade: Doubtful,
             reason: format!(
@@ -232,7 +229,7 @@ fn decide(r: &QualityReport) -> QualityDecision {
             ),
         };
     }
-    if r.pua_ratio >= PUA_DOUBT || r.replacement_ratio > 0.0 {
+    if r.pua_ratio >= t.pua_doubt() || r.replacement_ratio > 0.0 {
         return Keep {
             grade: Doubtful,
             reason: "minor encoding anomalies in the text layer".to_string(),

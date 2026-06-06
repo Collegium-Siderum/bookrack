@@ -407,11 +407,7 @@ pub async fn ingest_book<E: Embedder>(
     // EXTRACT.
     let started = std::time::Instant::now();
     let extracted = tracing::info_span!("operation", stage = "extract").in_scope(|| {
-        bookrack_extract::extract(
-            file,
-            &params.audit_profile.extract,
-            &params.heading_patterns,
-        )
+        bookrack_extract::extract(file, &params.audit_profile, &params.heading_patterns)
     });
     let extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,

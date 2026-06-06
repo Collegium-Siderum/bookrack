@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use bookrack_audit_profile::ExtractToggles;
+use bookrack_audit_profile::{ExtractToggles, HtmlToggles};
 use rbook::Epub;
 
 use crate::contract::{
@@ -28,8 +28,13 @@ use crate::html_parse;
 /// dirty-partition detection.
 use crate::EXTRACTOR_VERSION;
 
-/// Extract one EPUB file under the given toggle bag.
-pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
+/// Extract one EPUB file under the given toggle bag and HTML tag
+/// configuration.
+pub fn extract(
+    path: &Path,
+    toggles: &ExtractToggles,
+    html_toggles: &HtmlToggles,
+) -> Result<Extraction, ExtractError> {
     let epub = Epub::open(path).map_err(|e| ExtractError::CorruptFile {
         detail: e.to_string(),
     })?;
@@ -51,7 +56,7 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
         let source_unit = content.position() as u32;
         unit_of_manifest.insert(content.manifest_entry().id().to_string(), source_unit);
 
-        let parsed = html_parse::parse_blocks(content.content(), source_unit);
+        let parsed = html_parse::parse_blocks(content.content(), source_unit, html_toggles);
         let base = blocks.len();
         if !parsed.blocks.is_empty() {
             first_block_of.entry(source_unit).or_insert(base);

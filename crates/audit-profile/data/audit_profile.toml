@@ -45,6 +45,19 @@ bracketed_min_chars = 3
 [language]
 bcp47_check = true
 body_script_match = true
+# Body / declared-language disagreement uses two coarse buckets and a
+# small per-bucket ratio guard. Operators add more BCP-47 primary
+# subtags to either list as the corpus expands.
+cjk_codes = ["zh", "ja", "ko"]
+latin_codes = ["en", "fr", "de", "es", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "ru"]
+# Minimum CJK character ratio the body sample must clear when a CJK
+# language is declared; below that and the latin ratio above
+# `body_latin_min_ratio`, the audit flags `LangMismatchesBody`.
+body_cjk_min_ratio = 0.1
+body_latin_min_ratio = 0.6
+# Maximum CJK character ratio allowed when a Latin-script language is
+# declared; above this the audit flags the disagreement.
+body_cjk_max_ratio = 0.4
 
 [publisher]
 url_watermark = true
@@ -90,3 +103,55 @@ epub_isbn_recognition = true
 marc_role_mapping = true
 # H-05: emit Chinese chapter/volume markers as heading blocks.
 txt_toc_enabled = true
+
+[html]
+# Tag lists the EPUB / HTML adapter's DOM walk consults. `block_tags`
+# elements emit one [`Block`]; `skip_tags` subtrees carry no readable
+# prose. Adding a tag here changes the block stream, which is
+# stamped through `extractor_version`.
+block_tags = [
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
+    "blockquote",
+    "figcaption",
+    "pre",
+    "td",
+    "th",
+    "dd",
+    "dt",
+    "caption",
+    "div",
+]
+skip_tags = ["script", "style", "head", "nav", "template", "svg"]
+
+[quality]
+# PDF text-layer quality thresholds the extract / OCR gate consults.
+# Calibrated against the spike's PDF corpus; tuning these values
+# changes the verdict ladder and is stamped through `extractor_version`.
+# Below this chars-per-page count the layer is judged a bare scan.
+chars_per_page_ocr = 50.0
+# Below this chars-per-page count the layer is judged sparse.
+chars_per_page_doubt = 200.0
+# Above this share of replacement characters (U+FFFD) the layer is
+# routed to OCR as encoding corruption.
+replacement_ocr = 0.05
+# Above this share of Private Use Area code points the layer is
+# routed to OCR as a broken font cmap.
+pua_ocr = 0.10
+# Above this share of PUA code points the layer is downgraded to
+# Doubtful, even though the OCR threshold has not fired.
+pua_doubt = 0.01
+# Above this share of control characters the layer is routed to OCR.
+control_ocr = 0.02
+# Image-page share above which the layer is treated as a dual-layer
+# scan and downgraded to Doubtful even when the text reads cleanly.
+dual_layer = 0.5
+# Share of CJK ideographs separated from the next ideograph by a space
+# above which the layer is downgraded — clean CJK has no word spaces.
+cjk_space_doubt = 0.02

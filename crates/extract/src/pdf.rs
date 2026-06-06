@@ -63,8 +63,11 @@ static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
 /// any data, hence `Mutex<()>`.
 pub(crate) static EXTRACTION_LOCK: Mutex<()> = Mutex::new(());
 
-/// Extract one PDF file.
-pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
+/// Extract one PDF file under the active quality thresholds.
+pub fn extract(
+    path: &Path,
+    quality_thresholds: &bookrack_audit_profile::QualityThresholds,
+) -> Result<ExtractOutcome, ExtractError> {
     let pdfium = pdfium()?;
     // Hold PDFium for the whole extraction (see the module's thread-
     // safety note). A poisoned lock means a previous extraction
@@ -124,7 +127,7 @@ pub fn extract(path: &Path) -> Result<ExtractOutcome, ExtractError> {
 
     // The quality gate decides extract-vs-OCR. A layer it rejects never
     // becomes an `Extraction`.
-    let report = quality::assess(&pages_text, image_pages);
+    let report = quality::assess(&pages_text, image_pages, quality_thresholds);
     let grade = match report.verdict {
         QualityDecision::RouteToOcr { reason } => {
             return Ok(ExtractOutcome::NeedsOcr { reason });

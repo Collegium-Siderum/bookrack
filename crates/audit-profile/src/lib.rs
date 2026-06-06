@@ -98,6 +98,8 @@ pub struct AuditProfile {
     pub copyright_blocks: CopyrightBlocksToggles,
     pub filename_parser: FilenameParserToggles,
     pub extract: ExtractToggles,
+    pub html: HtmlToggles,
+    pub quality: QualityThresholds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +161,36 @@ impl Default for TitleToggles {
 pub struct LanguageToggles {
     pub bcp47_check: bool,
     pub body_script_match: bool,
+    /// BCP-47 primary subtags treated as CJK-bucket languages by the
+    /// body / declared-language disagreement check.
+    pub cjk_codes: Vec<String>,
+    /// BCP-47 primary subtags treated as Latin-script-bucket languages.
+    pub latin_codes: Vec<String>,
+    /// Minimum CJK character ratio in the body sample required before
+    /// a CJK declaration is accepted; expressed in basis points
+    /// (0..=10000) so the struct keeps `Eq`.
+    pub body_cjk_min_ratio_bp: u32,
+    /// Threshold on Latin-letter ratio that combined with
+    /// `body_cjk_min_ratio_bp` decides a CJK declaration mismatch.
+    pub body_latin_min_ratio_bp: u32,
+    /// Maximum CJK character ratio tolerated when a Latin-script
+    /// language is declared.
+    pub body_cjk_max_ratio_bp: u32,
+}
+
+impl LanguageToggles {
+    /// CJK minimum ratio as a float in 0.0..=1.0.
+    pub fn body_cjk_min_ratio(&self) -> f64 {
+        self.body_cjk_min_ratio_bp as f64 / 10_000.0
+    }
+    /// Latin minimum ratio as a float in 0.0..=1.0.
+    pub fn body_latin_min_ratio(&self) -> f64 {
+        self.body_latin_min_ratio_bp as f64 / 10_000.0
+    }
+    /// CJK maximum ratio (for Latin declarations) as a float.
+    pub fn body_cjk_max_ratio(&self) -> f64 {
+        self.body_cjk_max_ratio_bp as f64 / 10_000.0
+    }
 }
 
 impl Default for LanguageToggles {
@@ -166,6 +198,25 @@ impl Default for LanguageToggles {
         Self {
             bcp47_check: true,
             body_script_match: true,
+            cjk_codes: vec!["zh".to_string(), "ja".to_string(), "ko".to_string()],
+            latin_codes: vec![
+                "en".to_string(),
+                "fr".to_string(),
+                "de".to_string(),
+                "es".to_string(),
+                "it".to_string(),
+                "pt".to_string(),
+                "nl".to_string(),
+                "sv".to_string(),
+                "no".to_string(),
+                "da".to_string(),
+                "fi".to_string(),
+                "pl".to_string(),
+                "ru".to_string(),
+            ],
+            body_cjk_min_ratio_bp: 1000,
+            body_latin_min_ratio_bp: 6000,
+            body_cjk_max_ratio_bp: 4000,
         }
     }
 }
@@ -267,6 +318,109 @@ pub struct ExtractToggles {
     pub txt_toc_enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlToggles {
+    /// Block-level tags the DOM walk emits as one [`Block`].
+    pub block_tags: Vec<String>,
+    /// Tags whose subtrees carry no readable prose and are skipped.
+    pub skip_tags: Vec<String>,
+}
+
+impl Default for HtmlToggles {
+    fn default() -> Self {
+        Self {
+            block_tags: [
+                "p",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+                "li",
+                "blockquote",
+                "figcaption",
+                "pre",
+                "td",
+                "th",
+                "dd",
+                "dt",
+                "caption",
+                "div",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            skip_tags: ["script", "style", "head", "nav", "template", "svg"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// PDF text-layer quality thresholds. The eight ratios / counts are
+/// stored as basis points (0..=10_000) for `Eq`; helpers expose them
+/// as floats at the call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualityThresholds {
+    /// Below this characters-per-page count, route the layer to OCR
+    /// as a bare scan. Stored as the integer value (chars / page) the
+    /// `assess` compare runs against.
+    pub chars_per_page_ocr: u32,
+    /// Below this characters-per-page count, downgrade the layer to
+    /// Doubtful as sparse.
+    pub chars_per_page_doubt: u32,
+    pub replacement_ocr_bp: u32,
+    pub pua_ocr_bp: u32,
+    pub pua_doubt_bp: u32,
+    pub control_ocr_bp: u32,
+    pub dual_layer_bp: u32,
+    pub cjk_space_doubt_bp: u32,
+}
+
+impl QualityThresholds {
+    pub fn chars_per_page_ocr(&self) -> f64 {
+        self.chars_per_page_ocr as f64
+    }
+    pub fn chars_per_page_doubt(&self) -> f64 {
+        self.chars_per_page_doubt as f64
+    }
+    pub fn replacement_ocr(&self) -> f64 {
+        self.replacement_ocr_bp as f64 / 10_000.0
+    }
+    pub fn pua_ocr(&self) -> f64 {
+        self.pua_ocr_bp as f64 / 10_000.0
+    }
+    pub fn pua_doubt(&self) -> f64 {
+        self.pua_doubt_bp as f64 / 10_000.0
+    }
+    pub fn control_ocr(&self) -> f64 {
+        self.control_ocr_bp as f64 / 10_000.0
+    }
+    pub fn dual_layer(&self) -> f64 {
+        self.dual_layer_bp as f64 / 10_000.0
+    }
+    pub fn cjk_space_doubt(&self) -> f64 {
+        self.cjk_space_doubt_bp as f64 / 10_000.0
+    }
+}
+
+impl Default for QualityThresholds {
+    fn default() -> Self {
+        Self {
+            chars_per_page_ocr: 50,
+            chars_per_page_doubt: 200,
+            replacement_ocr_bp: 500,
+            pua_ocr_bp: 1000,
+            pua_doubt_bp: 100,
+            control_ocr_bp: 200,
+            dual_layer_bp: 5000,
+            cjk_space_doubt_bp: 200,
+        }
+    }
+}
+
 impl Default for ExtractToggles {
     fn default() -> Self {
         Self {
@@ -314,6 +468,7 @@ impl AuditProfile {
             language: LanguageToggles {
                 bcp47_check: false,
                 body_script_match: false,
+                ..LanguageToggles::default()
             },
             publisher: PublisherToggles {
                 url_watermark: false,
@@ -342,6 +497,8 @@ impl AuditProfile {
                 txt_toc_enabled: false,
                 ..ExtractToggles::default()
             },
+            html: HtmlToggles::default(),
+            quality: QualityThresholds::default(),
         }
     }
 
@@ -417,6 +574,10 @@ pub(crate) struct ProfileFile {
     pub filename_parser: Option<FilenameParserSection>,
     #[serde(default)]
     pub extract: Option<ExtractSection>,
+    #[serde(default)]
+    pub html: Option<HtmlSection>,
+    #[serde(default)]
+    pub quality: Option<QualitySection>,
 }
 
 macro_rules! optional_section {
@@ -451,6 +612,11 @@ optional_section!(TitleSection {
 optional_section!(LanguageSection {
     bcp47_check: bool,
     body_script_match: bool,
+    cjk_codes: Vec<String>,
+    latin_codes: Vec<String>,
+    body_cjk_min_ratio: f64,
+    body_latin_min_ratio: f64,
+    body_cjk_max_ratio: f64,
 });
 
 optional_section!(PublisherSection {
@@ -490,6 +656,22 @@ optional_section!(ExtractSection {
     epub_isbn_recognition: bool,
     marc_role_mapping: bool,
     txt_toc_enabled: bool,
+});
+
+optional_section!(HtmlSection {
+    block_tags: Vec<String>,
+    skip_tags: Vec<String>,
+});
+
+optional_section!(QualitySection {
+    chars_per_page_ocr: f64,
+    chars_per_page_doubt: f64,
+    replacement_ocr: f64,
+    pua_ocr: f64,
+    pua_doubt: f64,
+    control_ocr: f64,
+    dual_layer: f64,
+    cjk_space_doubt: f64,
 });
 
 /// Re-export the loader's small surface for callers that need to

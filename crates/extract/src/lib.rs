@@ -25,7 +25,7 @@ pub use contract::*;
 
 use std::path::Path;
 
-use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
+use bookrack_audit_profile::{AuditProfile, HeadingPatterns};
 
 /// Monotonic version of the extractor's output. Stored on
 /// `intake.extractor_version`; a mismatch with a stored row marks the
@@ -35,7 +35,7 @@ use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
 /// changes, or whenever a behaviour-sensitive dependency is upgraded.
 /// The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
-pub const EXTRACTOR_VERSION: u32 = 3;
+pub const EXTRACTOR_VERSION: u32 = 4;
 
 /// Monotonic version of the OCR adapter's output. Stored on the OCR
 /// intake's `intake.extractor_version`, decoupled from
@@ -66,26 +66,29 @@ pub const FROZEN_DEPS_HASH: &str =
 /// a structural failure (an unreadable file, an unsupported format) is
 /// an [`ExtractError`].
 ///
-/// `toggles` carries the four half-rule switches the EPUB and TXT
-/// adapters consult: EPUB year-range gating, EPUB ISBN recognition,
-/// MARC role-code mapping, and TXT heading detection. Format-detect,
-/// HTML, and PDF adapters do not yet consume the toggle bag.
-/// `heading_patterns` carries the multi-language marker grammar the
-/// TXT adapter consults; the other adapters ignore it.
+/// `profile` carries every behavioural knob the adapters consult:
+/// `profile.extract` gates the EPUB / TXT half-rules,
+/// `profile.html` carries the block / skip tag lists the EPUB and
+/// HTML adapters' DOM walk uses, and `profile.quality` carries the
+/// thresholds the PDF text-layer gate consults. `heading_patterns`
+/// carries the multi-language chapter / volume marker grammar the
+/// TXT adapter consults.
 pub fn extract(
     path: &Path,
-    toggles: &ExtractToggles,
+    profile: &AuditProfile,
     heading_patterns: &HeadingPatterns,
 ) -> Result<ExtractOutcome, ExtractError> {
     match detect::detect(path) {
-        detect::Format::Epub => epub::extract(path, toggles).map(ExtractOutcome::Extracted),
-        detect::Format::Html => html::extract(path).map(ExtractOutcome::Extracted),
+        detect::Format::Epub => {
+            epub::extract(path, &profile.extract, &profile.html).map(ExtractOutcome::Extracted)
+        }
+        detect::Format::Html => html::extract(path, &profile.html).map(ExtractOutcome::Extracted),
         detect::Format::Txt => {
-            txt::extract(path, toggles, heading_patterns).map(ExtractOutcome::Extracted)
+            txt::extract(path, &profile.extract, heading_patterns).map(ExtractOutcome::Extracted)
         }
         // The PDF adapter resolves the three-state outcome itself — a
         // PDF can route to OCR — so it is not wrapped like the others.
-        detect::Format::Pdf => pdf::extract(path),
+        detect::Format::Pdf => pdf::extract(path, &profile.quality),
         other => Err(ExtractError::UnsupportedFormat {
             detected: other.label().to_string(),
         }),
