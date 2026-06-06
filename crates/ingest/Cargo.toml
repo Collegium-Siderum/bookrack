@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-audit-profile.workspace = true
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-extract = { path = "../extract" }

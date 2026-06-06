@@ -73,12 +73,18 @@ pub struct StructureParams {
     /// Length, in hex characters, of the stable-anchor prefix taken from
     /// each prose leaf's normalized-text hash.
     pub stable_anchor_len: usize,
+    /// Thresholds the TOC-shape statistics use to decide whether a TOC
+    /// looks suspiciously flat or skewed against the heading-block
+    /// count. Sourced from the active audit profile so an operator
+    /// retunes the warning levels without recompiling.
+    pub toc_shape: bookrack_audit_profile::TocShapeToggles,
 }
 
 impl Default for StructureParams {
     fn default() -> StructureParams {
         StructureParams {
             stable_anchor_len: 16,
+            toc_shape: bookrack_audit_profile::TocShapeToggles::default(),
         }
     }
 }
@@ -216,7 +222,7 @@ pub fn ingest_structure(
     let plan = structure::plan_tree(book_root_type, extraction, params)?;
     let prose_leaves = plan.prose_leaves;
     let child_count = plan.child_count();
-    let toc_stats = structure::toc_stats(extraction);
+    let toc_stats = structure::toc_stats(extraction, &params.toc_shape);
 
     let idx = PartitionIdx::new(intake_id);
     corpus.drop_partition(idx)?;

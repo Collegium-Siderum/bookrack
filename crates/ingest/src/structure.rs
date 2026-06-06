@@ -33,7 +33,8 @@ use bookrack_extract::{BlockKind, Extraction};
 use bookrack_normalize::{norm_text_sha256, normalize};
 use sha2::{Digest, Sha256};
 
-use bookrack_metadata::{FLAT_TOC_MIN_ENTRIES, HEADING_SKEW_MIN, HEADING_SKEW_RATIO, TocStats};
+use bookrack_audit_profile::TocShapeToggles;
+use bookrack_metadata::TocStats;
 
 use crate::{IngestError, StructureParams};
 
@@ -380,25 +381,25 @@ pub(crate) fn plan_tree(
 /// Warning-level TOC shape statistics over one [`Extraction`].
 ///
 /// `suspicious_flat` fires when a TOC has at least
-/// [`FLAT_TOC_MIN_ENTRIES`] entries that all sit at one depth — enough
+/// `shape.flat_min_entries` entries that all sit at one depth — enough
 /// rows that a hierarchy could have been expressed, yet none was.
 /// `heading_block_skew` fires when the TOC entry count and the body's
-/// heading-block count diverge by at least [`HEADING_SKEW_RATIO`] in
-/// either direction, once both sides clear [`HEADING_SKEW_MIN`].
-pub(crate) fn toc_stats(extraction: &Extraction) -> TocStats {
+/// heading-block count diverge by at least `shape.skew_ratio` in either
+/// direction, once both sides clear `shape.skew_min`.
+pub(crate) fn toc_stats(extraction: &Extraction, shape: &TocShapeToggles) -> TocStats {
     let entries = &extraction.toc.entries;
     let total = entries.len();
     let unanchored = entries.iter().filter(|e| e.start_block.is_none()).count();
     let suspicious_flat =
-        total >= FLAT_TOC_MIN_ENTRIES && entries.iter().all(|e| e.depth == entries[0].depth);
+        total >= shape.flat_min_entries && entries.iter().all(|e| e.depth == entries[0].depth);
     let heading_blocks = extraction
         .blocks
         .iter()
         .filter(|b| matches!(b.kind, BlockKind::Heading { .. }))
         .count();
-    let heading_block_skew = (total >= HEADING_SKEW_MIN || heading_blocks >= HEADING_SKEW_MIN)
-        && (total.saturating_mul(HEADING_SKEW_RATIO) < heading_blocks
-            || heading_blocks.saturating_mul(HEADING_SKEW_RATIO) < total);
+    let heading_block_skew = (total >= shape.skew_min || heading_blocks >= shape.skew_min)
+        && (total.saturating_mul(shape.skew_ratio) < heading_blocks
+            || heading_blocks.saturating_mul(shape.skew_ratio) < total);
     TocStats {
         total_toc_entries: total,
         unanchored_toc_entries: unanchored,

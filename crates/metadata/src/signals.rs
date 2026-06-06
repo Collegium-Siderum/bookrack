@@ -23,15 +23,6 @@ use crate::report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, Verdict,
 };
 
-/// Minimum TOC size at which a single-depth nav becomes a meaningful
-/// `suspicious_flat` signal. Re-exported through [`crate`] so the
-/// ingest STRUCTURE step that computes the bit shares the threshold.
-pub const FLAT_TOC_MIN_ENTRIES: usize = 5;
-/// Minimum side size at which `heading_block_skew` becomes meaningful.
-pub const HEADING_SKEW_MIN: usize = 5;
-/// Ratio threshold for `heading_block_skew` divergence.
-pub const HEADING_SKEW_RATIO: usize = 4;
-
 /// How a TOC's shape audit lands on the verdict / confidence dial.
 ///
 /// The shape signals are a separate channel from the per-field grades:

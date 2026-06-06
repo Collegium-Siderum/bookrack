@@ -753,6 +753,7 @@ dependencies = [
 name = "bookrack-ingest"
 version = "0.1.0"
 dependencies = [
+ "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",

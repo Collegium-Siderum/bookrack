@@ -29,9 +29,7 @@ pub use report::{
     AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
 };
 pub use rules::{AuditRules, LoadError as RulesLoadError};
-pub use signals::{
-    FLAT_TOC_MIN_ENTRIES, HEADING_SKEW_MIN, HEADING_SKEW_RATIO, is_valid_isbn, looks_like_timestamp,
-};
+pub use signals::{is_valid_isbn, looks_like_timestamp};
 
 /// Run the audit over one prepared input set under the given profile.
 pub fn audit(input: &AuditInput, profile: &AuditProfile) -> MetadataReport {
