@@ -49,6 +49,9 @@ pub struct DryrunParams {
     /// the EPUB / TXT half-rules, the filename parser, and the
     /// downstream audit. Defaults to the shipped profile.
     pub audit_profile: bookrack_metadata::AuditProfile,
+    /// Multi-language chapter / volume marker patterns the TXT
+    /// adapter consults. Defaults to the shipped `headings.toml`.
+    pub heading_patterns: bookrack_audit_profile::HeadingPatterns,
 }
 
 impl Default for DryrunParams {
@@ -59,6 +62,7 @@ impl Default for DryrunParams {
             skip_chunks: false,
             audit_data: bookrack_metadata::AuditData::default_data(),
             audit_profile: bookrack_metadata::AuditProfile::default(),
+            heading_patterns: bookrack_audit_profile::HeadingPatterns::default(),
         }
     }
 }
@@ -355,7 +359,11 @@ pub fn dryrun_book(path: &Path, params: &DryrunParams) -> DryrunBookReport {
         error: None,
     };
 
-    let extraction = match extract(path, &params.audit_profile.extract) {
+    let extraction = match extract(
+        path,
+        &params.audit_profile.extract,
+        &params.heading_patterns,
+    ) {
         Ok(ExtractOutcome::Extracted(e)) => e,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             record.extract_outcome = "needs_ocr".to_string();

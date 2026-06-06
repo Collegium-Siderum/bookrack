@@ -25,7 +25,7 @@ pub use contract::*;
 
 use std::path::Path;
 
-use bookrack_audit_profile::ExtractToggles;
+use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
 
 /// Monotonic version of the extractor's output. Stored on
 /// `intake.extractor_version`; a mismatch with a stored row marks the
@@ -70,11 +70,19 @@ pub const FROZEN_DEPS_HASH: &str =
 /// adapters consult: EPUB year-range gating, EPUB ISBN recognition,
 /// MARC role-code mapping, and TXT heading detection. Format-detect,
 /// HTML, and PDF adapters do not yet consume the toggle bag.
-pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<ExtractOutcome, ExtractError> {
+/// `heading_patterns` carries the multi-language marker grammar the
+/// TXT adapter consults; the other adapters ignore it.
+pub fn extract(
+    path: &Path,
+    toggles: &ExtractToggles,
+    heading_patterns: &HeadingPatterns,
+) -> Result<ExtractOutcome, ExtractError> {
     match detect::detect(path) {
         detect::Format::Epub => epub::extract(path, toggles).map(ExtractOutcome::Extracted),
         detect::Format::Html => html::extract(path).map(ExtractOutcome::Extracted),
-        detect::Format::Txt => txt::extract(path, toggles).map(ExtractOutcome::Extracted),
+        detect::Format::Txt => {
+            txt::extract(path, toggles, heading_patterns).map(ExtractOutcome::Extracted)
+        }
         // The PDF adapter resolves the three-state outcome itself — a
         // PDF can route to OCR — so it is not wrapped like the others.
         detect::Format::Pdf => pdf::extract(path),

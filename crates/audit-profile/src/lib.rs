@@ -46,10 +46,15 @@ use std::path::Path;
 use serde::Deserialize;
 
 mod data;
+mod headings;
 mod load;
 
 pub use data::{
     AuditData, DATA_OVERLAY_FILE, DATA_SCHEMA_VERSION, DEFAULT_DATA_TOML, DataLoadError,
+};
+pub use headings::{
+    DEFAULT_HEADINGS_TOML, GermanPatterns, HEADINGS_OVERLAY_FILE, HEADINGS_SCHEMA_VERSION,
+    HeadingPatterns, HeadingsLoadError, LatinPatterns, SinoPatterns,
 };
 pub use load::LoadError;
 

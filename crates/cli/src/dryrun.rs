@@ -48,6 +48,7 @@ pub fn run(
         skip_chunks: no_chunk,
         audit_data,
         audit_profile: crate::load_audit_profile(cfg, profile_name),
+        heading_patterns: crate::load_heading_patterns(cfg),
         ..Default::default()
     };
 

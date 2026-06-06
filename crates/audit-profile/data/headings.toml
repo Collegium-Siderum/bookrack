@@ -1,0 +1,90 @@
+# Default multi-language heading patterns shipped with bookrack.
+#
+# Schema-locked pattern set the TXT adapter consults to recognise
+# chapter / volume marker lines. Three template families cover the
+# practical long-form-prose corpus the adapter sees today:
+#
+# - Sino: <prefix><numeral><unit> as one word. Covers Simplified and
+#   Traditional Chinese, Japanese (Aozora-style), and Sino-Korean.
+# - Latin: <UnitWord> <Numeral>[ rest] with the unit word followed by
+#   Roman, Arabic, or a small set of spelled-out first ordinals.
+#   Covers English, French, Spanish, and Italian.
+# - German: <SpelledOrdinalAdj> <Unit> as exactly two tokens. Covers
+#   German novels whose chapter labels are always spelled out.
+#
+# A runtime overlay at <data_root>/audit-rules/headings.toml is merged
+# on top: any field present there REPLACES the default, missing fields
+# fall through.
+#
+# Non-Latin characters are spelled as TOML \uXXXX basic-string escapes
+# so this file stays ASCII-clean and complies with the workspace's
+# CJK-out-of-fixtures rule.
+
+schema_version = 1
+
+[sino]
+# Ordinal prefix (U+7B2C).
+prefix = "\u7B2C"
+# Volume unit characters. The Chinese forms and the Japanese volume
+# character. Indices: U+5377 / U+90E8 / U+7BC7 / U+5DFB.
+volume_units = ["\u5377", "\u90E8", "\u7BC7", "\u5DFB"]
+# Chapter unit characters. The Chinese forms and the Japanese chapter
+# / episode units. Indices: U+7AE0 / U+8282 / U+56DE / U+7BC0 / U+8A71.
+chapter_units = ["\u7AE0", "\u8282", "\u56DE", "\u7BC0", "\u8A71"]
+# CJK numerals: 0..9 (U+96F6 plus U+4E00..U+4E5D), the round-number
+# characters 10 / 100 / 1000 / 10000 (U+5341 / U+767E / U+5343 /
+# U+4E07), the "two" alias (U+4E24), the formal / traditional digit
+# set (U+58F9 .. U+62FE), and the fullwidth digits 0..9
+# (U+FF10..U+FF19).
+numerals = "\u96F6\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D\u5341\u767E\u5343\u4E07\u4E24\u58F9\u8D30\u53C1\u8086\u4F0D\u9646\u67D2\u634C\u7396\u62FE\uFF10\uFF11\uFF12\uFF13\uFF14\uFF15\uFF16\uFF17\uFF18\uFF19"
+# Character cap: sixty covers a chapter marker plus its title and an
+# optional trailing page number without letting whole sentences slip in.
+max_chars = 60
+
+[latin]
+volume_units = ["book", "tome", "livre", "libro", "parte", "partie"]
+# `capitulo` carries the Spanish i-acute at U+00ED.
+chapter_units = ["chapter", "chapitre", "cap\u00EDtulo", "capitolo"]
+# First-ordinal spellings observed in the wild; subsequent chapters in
+# those novels carry Roman or Arabic numerals.
+spelled_first = ["primero", "premier", "primo", "one", "first"]
+# Roman-numeral alphabet. Validation is permissive: a non-empty run of
+# these characters up to `roman_max_len` is accepted without checking
+# for canonical form.
+roman_chars = "IVXLCDM"
+roman_max_len = 8
+# Character cap: French and Spanish headings carry the chapter title
+# inline and run long; one hundred fits the observed distribution.
+max_chars = 100
+
+[german]
+# Ordinal stems 1 through 20, plus the alternate form of 7. Each stem
+# combines with `-es` for the neuter `Kapitel` heading or with `-er`
+# for the masculine `Teil` heading. Umlauted stems use u-umlaut
+# (U+00FC) and o-umlaut (U+00F6).
+ordinal_stems = [
+    "erst",
+    "zweit",
+    "dritt",
+    "viert",
+    "f\u00FCnft",
+    "sechst",
+    "siebt",
+    "siebent",
+    "acht",
+    "neunt",
+    "zehnt",
+    "elft",
+    "zw\u00F6lft",
+    "dreizehnt",
+    "vierzehnt",
+    "f\u00FCnfzehnt",
+    "sechzehnt",
+    "siebzehnt",
+    "achtzehnt",
+    "neunzehnt",
+    "zwanzigst",
+]
+# Character cap: German headings are exactly two short words; thirty
+# rejects body text outright.
+max_chars = 30

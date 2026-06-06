@@ -294,6 +294,9 @@ pub struct IngestParams {
     /// downstream audit. Defaults to the shipped profile so an
     /// embedder that does not set it sees the pre-profile behaviour.
     pub audit_profile: bookrack_metadata::AuditProfile,
+    /// Multi-language chapter / volume marker patterns the TXT
+    /// adapter consults. Defaults to the shipped `headings.toml`.
+    pub heading_patterns: bookrack_audit_profile::HeadingPatterns,
     /// When true, run the full pipeline even if the source's
     /// `source_sha256` is already on file and the stored
     /// `extractor_version` / `embed_model` stamps match this binary's.
@@ -311,6 +314,7 @@ impl Default for IngestParams {
             hold_for_metadata: false,
             audit_data: bookrack_metadata::AuditData::default_data(),
             audit_profile: bookrack_metadata::AuditProfile::default(),
+            heading_patterns: bookrack_audit_profile::HeadingPatterns::default(),
             force: false,
         }
     }
@@ -402,8 +406,13 @@ pub async fn ingest_book<E: Embedder>(
 
     // EXTRACT.
     let started = std::time::Instant::now();
-    let extracted = tracing::info_span!("operation", stage = "extract")
-        .in_scope(|| bookrack_extract::extract(file, &params.audit_profile.extract));
+    let extracted = tracing::info_span!("operation", stage = "extract").in_scope(|| {
+        bookrack_extract::extract(
+            file,
+            &params.audit_profile.extract,
+            &params.heading_patterns,
+        )
+    });
     let extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {

@@ -1750,6 +1750,22 @@ pub(crate) fn load_audit_data(cfg: &Config) -> AuditData {
     }
 }
 
+/// Load the multi-language heading patterns from
+/// `cfg.audit_rules_dir()`. A missing directory or malformed file is
+/// logged and the shipped default is returned.
+pub(crate) fn load_heading_patterns(cfg: &Config) -> bookrack_audit_profile::HeadingPatterns {
+    match bookrack_audit_profile::HeadingPatterns::load_from(&cfg.audit_rules_dir()) {
+        Ok(patterns) => patterns,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to load heading patterns overlay; using shipped default",
+            );
+            bookrack_audit_profile::HeadingPatterns::default_patterns()
+        }
+    }
+}
+
 /// Resolve the active audit profile.
 ///
 /// When `name` is `Some`, the named built-in (`default` /
@@ -1795,12 +1811,14 @@ async fn run_ingest(
     let embedder = embedder(cfg, &embed_cfg)?;
     let audit_data = load_audit_data(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
+    let heading_patterns = load_heading_patterns(cfg);
     let params = IngestParams {
         embed: embed_cfg,
         hold_for_metadata,
         force,
         audit_data,
         audit_profile,
+        heading_patterns,
         ..Default::default()
     };
 
@@ -1981,10 +1999,12 @@ async fn run_intake_ocr(
     let embedder = embedder(cfg, &embed_cfg)?;
     let audit_data = load_audit_data(cfg);
     let audit_profile = load_audit_profile(cfg, profile_name);
+    let heading_patterns = load_heading_patterns(cfg);
     let params = IngestParams {
         embed: embed_cfg,
         audit_data,
         audit_profile,
+        heading_patterns,
         ..Default::default()
     };
     let ocr_params = OcrIngestParams {

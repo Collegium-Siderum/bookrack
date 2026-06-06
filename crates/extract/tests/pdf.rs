@@ -34,7 +34,11 @@ fn joined_text(extraction: &Extraction) -> String {
 
 /// Extract a fixture, asserting it produced a usable text layer.
 fn extracted(name: &str) -> Extraction {
-    match extract(&pdf_fixture(name), &common::default_extract_toggles()) {
+    match extract(
+        &pdf_fixture(name),
+        &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
+    ) {
         Ok(ExtractOutcome::Extracted(e)) => e,
         other => panic!("{name}: expected a usable text layer, got {other:?}"),
     }
@@ -166,6 +170,7 @@ fn encrypted_userpw_pdf_is_drm_protected() {
     let err = extract(
         &pdf_fixture("encrypted_userpw.pdf"),
         &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
     )
     .expect_err("user password");
     assert!(matches!(err, ExtractError::DrmProtected), "got {err:?}");
@@ -181,6 +186,7 @@ fn image_only_pdf_routes_to_ocr() {
     match extract(
         &pdf_fixture("image_only.pdf"),
         &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
     ) {
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             assert!(!reason.is_empty(), "the OCR-routing reason is recorded");
@@ -200,6 +206,7 @@ fn corrupt_pdf_is_reported_as_a_corrupt_file() {
     let err = extract(
         &pdf_fixture("corrupt.pdf"),
         &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
     )
     .expect_err("corrupt file");
     assert!(
@@ -332,10 +339,18 @@ fn pdf_extraction_is_deterministic() {
         "image_only.pdf",
     ] {
         let path = pdf_fixture(name);
-        let first = extract(&path, &common::default_extract_toggles())
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
-        let second = extract(&path, &common::default_extract_toggles())
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let first = extract(
+            &path,
+            &common::default_extract_toggles(),
+            &common::default_heading_patterns(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let second = extract(
+            &path,
+            &common::default_extract_toggles(),
+            &common::default_heading_patterns(),
+        )
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(first, second, "{name} extracts deterministically");
     }
 }

@@ -53,8 +53,18 @@ fn legacy_gbk_text_is_decoded_via_gb18030() {
 #[test]
 fn txt_extraction_is_deterministic() {
     let path = fixture("web_novel.txt");
-    let first = extract(&path, &common::default_extract_toggles()).expect("first extract");
-    let second = extract(&path, &common::default_extract_toggles()).expect("second extract");
+    let first = extract(
+        &path,
+        &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
+    )
+    .expect("first extract");
+    let second = extract(
+        &path,
+        &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
+    )
+    .expect("second extract");
     assert_eq!(first, second);
 }
 
@@ -96,7 +106,12 @@ fn disabling_txt_toc_collapses_headings_to_body() {
         txt_toc_enabled: false,
         ..ExtractToggles::default()
     };
-    let outcome = extract(&fixture("web_novel.txt"), &toggles).expect("extract");
+    let outcome = extract(
+        &fixture("web_novel.txt"),
+        &toggles,
+        &common::default_heading_patterns(),
+    )
+    .expect("extract");
     let ExtractOutcome::Extracted(ex) = outcome else {
         panic!("expected an extracted text layer");
     };

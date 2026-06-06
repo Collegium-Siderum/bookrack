@@ -22,7 +22,7 @@
 
 use std::path::Path;
 
-use bookrack_audit_profile::ExtractToggles;
+use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
 
 use crate::EXTRACTOR_VERSION;
 use crate::contract::{
@@ -33,7 +33,13 @@ use crate::headings;
 /// Extract one plain-text file. `toggles.txt_toc_enabled` gates whether
 /// matching lines become `Heading` blocks; when off, every non-blank
 /// line lands as `BlockKind::Body` and the derived TOC stays empty.
-pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
+/// `heading_patterns` carries the multi-language marker grammar the
+/// dispatcher consults when the gate is on.
+pub fn extract(
+    path: &Path,
+    toggles: &ExtractToggles,
+    heading_patterns: &HeadingPatterns,
+) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
     let text = decode(&bytes);
 
@@ -47,7 +53,7 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
             continue;
         }
         let kind = if toggles.txt_toc_enabled {
-            match headings::heading_level(line) {
+            match headings::heading_level(line, heading_patterns) {
                 Some(level) => BlockKind::Heading { level },
                 None => BlockKind::Body,
             }

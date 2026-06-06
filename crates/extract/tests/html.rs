@@ -53,7 +53,17 @@ fn standalone_reads_head_metadata() {
 #[test]
 fn html_extraction_is_deterministic() {
     let path = fixture("standalone.html");
-    let first = extract(&path, &common::default_extract_toggles()).expect("first extract");
-    let second = extract(&path, &common::default_extract_toggles()).expect("second extract");
+    let first = extract(
+        &path,
+        &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
+    )
+    .expect("first extract");
+    let second = extract(
+        &path,
+        &common::default_extract_toggles(),
+        &common::default_heading_patterns(),
+    )
+    .expect("second extract");
     assert_eq!(first, second);
 }
