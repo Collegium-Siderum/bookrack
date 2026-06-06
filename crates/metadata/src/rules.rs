@@ -6,7 +6,8 @@
 //!
 //! - `publishers.toml` holds the reputable-imprint whitelist.
 //! - `watermarks.toml` holds four token lists used by the
-//!   distribution-watermark sniffer.
+//!   distribution-watermark sniffer, plus the suffix tokens that mark a
+//!   trailing bracketed segment as a volume / edition marker.
 //!
 //! Each file declares `schema_version = 1`; the loader rejects any
 //! other value. The whole directory is opt-in: a missing directory or
@@ -41,6 +42,12 @@ pub struct AuditRules {
     pub ascii_distribution_tokens: Vec<String>,
     /// CJK fragments that mark watermarks or distribution brands.
     pub watermark_cjk_tokens: Vec<String>,
+    /// Tokens that, when found at the end of a trimmed bracketed
+    /// segment, mark the segment as a volume / edition marker rather
+    /// than a series name or marketing block. Single-character tokens
+    /// are typical (e.g. CJK volume / edition / printing suffixes), but
+    /// multi-character tokens are honoured via suffix match.
+    pub volume_suffix_tokens: Vec<String>,
 }
 
 impl AuditRules {
@@ -67,6 +74,7 @@ impl AuditRules {
             promo_tokens: watermarks.promo_tokens,
             ascii_distribution_tokens: watermarks.ascii_distribution_tokens,
             watermark_cjk_tokens: watermarks.watermark_cjk_tokens,
+            volume_suffix_tokens: watermarks.volume_suffix_tokens,
         })
     }
 }
@@ -126,6 +134,8 @@ struct WatermarksFile {
     ascii_distribution_tokens: Vec<String>,
     #[serde(default)]
     watermark_cjk_tokens: Vec<String>,
+    #[serde(default)]
+    volume_suffix_tokens: Vec<String>,
 }
 
 fn load_publishers(path: &Path) -> Result<Vec<String>, LoadError> {
@@ -235,7 +245,8 @@ mod tests {
              contact_tokens = [\"qq:\"]\n\
              promo_tokens = [\"free ebook\"]\n\
              ascii_distribution_tokens = [\"cj5\"]\n\
-             watermark_cjk_tokens = [\"\\u638C\\u4E0A\\u4E66\\u82D1\"]\n",
+             watermark_cjk_tokens = [\"\\u638C\\u4E0A\\u4E66\\u82D1\"]\n\
+             volume_suffix_tokens = [\"\\u518C\", \"\\u7248\", \"\\u672C\"]\n",
         );
         let rules = AuditRules::load_from(tmp.path()).expect("load");
         assert_eq!(rules.publisher_whitelist, vec!["Acme University Press"]);
@@ -243,6 +254,34 @@ mod tests {
         assert_eq!(rules.promo_tokens, vec!["free ebook"]);
         assert_eq!(rules.ascii_distribution_tokens, vec!["cj5"]);
         assert_eq!(rules.watermark_cjk_tokens.len(), 1);
+        assert_eq!(
+            rules.volume_suffix_tokens,
+            vec![
+                "\u{518C}".to_string(),
+                "\u{7248}".to_string(),
+                "\u{672C}".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn watermarks_without_volume_suffix_tokens_loads_to_empty() {
+        // The field is opt-in: an existing `watermarks.toml` that
+        // predates this rule must still load and yield empty volume
+        // suffixes, so the bracketed-title classifier silently falls
+        // through to series / marketing / aggregator.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write(
+            tmp.path(),
+            WATERMARKS_FILE,
+            "schema_version = 1\n\
+             contact_tokens = []\n\
+             promo_tokens = []\n\
+             ascii_distribution_tokens = []\n\
+             watermark_cjk_tokens = []\n",
+        );
+        let rules = AuditRules::load_from(tmp.path()).expect("load");
+        assert!(rules.volume_suffix_tokens.is_empty());
     }
 
     #[test]

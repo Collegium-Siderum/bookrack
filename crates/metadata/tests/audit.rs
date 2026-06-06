@@ -32,6 +32,15 @@ fn test_rules() -> &'static AuditRules {
                 .trim()
                 .to_string(),
         ],
+        // CJK volume / edition / printing suffixes recognised by the
+        // bracketed-title classifier: `\u{518C}` / `\u{7248}` /
+        // `\u{672C}`. In production these come from
+        // `volume_suffix_tokens` in the operator's `watermarks.toml`.
+        volume_suffix_tokens: vec![
+            "\u{518C}".to_string(),
+            "\u{7248}".to_string(),
+            "\u{672C}".to_string(),
+        ],
     })
 }
 

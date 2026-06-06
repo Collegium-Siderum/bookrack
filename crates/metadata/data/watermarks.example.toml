@@ -43,3 +43,17 @@ watermark_cjk_tokens = [
     # placeholder entry, edit or remove as needed
     # "\uXXXX\uXXXX..."
 ]
+
+# Suffix tokens that mark a trailing bracketed segment as a volume /
+# edition / printing marker rather than a series name or marketing
+# block. Match is `ends_with` against the trimmed bracketed content,
+# so both single-character and multi-character tokens work. Empty by
+# default: every bracketed tail then routes through the series /
+# marketing / aggregator branches only.
+volume_suffix_tokens = [
+    # Typical entries for CJK markets cover the volume / edition /
+    # printing suffix characters at U+518C / U+7248 / U+672C; a
+    # Japanese volume suffix sits at U+5DFB. Add the tokens your
+    # collection actually uses; an empty list disables this signal.
+    # "\uXXXX"
+]
