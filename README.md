@@ -42,10 +42,20 @@ neighbour indexing, metadata) is still in progress.
 
 3. **Extract and run the wizard.**
 
+   macOS / Linux:
+
    ```
    tar -xzf bookrack-*.tar.gz
    cd bookrack-*
    ./bookrack init
+   ```
+
+   Windows (PowerShell):
+
+   ```
+   Expand-Archive bookrack-*.zip -DestinationPath .
+   cd bookrack-*
+   .\bookrack.exe init
    ```
 
    `init` is a five-step wizard: it picks a data root, checks the
@@ -56,9 +66,18 @@ neighbour indexing, metadata) is still in progress.
 
 4. **Ingest a book and start the MCP server.**
 
+   macOS / Linux:
+
    ```
    ./bookrack ingest /path/to/book.epub
    ./bookrack-mcp                          # 127.0.0.1:8765/mcp
+   ```
+
+   Windows (PowerShell):
+
+   ```
+   .\bookrack.exe ingest path\to\book.epub
+   .\bookrack-mcp.exe                      # 127.0.0.1:8765/mcp
    ```
 
 ## Connecting an MCP client
@@ -120,23 +139,45 @@ The output is unchanged either way; only the wall-clock includes the
 time spent asleep, which makes a run that crossed an idle-sleep
 window read as far slower than it really was.
 
-On macOS the default idle-sleep policy will suspend a backgrounded
-shell. Wrap a long ingest to opt out of idle sleep for its duration:
+On every desktop platform the default idle-sleep policy will suspend
+a backgrounded shell. Wrap a long ingest to opt out of idle sleep for
+its duration:
+
+macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
 ```
 caffeinate -i bookrack ingest <file>     # single book
 caffeinate -i bash bulk-ingest.sh        # batch driver
 ```
 
-`-i` keeps the system from sleeping on idle without blocking display
-sleep, so an unattended overnight run finishes in its true
-wall-clock.
+Linux (systemd) — `systemd-inhibit` takes the same kind of lock the
+desktop environment uses for media playback:
+
+```
+systemd-inhibit --what=idle --why="bookrack ingest" \
+    bookrack ingest <file>
+systemd-inhibit --what=idle --why="bookrack ingest" \
+    bash bulk-ingest.sh
+```
+
+Windows (PowerShell) — flip the active power scheme's idle-sleep
+timeout to zero for the duration of the run, then restore it:
+
+```
+powercfg /change standby-timeout-ac 0
+.\bookrack.exe ingest path\to\book.epub
+powercfg /change standby-timeout-ac 30   # restore the previous value
+```
+
+For an unattended overnight run, prefer a wrapper that runs the
+restore step even when the ingest exits with an error.
 
 ### Audit profile
 
-The metadata audit, the filename parser, and the EPUB / TXT
-half-rules read every toggle and threshold from an audit profile.
-Three built-in presets ship with the binary:
+The metadata audit, the filename parser, the EPUB / TXT half-rules,
+and the extract-side HTML / quality / language gates read every
+toggle and threshold from an audit profile. Three built-in presets
+ship with the binary:
 
 - `default` — the previous hard-coded behaviour, expressed as
   toggles. Year range 1450–2100, every per-field signal active, every
@@ -159,14 +200,29 @@ bookrack --audit-profile strict dryrun <dir>
 
 Without the flag, the shipped `default` profile is merged with an
 optional overlay at `<data_root>/audit-rules/audit_profile.local.toml`
-so a deployment can adjust individual thresholds without
-recompiling. Two existing list-typed inputs continue to load from
-the same directory: `<data_root>/audit-rules/publishers.toml`
-carries the reputable-imprint whitelist (see
-[publishers.example.toml](crates/metadata/data/publishers.example.toml))
-and `watermarks.toml` carries the four watermark token lists (see
-[watermarks.example.toml](crates/metadata/data/watermarks.example.toml)).
-Both files are user-supplied; bookrack ships only the examples.
+so a deployment can adjust individual thresholds, the HTML block /
+skip tag lists, the PDF text-quality cutoffs, or the BCP-47 script
+buckets without recompiling.
+
+Two further on-disk schemas live under the same directory and follow
+the same shipped-default-plus-overlay merge:
+
+- `<data_root>/audit-rules/audit_data.toml` — the reputable-imprint
+  whitelist, the four watermark token lists, the URL / e-mail
+  watermark substrings, the whitelist normalisation abbreviations,
+  the placeholder-title words, and the book-extension lists the
+  ingest dryrun walker and the diagnose scrubber consult. See the
+  shipped default at
+  [crates/audit-profile/data/audit_data.toml](crates/audit-profile/data/audit_data.toml).
+- `<data_root>/audit-rules/headings.toml` — the multi-language
+  chapter / volume marker grammars the TXT adapter dispatches across
+  (Sino, Latin, German families today). Add a unit char, ordinal
+  stem, or first-ordinal spelling for a new language without a
+  recompile. See the shipped default at
+  [crates/audit-profile/data/headings.toml](crates/audit-profile/data/headings.toml).
+
+All three overlays are user-supplied; bookrack falls through to the
+shipped defaults when an overlay is absent or omits a field.
 
 ### Upgrading
 
@@ -192,7 +248,8 @@ The `--stale-only` flag on `corpus rebuild` and `vectors reembed`
 scopes the refresh to the partitions whose stored
 `extractor_version` lags this binary's. A reembed that touches every
 book is the most expensive refresh; schedule it for a low-activity
-window and wrap long runs in `caffeinate -i` on macOS, as above.
+window and wrap long runs with the platform's idle-sleep override
+covered under [Long ingestions](#long-ingestions).
 
 See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
 matrix and per-command guidance.
@@ -208,7 +265,13 @@ bookrack reads its data root in this precedence, highest first:
 4. A `bookrack-data/` directory next to the running binary
 5. The `default` entry of the registry named by `BOOKRACK_REGISTRY`
 6. The `default` entry of the platform-default registry at
-   `<config_dir>/bookrack/registry.toml`
+   `<config_dir>/bookrack/registry.toml`, where `<config_dir>` is:
+
+   | Platform | `<config_dir>` |
+   | --- | --- |
+   | macOS | `~/Library/Application Support` |
+   | Linux | `$XDG_CONFIG_HOME`, or `~/.config` if unset |
+   | Windows | `%APPDATA%` (the Roaming AppData directory) |
 
 `bookrack init` writes step 6's registry file by default. Operational
 knobs (Ollama endpoint, embed model, MCP listen address, log filter)
