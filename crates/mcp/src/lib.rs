@@ -14,6 +14,7 @@ use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
+use bookrack_ops::registry::LibraryRegistry;
 use bookrack_ops::{Ops, OpsError, SearchOptions, reads, writes};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -631,11 +632,20 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 ///
 /// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
 /// server pointed at `http://<addr>/mcp`.
+///
+/// The registry is the in-process scheduler entry point. This phase
+/// pins each tool to the registry's default library — the registry
+/// reaches deeper into the tool surface in a later phase, when each
+/// tool accepts an explicit `library` selector.
 pub async fn serve(
-    ops: SharedOps,
+    registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     addr: &str,
 ) -> anyhow::Result<()> {
+    let ops = registry
+        .get(None)
+        .context("resolve default library from registry")?
+        .ops_arc();
     let service = StreamableHttpService::new(
         move || Ok(BookrackServer::new(ops.clone(), info_context.clone())),
         LocalSessionManager::default().into(),

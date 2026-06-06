@@ -12,7 +12,6 @@
 //! means restarting with a different `--data-dir` / `--library`.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
@@ -21,6 +20,7 @@ use bookrack_config::{
 };
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::info::LibraryInfoContext;
+use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
 
@@ -109,8 +109,17 @@ async fn run() -> Result<()> {
         embed_model_configured: embed_cfg.model.clone(),
     };
 
+    // Wrap the single warm Ops in a one-element LibraryRegistry. The
+    // registry routes every later phase's call (REPL, queue worker,
+    // future MCP per-tool library selector) through one chokepoint;
+    // this binary still serves exactly one library, but its plumbing
+    // now matches the multi-library shape.
+    let library_name = cfg.library().unwrap_or("default").to_string();
+    let handle = LibraryHandle::new(library_name, ops);
+    let registry = LibraryRegistry::single(handle);
+
     let mcp_cfg = McpConfig::from_env();
-    bookrack_mcp::serve(Arc::new(ops), info_context, &mcp_cfg.addr).await
+    bookrack_mcp::serve(registry, info_context, &mcp_cfg.addr).await
 }
 
 fn resolution_source_label(source: ResolutionSource) -> &'static str {
