@@ -59,6 +59,35 @@ fn txt_extraction_is_deterministic() {
 }
 
 #[test]
+fn multilingual_fixture_emits_a_toc_across_supported_families() {
+    let ex = extracted(&fixture("multilingual_headings.txt"));
+
+    // The fixture seeds three volume / part / book markers (Book I,
+    // Tome I--FANTINE, Erster Teil), one Livre premier section
+    // marker, plus chapter markers in English, French, German,
+    // Spanish, and Italian. All resolve to TOC entries.
+    let depths: Vec<u8> = ex.toc.entries.iter().map(|e| e.depth).collect();
+    assert_eq!(
+        depths,
+        vec![
+            // Book I, Chapter I., CHAPTER II.
+            0, 1, 1, //
+            // Tome I--FANTINE, Livre premier, Chapitre I, Chapitre II
+            0, 0, 1, 1, //
+            // Erster Teil, Erstes Kapitel, Zweites Kapitel, Fünfzehntes Kapitel
+            0, 1, 1, 1, //
+            // Capítulo primero., Capítulo II.
+            1, 1, //
+            // CAPITOLO PRIMO., CAPITOLO XXIII.
+            1, 1,
+        ]
+    );
+    assert!(ex.toc.entries.iter().all(|e| e.start_block.is_some()));
+    assert!(ex.blocks.iter().any(|b| b.kind == BlockKind::Body));
+    assert_eq!(ex.provenance.extractor_version, EXTRACTOR_VERSION);
+}
+
+#[test]
 fn disabling_txt_toc_collapses_headings_to_body() {
     use bookrack_audit_profile::ExtractToggles;
     use bookrack_extract::ExtractOutcome;

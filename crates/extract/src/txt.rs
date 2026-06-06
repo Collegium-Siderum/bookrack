@@ -13,12 +13,12 @@
 //! - **segmentation** — one non-blank line is one block. This fits the
 //!   common one-paragraph-per-line text (web-novel dumps and the like);
 //!   hard-wrapped text would instead need a blank-line paragraph-join.
-//! - **structure** — lines that look like Chinese chapter / volume
-//!   markers become `Heading` blocks, so even a bare `.txt` yields a
-//!   usable TOC.
-//!
-//! The chapter-marker characters are spelled as `\u{...}` escapes, not
-//! literal glyphs, so this source file stays ASCII-only.
+//! - **structure** — lines that match a chapter / volume marker in any
+//!   supported language family become `Heading` blocks, so even a bare
+//!   `.txt` yields a usable TOC. See [`crate::headings`] for the family
+//!   definitions; the dispatcher covers Sino (Chinese / Japanese /
+//!   Hangul-via-Sino-shape), Latin (English / French / Spanish /
+//!   Italian), and German.
 
 use std::path::Path;
 
@@ -28,27 +28,11 @@ use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, ExtractError, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
 };
-
-/// The ordinal prefix that opens a Chinese chapter / volume marker
-/// (U+7B2C).
-const MARKER_PREFIX: char = '\u{7b2c}';
-
-/// Volume-class unit characters — U+5377, U+90E8, U+7BC7. A marker
-/// ending in one of these is a level-1 heading.
-const VOLUME_UNITS: [char; 3] = ['\u{5377}', '\u{90e8}', '\u{7bc7}'];
-
-/// Chapter-class unit characters — U+7AE0, U+8282, U+56DE. A marker
-/// ending in one of these is a level-2 heading.
-const CHAPTER_UNITS: [char; 3] = ['\u{7ae0}', '\u{8282}', '\u{56de}'];
-
-/// CJK numerals, including the fullwidth digit variants, that may form
-/// the number run between a marker's prefix and its unit character.
-const CJK_NUMERALS: &str = "\u{96f6}\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}\u{4e03}\u{516b}\u{4e5d}\u{5341}\u{767e}\u{5343}\u{4e07}\u{4e24}\u{58f9}\u{8d30}\u{53c1}\u{8086}\u{4f0d}\u{9646}\u{67d2}\u{634c}\u{7396}\u{62fe}\u{ff10}\u{ff11}\u{ff12}\u{ff13}\u{ff14}\u{ff15}\u{ff16}\u{ff17}\u{ff18}\u{ff19}";
+use crate::headings;
 
 /// Extract one plain-text file. `toggles.txt_toc_enabled` gates whether
-/// Chinese chapter / volume marker lines are emitted as heading blocks;
-/// when off, every non-blank line lands as `BlockKind::Body` and the
-/// derived TOC stays empty.
+/// matching lines become `Heading` blocks; when off, every non-blank
+/// line lands as `BlockKind::Body` and the derived TOC stays empty.
 pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
     let text = decode(&bytes);
@@ -63,7 +47,7 @@ pub fn extract(path: &Path, toggles: &ExtractToggles) -> Result<Extraction, Extr
             continue;
         }
         let kind = if toggles.txt_toc_enabled {
-            match heading_level(line) {
+            match headings::heading_level(line) {
                 Some(level) => BlockKind::Heading { level },
                 None => BlockKind::Body,
             }
@@ -122,42 +106,6 @@ fn decode(bytes: &[u8]) -> String {
     // GBK and GB2312, so one decoder covers all three.
     let (text, _, _) = encoding_rs::GB18030.decode(bytes);
     text.into_owned()
-}
-
-/// Heading level of a Chinese chapter / volume marker line, or `None`.
-///
-/// A marker is a short line beginning with the ordinal prefix, then a
-/// run of ASCII or CJK numerals, then a unit character. Volume-class
-/// units are level 1, chapter-class units level 2. The length cap keeps
-/// a prose sentence that merely opens with the prefix from matching.
-fn heading_level(line: &str) -> Option<u8> {
-    if line.chars().count() > 30 {
-        return None;
-    }
-    let mut chars = line.chars();
-    if chars.next()? != MARKER_PREFIX {
-        return None;
-    }
-    let mut saw_number = false;
-    for c in chars {
-        if c.is_ascii_digit() || CJK_NUMERALS.contains(c) {
-            saw_number = true;
-        } else if saw_number {
-            // First non-numeral after the number run decides the kind.
-            return if VOLUME_UNITS.contains(&c) {
-                Some(1)
-            } else if CHAPTER_UNITS.contains(&c) {
-                Some(2)
-            } else {
-                None
-            };
-        } else {
-            // The prefix is not immediately followed by a number — this
-            // is ordinary prose opening with it, not a marker.
-            return None;
-        }
-    }
-    None
 }
 
 /// Build a TOC from the heading blocks, each anchored to its own block.

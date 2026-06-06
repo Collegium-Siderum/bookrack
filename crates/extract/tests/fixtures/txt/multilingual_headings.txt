@@ -1,0 +1,34 @@
+Book I
+
+Chapter I. The opening lines.
+A short paragraph that follows the heading.
+CHAPTER II.
+Another short paragraph in the second chapter.
+
+Tome I--FANTINE
+
+Livre premier
+
+Chapitre I Monsieur Myriel
+Une phrase de prose française qui suit le chapitre.
+Chapitre II Monsieur Myriel devient monseigneur Bienvenu
+La suite, sur une ligne séparée.
+
+Erster Teil
+
+Erstes Kapitel
+Ein deutscher Absatz, der dem Kapitel folgt.
+Zweites Kapitel
+Noch ein Absatz, weiter im deutschen Erzählstrang.
+Fünfzehntes Kapitel
+Das Ende der deutschen Sektion.
+
+Capítulo primero. Que trata de la condición del hidalgo.
+Una oración de prosa española sigue al encabezado.
+Capítulo II. Que trata de la primera salida.
+Otra oración para cerrar la sección.
+
+CAPITOLO PRIMO.
+Una frase italiana segue il titolo del capitolo.
+CAPITOLO XXIII.
+Un altro capitolo italiano per chiudere la prova.
