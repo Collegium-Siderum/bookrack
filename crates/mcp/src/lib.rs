@@ -24,6 +24,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
 /// The warm ops state, shared across MCP sessions.
 type SharedOps = Arc<Ops<OllamaEmbedClient>>;
@@ -628,7 +629,8 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
-/// Bind the streamable-HTTP server at `addr` and serve until Ctrl-C.
+/// Bind the streamable-HTTP server at `addr` and serve until the
+/// shutdown channel fires.
 ///
 /// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
 /// server pointed at `http://<addr>/mcp`.
@@ -637,10 +639,17 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// pins each tool to the registry's default library — the registry
 /// reaches deeper into the tool surface in a later phase, when each
 /// tool accepts an explicit `library` selector.
+///
+/// `shutdown_rx` lets the caller drive graceful shutdown from a
+/// broadcast channel shared with sibling tasks (signal listener, REPL,
+/// queue worker). A standalone caller can wire its own `ctrl_c` task
+/// into the channel; the embedded daemon-REPL feeds its session-wide
+/// shutdown signal through here.
 pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     addr: &str,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let ops = registry
         .get(None)
@@ -657,8 +666,8 @@ pub async fn serve(
         .with_context(|| format!("bind MCP server to {addr}"))?;
     tracing::info!(%addr, "bookrack MCP server listening on /mcp");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.recv().await;
         })
         .await
         .context("serve MCP server")?;

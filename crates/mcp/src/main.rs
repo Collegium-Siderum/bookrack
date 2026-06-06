@@ -23,6 +23,7 @@ use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
+use tokio::sync::broadcast;
 
 #[derive(clap::Parser)]
 #[command(
@@ -119,7 +120,17 @@ async fn run() -> Result<()> {
     let registry = LibraryRegistry::single(handle);
 
     let mcp_cfg = McpConfig::from_env();
-    bookrack_mcp::serve(registry, info_context, &mcp_cfg.addr).await
+
+    // Headless mcp binary wires its own broadcast channel: a single
+    // Ctrl-C subscriber feeds the shared shutdown signal that the
+    // embedded daemon-REPL drives through the same channel.
+    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = shutdown_tx.send(());
+        }
+    });
+    bookrack_mcp::serve(registry, info_context, &mcp_cfg.addr, shutdown_rx).await
 }
 
 fn resolution_source_label(source: ResolutionSource) -> &'static str {

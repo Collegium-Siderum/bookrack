@@ -21,11 +21,13 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-diagnose = { path = "../diagnose" }
 bookrack-extract = { path = "../extract" }
+bookrack-mcp = { path = "../mcp" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
 bookrack-vectors = { path = "../vectors" }
 clap.workspace = true
+dirs.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

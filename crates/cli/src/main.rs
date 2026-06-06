@@ -16,6 +16,7 @@ mod dryrun;
 mod init;
 mod remove;
 mod render;
+mod run;
 
 use std::path::{Path, PathBuf};
 
@@ -255,6 +256,27 @@ enum Command {
         /// verbatim. Appropriate only for bundles kept locally.
         #[arg(long)]
         no_scrub: bool,
+    },
+    /// Start the daemon-REPL session: warm the library registry,
+    /// acquire the machine-wide session lock, and serve MCP over
+    /// streamable HTTP for the lifetime of the terminal. The
+    /// foreground task idles until a shutdown signal arrives (Ctrl-C,
+    /// SIGTERM, SIGHUP, or — in a later phase — the REPL's `exit`).
+    Run {
+        /// Override the MCP listener address. Defaults to the value
+        /// from `BOOKRACK_MCP_ADDR` (and falls back to the built-in
+        /// loopback address from there).
+        #[arg(long, value_name = "ADDR")]
+        mcp_addr: Option<std::net::SocketAddr>,
+        /// Skip binding the MCP listener. The session lock is still
+        /// taken and the registry is still opened; useful when another
+        /// tool already owns the MCP port.
+        #[arg(long)]
+        no_mcp: bool,
+        /// Override the runtime directory. Falls back to
+        /// `BOOKRACK_RUNTIME_DIR` or the platform default.
+        #[arg(long, value_name = "PATH")]
+        runtime_dir: Option<PathBuf>,
     },
     /// Drop a book from every store — intake row, opaque envelope,
     /// corpus partition, vectors partition, and the cascaded catalog
@@ -718,6 +740,26 @@ async fn run() -> Result<()> {
         .await;
     }
 
+    // `run` owns its own configuration bootstrap (lock acquisition,
+    // obs init, library warm-up). Dispatching it before the shared
+    // `Config::resolve` below keeps that ownership clean and lets the
+    // daemon emit its lock-conflict message without first paying the
+    // resolve cost.
+    if let Command::Run {
+        mcp_addr,
+        no_mcp,
+        runtime_dir,
+    } = &cli.command
+    {
+        return run::run_daemon(run::RunOpts {
+            selection: cli.selection(),
+            mcp_addr: *mcp_addr,
+            no_mcp: *no_mcp,
+            runtime_dir: runtime_dir.clone(),
+        })
+        .await;
+    }
+
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
@@ -871,6 +913,7 @@ async fn run() -> Result<()> {
         }
         Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
         Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
+        Command::Run { .. } => unreachable!("Run is dispatched before Config::resolve"),
     }
 }
 
