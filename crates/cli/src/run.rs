@@ -98,7 +98,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     );
 
     let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
-    let (_obs_guard, _log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
+    let (_obs_guard, log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     let embed_cfg = EmbedConfig::from_env();
     let embedder = OllamaEmbedClient::new(
@@ -221,8 +221,9 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         Some(addr) => {
             let registry = Arc::clone(&registry);
             let rx = shutdown_tx.subscribe();
+            let log_stream = log_stream.clone();
             Some(tokio::spawn(async move {
-                bookrack_mcp::serve(registry, info_context, started_at, &addr, rx).await
+                bookrack_mcp::serve(registry, info_context, started_at, log_stream, &addr, rx).await
             }))
         }
         None => {

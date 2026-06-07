@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
@@ -217,6 +218,33 @@ pub struct SessionInfoResult {
     pub ollama_url: String,
 }
 
+/// Arguments for `session.logs_tail`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct SessionLogsTailArgs {
+    /// Maximum number of log events to return, from the most recent.
+    /// Capped server-side at [`SESSION_LOGS_TAIL_MAX`]. Defaults to
+    /// [`SESSION_LOGS_TAIL_DEFAULT`] when omitted.
+    #[serde(default)]
+    pub n: Option<usize>,
+}
+
+/// Default `n` when [`SessionLogsTailArgs::n`] is omitted.
+pub const SESSION_LOGS_TAIL_DEFAULT: usize = 100;
+
+/// Server-side cap on `n` for `session.logs_tail`.
+pub const SESSION_LOGS_TAIL_MAX: usize = 1024;
+
+/// Response shape returned by `session.logs_tail`: a slice of the
+/// daemon's in-memory log ring buffer, oldest first.
+#[derive(Debug, Serialize)]
+pub struct SessionLogsTailResult {
+    /// The events themselves.
+    pub events: Vec<LogEvent>,
+    /// How many events the tool returned (`<= n` capped by buffer
+    /// occupancy).
+    pub returned: usize,
+}
+
 /// Arguments for `library.metadata.set`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataSetArgs {
@@ -293,6 +321,7 @@ pub struct BookrackServer {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     started_at: Instant,
+    log_stream: LogStreamHandle,
     tool_router: ToolRouter<BookrackServer>,
 }
 
@@ -303,18 +332,22 @@ impl BookrackServer {
     /// embed model, MCP address) needed to fill `library.info` and
     /// `session.info` without re-reading the process environment on
     /// every call. `started_at` stamps the daemon's birth so
-    /// `session.info` can report uptime. Tools route each call through
-    /// the registry, scoped to either an explicit `library` selector
-    /// or the current default when the selector is absent.
+    /// `session.info` can report uptime. `log_stream` is the shared
+    /// in-process log fan-out the `session.logs_tail` tool reads its
+    /// ring-buffer snapshot from. Tools route each call through the
+    /// registry, scoped to either an explicit `library` selector or
+    /// the current default when the selector is absent.
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
         started_at: Instant,
+        log_stream: LogStreamHandle,
     ) -> BookrackServer {
         BookrackServer {
             registry,
             info_context,
             started_at,
+            log_stream,
             tool_router: Self::tool_router(),
         }
     }
@@ -671,6 +704,28 @@ impl BookrackServer {
         respond_with(&result)
     }
 
+    /// Return the most recent log events from the daemon's in-memory
+    /// ring buffer. Hands clients a one-shot snapshot; the live
+    /// SSE endpoint at `/session/logs` is the streaming counterpart.
+    #[tool(
+        name = "session.logs_tail",
+        description = "Return the most recent N log events from the daemon's in-memory \
+                       ring buffer (oldest first within the returned slice). N defaults \
+                       to 100 and is capped server-side at 1024."
+    )]
+    async fn session_logs_tail(
+        &self,
+        Parameters(args): Parameters<SessionLogsTailArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let n = args
+            .n
+            .unwrap_or(SESSION_LOGS_TAIL_DEFAULT)
+            .min(SESSION_LOGS_TAIL_MAX);
+        let events = self.log_stream.tail(n);
+        let returned = events.len();
+        respond_with(&SessionLogsTailResult { events, returned })
+    }
+
     /// Snapshot the vector store.
     #[tool(
         name = "library.vectors_status",
@@ -864,6 +919,11 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// `main` so the reported uptime spans configuration resolution and
 /// embedding-store warm-up, not just the listener's lifetime.
 ///
+/// `log_stream` is the in-process log fan-out handle returned by
+/// `bookrack_obs::init`; the `session.logs_tail` tool reads its ring
+/// buffer through it and future endpoints (live SSE under
+/// `/session/logs`) subscribe to its broadcast channel.
+///
 /// `shutdown_rx` lets the caller drive graceful shutdown from a
 /// broadcast channel shared with sibling tasks (signal listener, REPL,
 /// queue worker). A standalone caller can wire its own `ctrl_c` task
@@ -873,6 +933,7 @@ pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     started_at: Instant,
+    log_stream: LogStreamHandle,
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
@@ -882,6 +943,7 @@ pub async fn serve(
                 registry.clone(),
                 info_context.clone(),
                 started_at,
+                log_stream.clone(),
             ))
         },
         LocalSessionManager::default().into(),
