@@ -5,7 +5,7 @@
 //! reflection commands that need no catalog.
 
 use anyhow::{Context, Result};
-use bookrack_catalog::{Catalog, IntakeFilter};
+use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
@@ -19,10 +19,6 @@ use crate::ops_helpers::catalog_only_ops;
 use crate::render;
 use crate::{AuditProfileAction, MetadataAction, WriteMetadataAction};
 
-/// Logical address of the book root; the CLI's metadata commands only
-/// touch this scope, matching the audit and the ingest sub-step.
-const BOOK_SCOPE: &str = "book";
-
 pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&str>) -> Result<()> {
     // The audit-profile reflection commands need no catalog and no audit
     // rules, so they short-circuit before the catalog open.
@@ -30,8 +26,10 @@ pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&st
         return audit_profile(action);
     }
     // Trigger any pending catalog migration (with a pre-migration
-    // backup snapshot) once before dispatching.
-    let catalog =
+    // backup snapshot) once before dispatching. The handle is dropped
+    // immediately; every read below opens its own short-lived catalog
+    // through ops.
+    let _migrate =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
     match action {
@@ -41,7 +39,7 @@ pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&st
             limit,
             offset,
             json,
-        } => list(&ops, &catalog, needs_review, limit, offset, json),
+        } => list(&ops, needs_review, limit, offset, json),
         MetadataAction::AuditTrail { book, json } => audit_trail(&ops, book, json),
         MetadataAction::AuditProfile { .. } => unreachable!("handled above"),
     }
@@ -103,68 +101,31 @@ fn audit_profile(action: AuditProfileAction) -> Result<()> {
 
 fn list(
     ops: &Ops<OllamaEmbedClient>,
-    catalog: &Catalog,
     needs_review: bool,
     limit: u32,
     offset: u32,
     json: bool,
 ) -> Result<()> {
-    if needs_review {
-        let page = bookrack_ops::reads::metadata::list_pending_reviews(ops, limit, offset)
-            .context("list pending reviews")?;
-        let rows: Vec<render::MetadataListRow> = page
-            .rows
-            .into_iter()
-            .map(|r| render::MetadataListRow {
-                intake_id: r.intake_id,
-                title: r.title,
-                confidence: r.confidence,
-                review_status: r.review_status,
-            })
-            .collect();
-        if json {
-            render::metadata_list_json(&rows, page.total);
-        } else {
-            render::metadata_list(&rows, page.total, true);
-        }
-        return Ok(());
-    }
-    // The unfiltered listing has no ops wrapper yet; it stays direct
-    // and is not recorded in `mcp_tool_calls`. Switching it through
-    // ops needs a new `list_books_for_review` read that surfaces
-    // confidence and review status, which is out of scope here.
-    let filter = IntakeFilter::default();
-    let intakes = catalog
-        .find_intakes(&filter, limit, offset)
-        .context("find intakes")?;
-    let total = catalog
-        .count_find_intakes(&filter)
-        .context("count intakes")?;
-    let mut rows = Vec::with_capacity(intakes.len());
-    for intake in intakes {
-        let effective = catalog
-            .effective_publication_attrs(intake.intake_id, BOOK_SCOPE)
-            .context("read effective metadata")?;
-        let title = effective.get("title").map(str::to_string);
-        let attrs = catalog
-            .publication_attrs(intake.intake_id, BOOK_SCOPE)
-            .context("read publication attrs")?;
-        let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-        let review = catalog
-            .review(intake.intake_id, BOOK_SCOPE)
-            .context("read review")?
-            .map(|r| r.status);
-        rows.push(render::MetadataListRow {
-            intake_id: intake.intake_id,
-            title,
-            confidence,
-            review_status: review,
-        });
-    }
-    if json {
-        render::metadata_list_json(&rows, total);
+    let page = if needs_review {
+        bookrack_ops::reads::metadata::list_pending_reviews(ops, limit, offset)
+            .context("list pending reviews")?
     } else {
-        render::metadata_list(&rows, total, needs_review);
+        bookrack_ops::reads::metadata::list_metadata(ops, limit, offset).context("list metadata")?
+    };
+    let rows: Vec<render::MetadataListRow> = page
+        .rows
+        .into_iter()
+        .map(|r| render::MetadataListRow {
+            intake_id: r.intake_id,
+            title: r.title,
+            confidence: r.confidence,
+            review_status: r.review_status,
+        })
+        .collect();
+    if json {
+        render::metadata_list_json(&rows, page.total);
+    } else {
+        render::metadata_list(&rows, page.total, needs_review);
     }
     Ok(())
 }

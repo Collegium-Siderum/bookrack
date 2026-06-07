@@ -32,24 +32,26 @@ pub struct MetadataReport {
     pub review_status: Option<String>,
 }
 
-/// One row of [`crate::reads::metadata::list_pending_reviews`].
+/// One row of a paginated metadata list — returned by both
+/// [`crate::reads::metadata::list_metadata`] (unfiltered) and
+/// [`crate::reads::metadata::list_pending_reviews`] (review queue).
 #[derive(Debug, Clone, Serialize)]
-pub struct PendingReviewRow {
+pub struct MetadataListRow {
     /// Catalog intake id of the book.
     pub intake_id: i64,
     /// Best-effort title.
     pub title: Option<String>,
     /// Confidence the audit assigned (`high` / `medium` / `low`).
     pub confidence: Option<String>,
-    /// Current review status (`pending` / `acknowledged`).
+    /// Current review status (`pending` / `acknowledged` / ...).
     pub review_status: Option<String>,
 }
 
-/// Paginated result of [`crate::reads::metadata::list_pending_reviews`].
+/// Paginated result of a metadata listing — see [`MetadataListRow`].
 #[derive(Debug, Clone, Serialize)]
-pub struct PendingReviewPage {
+pub struct MetadataListPage {
     /// Books in this page.
-    pub rows: Vec<PendingReviewRow>,
+    pub rows: Vec<MetadataListRow>,
     /// Total number of books matching the filter, regardless of
     /// pagination.
     pub total: u64,

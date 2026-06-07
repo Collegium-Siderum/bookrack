@@ -163,9 +163,11 @@ pub struct BookIdArgs {
     pub library: Option<String>,
 }
 
-/// Arguments for `library.list_pending_reviews`.
+/// Arguments shared by `library.list_metadata` and
+/// `library.list_pending_reviews`. Identical field set — the two tools
+/// differ only in which catalog rows they include.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListPendingReviewsArgs {
+pub struct MetadataPageArgs {
     /// Maximum number of rows in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -507,6 +509,25 @@ impl BookrackServer {
         }
     }
 
+    /// Return every registered book with its confidence and review
+    /// status, unfiltered.
+    #[tool(
+        name = "library.list_metadata",
+        description = "List every registered book with its current confidence and review \
+                       status, regardless of audit verdict. Paginated."
+    )]
+    async fn library_list_metadata(
+        &self,
+        Parameters(args): Parameters<MetadataPageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::metadata::list_metadata(handle.ops(), limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
     /// Return books still on the metadata review queue.
     #[tool(
         name = "library.list_pending_reviews",
@@ -515,7 +536,7 @@ impl BookrackServer {
     )]
     async fn library_list_pending_reviews(
         &self,
-        Parameters(args): Parameters<ListPendingReviewsArgs>,
+        Parameters(args): Parameters<MetadataPageArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let limit = args.limit.unwrap_or(0);

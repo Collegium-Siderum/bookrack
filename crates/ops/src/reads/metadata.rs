@@ -10,7 +10,7 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::audit::AuditTrailEntry;
-use crate::dto::metadata_report::{MetadataReport, PendingReviewPage, PendingReviewRow};
+use crate::dto::metadata_report::{MetadataListPage, MetadataListRow, MetadataReport};
 use crate::dto::{BookDetail, clamp_limit};
 use crate::recorder::record_call_sync;
 
@@ -46,20 +46,33 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
     )
 }
 
+/// List every registered book with its current confidence and review
+/// status. Paginated; no audit / review filtering.
+pub fn list_metadata<E: Embedder>(
+    ops: &Ops<E>,
+    limit: u32,
+    offset: u32,
+) -> Result<MetadataListPage> {
+    record_call_sync!(
+        ops,
+        "library.list_metadata",
+        serde_json::json!({ "limit": limit, "offset": offset }),
+        { list_metadata_inner(ops, IntakeFilter::default(), limit, offset) }
+    )
+}
+
 /// List books still on the review queue: low / medium confidence plus
 /// pending / acknowledged review status. Paginated.
 pub fn list_pending_reviews<E: Embedder>(
     ops: &Ops<E>,
     limit: u32,
     offset: u32,
-) -> Result<PendingReviewPage> {
+) -> Result<MetadataListPage> {
     record_call_sync!(
         ops,
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
-            let (effective_limit, clamp_triggered) = clamp_limit(limit);
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
             let needs_review_confidence: &[&str] = &["low", "medium"];
             let needs_review_status: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
             let filter = IntakeFilter {
@@ -67,34 +80,47 @@ pub fn list_pending_reviews<E: Embedder>(
                 review_status_in: needs_review_status,
                 ..IntakeFilter::default()
             };
-            let intakes = catalog.find_intakes(&filter, effective_limit, offset)?;
-            let total = catalog.count_find_intakes(&filter)?;
-            let mut rows = Vec::with_capacity(intakes.len());
-            for intake in intakes {
-                let effective =
-                    catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
-                let title = effective.get("title").map(str::to_string);
-                let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
-                let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-                let review_status = catalog
-                    .review(intake.intake_id, BOOK_SCOPE)?
-                    .map(|r| r.status);
-                rows.push(PendingReviewRow {
-                    intake_id: intake.intake_id,
-                    title,
-                    confidence,
-                    review_status,
-                });
-            }
-            let returned = rows.len() as u64;
-            let truncated = clamp_triggered || u64::from(offset) + returned < total;
-            Ok(PendingReviewPage {
-                rows,
-                total,
-                truncated,
-            })
+            list_metadata_inner(ops, filter, limit, offset)
         }
     )
+}
+
+/// Shared body of the two paginated metadata listings. Pulled out so
+/// the public entry points stay thin and the filter shape is the only
+/// thing that differs between them.
+fn list_metadata_inner<E: Embedder>(
+    ops: &Ops<E>,
+    filter: IntakeFilter<'_>,
+    limit: u32,
+    offset: u32,
+) -> Result<MetadataListPage> {
+    let (effective_limit, clamp_triggered) = clamp_limit(limit);
+    let catalog = Catalog::open_read_only(ops.catalog_db())?;
+    let intakes = catalog.find_intakes(&filter, effective_limit, offset)?;
+    let total = catalog.count_find_intakes(&filter)?;
+    let mut rows = Vec::with_capacity(intakes.len());
+    for intake in intakes {
+        let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+        let title = effective.get("title").map(str::to_string);
+        let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+        let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
+        let review_status = catalog
+            .review(intake.intake_id, BOOK_SCOPE)?
+            .map(|r| r.status);
+        rows.push(MetadataListRow {
+            intake_id: intake.intake_id,
+            title,
+            confidence,
+            review_status,
+        });
+    }
+    let returned = rows.len() as u64;
+    let truncated = clamp_triggered || u64::from(offset) + returned < total;
+    Ok(MetadataListPage {
+        rows,
+        total,
+        truncated,
+    })
 }
 
 /// Read the metadata-edit audit trail for one book, oldest first.
