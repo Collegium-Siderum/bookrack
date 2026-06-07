@@ -9,7 +9,7 @@
 //! contract changes, so a future reader can tell which decoder applies.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use serde::Serialize;
 
@@ -88,40 +88,10 @@ pub fn write(bundle_dir: &Path, manifest: &Manifest) -> Result<(), DiagnoseError
     Ok(())
 }
 
-/// Format a [`SystemTime`] as `YYYY-MM-DDTHH:MM:SSZ`. Done by hand so
-/// the crate does not pull in a date library for one timestamp.
+/// Format a [`SystemTime`] as `YYYY-MM-DDTHH:MM:SSZ` (seconds
+/// precision, UTC zone written as `Z`).
 pub fn iso8601_z(t: SystemTime) -> String {
-    let secs = t
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, mo, d, h, mi, s) = ymd_hms_from_unix(secs as i64);
-    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
-}
-
-/// Compute `(year, month, day, hour, minute, second)` from a Unix
-/// timestamp. Uses the standard civil-from-days algorithm; correct for
-/// any date in the proleptic Gregorian calendar.
-fn ymd_hms_from_unix(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
-    let day_seconds = 86_400i64;
-    let days = secs.div_euclid(day_seconds);
-    let day_secs = secs.rem_euclid(day_seconds);
-    let hour = (day_secs / 3600) as u32;
-    let minute = ((day_secs % 3600) / 60) as u32;
-    let second = (day_secs % 60) as u32;
-
-    // Civil-from-days, after Howard Hinnant.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let year = (y + i64::from(m <= 2)) as i32;
-    (year, m, d, hour, minute, second)
+    chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> Result<(), DiagnoseError> {
@@ -151,6 +121,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> Result<(), Diagnos
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::UNIX_EPOCH;
 
     #[test]
     fn iso8601_z_renders_a_known_unix_timestamp() {

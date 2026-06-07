@@ -92,6 +92,10 @@ sha2 = "0.10"
 unicode-normalization = "0.1"
 # `.env` file loading for the `config` crate.
 dotenvy = "0.15"
+# RFC 3339 timestamp formatting for the `ingest` embed-run stamp and the
+# `diagnose` manifest. The `serde` feature lets DateTime<Utc> derive
+# Serialize / Deserialize for the persistent CLI queue state.
+chrono = { version = "0.4", features = ["serde"] }
 # Temp directories for tests that need an on-disk store (e.g. LanceDB).
 tempfile = "3"
 # The audit-profile crate, pinned at the workspace level so every

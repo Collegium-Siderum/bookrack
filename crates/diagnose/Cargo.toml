@@ -11,6 +11,7 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-vectors = { path = "../vectors" }
+chrono.workspace = true
 flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
