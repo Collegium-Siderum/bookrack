@@ -97,7 +97,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     );
 
     let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
-    let _obs_guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
+    let (_obs_guard, _log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     let embed_cfg = EmbedConfig::from_env();
     let embedder = OllamaEmbedClient::new(

@@ -67,7 +67,7 @@ async fn run() -> Result<()> {
     // layer unless `BOOKRACK_LOG_CONSOLE` overrides — `bookrack run`
     // gets the quiet REPL default through `LogConfig::from_env`
     // instead.
-    let _guard = bookrack_obs::init(&cfg, &LogConfig::for_headless_daemon());
+    let (_guard, _log_stream) = bookrack_obs::init(&cfg, &LogConfig::for_headless_daemon());
 
     let mcp_cfg = McpConfig::from_env();
 

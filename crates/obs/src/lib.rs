@@ -20,11 +20,17 @@ use bookrack_config::{Config, DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-/// Install the global subscriber and return its flush guard.
+pub mod stream;
+
+pub use stream::{BroadcastLayer, LogEvent, LogStreamHandle};
+
+/// Install the global subscriber and return its flush guard plus the
+/// in-process log stream handle.
 ///
-/// The subscriber carries two filtered layers driven by independent
-/// `EnvFilter` directives so the foreground REPL and the persisted
-/// operational log can run at different verbosities:
+/// The subscriber carries three filtered layers driven by independent
+/// `EnvFilter` directives so the foreground REPL, the persisted
+/// operational log, and live subscribers can run at different
+/// verbosities:
 ///
 /// * The **stderr console layer** writes human-readable lines and is
 ///   filtered by [`LogConfig::console_level`]. Default `error` keeps
@@ -33,24 +39,29 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// * The **file layer** writes JSON lines to a daily-rolling
 ///   `bookrack.log` under [`Config::logs_dir`] (created if missing)
 ///   and is filtered by [`LogConfig::directive`].
+/// * The **broadcast layer** mirrors events into the returned
+///   [`LogStreamHandle`] for in-process consumers (ring-buffered tail
+///   reads, live broadcast subscribers), filtered by the same
+///   directive as the file layer so on-disk and in-memory audit views
+///   stay aligned.
 ///
 /// Stdout is left alone for command results, so the two output streams
-/// never interleave. An unparseable directive on either side is replaced
+/// never interleave. An unparseable directive on any layer is replaced
 /// with the corresponding default rather than panicking, so a typo in an
 /// environment variable cannot brick startup.
 ///
 /// When the logs directory cannot be created or is not writable, the file
 /// layer is omitted and a notice is printed to stderr; stderr logging
-/// continues. The returned guard is then `None`.
+/// and the broadcast layer continue. The returned guard is then `None`.
 ///
 /// Also installs a panic hook that writes a crash report under the same
 /// logs directory (see [`install_crash_hook`]).
 ///
 /// The returned [`WorkerGuard`] owns the non-blocking writer's background
 /// thread. The caller must hold it for the program's lifetime — typically
-/// `let _guard = bookrack_obs::init(&cfg, &log);` in `main` — so buffered
-/// lines flush on exit.
-pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
+/// `let (_guard, log_stream) = bookrack_obs::init(&cfg, &log);` in
+/// `main` — so buffered lines flush on exit.
+pub fn init(cfg: &Config, log: &LogConfig) -> (Option<WorkerGuard>, LogStreamHandle) {
     let logs_dir = cfg.logs_dir();
     // The data root is validated to exist, but its `logs/` subdirectory
     // may not; the appender does not create it, so do it here.
@@ -60,6 +71,8 @@ pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
         EnvFilter::try_new(&log.directive).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
     let console_filter = EnvFilter::try_new(&log.console_level)
         .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_CONSOLE));
+    let broadcast_filter =
+        EnvFilter::try_new(&log.directive).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
 
     let (file_layer, guard) = if logs_dir_writable {
         let file_appender = tracing_appender::rolling::daily(&logs_dir, "bookrack.log");
@@ -81,14 +94,18 @@ pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
         .with_writer(io::stderr)
         .with_filter(console_filter);
 
+    let log_stream = LogStreamHandle::default();
+    let broadcast = BroadcastLayer::new(log_stream.clone()).with_filter(broadcast_filter);
+
     tracing_subscriber::registry()
         .with(console)
         .with(file_layer)
+        .with(broadcast)
         .init();
 
     install_crash_hook(logs_dir);
 
-    guard
+    (guard, log_stream)
 }
 
 /// Probe whether `dir` accepts file creation by writing and removing a

@@ -528,7 +528,7 @@ async fn run() -> Result<()> {
     }
 
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
-    let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
+    let (_guard, _log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     let _profile_name = cli.audit_profile.clone();
     match cli.command {

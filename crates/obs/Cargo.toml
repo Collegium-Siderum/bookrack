@@ -10,3 +10,12 @@ bookrack-config = { path = "../config" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# Timestamping log events captured by `BroadcastLayer`. `serde` lets
+# `DateTime<Utc>` round-trip through the SSE wire format alongside the
+# `LogEvent` body.
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# Broadcast channel + ring buffer that fan out log events to live
+# subscribers (`session.logs_tail`, the SSE endpoint, REPL `:logs tail`).
+tokio = { workspace = true, features = ["sync"] }
