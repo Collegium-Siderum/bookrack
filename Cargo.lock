@@ -798,6 +798,7 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
+ "bookrack-session",
  "clap",
  "rmcp",
  "serde",

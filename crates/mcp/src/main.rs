@@ -23,6 +23,7 @@ use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
 use bookrack_query::Library;
+use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
 use tokio::sync::broadcast;
 
 #[derive(clap::Parser)]
@@ -61,6 +62,28 @@ async fn run() -> Result<()> {
     };
     let cfg = Config::resolve(&selection).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
+
+    let mcp_cfg = McpConfig::from_env();
+
+    // Hold the session-scoped tty lock for the daemon's lifetime so
+    // another `bookrack run` or `bookrack-mcp` on the same machine
+    // refuses to open a competing write handle on the catalog or
+    // corpus.
+    let runtime_dir =
+        resolve_runtime_dir(None).context("resolve BOOKRACK_RUNTIME_DIR for bookrack-mcp")?;
+    std::fs::create_dir_all(&runtime_dir).with_context(|| {
+        format!(
+            "create runtime directory {} for the bookrack session lock",
+            runtime_dir.display()
+        )
+    })?;
+    let lock_path = runtime_dir.join(tty_lock_name());
+    let _tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_cfg.addr)?;
+    tracing::info!(
+        path = %lock_path.display(),
+        mcp = %mcp_cfg.addr,
+        "bookrack session lock acquired",
+    );
 
     let embed_cfg = EmbedConfig::from_env();
     let embedder = OllamaEmbedClient::new(
@@ -120,8 +143,6 @@ async fn run() -> Result<()> {
     let library_name = cfg.library().unwrap_or("default").to_string();
     let handle = LibraryHandle::new(library_name, ops);
     let registry = LibraryRegistry::single(handle);
-
-    let mcp_cfg = McpConfig::from_env();
 
     // Headless mcp binary wires its own broadcast channel: a single
     // Ctrl-C subscriber feeds the shared shutdown signal that the
