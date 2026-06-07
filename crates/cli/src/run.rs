@@ -305,9 +305,9 @@ fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestP
         embed: embed_cfg.clone(),
         hold_for_metadata: false,
         force: false,
-        audit_data: crate::load_audit_data(cfg),
-        audit_profile: crate::load_audit_profile(cfg, None),
-        heading_patterns: crate::load_heading_patterns(cfg),
+        audit_data: crate::audit_helpers::load_audit_data(cfg),
+        audit_profile: crate::audit_helpers::load_audit_profile(cfg, None),
+        heading_patterns: crate::audit_helpers::load_heading_patterns(cfg),
         ..Default::default()
     }
 }
