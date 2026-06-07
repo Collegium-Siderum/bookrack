@@ -107,7 +107,7 @@ pub(crate) struct LockInfo {
 }
 
 /// Parse a session-lock file body. Format is line-oriented
-/// `key=value` lines (see `crates/cli/src/run.rs` `TtyLock::acquire`);
+/// `key=value` lines (see `bookrack_session::TtyLock::acquire`);
 /// unknown lines are tolerated so a future field addition does not
 /// break older `bookrack exec` binaries.
 pub(crate) fn parse_lock(text: &str) -> LockInfo {
@@ -163,8 +163,8 @@ fn print_info(lock_path: &Path) -> Result<()> {
 }
 
 /// Hit the live daemon's `tools/list` and render the server's
-/// authoritative tool slice. Replaces the previous compile-time
-/// `TOOL_NAMES` const so the operator never sees a drifted list.
+/// authoritative tool slice — the operator sees what the running
+/// daemon actually exposes, not a compile-time guess.
 async fn print_tools_live(lock_path: &Path) -> Result<()> {
     let mcp = require_mcp_addr(lock_path)?;
     let transport = StreamableHttpClientTransport::with_client(

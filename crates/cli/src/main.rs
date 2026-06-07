@@ -138,25 +138,22 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
     },
-    /// Discover the running bookrack session and probe its MCP
-    /// surface. Subcommands:
-    ///   `info` (default)  — print the session pid + MCP address.
-    ///   `tools`           — list the MCP tool names this server
-    ///                       exposes today.
-    /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to find the
-    /// session; never opens a database, never makes an HTTP call.
-    /// The full MCP HTTP client (so `bookrack exec library.search
-    /// '{...}'` actually dispatches) lands in a follow-up.
+    /// Reach the running bookrack session over MCP. Subcommands:
+    ///   `info` (default)        — print the session pid + MCP address.
+    ///                             Pure file read of the session lock;
+    ///                             never makes an HTTP call.
+    ///   `tools`                  — open an MCP client and run
+    ///                             `tools/list` against the live server.
+    ///   `library.<tool> [<json>]` — call the named MCP tool, with the
+    ///                             second positional token forwarded
+    ///                             verbatim as JSON arguments.
+    /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
+    /// the session; never opens a catalog, corpus, or vector store.
     Exec {
         /// Subcommand and its positional arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Drop a book from every store — intake row, opaque envelope,
-    /// corpus partition, vectors partition, and the cascaded catalog
-    /// tables. Preserves `metadata_audit` and `book_pipeline_audit` as a
-    /// forensic record. Vector rows are tombstoned; their space is
-    /// reclaimed by the next ingest's optimize pass.
     /// Run a one-screen health check: data root resolution, schema
     /// versions, PDFium library presence, Ollama daemon reachability,
     /// and whether the configured embed model is pulled. Exits with a
