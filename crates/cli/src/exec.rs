@@ -15,6 +15,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use rmcp::ServiceExt;
+use rmcp::model::{CallToolRequestParams, CallToolResult};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
 use crate::run::{resolve_runtime_dir, tty_lock_name};
 
@@ -148,6 +152,42 @@ fn print_tools(lock_path: &Path) {
     for name in TOOL_NAMES {
         println!("  {name}");
     }
+}
+
+/// Open a streamable-HTTP MCP session against the daemon listening at
+/// `mcp_addr`, call the named tool with `arguments`, and return the
+/// server's [`CallToolResult`]. `arguments` is the raw JSON object the
+/// tool's input schema expects; `serde_json::Value::Null` and an empty
+/// object both encode to `arguments: None` on the wire.
+///
+/// The transport's `mcp-session-id` header is managed by rmcp's
+/// `LocalSessionManager`; this helper has no session bookkeeping of
+/// its own. The connection is cancelled before returning so the
+/// server's per-session state drops immediately.
+#[allow(dead_code)] // wired by B2 (argv -> JSON dispatch)
+async fn call_tool(
+    mcp_addr: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Result<CallToolResult> {
+    let arguments = match arguments {
+        serde_json::Value::Object(map) => Some(map),
+        serde_json::Value::Null => None,
+        other => bail!("tool arguments must be a JSON object, got {other}"),
+    };
+    let transport = StreamableHttpClientTransport::with_client(
+        reqwest::Client::new(),
+        StreamableHttpClientTransportConfig::with_uri(format!("http://{mcp_addr}/mcp")),
+    );
+    let client = ().serve(transport).await.context("connect MCP streamable-HTTP transport")?;
+    let mut req = CallToolRequestParams::new(name.to_string());
+    req.arguments = arguments;
+    let result = client
+        .call_tool(req)
+        .await
+        .with_context(|| format!("call MCP tool `{name}`"))?;
+    let _ = client.cancel().await;
+    Ok(result)
 }
 
 /// Helper used in tests to keep the lock-file path construction next
