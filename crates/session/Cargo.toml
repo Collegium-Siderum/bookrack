@@ -1,0 +1,14 @@
+[package]
+name = "bookrack-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+fs2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

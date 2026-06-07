@@ -30,7 +30,7 @@ use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-use crate::run::{resolve_runtime_dir, tty_lock_name};
+use bookrack_session::{resolve_runtime_dir, tty_lock_name};
 
 /// Run a `bookrack exec` invocation.
 ///

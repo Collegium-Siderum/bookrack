@@ -25,16 +25,15 @@ bookrack-mcp = { path = "../mcp" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
+bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 clap.workspace = true
-dirs.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-fs2.workspace = true
 reedline.workspace = true
 shlex.workspace = true
 # `bookrack init` writes a tempdir for the end-to-end smoke ingest, so

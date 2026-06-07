@@ -657,11 +657,10 @@ dependencies = [
  "bookrack-ops",
  "bookrack-query",
  "bookrack-search",
+ "bookrack-session",
  "bookrack-vectors",
  "chrono",
  "clap",
- "dirs 5.0.1",
- "fs2",
  "reedline",
  "reqwest 0.13.4",
  "rmcp",
@@ -896,6 +895,16 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bookrack-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs 5.0.1",
+ "fs2",
+ "tempfile",
 ]
 
 [[package]]
