@@ -420,6 +420,12 @@ pub const EMBED_PROGRESS_INTERVAL_ENV: &str = "BOOKRACK_EMBED_PROGRESS_INTERVAL_
 /// Environment variable overriding the log filter directive.
 pub const LOG_ENV: &str = "BOOKRACK_LOG";
 
+/// Environment variable overriding the human-readable console layer's
+/// filter directive. Lets an operator dial up stderr verbosity for one
+/// session without touching [`LOG_ENV`], which governs the structured
+/// file layer that persists across runs.
+pub const LOG_CONSOLE_ENV: &str = "BOOKRACK_LOG_CONSOLE";
+
 /// Filter directive used when [`LOG_ENV`] is unset.
 ///
 /// bookrack's own crates log at `info`; the vector-store dependencies
@@ -437,6 +443,14 @@ pub const LOG_ENV: &str = "BOOKRACK_LOG";
 /// events.
 pub const DEFAULT_LOG: &str = "info,lance=warn,lance_namespace_impls=warn,lance_table=warn,\
      lance_index=error,datafusion=warn,rusqlite_migration=warn";
+
+/// Default console-layer filter when [`LOG_CONSOLE_ENV`] is unset. The
+/// stderr layer is silenced down to errors by default so the foreground
+/// REPL stays clear of daemon-internal telemetry; the file layer keeps
+/// recording at [`DEFAULT_LOG`] verbosity for after-the-fact inspection.
+/// Override with `BOOKRACK_LOG_CONSOLE=debug` (or any `EnvFilter`
+/// directive) when you want full verbosity on screen for one run.
+pub const DEFAULT_LOG_CONSOLE: &str = "error";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
@@ -628,24 +642,40 @@ impl McpConfig {
 
 /// Logging verbosity, resolved separately from the data-path config so an
 /// entry point can install its subscriber before touching anything else.
+///
+/// The two filter directives drive independent layers in the subscriber:
+/// [`directive`](Self::directive) governs the structured JSON file layer
+/// (the persistent operational log), while
+/// [`console_level`](Self::console_level) governs the human-readable
+/// stderr layer (the foreground REPL or attached terminal). Splitting
+/// them lets a daemon run silently on screen while still recording at
+/// full verbosity on disk.
 #[derive(Debug, Clone)]
 pub struct LogConfig {
-    /// Filter directive for `EnvFilter`, e.g. `info`, `debug`, or
-    /// `bookrack_ingest=debug,info`.
+    /// Filter directive for the file layer's `EnvFilter`, e.g. `info`,
+    /// `debug`, or `bookrack_ingest=debug,info`. Overridden by
+    /// [`LOG_ENV`].
     pub directive: String,
+    /// Filter directive for the stderr console layer's `EnvFilter`.
+    /// Defaults to [`DEFAULT_LOG_CONSOLE`] (`error`) so REPL sessions
+    /// stay free of daemon-internal telemetry; overridden by
+    /// [`LOG_CONSOLE_ENV`].
+    pub console_level: String,
 }
 
 impl Default for LogConfig {
     fn default() -> LogConfig {
         LogConfig {
             directive: DEFAULT_LOG.to_string(),
+            console_level: DEFAULT_LOG_CONSOLE.to_string(),
         }
     }
 }
 
 impl LogConfig {
-    /// Resolve from the environment, falling back to [`DEFAULT_LOG`] when
-    /// the override is unset or blank.
+    /// Resolve from the environment, falling back to [`DEFAULT_LOG`]
+    /// and [`DEFAULT_LOG_CONSOLE`] when the respective overrides are
+    /// unset or blank.
     pub fn from_env() -> LogConfig {
         LogConfig::resolve_from(|key| std::env::var(key).ok())
     }
@@ -655,6 +685,8 @@ impl LogConfig {
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
         LogConfig {
             directive: env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string()),
+            console_level: env_trimmed(get(LOG_CONSOLE_ENV))
+                .unwrap_or_else(|| DEFAULT_LOG_CONSOLE.to_string()),
         }
     }
 }
@@ -1401,11 +1433,14 @@ mod tests {
 
     #[test]
     fn log_config_default_and_env_override() {
-        assert_eq!(LogConfig::default().directive, DEFAULT_LOG);
+        let defaults = LogConfig::default();
+        assert_eq!(defaults.directive, DEFAULT_LOG);
+        assert_eq!(defaults.console_level, DEFAULT_LOG_CONSOLE);
 
-        // An unset variable falls back to the default.
+        // An unset variable falls back to the default for each field.
         let unset = LogConfig::resolve_from(|_| None);
         assert_eq!(unset.directive, DEFAULT_LOG);
+        assert_eq!(unset.console_level, DEFAULT_LOG_CONSOLE);
 
         // A set directive is taken verbatim.
         let set = LogConfig::resolve_from(|key| match key {
@@ -1413,10 +1448,40 @@ mod tests {
             _ => None,
         });
         assert_eq!(set.directive, "bookrack_ingest=debug,info");
+        assert_eq!(set.console_level, DEFAULT_LOG_CONSOLE);
 
         // A whitespace-only value counts as unset.
         let blank = LogConfig::resolve_from(|_| Some("   ".to_string()));
         assert_eq!(blank.directive, DEFAULT_LOG);
+        assert_eq!(blank.console_level, DEFAULT_LOG_CONSOLE);
+    }
+
+    #[test]
+    fn log_config_console_level_env_override() {
+        // A set console directive is taken verbatim and leaves the file
+        // directive untouched.
+        let console = LogConfig::resolve_from(|key| match key {
+            LOG_CONSOLE_ENV => Some("debug".to_string()),
+            _ => None,
+        });
+        assert_eq!(console.console_level, "debug");
+        assert_eq!(console.directive, DEFAULT_LOG);
+
+        // Both overrides apply independently.
+        let both = LogConfig::resolve_from(|key| match key {
+            LOG_ENV => Some("bookrack_ingest=debug,info".to_string()),
+            LOG_CONSOLE_ENV => Some("bookrack=trace".to_string()),
+            _ => None,
+        });
+        assert_eq!(both.directive, "bookrack_ingest=debug,info");
+        assert_eq!(both.console_level, "bookrack=trace");
+
+        // Whitespace-only console value counts as unset.
+        let blank = LogConfig::resolve_from(|key| match key {
+            LOG_CONSOLE_ENV => Some("   ".to_string()),
+            _ => None,
+        });
+        assert_eq!(blank.console_level, DEFAULT_LOG_CONSOLE);
     }
 
     #[test]
