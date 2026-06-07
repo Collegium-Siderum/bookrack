@@ -12,3 +12,4 @@ pub mod info;
 pub mod metadata;
 pub mod pipeline;
 pub mod search;
+pub mod vectors;

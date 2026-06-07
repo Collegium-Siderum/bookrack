@@ -7,76 +7,44 @@ use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
+use bookrack_ops::dto::vectors_status::VectorsStatus;
 use bookrack_vectors::ChunkStore;
 
 use crate::embed_helpers::embedder;
+use crate::ops_helpers::catalog_only_ops;
 use crate::util::confirm;
 
 /// Render `bookrack vectors status` — a read-only summary of the
 /// table, the LanceDB index it carries, and the persisted ANN config.
 pub async fn status(cfg: &Config) -> Result<()> {
-    // Read the vector dimension from corpus stamps. Absent stamps mean
-    // the library has never been ingested into; the vector table will
-    // not exist on disk either, so the output is the "empty" form.
-    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let dim = match corpus
-        .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
-        .context("read vector_dim stamp")?
-    {
-        Some(s) => s.parse::<usize>().context("parse vector_dim stamp")?,
-        None => {
-            println!("table:           (empty — no chunks ingested yet)");
-            println!("ann index:       (none)");
-            println!("ann config:      (no meta)");
-            println!("churn:           n/a");
-            return Ok(());
-        }
-    };
-    let lancedb_dir = cfg.lancedb_dir();
-    let store = ChunkStore::open(&lancedb_dir, dim)
+    let ops = catalog_only_ops(cfg);
+    let status = bookrack_ops::reads::vectors::status(&ops)
         .await
-        .context("open vector store")?;
-    let row_count = store.count_rows().await.context("count rows")?;
-    let indices = store.list_indices().await.context("list indices")?;
-    let ann_cfg = store
-        .current_ann_cfg(&lancedb_dir)
-        .context("read ann config")?;
-    let meta = bookrack_vectors::meta::load(&lancedb_dir).context("load vectors_meta")?;
-    print_status(row_count, &indices, &store, &ann_cfg, &meta).await?;
+        .context("read vectors status")?;
+    print_status(&status);
     Ok(())
 }
 
-/// Write the status output to stdout. Split out so a future test can
-/// drive the renderer with a fixed `StatusInputs` and assert against
-/// the string — for now the command exercises it end-to-end.
-async fn print_status(
-    row_count: usize,
-    indices: &[String],
-    store: &ChunkStore,
-    ann_cfg: &Option<bookrack_vectors::AnnConfig>,
-    meta: &Option<bookrack_vectors::VectorsMeta>,
-) -> Result<()> {
-    println!("table:           {row_count} rows");
-    // LanceDB has been observed to enumerate the same index name more
-    // than once after repeated ingest / optimize passes. Print each
-    // distinct name once, preserving the order they were reported in.
-    let mut seen = std::collections::HashSet::new();
-    let unique: Vec<&str> = indices
-        .iter()
-        .filter(|n| seen.insert(n.as_str()))
-        .map(String::as_str)
-        .collect();
-    if unique.is_empty() {
-        println!("ann index:       (none — brute-force)");
+/// Write the status DTO to stdout. Pure over its input so the formatter
+/// can be exercised against a fixed snapshot without touching disk.
+fn print_status(status: &VectorsStatus) {
+    match status.row_count {
+        None => {
+            println!("table:           (empty -- no chunks ingested yet)");
+            println!("ann index:       (none)");
+            println!("ann config:      (no meta)");
+            println!("churn:           n/a");
+            return;
+        }
+        Some(rows) => println!("table:           {rows} rows"),
+    }
+    if status.indices.is_empty() {
+        println!("ann index:       (none -- brute-force)");
     } else {
-        for name in &unique {
-            println!("ann index:       {name}");
-            let stats = store
-                .index_stats(name)
-                .await
-                .with_context(|| format!("index_stats({name})"))?;
-            if let Some(s) = stats {
-                println!("  type:          {:?}", s.index_type);
+        for idx in &status.indices {
+            println!("ann index:       {}", idx.name);
+            if let Some(s) = &idx.stats {
+                println!("  type:          {}", s.index_type);
                 println!("  num_indexed:   {}", s.num_indexed_rows);
                 println!("  num_unindexed: {}", s.num_unindexed_rows);
                 if let Some(ni) = s.num_indices {
@@ -90,11 +58,11 @@ async fn print_status(
             }
         }
     }
-    match ann_cfg {
+    match &status.ann_config {
         None => println!("ann config:      (no meta)"),
         Some(c) => println!(
             "ann config:      {} / np={} / nprobes={} / refine={}",
-            c.kind.as_str(),
+            c.kind,
             c.num_partitions,
             c.nprobes,
             c.refine_factor
@@ -102,29 +70,20 @@ async fn print_status(
                 .unwrap_or_else(|| "n/a".to_string())
         ),
     }
-    match meta {
+    match &status.meta {
         None => println!("churn:           n/a"),
         Some(m) => println!(
             "churn:           {} since last rebuild",
             m.churn_since_rebuild
         ),
     }
-    // Meta drift: the meta claims an index name that LanceDB does not
-    // actually carry. This is the visible after-effect of a failed
-    // rebuild (meta written, but later state diverged) or of a manual
-    // intervention on the lancedb directory. Suggest a rebuild — the
-    // two sides reconcile from a fresh build.
-    if let Some(m) = meta
-        && m.kind != "brute-force"
-        && !indices.contains(&m.lance_index_name)
-    {
+    if let Some(drift) = &status.meta_drift {
         println!(
             "meta drift:      expected index {:?}, found {:?}; \
              run bookrack vectors rebuild",
-            m.lance_index_name, indices
+            drift.expected_index, drift.found_indices
         );
     }
-    Ok(())
 }
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index

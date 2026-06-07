@@ -136,8 +136,10 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::Query(_) => "query",
         OpsError::Catalog(_) => "catalog",
         OpsError::Corpus(_) => "corpus",
+        OpsError::Vectors(_) => "vectors",
         OpsError::IntakeNotFound { .. } => "intake_not_found",
         OpsError::SearchUnavailable => "search_unavailable",
+        OpsError::Other(_) => "other",
     }
 }
 

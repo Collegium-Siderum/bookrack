@@ -607,6 +607,25 @@ impl BookrackServer {
         respond_with(&info)
     }
 
+    /// Snapshot the vector store.
+    #[tool(
+        name = "library.vectors_status",
+        description = "Snapshot the vector store: chunk-table row count, every ANN \
+                       index LanceDB enumerates with its per-shard statistics, the \
+                       persisted ANN config, and any drift between the on-disk meta \
+                       and the indices LanceDB actually carries."
+    )]
+    async fn library_vectors_status(
+        &self,
+        Parameters(args): Parameters<LibraryOnlyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let status = reads::vectors::status(handle.ops())
+            .await
+            .map_err(ops_error_to_internal)?;
+        respond_with(&status)
+    }
+
     /// Set an override on one bibliographic field of a book.
     #[tool(
         name = "library.metadata.set",

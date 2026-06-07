@@ -53,6 +53,10 @@ pub enum OpsError {
     #[error("corpus error")]
     Corpus(#[from] bookrack_corpus::CorpusError),
 
+    /// The vector store layer reported an error.
+    #[error("vectors error")]
+    Vectors(#[from] bookrack_vectors::VectorsError),
+
     /// The named intake does not exist.
     #[error("no intake registered for id {intake_id}")]
     IntakeNotFound {
@@ -63,6 +67,10 @@ pub enum OpsError {
     /// A search op was issued on an [`Ops`] built without a vector store.
     #[error("search is not available on a catalog-only Ops handle")]
     SearchUnavailable,
+
+    /// Catch-all for ad-hoc errors that have no dedicated variant.
+    #[error(transparent)]
+    Other(anyhow::Error),
 }
 
 /// A fallible op.
