@@ -154,6 +154,18 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         )
         .await
         .context("registry-mediated ingest")?;
+        // The first ingest into a previously empty data dir creates the
+        // lance dir mid-process; the warm `Library` cached its store at
+        // startup, when the dir did not yet exist, and would otherwise
+        // serve every subsequent search from `store = None`. Force the
+        // library to rebind its store from the on-disk lance dir before
+        // the ingest_book lock drops.
+        if let Some(library) = self.ops.library() {
+            library
+                .refresh_store()
+                .await
+                .context("refresh library store after ingest")?;
+        }
         Ok(report)
     }
 }

@@ -20,6 +20,7 @@ use bookrack_embed::Embedder;
 use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
 use bookrack_vectors::ChunkStore;
 pub use bookrack_vectors::SearchOptions;
+use tokio::sync::RwLock;
 
 use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
@@ -72,7 +73,8 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 /// database file is cheap, and it keeps this type free to be shared across
 /// concurrent requests behind an `Arc`.
 pub struct Library<E: Embedder> {
-    store: Option<ChunkStore>,
+    store: RwLock<Option<ChunkStore>>,
+    embed_model: String,
     probed_dim: usize,
     embedder: E,
     corpus_db: PathBuf,
@@ -112,7 +114,8 @@ impl<E: Embedder> Library<E> {
             ))?;
         }
         Ok(Library {
-            store,
+            store: RwLock::new(store),
+            embed_model,
             probed_dim,
             embedder,
             corpus_db,
@@ -120,6 +123,61 @@ impl<E: Embedder> Library<E> {
             lancedb_dir: lancedb_dir.to_path_buf(),
             default_top_k,
         })
+    }
+
+    /// Drop the cached vector store and rebind it from the lance dir on
+    /// disk. Called by [`bookrack_ops::LibraryHandle::ingest_book`] right
+    /// after a successful ingest: the first ingest into a previously
+    /// empty data dir creates the lance dir mid-process, and the
+    /// `store=None` cached at [`Self::open`] would otherwise hide every
+    /// subsequent search.
+    ///
+    /// Holds the write lock, so any in-flight searches finish before the
+    /// rebind and any later search waits for it. Verifies the rebound
+    /// store's stamps against the warm embedder for the same reason
+    /// [`Self::open`] does.
+    pub async fn refresh_store(&self) -> Result<()> {
+        let fresh = ChunkStore::try_open(&self.lancedb_dir).await?;
+        if let Some(s) = &fresh
+            && s.count_rows().await? > 0
+        {
+            let corpus = Corpus::open(&self.corpus_db)?;
+            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+                &self.embed_model,
+                self.probed_dim as u32,
+            ))?;
+        }
+        let mut guard = self.store.write().await;
+        *guard = fresh;
+        Ok(())
+    }
+
+    /// Lazy-open the store under the read path. The daemon's [`Self::open`]
+    /// records `store=None` when the data dir was empty at startup, so a
+    /// later first ingest in the same process would leave the read path
+    /// blind until [`Self::refresh_store`] runs. Search paths call this
+    /// before reading so a misordered refresh — or a search that races a
+    /// concurrent ingest — still observes the store.
+    async fn ensure_store(&self) -> Result<()> {
+        if self.store.read().await.is_some() {
+            return Ok(());
+        }
+        let fresh = ChunkStore::try_open(&self.lancedb_dir).await?;
+        let Some(s) = fresh else {
+            return Ok(());
+        };
+        if s.count_rows().await? > 0 {
+            let corpus = Corpus::open(&self.corpus_db)?;
+            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+                &self.embed_model,
+                self.probed_dim as u32,
+            ))?;
+        }
+        let mut guard = self.store.write().await;
+        if guard.is_none() {
+            *guard = Some(s);
+        }
+        Ok(())
     }
 
     /// The embedding dimension probed from the configured embedder.
@@ -158,7 +216,9 @@ impl<E: Embedder> Library<E> {
         overrides: SearchOptions,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
-        let Some(store) = &self.store else {
+        self.ensure_store().await?;
+        let guard = self.store.read().await;
+        let Some(store) = guard.as_ref() else {
             return Ok(Vec::new());
         };
         let top_k = top_k.unwrap_or(self.default_top_k);
@@ -202,7 +262,9 @@ impl<E: Embedder> Library<E> {
         overrides: SearchOptions,
         top_k: Option<usize>,
     ) -> Result<Vec<Citation>> {
-        let Some(store) = &self.store else {
+        self.ensure_store().await?;
+        let guard = self.store.read().await;
+        let Some(store) = guard.as_ref() else {
             return Ok(Vec::new());
         };
         let top_k = top_k.unwrap_or(self.default_top_k);
