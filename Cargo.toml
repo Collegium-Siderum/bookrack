@@ -134,6 +134,12 @@ reedline = "0.48"
 # user-typed line into argv tokens before handing them to clap.
 # License: MIT OR Apache-2.0; RUSTSEC-2024-0006 fixed in >= 1.3.0.
 shlex = "2"
+# Stream adapters for tokio primitives. The `sync` feature pulls in
+# `tokio-stream::wrappers::BroadcastStream`, which the `mcp` crate
+# wraps around a `LogStreamHandle::subscribe()` receiver to expose the
+# in-process log stream as a Server-Sent Events endpoint under
+# `/session/logs`. License: MIT; in lockstep with `tokio` itself.
+tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 
 # Test binaries link the full lance / datafusion / arrow / rustls
 # dependency tree once per crate under test. Full debug info pushes the

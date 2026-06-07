@@ -16,6 +16,11 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-session = { path = "../session" }
 rmcp.workspace = true
 axum.workspace = true
+# `BroadcastStream` adapter to fan the LogStreamHandle broadcast
+# receiver into an axum SSE response for the /session/logs endpoint.
+# Re-exports the `Stream` trait so no separate `futures` dep is needed
+# at the listener layer.
+tokio-stream.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

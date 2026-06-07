@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Context;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
@@ -30,6 +31,8 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 
 /// Arguments for the `library.search` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1040,13 +1043,19 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// Bind the streamable-HTTP server at `addr` and serve until the
 /// shutdown channel fires.
 ///
-/// The MCP service is mounted at `/mcp`; connect a client as an HTTP MCP
-/// server pointed at `http://<addr>/mcp`.
+/// Two HTTP routes are mounted:
 ///
-/// Every tool resolves its target library through the registry — by
-/// the `library` selector when present, by the registry's current
-/// default when absent. Write tools require an explicit `library`
-/// name in their input; read tools accept `library` as optional.
+/// * `/mcp` — the MCP streamable-HTTP service. Connect an MCP client
+///   to `http://<addr>/mcp`. Every tool resolves its target library
+///   through the registry — by the `library` selector when present,
+///   by the registry's current default when absent. Write tools
+///   require an explicit `library` name in their input; read tools
+///   accept `library` as optional.
+/// * `/session/logs` — a Server-Sent Events endpoint that streams
+///   `LogEvent`s from `log_stream` as soon as they are produced. Each
+///   SSE frame's `data:` payload is one log event serialised as JSON;
+///   the stream stays open until the client disconnects or the
+///   daemon shuts down.
 ///
 /// `started_at` stamps the wall-clock instant the host daemon
 /// considers itself "up"; `session.info` reports the elapsed seconds
@@ -1056,8 +1065,8 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 ///
 /// `log_stream` is the in-process log fan-out handle returned by
 /// `bookrack_obs::init`; the `session.logs_tail` tool reads its ring
-/// buffer through it and future endpoints (live SSE under
-/// `/session/logs`) subscribe to its broadcast channel.
+/// buffer through it and the `/session/logs` SSE endpoint subscribes
+/// to its broadcast channel.
 ///
 /// `queue_state` is the shared snapshot of the ingest queue the
 /// daemon-REPL drives; the headless `bookrack-mcp` binary passes an
@@ -1085,6 +1094,7 @@ pub async fn serve(
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
+    let log_stream_for_sse = log_stream.clone();
     let service = StreamableHttpService::new(
         move || {
             Ok(BookrackServer::new(
@@ -1099,7 +1109,13 @@ pub async fn serve(
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
-    let app = axum::Router::new().nest_service("/mcp", service);
+    let app = axum::Router::new().nest_service("/mcp", service).route(
+        "/session/logs",
+        axum::routing::get(move || {
+            let handle = log_stream_for_sse.clone();
+            sse_logs_handler(handle)
+        }),
+    );
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind MCP server to {addr}"))?;
@@ -1111,6 +1127,34 @@ pub async fn serve(
         .await
         .context("serve MCP server")?;
     Ok(())
+}
+
+/// SSE handler for `/session/logs`. Subscribes to the shared
+/// [`LogStreamHandle`] broadcast channel and emits each event as one
+/// SSE frame whose `data:` payload is the JSON-serialised event.
+///
+/// Receivers that fall behind get a `Lagged` error from the broadcast
+/// channel and are silently skipped — the SSE stream stays open and
+/// catches up with subsequent events rather than tearing the
+/// connection down. Events whose JSON serialisation fails (which
+/// should not happen for a well-formed `LogEvent`) are dropped the
+/// same way.
+///
+/// `KeepAlive::default()` emits a comment-only frame every 15 seconds
+/// so proxies that prune idle TCP connections leave the stream alone
+/// during quiet periods.
+async fn sse_logs_handler(
+    handle: LogStreamHandle,
+) -> Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let rx = handle.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(
+        |item| -> Option<Result<Event, std::convert::Infallible>> {
+            let ev = item.ok()?;
+            let data = serde_json::to_string(&ev).ok()?;
+            Some(Ok(Event::default().data(data)))
+        },
+    );
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]
