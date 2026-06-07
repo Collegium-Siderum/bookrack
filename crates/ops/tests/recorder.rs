@@ -155,6 +155,7 @@ async fn record_call_async_writes_one_ok_row() {
         resolution_source: "test".to_string(),
         ollama_url: "http://localhost:0/".to_string(),
         embed_model_configured: "test-model".to_string(),
+        mcp_addr: String::new(),
     };
     show_library_info(&fx.ops, ctx).await.expect("info");
     let rows = fx.rows("library.info");

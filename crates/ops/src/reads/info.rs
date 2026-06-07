@@ -37,6 +37,11 @@ pub struct LibraryInfoContext {
     pub ollama_url: String,
     /// Model tag the daemon is configured to embed with.
     pub embed_model_configured: String,
+    /// MCP listener address the daemon advertises through the lock
+    /// file and `session.info`, in `host:port` form. Empty when the
+    /// daemon is running without an MCP listener (e.g. `bookrack run
+    /// --no-mcp`).
+    pub mcp_addr: String,
 }
 
 /// Read the one-page library status card.

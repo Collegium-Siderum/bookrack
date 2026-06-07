@@ -90,6 +90,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let lock_path = runtime_dir.join(tty_lock_name());
     let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
     let _tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label)?;
+    let started_at = Instant::now();
     tracing::info!(
         path = %lock_path.display(),
         mcp = %mcp_label,
@@ -147,6 +148,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         resolution_source: resolution_source_label(cfg.source()).to_string(),
         ollama_url: cfg.ollama_url().to_string(),
         embed_model_configured: embed_cfg.model.clone(),
+        mcp_addr: mcp_label.clone(),
     };
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
@@ -220,7 +222,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             let registry = Arc::clone(&registry);
             let rx = shutdown_tx.subscribe();
             Some(tokio::spawn(async move {
-                bookrack_mcp::serve(registry, info_context, &addr, rx).await
+                bookrack_mcp::serve(registry, info_context, started_at, &addr, rx).await
             }))
         }
         None => {
@@ -242,7 +244,6 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let queue_path_for_repl = queue_state_path.clone();
     let library_default_for_repl = library_name.clone();
     let cfg_for_repl = Arc::clone(&cfg);
-    let started_at = Instant::now();
     let repl_handle = tokio::task::spawn_blocking(move || {
         repl_loop(
             registry_for_repl,

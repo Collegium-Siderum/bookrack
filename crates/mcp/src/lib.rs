@@ -11,6 +11,7 @@
 //! a schema change downstream leaves it untouched.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context;
 use bookrack_embed::OllamaEmbedClient;
@@ -190,6 +191,32 @@ pub struct LibraryOnlyArgs {
     pub library: Option<String>,
 }
 
+/// Arguments for `session.info`. The tool takes no inputs.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct SessionInfoArgs {}
+
+/// Response shape returned by `session.info`.
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SessionInfoResult {
+    /// `bookrack` workspace version, taken from the binary's
+    /// `CARGO_PKG_VERSION` at build time.
+    pub version: String,
+    /// Wall-clock seconds since the daemon started.
+    pub uptime_seconds: u64,
+    /// Every library registered with the session, sorted by name.
+    pub libraries: Vec<String>,
+    /// Registry name of the session's default library, or empty when
+    /// the daemon was started without a registry-backed selection.
+    pub default_library: String,
+    /// MCP listener address (`host:port`), or `disabled` when the
+    /// daemon is running without `/mcp`.
+    pub mcp_addr: String,
+    /// Where the library lives on disk (rendered).
+    pub data_dir: String,
+    /// Ollama HTTP endpoint the daemon will reach.
+    pub ollama_url: String,
+}
+
 /// Arguments for `library.metadata.set`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataSetArgs {
@@ -265,6 +292,7 @@ pub struct MetadataRejectArgs {
 pub struct BookrackServer {
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
+    started_at: Instant,
     tool_router: ToolRouter<BookrackServer>,
 }
 
@@ -272,17 +300,21 @@ pub struct BookrackServer {
 impl BookrackServer {
     /// Build a handler over the given library registry. `info_context`
     /// carries the static facts (data dir, library name, ollama url,
-    /// embed model) needed to fill `library.info` without re-reading
-    /// the process environment on every call. Tools route each call
-    /// through the registry, scoped to either an explicit `library`
-    /// selector or the current default when the selector is absent.
+    /// embed model, MCP address) needed to fill `library.info` and
+    /// `session.info` without re-reading the process environment on
+    /// every call. `started_at` stamps the daemon's birth so
+    /// `session.info` can report uptime. Tools route each call through
+    /// the registry, scoped to either an explicit `library` selector
+    /// or the current default when the selector is absent.
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
+        started_at: Instant,
     ) -> BookrackServer {
         BookrackServer {
             registry,
             info_context,
+            started_at,
             tool_router: Self::tool_router(),
         }
     }
@@ -607,6 +639,38 @@ impl BookrackServer {
         respond_with(&info)
     }
 
+    /// Return a one-page status card for the daemon process itself.
+    #[tool(
+        name = "session.info",
+        description = "Daemon runtime summary: bookrack version, uptime, registered \
+                       libraries, default library, MCP listener address, data root, \
+                       and Ollama endpoint."
+    )]
+    async fn session_info(
+        &self,
+        Parameters(_): Parameters<SessionInfoArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut libraries: Vec<String> = self
+            .registry
+            .list()
+            .map_err(|e| ErrorData::internal_error(format!("read library registry: {e}"), None))?
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        libraries.sort();
+        let default_library = self.registry.default_name().unwrap_or_default();
+        let result = SessionInfoResult {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_seconds: self.started_at.elapsed().as_secs(),
+            libraries,
+            default_library,
+            mcp_addr: self.info_context.mcp_addr.clone(),
+            data_dir: self.info_context.data_dir.clone(),
+            ollama_url: self.info_context.ollama_url.clone(),
+        };
+        respond_with(&result)
+    }
+
     /// Snapshot the vector store.
     #[tool(
         name = "library.vectors_status",
@@ -794,6 +858,12 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// default when absent. Write tools require an explicit `library`
 /// name in their input; read tools accept `library` as optional.
 ///
+/// `started_at` stamps the wall-clock instant the host daemon
+/// considers itself "up"; `session.info` reports the elapsed seconds
+/// against it. Callers typically capture this at the very top of their
+/// `main` so the reported uptime spans configuration resolution and
+/// embedding-store warm-up, not just the listener's lifetime.
+///
 /// `shutdown_rx` lets the caller drive graceful shutdown from a
 /// broadcast channel shared with sibling tasks (signal listener, REPL,
 /// queue worker). A standalone caller can wire its own `ctrl_c` task
@@ -802,11 +872,18 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
+    started_at: Instant,
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
-        move || Ok(BookrackServer::new(registry.clone(), info_context.clone())),
+        move || {
+            Ok(BookrackServer::new(
+                registry.clone(),
+                info_context.clone(),
+                started_at,
+            ))
+        },
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );

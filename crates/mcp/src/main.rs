@@ -12,6 +12,7 @@
 //! means restarting with a different `--data-dir` / `--library`.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
@@ -55,6 +56,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<()> {
+    let started_at = Instant::now();
     let cli = <Cli as clap::Parser>::parse();
     let selection = LibrarySelection {
         data_dir: cli.data_dir,
@@ -139,6 +141,7 @@ async fn run() -> Result<()> {
         resolution_source: resolution_source_label(cfg.source()).to_string(),
         ollama_url: cfg.ollama_url().to_string(),
         embed_model_configured: embed_cfg.model.clone(),
+        mcp_addr: mcp_cfg.addr.clone(),
     };
 
     // Wrap the single warm Ops in a one-element LibraryRegistry. The
@@ -159,7 +162,14 @@ async fn run() -> Result<()> {
             let _ = shutdown_tx.send(());
         }
     });
-    bookrack_mcp::serve(registry, info_context, &mcp_cfg.addr, shutdown_rx).await
+    bookrack_mcp::serve(
+        registry,
+        info_context,
+        started_at,
+        &mcp_cfg.addr,
+        shutdown_rx,
+    )
+    .await
 }
 
 fn resolution_source_label(source: ResolutionSource) -> &'static str {
