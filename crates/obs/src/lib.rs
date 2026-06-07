@@ -103,8 +103,11 @@ fn probe_writable(dir: &Path) -> bool {
 fn install_crash_hook(logs_dir: PathBuf) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let backtrace = Backtrace::force_capture().to_string();
         let message = panic_message(info);
+        if is_broken_pipe_panic(&message) {
+            std::process::exit(0);
+        }
+        let backtrace = Backtrace::force_capture().to_string();
         let location = info.location().map(|loc| loc.to_string());
         match write_crash_report(&logs_dir, &message, location.as_deref(), &backtrace) {
             Ok(path) => eprintln!("bookrack: crash report written to {}", path.display()),
@@ -112,6 +115,17 @@ fn install_crash_hook(logs_dir: PathBuf) {
         }
         previous(info);
     }));
+}
+
+/// Recognise the panic raised by `std::io::stdio::_print` / `_eprint` when
+/// the receiving end of stdout or stderr is gone — the typical
+/// `bookrack ... | head` shape. The classifier accepts either casing of
+/// `broken pipe` so it matches both the `io::Error` `Display` impl and the
+/// raw OS message variants.
+fn is_broken_pipe_panic(message: &str) -> bool {
+    let needle = "broken pipe";
+    let lower = message.to_ascii_lowercase();
+    lower.contains(needle)
 }
 
 /// Extract a human-readable message from a panic payload, which is a
@@ -225,6 +239,23 @@ mod tests {
         std::fs::set_permissions(&dir, restore).expect("chmod 755");
         std::fs::remove_dir_all(&dir).expect("cleanup");
         assert!(!result);
+    }
+
+    #[test]
+    fn broken_pipe_classifier_matches_std_panic_text() {
+        // Panic messages produced by the standard library on a closed
+        // stdout / stderr come in two shapes depending on the formatter:
+        // the io::Error `Display` lowercases the kind, while some
+        // platform-emitted variants keep the OS message's casing. The
+        // classifier accepts both so the silent-exit path covers each.
+        assert!(is_broken_pipe_panic(
+            "failed printing to stdout: broken pipe (os error 32)"
+        ));
+        assert!(is_broken_pipe_panic(
+            "failed printing to stderr: Broken pipe (os error 32)"
+        ));
+        assert!(!is_broken_pipe_panic("unrelated assertion failure"));
+        assert!(!is_broken_pipe_panic(""));
     }
 
     #[test]
