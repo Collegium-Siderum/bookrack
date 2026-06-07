@@ -7,3 +7,7 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
+# Timestamp fields on the persistent ingest queue (`queued_at`,
+# `started_at`, `finished_at`). Round-tripped through serde as RFC 3339
+# strings.
+chrono.workspace = true
