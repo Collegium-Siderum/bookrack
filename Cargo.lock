@@ -833,6 +833,10 @@ name = "bookrack-obs"
 version = "0.3.0-dev"
 dependencies = [
  "bookrack-config",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
