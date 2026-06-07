@@ -39,9 +39,14 @@ use bookrack_session::{resolve_runtime_dir, tty_lock_name};
 /// - `info` (default): print the active session — pid, MCP address,
 ///   lock path. Errors if no session is running.
 /// - `tools`: open a live MCP connection and run `tools/list`.
-/// - `library.<name> [<json-object>]`: call the named MCP tool with
-///   the second positional token as raw JSON arguments. `{}` and
-///   omitted-args both encode as `arguments: None` on the wire.
+/// - `logs follow`: stream `LogEvent`s from `/session/logs` SSE until
+///   the daemon shuts down or the client is interrupted.
+/// - `logs tail [<n>]`: print the most recent `n` log events
+///   (defaults to 100). Calls the `session.logs_tail` MCP tool.
+/// - `<namespace>.<tool> [<json-object>]` for `library.*` and
+///   `session.*`: call the named MCP tool with the second positional
+///   token as raw JSON arguments. `{}` and omitted-args both encode
+///   as `arguments: None` on the wire.
 pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result<()> {
     let runtime_dir = resolve_runtime_dir(runtime_dir_override)
         .context("resolve BOOKRACK_RUNTIME_DIR for `bookrack exec`")?;
@@ -51,7 +56,8 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
     match subcmd {
         "info" => print_info(&lock_path),
         "tools" => print_tools_live(&lock_path).await,
-        name if name.starts_with("library.") => {
+        "logs" => run_logs(&lock_path, &args[1..]).await,
+        name if name.starts_with("library.") || name.starts_with("session.") => {
             // Parse the optional JSON-object argument before connecting
             // so a syntax error stays local and does not waste an MCP
             // round-trip.
@@ -67,10 +73,80 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
         other => {
             bail!(
                 "bookrack exec: unknown subcommand `{other}`; \
-                 expected `info`, `tools`, or `library.<tool> [<json>]`"
+                 expected `info`, `tools`, `logs`, or `library.<tool> [<json>]`"
             )
         }
     }
+}
+
+/// Dispatcher for `bookrack exec logs <sub>`. `follow` streams the
+/// daemon's live log stream; `tail [n]` prints the most recent `n`
+/// events from the in-memory ring buffer. Defaults to `follow` when no
+/// sub-sub-command is given.
+async fn run_logs(lock_path: &Path, sub: &[String]) -> Result<()> {
+    let mode = sub.first().map(String::as_str).unwrap_or("follow");
+    match mode {
+        "follow" => follow_logs(lock_path).await,
+        "tail" => {
+            let n = sub.get(1).and_then(|s| s.parse::<usize>().ok());
+            tail_logs(lock_path, n).await
+        }
+        other => bail!(
+            "bookrack exec logs: unknown subcommand `{other}`; \
+             expected `follow` or `tail [<n>]`"
+        ),
+    }
+}
+
+/// Stream `LogEvent`s from `/session/logs` until the daemon shuts down
+/// or the connection is closed. Each SSE frame's `data:` payload is
+/// written verbatim to stdout, one JSON document per line, so callers
+/// can pipe through `jq` or any line-delimited JSON tool.
+async fn follow_logs(lock_path: &Path) -> Result<()> {
+    let mcp = require_mcp_addr(lock_path)?;
+    let url = format!("http://{mcp}/session/logs");
+    let mut resp = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("connect to {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url}"))?;
+    let mut buf = Vec::<u8>::new();
+    while let Some(chunk) = resp.chunk().await.context("read SSE chunk")? {
+        buf.extend_from_slice(&chunk);
+        while let Some(idx) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=idx).collect();
+            let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+            let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+            let Ok(text) = std::str::from_utf8(trimmed) else {
+                continue;
+            };
+            // SSE frames carry `event:`, `data:`, `id:`, `retry:`, and
+            // comment (`:`) lines, separated by blank lines. Only
+            // `data:` lines are interesting here.
+            if let Some(payload) = text
+                .strip_prefix("data: ")
+                .or_else(|| text.strip_prefix("data:"))
+            {
+                println!("{payload}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Call the `session.logs_tail` MCP tool with the requested `n` and
+/// print the JSON-encoded response to stdout, same shape as every
+/// other `bookrack exec <tool>` invocation.
+async fn tail_logs(lock_path: &Path, n: Option<usize>) -> Result<()> {
+    let mcp = require_mcp_addr(lock_path)?;
+    let arguments = match n {
+        Some(n) => serde_json::json!({ "n": n }),
+        None => serde_json::Value::Null,
+    };
+    let result = call_tool(&mcp, "session.logs_tail", arguments).await?;
+    print_tool_result(&result)
 }
 
 /// Read the active MCP address from the session lock, or error with

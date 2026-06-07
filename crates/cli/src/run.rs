@@ -30,6 +30,7 @@ use bookrack_config::{
 };
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::IngestParams;
+use bookrack_obs::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
@@ -257,6 +258,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let queue_path_for_repl = queue_state_path.clone();
     let library_default_for_repl = library_name.clone();
     let cfg_for_repl = Arc::clone(&cfg);
+    let log_stream_for_repl = log_stream.clone();
     let repl_handle = tokio::task::spawn_blocking(move || {
         repl_loop(
             registry_for_repl,
@@ -269,6 +271,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             library_default_for_repl,
             cfg_for_repl,
             started_at,
+            log_stream_for_repl,
         )
     });
 
@@ -461,6 +464,7 @@ fn repl_loop(
     library_default: String,
     cfg: Arc<Config>,
     started_at: Instant,
+    log_stream: LogStreamHandle,
 ) -> Result<()> {
     let history_path = runtime_dir.join(HISTORY_FILE);
     let history: Box<dyn History> = match FileBackedHistory::with_file(
@@ -506,6 +510,7 @@ fn repl_loop(
                     &library_default,
                     &cfg,
                     started_at,
+                    &log_stream,
                 ) {
                     ReplOutcome::Continue => {}
                     ReplOutcome::Exit => {
@@ -585,6 +590,7 @@ fn handle_line(
     library_default: &str,
     cfg: &Arc<Config>,
     started_at: Instant,
+    log_stream: &LogStreamHandle,
 ) -> ReplOutcome {
     let tokens = match shlex::split(line) {
         Some(tokens) if !tokens.is_empty() => tokens,
@@ -616,6 +622,10 @@ fn handle_line(
         }
         "queue" => {
             handle_queue(queue_state, queue_state_path, library_default, &tokens);
+            return ReplOutcome::Continue;
+        }
+        "logs" => {
+            handle_logs(log_stream, &tokens);
             return ReplOutcome::Continue;
         }
         _ => {}
@@ -786,6 +796,46 @@ fn handle_queue(
         other => {
             eprintln!("bookrack: unknown queue subcommand {other:?}");
             print_queue_usage();
+        }
+    }
+}
+
+/// Default `n` for the REPL `logs tail` built-in.
+const LOGS_TAIL_REPL_DEFAULT: usize = 50;
+
+/// REPL `logs` built-in. The only sub-command is
+/// `logs tail [<n>]`: print the most recent `n` events from the
+/// in-process ring buffer (default [`LOGS_TAIL_REPL_DEFAULT`]).
+///
+/// This is the in-process fast path counterpart to
+/// `bookrack exec logs tail`: it reads the [`LogStreamHandle`]
+/// directly instead of round-tripping through MCP, so events appear
+/// even when the listener is `--no-mcp` disabled.
+fn handle_logs(log_stream: &LogStreamHandle, tokens: &[String]) {
+    let sub = tokens.get(1).map(String::as_str).unwrap_or("tail");
+    match sub {
+        "tail" => {
+            let n = tokens
+                .get(2)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(LOGS_TAIL_REPL_DEFAULT);
+            let events = log_stream.tail(n);
+            if events.is_empty() {
+                println!("logs: ring buffer empty");
+                return;
+            }
+            for ev in &events {
+                println!(
+                    "{} {:>5} {}  {}",
+                    ev.ts.format("%H:%M:%S%.3f"),
+                    ev.level,
+                    ev.target,
+                    ev.message
+                );
+            }
+        }
+        other => {
+            eprintln!("logs: unknown subcommand `{other}`; expected `tail [<n>]`");
         }
     }
 }
@@ -991,6 +1041,7 @@ fn print_repl_help() {
     println!("                   Enqueue a file or every supported file under a directory");
     println!("  queue list       Show the persistent ingest queue");
     println!("  queue cancel <id-prefix> | clear | pause | resume");
+    println!("  logs tail [<n>]  Print the most recent <n> log events (default 50)");
     println!();
     println!("Other subcommands are parsed against the bookrack CLI grammar;");
     println!("execution from the REPL is wired in a later phase.");
