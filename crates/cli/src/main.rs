@@ -781,7 +781,7 @@ async fn run() -> Result<()> {
     // single-writer guarantee — so it dispatches before Config::resolve
     // as well.
     if let Command::Exec { args } = &cli.command {
-        return exec::run(args, None);
+        return exec::run(args, None).await;
     }
 
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;

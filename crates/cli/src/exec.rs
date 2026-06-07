@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bookrack exec` — discover and probe the live daemon session.
+//! `bookrack exec` — talk to the live daemon session over MCP.
 //!
 //! Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to learn what
-//! session is running (pid, MCP listener address) and surfaces it to
-//! the operator. The full MCP HTTP client wiring lands in a follow-up
-//! commit; this command's current scope is *discovery*: it never
-//! opens a database, never opens a process, and never makes an HTTP
-//! call — so it stays useful while the daemon-REPL grows its protocol
-//! surface, and so the "no DB handle outside the scheduler" invariant
-//! holds before the broader CLI face is reshaped.
+//! session is running (pid, MCP listener address). Sub-commands:
+//!
+//! - `info` (default): print the session — pid, MCP address, lock
+//!   path. Pure file read.
+//! - `tools`: open an MCP client connection and run `tools/list`
+//!   against the live server, so the operator sees the current tool
+//!   surface, not a stale compile-time slice.
+//! - `library.<name> [<json>]`: open an MCP client connection and
+//!   call the named tool with `arguments`. Argument parsing is plain
+//!   JSON forwarding: the second positional token is the input
+//!   object the tool's schema expects, so the daemon owns input
+//!   validation and `bookrack exec` does not duplicate any tool
+//!   schema.
+//!
+//! `bookrack exec` never opens a catalog, corpus, or vector store —
+//! the "no DB handle outside the scheduler" invariant is what gives
+//! the daemon-REPL session its single-writer guarantee.
 
 use std::fs;
 use std::path::Path;
@@ -22,40 +32,17 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 
 use crate::run::{resolve_runtime_dir, tty_lock_name};
 
-/// MCP tool names this binary's `bookrack-mcp` exposes today. Listed
-/// statically so `bookrack exec tools` works without opening a session
-/// or making an HTTP call; the canonical list is mirrored in
-/// [`crates/mcp/src/lib.rs`](../../mcp/src/lib.rs) and changes there
-/// must keep this slice in sync.
-const TOOL_NAMES: &[&str] = &[
-    "library.search",
-    "library.search_in_book",
-    "library.stats",
-    "library.list_books",
-    "library.find_books",
-    "library.show_book",
-    "library.show_toc",
-    "library.show_metadata_audit",
-    "library.list_pending_reviews",
-    "library.show_audit_trail",
-    "library.show_pipeline_trail",
-    "library.info",
-    "library.metadata.set",
-    "library.metadata.clear",
-    "library.metadata.ack",
-    "library.metadata.approve",
-    "library.metadata.reject",
-];
-
 /// Run a `bookrack exec` invocation.
 ///
 /// Sub-commands (positional, no flags):
 ///
 /// - `info` (default): print the active session — pid, MCP address,
 ///   lock path. Errors if no session is running.
-/// - `tools`: list MCP tools the bookrack server exposes. Does not
-///   require a running session.
-pub fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result<()> {
+/// - `tools`: open a live MCP connection and run `tools/list`.
+/// - `library.<name> [<json-object>]`: call the named MCP tool with
+///   the second positional token as raw JSON arguments. `{}` and
+///   omitted-args both encode as `arguments: None` on the wire.
+pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result<()> {
     let runtime_dir = resolve_runtime_dir(runtime_dir_override)
         .context("resolve BOOKRACK_RUNTIME_DIR for `bookrack exec`")?;
     let lock_path = runtime_dir.join(tty_lock_name());
@@ -63,16 +50,50 @@ pub fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result<()> {
     let subcmd = args.first().map(String::as_str).unwrap_or("info");
     match subcmd {
         "info" => print_info(&lock_path),
-        "tools" => {
-            print_tools(&lock_path);
-            Ok(())
+        "tools" => print_tools_live(&lock_path).await,
+        name if name.starts_with("library.") => {
+            // Parse the optional JSON-object argument before connecting
+            // so a syntax error stays local and does not waste an MCP
+            // round-trip.
+            let arguments = match args.get(1).map(String::as_str) {
+                None | Some("") => serde_json::Value::Null,
+                Some(raw) => serde_json::from_str::<serde_json::Value>(raw)
+                    .with_context(|| format!("parse JSON arguments for `{name}`: {raw}"))?,
+            };
+            let mcp = require_mcp_addr(&lock_path)?;
+            let result = call_tool(&mcp, name, arguments).await?;
+            print_tool_result(&result)
         }
         other => {
             bail!(
                 "bookrack exec: unknown subcommand `{other}`; \
-                 known subcommands: `info`, `tools`"
+                 expected `info`, `tools`, or `library.<tool> [<json>]`"
             )
         }
+    }
+}
+
+/// Read the active MCP address from the session lock, or error with
+/// a message telling the operator to start the daemon.
+fn require_mcp_addr(lock_path: &Path) -> Result<String> {
+    match read_lock_info(lock_path)? {
+        None => bail!(
+            "no bookrack session running (lock {} absent); \
+             start one with `bookrack run`",
+            lock_path.display()
+        ),
+        Some(info) => match info.mcp {
+            Some(addr) if addr != "disabled" => Ok(addr),
+            Some(_) => bail!(
+                "the running session has MCP disabled; \
+                 restart `bookrack run` without --no-mcp"
+            ),
+            None => bail!(
+                "the session lock at {} carries no MCP address; \
+                 restart `bookrack run`",
+                lock_path.display()
+            ),
+        },
     }
 }
 
@@ -141,17 +162,25 @@ fn print_info(lock_path: &Path) -> Result<()> {
     }
 }
 
-fn print_tools(lock_path: &Path) {
-    if let Ok(Some(info)) = read_lock_info(lock_path)
-        && let Some(mcp) = info.mcp.as_deref()
-    {
-        println!("MCP endpoint: http://{mcp}/mcp");
-        println!();
-    }
+/// Hit the live daemon's `tools/list` and render the server's
+/// authoritative tool slice. Replaces the previous compile-time
+/// `TOOL_NAMES` const so the operator never sees a drifted list.
+async fn print_tools_live(lock_path: &Path) -> Result<()> {
+    let mcp = require_mcp_addr(lock_path)?;
+    let transport = StreamableHttpClientTransport::with_client(
+        reqwest::Client::new(),
+        StreamableHttpClientTransportConfig::with_uri(format!("http://{mcp}/mcp")),
+    );
+    let client = ().serve(transport).await.context("connect MCP streamable-HTTP transport")?;
+    let tools = client.list_tools(None).await.context("list MCP tools")?;
+    let _ = client.cancel().await;
+    println!("MCP endpoint: http://{mcp}/mcp");
+    println!();
     println!("Tools:");
-    for name in TOOL_NAMES {
-        println!("  {name}");
+    for tool in tools.tools {
+        println!("  {}", tool.name);
     }
+    Ok(())
 }
 
 /// Open a streamable-HTTP MCP session against the daemon listening at
@@ -164,7 +193,6 @@ fn print_tools(lock_path: &Path) {
 /// `LocalSessionManager`; this helper has no session bookkeeping of
 /// its own. The connection is cancelled before returning so the
 /// server's per-session state drops immediately.
-#[allow(dead_code)] // wired by B2 (argv -> JSON dispatch)
 async fn call_tool(
     mcp_addr: &str,
     name: &str,
@@ -188,6 +216,26 @@ async fn call_tool(
         .with_context(|| format!("call MCP tool `{name}`"))?;
     let _ = client.cancel().await;
     Ok(result)
+}
+
+/// Render a [`CallToolResult`] to stdout. Text content is printed
+/// verbatim (the server controls formatting); other content kinds
+/// are flagged so the operator notices when the server returns
+/// something `bookrack exec` cannot render yet. An `is_error` result
+/// surfaces as an `Err` so shell-level `&&` chaining stops on a
+/// tool-side failure.
+fn print_tool_result(result: &CallToolResult) -> Result<()> {
+    for content in &result.content {
+        if let Some(text) = content.as_text() {
+            println!("{}", text.text);
+        } else {
+            eprintln!("bookrack exec: tool returned non-text content; ignoring");
+        }
+    }
+    if result.is_error.unwrap_or(false) {
+        bail!("the MCP tool returned an error result");
+    }
+    Ok(())
 }
 
 /// Helper used in tests to keep the lock-file path construction next
@@ -225,33 +273,119 @@ mod tests {
         assert_eq!(info.mcp.as_deref(), Some("127.0.0.1:9090"));
     }
 
-    #[test]
-    fn run_info_errors_when_no_session_lock_exists() {
+    #[tokio::test]
+    async fn run_info_errors_when_no_session_lock_exists() {
         let dir = tempdir().unwrap();
-        let err = run(&[], Some(dir.path())).expect_err("expected error");
+        let err = run(&[], Some(dir.path()))
+            .await
+            .expect_err("expected error");
         let msg = err.to_string();
         assert!(msg.contains("no bookrack session running"), "got: {msg}");
         assert!(msg.contains(dir.path().to_string_lossy().as_ref()));
     }
 
-    #[test]
-    fn run_info_succeeds_when_lock_is_present() {
+    #[tokio::test]
+    async fn run_info_succeeds_when_lock_is_present() {
         let dir = tempdir().unwrap();
         let lock_path = lock_path_for(dir.path());
         fs::write(&lock_path, "pid=1234\nmcp=127.0.0.1:8765\n").unwrap();
-        run(&["info".to_string()], Some(dir.path())).unwrap();
+        run(&["info".to_string()], Some(dir.path())).await.unwrap();
     }
 
-    #[test]
-    fn run_tools_succeeds_without_session() {
+    #[tokio::test]
+    async fn run_tools_without_session_lock_points_at_bookrack_run() {
+        // The previous static-list behaviour is gone; without a daemon
+        // the live `tools/list` cannot run and the operator gets the
+        // same "start `bookrack run`" hint as every other live path.
         let dir = tempdir().unwrap();
-        run(&["tools".to_string()], Some(dir.path())).unwrap();
+        let err = run(&["tools".to_string()], Some(dir.path()))
+            .await
+            .expect_err("expected error");
+        assert!(
+            err.to_string().contains("bookrack run"),
+            "expected bookrack-run hint, got: {err}"
+        );
     }
 
-    #[test]
-    fn run_rejects_unknown_subcommand() {
+    #[tokio::test]
+    async fn run_rejects_unknown_subcommand() {
         let dir = tempdir().unwrap();
-        let err = run(&["ghost".to_string()], Some(dir.path())).expect_err("expected error");
+        let err = run(&["ghost".to_string()], Some(dir.path()))
+            .await
+            .expect_err("expected error");
         assert!(err.to_string().contains("unknown subcommand"));
+    }
+
+    #[tokio::test]
+    async fn library_tool_call_without_session_points_at_bookrack_run() {
+        let dir = tempdir().unwrap();
+        let err = run(
+            &["library.info".to_string(), "{}".to_string()],
+            Some(dir.path()),
+        )
+        .await
+        .expect_err("expected error");
+        assert!(
+            err.to_string().contains("bookrack run"),
+            "expected bookrack-run hint, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_tool_call_rejects_invalid_json_arguments_locally() {
+        // JSON syntax validation must happen before a transport is
+        // opened: even with no daemon running, a malformed argument
+        // surfaces a parse error, not a connection failure.
+        let dir = tempdir().unwrap();
+        let err = run(
+            &["library.search".to_string(), "{not-json".to_string()],
+            Some(dir.path()),
+        )
+        .await
+        .expect_err("expected error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parse JSON arguments"),
+            "expected JSON parse error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_tool_call_rejects_non_object_json_locally() {
+        let dir = tempdir().unwrap();
+        // Even with a fake lock pointing at an unreachable address,
+        // the array-shaped argument is rejected before the transport
+        // opens.
+        let lock_path = lock_path_for(dir.path());
+        fs::write(&lock_path, "pid=1\nmcp=127.0.0.1:1\n").unwrap();
+        let err = run(
+            &["library.search".to_string(), "[1,2,3]".to_string()],
+            Some(dir.path()),
+        )
+        .await
+        .expect_err("expected error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a JSON object"),
+            "expected non-object rejection, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_tool_call_rejects_disabled_mcp() {
+        let dir = tempdir().unwrap();
+        let lock_path = lock_path_for(dir.path());
+        fs::write(&lock_path, "pid=1\nmcp=disabled\n").unwrap();
+        let err = run(
+            &["library.info".to_string(), "{}".to_string()],
+            Some(dir.path()),
+        )
+        .await
+        .expect_err("expected error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MCP disabled"),
+            "expected disabled-MCP error, got: {msg}"
+        );
     }
 }
