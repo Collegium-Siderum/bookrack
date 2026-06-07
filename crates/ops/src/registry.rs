@@ -16,9 +16,15 @@
 //! [`get`]: LibraryRegistry::get
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
+use anyhow::Context;
+use bookrack_catalog::Catalog;
+use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
+use bookrack_ingest::{IngestParams, IngestReport};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Ops;
 
@@ -61,9 +67,16 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 /// Always held behind an `Arc`: the scheduler hands clones to whatever
 /// task needs to run an op, so the underlying [`Ops`] is never moved or
 /// reopened during the registry's lifetime.
+///
+/// The handle also owns a per-library [`AsyncMutex`] used to serialise
+/// ingest writes. Read ops keep going through the shared `Arc<Ops>`
+/// without contention; only [`LibraryHandle::ingest_book`] takes the
+/// lock, so two queue workers — current and hypothetical — never run
+/// the catalog/corpus write path in parallel against the same library.
 pub struct LibraryHandle<E: Embedder> {
     name: String,
     ops: Arc<Ops<E>>,
+    ingest_lock: AsyncMutex<()>,
 }
 
 impl<E: Embedder> LibraryHandle<E> {
@@ -79,6 +92,7 @@ impl<E: Embedder> LibraryHandle<E> {
         Arc::new(LibraryHandle {
             name: name.into(),
             ops,
+            ingest_lock: AsyncMutex::new(()),
         })
     }
 
@@ -98,6 +112,49 @@ impl<E: Embedder> LibraryHandle<E> {
     /// underlying ops is never moved or reopened.
     pub fn ops_arc(&self) -> Arc<Ops<E>> {
         Arc::clone(&self.ops)
+    }
+}
+
+impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
+    /// Ingest one book into this library through the registry-mediated
+    /// write path.
+    ///
+    /// Holds the per-library ingest mutex for the duration of the call,
+    /// opens fresh [`Catalog`] and [`Corpus`] handles from the library's
+    /// stored paths, then forwards to [`bookrack_ingest::ingest_book`]
+    /// with the library's warm embedder. The caller — currently the
+    /// `bookrack run` REPL's queue worker — never opens a database on
+    /// its own.
+    ///
+    /// Returns an error when this handle was built catalog-only, since
+    /// ingest requires the embedder that lives on the
+    /// [`bookrack_query::Library`] half.
+    pub async fn ingest_book(
+        &self,
+        path: &Path,
+        params: &IngestParams,
+    ) -> anyhow::Result<IngestReport> {
+        let embedder = self
+            .ops
+            .embedder()
+            .ok_or_else(|| anyhow::anyhow!("ingest requires a library handle with an embedder"))?;
+        let _guard = self.ingest_lock.lock().await;
+        let mut corpus =
+            Corpus::open(self.ops.corpus_db()).context("open corpus for ingest write")?;
+        let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
+            .context("open catalog for ingest write")?;
+        let report = bookrack_ingest::ingest_book(
+            path,
+            &mut corpus,
+            &mut catalog,
+            self.ops.lancedb_dir(),
+            self.ops.books_dir(),
+            embedder,
+            params,
+        )
+        .await
+        .context("registry-mediated ingest")?;
+        Ok(report)
     }
 }
 
@@ -267,6 +324,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use bookrack_embed::{EmbedError, Embedder};
+    use bookrack_ingest::IngestParams;
 
     use crate::{Caller, Ops};
 
@@ -291,6 +349,8 @@ mod tests {
             PathBuf::from("/dev/null/corpus.db"),
             PathBuf::from("/dev/null/catalog.db"),
             Path::new("/dev/null/lancedb"),
+            PathBuf::from("/dev/null/books"),
+            PathBuf::from("/dev/null/backup"),
             Caller::cli(),
         )
     }
@@ -367,6 +427,20 @@ mod tests {
             Err(other) => panic!("expected LibraryUnknown, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[tokio::test]
+    async fn ingest_book_on_catalog_only_handle_errors_without_running_ingest() {
+        let h = handle("books");
+        let err = h
+            .ingest_book(Path::new("/does/not/exist.epub"), &IngestParams::default())
+            .await
+            .expect_err("catalog-only handle has no embedder");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("library handle with an embedder"),
+            "expected the catalog-only guard message, got: {msg}",
+        );
     }
 
     #[test]

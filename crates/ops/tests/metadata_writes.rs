@@ -28,6 +28,8 @@ struct Fixture {
     catalog_db: PathBuf,
     corpus_db: PathBuf,
     lancedb_dir: PathBuf,
+    books_dir: PathBuf,
+    backup_dir: PathBuf,
 }
 
 impl Fixture {
@@ -36,6 +38,8 @@ impl Fixture {
         let catalog_db = tmp.path().join("catalog.db");
         let corpus_db = tmp.path().join("corpus.db");
         let lancedb_dir = tmp.path().join("lancedb");
+        let books_dir = tmp.path().join("books");
+        let backup_dir = tmp.path().join("backup");
         // Create the catalog once so the schema is migrated before the
         // first op runs.
         Catalog::open(&catalog_db).expect("seed catalog");
@@ -43,6 +47,8 @@ impl Fixture {
             corpus_db.clone(),
             catalog_db.clone(),
             &lancedb_dir,
+            books_dir.clone(),
+            backup_dir.clone(),
             Caller::cli(),
         );
         Fixture {
@@ -51,6 +57,8 @@ impl Fixture {
             catalog_db,
             corpus_db,
             lancedb_dir,
+            books_dir,
+            backup_dir,
         }
     }
 
@@ -60,6 +68,8 @@ impl Fixture {
             fx.corpus_db.clone(),
             fx.catalog_db.clone(),
             &fx.lancedb_dir,
+            fx.books_dir.clone(),
+            fx.backup_dir.clone(),
             Caller::mcp(),
         );
         fx

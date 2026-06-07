@@ -29,10 +29,14 @@ impl Fixture {
         let corpus_db = tmp.path().join("corpus.db");
         let lancedb_dir = tmp.path().join("lancedb");
         Catalog::open(&catalog_db).expect("seed catalog");
+        let books_dir = tmp.path().join("books");
+        let backup_dir = tmp.path().join("backup");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db,
             catalog_db.clone(),
             &lancedb_dir,
+            books_dir,
+            backup_dir,
             Caller::cli(),
         );
         Fixture {

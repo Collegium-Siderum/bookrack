@@ -99,6 +99,8 @@ async fn run() -> Result<()> {
         cfg.corpus_db(),
         cfg.catalog_db(),
         &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::mcp(),
     );
 

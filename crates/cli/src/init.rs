@@ -312,6 +312,8 @@ async fn smoke_search(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<usize> {
         cfg.corpus_db(),
         cfg.catalog_db(),
         &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::cli(),
     );
     let hits = reads::search::search(&ops, SMOKE_QUERY, SearchOptions::default(), None)

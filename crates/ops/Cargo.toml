@@ -10,12 +10,15 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-embed = { path = "../embed" }
+bookrack-ingest = { path = "../ingest" }
 bookrack-query = { path = "../query" }
 bookrack-search = { path = "../search" }
 bookrack-vectors = { path = "../vectors" }
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 
 [dev-dependencies]

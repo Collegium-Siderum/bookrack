@@ -1340,6 +1340,8 @@ fn catalog_only_ops(cfg: &Config) -> Ops<OllamaEmbedClient> {
         cfg.corpus_db(),
         cfg.catalog_db(),
         &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::cli(),
     )
 }
@@ -2150,6 +2152,8 @@ async fn run_query(
         cfg.corpus_db(),
         cfg.catalog_db(),
         &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::cli(),
     );
 

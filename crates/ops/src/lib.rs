@@ -71,12 +71,16 @@ pub type Result<T> = std::result::Result<T, OpsError>;
 /// Warm, shareable op state.
 ///
 /// Holds the file-system paths every op needs and, optionally, a warm
-/// [`Library`] for search.
+/// [`Library`] for search. The path set covers both reads (catalog,
+/// corpus, vector store) and the registry-mediated ingest write path
+/// (books staging directory, catalog backup directory).
 pub struct Ops<E: Embedder> {
     library: Option<Library<E>>,
     corpus_db: PathBuf,
     catalog_db: PathBuf,
     lancedb_dir: PathBuf,
+    books_dir: PathBuf,
+    backup_dir: PathBuf,
     caller: Caller,
 }
 
@@ -88,6 +92,8 @@ impl<E: Embedder> Ops<E> {
         corpus_db: PathBuf,
         catalog_db: PathBuf,
         lancedb_dir: &Path,
+        books_dir: PathBuf,
+        backup_dir: PathBuf,
         caller: Caller,
     ) -> Ops<E> {
         Ops {
@@ -95,6 +101,8 @@ impl<E: Embedder> Ops<E> {
             corpus_db,
             catalog_db,
             lancedb_dir: lancedb_dir.to_path_buf(),
+            books_dir,
+            backup_dir,
             caller,
         }
     }
@@ -108,6 +116,8 @@ impl<E: Embedder> Ops<E> {
         corpus_db: PathBuf,
         catalog_db: PathBuf,
         lancedb_dir: &Path,
+        books_dir: PathBuf,
+        backup_dir: PathBuf,
         caller: Caller,
     ) -> Ops<E> {
         Ops {
@@ -115,6 +125,8 @@ impl<E: Embedder> Ops<E> {
             corpus_db,
             catalog_db,
             lancedb_dir: lancedb_dir.to_path_buf(),
+            books_dir,
+            backup_dir,
             caller,
         }
     }
@@ -146,6 +158,21 @@ impl<E: Embedder> Ops<E> {
 
     pub(crate) fn lancedb_dir(&self) -> &Path {
         &self.lancedb_dir
+    }
+
+    pub(crate) fn books_dir(&self) -> &Path {
+        &self.books_dir
+    }
+
+    pub(crate) fn backup_dir(&self) -> &Path {
+        &self.backup_dir
+    }
+
+    /// Borrow the warm embedder, if this `Ops` was built with a library.
+    /// Used by the registry-level ingest wrapper, which feeds the
+    /// embedder into [`bookrack_ingest::ingest_book`].
+    pub(crate) fn embedder(&self) -> Option<&E> {
+        self.library.as_ref().map(Library::embedder)
     }
 }
 

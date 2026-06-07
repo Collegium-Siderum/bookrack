@@ -140,6 +140,8 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         cfg.corpus_db(),
         cfg.catalog_db(),
         &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::cli(),
     );
 

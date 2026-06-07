@@ -127,6 +127,13 @@ impl<E: Embedder> Library<E> {
         self.probed_dim
     }
 
+    /// Borrow the warm embedder driving this library. Consumed by the
+    /// registry-level ingest wrapper, which forwards the reference to
+    /// [`bookrack_ingest::ingest_book`].
+    pub fn embedder(&self) -> &E {
+        &self.embedder
+    }
+
     /// Search the library for passages matching `query`, nearest first.
     /// `top_k` falls back to the configured default when `None`.
     ///
