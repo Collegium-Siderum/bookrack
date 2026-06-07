@@ -44,31 +44,11 @@ Prerequisites:
   the embed model before either command runs, e.g.:
       ollama pull qwen3-embedding:0.6b";
 
-/// Trailing block shown by `bookrack ingest --help`.
-const INGEST_AFTER_HELP: &str = "\
-Examples:
-  bookrack ingest path/to/book.epub
-  bookrack ingest path/to/books-dir --recursive
-  bookrack ingest path/to/book.epub --force";
-
 /// Trailing block shown by `bookrack query --help`.
 const QUERY_AFTER_HELP: &str = "\
 Examples:
   bookrack query \"the history of madness\"
   bookrack query \"recurring motifs\" --in-book 1";
-
-/// Trailing block shown by `bookrack remove --help`.
-const REMOVE_AFTER_HELP: &str = "\
-Examples:
-  bookrack remove 42
-  bookrack remove --sha 9f1c... --dry-run
-  bookrack remove 42 --yes
-
-Notes:
-  metadata_audit and book_pipeline_audit rows are preserved by design
-  so the pipeline history of a removed book remains queryable. Vector
-  rows are tombstoned in LanceDB; their space is reclaimed by the
-  optimize pass the next ingest runs, not by remove itself.";
 
 #[derive(clap::Parser)]
 #[command(
@@ -109,42 +89,6 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Drive an intake from a derived source manifestation. The OCR
-    /// variant pairs a polyocr-style Markdown product with its source
-    /// PDF; future variants will cover other derived sources.
-    Intake {
-        #[command(subcommand)]
-        action: IntakeAction,
-    },
-    /// Ingest and embed a single file (or, with `--recursive`, every
-    /// supported file under a directory) into the library.
-    #[command(after_help = INGEST_AFTER_HELP)]
-    Ingest {
-        /// Path to the source file, or — with `--recursive` — the
-        /// directory to walk.
-        path: PathBuf,
-        /// Walk `path` as a directory, ingesting every supported file
-        /// found. Files whose `source_sha256` is already registered are
-        /// skipped via the existing intake deduplication; a per-file
-        /// failure is logged and the walk continues.
-        #[arg(long)]
-        recursive: bool,
-        /// Stop in the metadata stage when the audit verdict is
-        /// `needs_work` and wait for an operator. Off by default —
-        /// EMBED runs straight through and the audit verdict is
-        /// merely advisory. With the flag on, the held book resumes
-        /// through `bookrack metadata advance <book>` once an
-        /// operator has corrected the record.
-        #[arg(long)]
-        hold_for_metadata: bool,
-        /// Re-extract, re-chunk, and re-embed even when the source's
-        /// `source_sha256` is already on file and every stamp matches
-        /// this binary. Without this flag, an up-to-date re-ingest is a
-        /// no-op. Use it after editing the source file or to recover
-        /// from a corrupted partition.
-        #[arg(long)]
-        force: bool,
-    },
     /// Query the library and print cited passages.
     #[command(after_help = QUERY_AFTER_HELP)]
     Query {
@@ -190,15 +134,10 @@ enum Command {
         #[arg(long)]
         no_chunk: bool,
     },
-    /// Manage the vector store's ANN index — inspect, rebuild, drop.
+    /// Print table size, ANN index state, and the persisted ANN config.
     Vectors {
         #[command(subcommand)]
         action: VectorsAction,
-    },
-    /// Manage the corpus database — rebuild it from the opaque store.
-    Corpus {
-        #[command(subcommand)]
-        action: CorpusAction,
     },
     /// Render `book_pipeline_audit` rows for a book, oldest first.
     PipelineTrail {
@@ -220,14 +159,6 @@ enum Command {
     /// TableSpecs and tally the cross-store counts (catalog intakes,
     /// vectors-meta chunk count, intake-file existence on disk).
     Verify,
-    /// Operate on the `corpus.db` `index_meta` stamps directly. The
-    /// rebuild and reembed paths reconcile stamps as a side effect; this
-    /// surface gives an operator a no-rebuild way to confirm — or fix —
-    /// stamp drift.
-    Stamps {
-        #[command(subcommand)]
-        action: StampsAction,
-    },
     /// Inspect the library registry — the file named by
     /// `BOOKRACK_REGISTRY` that maps short names to data roots.
     Libraries {
@@ -323,26 +254,9 @@ enum Command {
         #[arg(long)]
         no_smoke: bool,
     },
-    #[command(after_help = REMOVE_AFTER_HELP)]
-    Remove {
-        /// Intake id of the book to remove. Mutually exclusive with
-        /// `--sha`; exactly one of the two must be supplied.
-        intake_id: Option<i64>,
-        /// Whole-file SHA-256 of the source file, looked up in
-        /// `catalog.intake.source_sha256`. Mutually exclusive with the
-        /// positional intake id.
-        #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
-        sha: Option<String>,
-        /// Print the per-store plan and exit without writing.
-        #[arg(long)]
-        dry_run: bool,
-        /// Skip the destructive-action confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-    },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum IntakeAction {
     /// Bring an OCR product into the library as a derived source
     /// manifestation. The scan PDF named by `--from-pdf` is registered
@@ -373,7 +287,7 @@ pub(crate) enum IntakeAction {
     },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum LibrariesAction {
     /// List every entry in the registry, marking the `default = "..."`
     /// fallback when one is set.
@@ -384,7 +298,7 @@ pub(crate) enum LibrariesAction {
     },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum StampsAction {
     /// Probe the embedder for its vector dimension and write the
     /// resulting stamps into `corpus.db`'s `index_meta` when the table
@@ -393,7 +307,7 @@ pub(crate) enum StampsAction {
     Reconcile,
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum BooksAction {
     /// List books in catalog order, paginated.
     List {
@@ -456,10 +370,14 @@ pub(crate) enum BooksAction {
     },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum VectorsAction {
     /// Print table size, ANN index state, and the persisted ANN config.
     Status,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum WriteVectorsAction {
     /// Build or rebuild the ANN index from explicit parameters. Without
     /// any flag, reads the persisted config from `vectors_meta.json` and
     /// rebuilds from that — useful after corpus growth has exceeded the
@@ -509,7 +427,7 @@ pub(crate) enum VectorsAction {
     },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum CorpusAction {
     /// Rebuild `corpus.db` from the v1 extraction envelopes recorded in
     /// the opaque store. Intakes whose envelope is missing, mismatched,
@@ -540,7 +458,7 @@ pub(crate) enum CorpusAction {
     },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum MetadataAction {
     /// Show the metadata audit report for a book.
     Show {
@@ -550,6 +468,40 @@ pub(crate) enum MetadataAction {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect and compare audit profiles.
+    AuditProfile {
+        #[command(subcommand)]
+        action: AuditProfileAction,
+    },
+    /// List books, optionally narrowed to those that still need review.
+    List {
+        /// Restrict the listing to books whose root audit confidence is
+        /// `low` or `medium` *and* whose review status is `pending` or
+        /// `acknowledged`. Missing review rows count as `pending`.
+        #[arg(long)]
+        needs_review: bool,
+        /// Maximum rows to print.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Skip this many rows before printing.
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the `metadata_audit` history for a book, oldest first.
+    AuditTrail {
+        /// The intake id of the book.
+        book: i64,
+        /// Emit machine-readable JSON instead of the human listing.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum WriteMetadataAction {
     /// Set (or change) one metadata field's value.
     Set {
         /// The intake id of the book.
@@ -601,39 +553,9 @@ pub(crate) enum MetadataAction {
         /// The intake id of the book.
         book: i64,
     },
-    /// Inspect and compare audit profiles.
-    AuditProfile {
-        #[command(subcommand)]
-        action: AuditProfileAction,
-    },
-    /// List books, optionally narrowed to those that still need review.
-    List {
-        /// Restrict the listing to books whose root audit confidence is
-        /// `low` or `medium` *and* whose review status is `pending` or
-        /// `acknowledged`. Missing review rows count as `pending`.
-        #[arg(long)]
-        needs_review: bool,
-        /// Maximum rows to print.
-        #[arg(long, default_value_t = 50)]
-        limit: u32,
-        /// Skip this many rows before printing.
-        #[arg(long, default_value_t = 0)]
-        offset: u32,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Render the `metadata_audit` history for a book, oldest first.
-    AuditTrail {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Debug)]
 pub(crate) enum AuditProfileAction {
     /// Print every built-in profile name, one per line.
     List {
@@ -780,40 +702,6 @@ async fn run() -> Result<()> {
 
     let profile_name = cli.audit_profile.clone();
     match cli.command {
-        Command::Ingest {
-            path,
-            recursive,
-            hold_for_metadata,
-            force,
-        } => {
-            cmd::ingest::run(
-                &cfg,
-                &path,
-                recursive,
-                hold_for_metadata,
-                force,
-                profile_name.as_deref(),
-            )
-            .await
-        }
-        Command::Intake { action } => match action {
-            IntakeAction::Ocr {
-                ocr_md,
-                from_pdf,
-                expected_pages,
-                allow_partial,
-            } => {
-                cmd::intake_ocr::run(
-                    &cfg,
-                    &ocr_md,
-                    &from_pdf,
-                    expected_pages,
-                    allow_partial,
-                    profile_name.as_deref(),
-                )
-                .await
-            }
-        },
         Command::Query {
             text,
             in_book,
@@ -839,70 +727,11 @@ async fn run() -> Result<()> {
         ),
         Command::Vectors { action } => match action {
             VectorsAction::Status => cmd::vectors::status(&cfg).await,
-            VectorsAction::Rebuild {
-                kind,
-                num_partitions,
-                num_sub_vectors,
-                num_bits,
-                nprobes,
-                refine_factor,
-            } => {
-                cmd::vectors::rebuild(
-                    &cfg,
-                    kind.as_deref(),
-                    num_partitions,
-                    num_sub_vectors,
-                    num_bits,
-                    nprobes,
-                    refine_factor,
-                )
-                .await
-            }
-            VectorsAction::Drop => cmd::vectors::drop(&cfg).await,
-            VectorsAction::Reembed {
-                book,
-                stale_only,
-                dry_run,
-                yes,
-            } => {
-                cmd::vectors::reembed(
-                    &cfg,
-                    book,
-                    stale_only,
-                    dry_run,
-                    yes,
-                    profile_name.as_deref(),
-                )
-                .await
-            }
-        },
-        Command::Corpus { action } => match action {
-            CorpusAction::Rebuild {
-                include_vectors,
-                book,
-                stale_only,
-                dry_run,
-                yes,
-            } => {
-                cmd::corpus::rebuild(
-                    &cfg,
-                    include_vectors,
-                    book,
-                    stale_only,
-                    dry_run,
-                    yes,
-                    profile_name.as_deref(),
-                )
-                .await
-            }
         },
         Command::PipelineTrail { book, json } => cmd::pipeline_trail::run(&cfg, book, json),
         Command::Books { action } => cmd::books::run(&cfg, action),
         Command::Info => cmd::info::run(&cfg).await,
         Command::Verify => cmd::verify::run(&cfg),
-        Command::Stamps { action } => match action {
-            StampsAction::Reconcile => cmd::stamps::reconcile(&cfg).await,
-        },
         Command::Libraries { action } => match action {
             LibrariesAction::List { json } => cmd::libraries::list(json),
         },
@@ -911,28 +740,75 @@ async fn run() -> Result<()> {
             days,
             no_scrub,
         } => cmd::diagnose::run(&cfg, out, days, no_scrub),
-        Command::Remove {
-            intake_id,
-            sha,
-            dry_run,
-            yes,
-        } => {
-            cmd::remove::run(
-                &cfg,
-                cmd::remove::RemoveArgs {
-                    intake_id,
-                    sha,
-                    dry_run,
-                    yes,
-                },
-            )
-            .await
-        }
         Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
         Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
         Command::Run { .. } => unreachable!("Run is dispatched before Config::resolve"),
         Command::Exec { .. } => unreachable!("Exec is dispatched before Config::resolve"),
     }
+}
+
+/// Inside-`bookrack run` command grammar. Hosts every write command
+/// that was removed from the external [`Cli`]. The REPL fallback in
+/// `crate::run` parses tokens through this grammar; dispatch maps each
+/// variant to the matching `cmd::*` runner.
+#[derive(clap::Parser, Debug)]
+#[command(name = "", no_binary_name = true)]
+pub(crate) struct ReplCli {
+    #[command(subcommand)]
+    pub(crate) command: ReplCommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub(crate) enum ReplCommand {
+    /// Ingest and embed a single file (or, with `--recursive`, every
+    /// supported file under a directory) into the library. Inside the
+    /// REPL this runs synchronously; queue an entire directory through
+    /// the queue worker with `queue add <path>` instead.
+    Ingest {
+        path: PathBuf,
+        #[arg(long)]
+        recursive: bool,
+        #[arg(long)]
+        hold_for_metadata: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Drive an intake from a derived source manifestation.
+    Intake {
+        #[command(subcommand)]
+        action: IntakeAction,
+    },
+    /// Edit one book's metadata: set / clear / ack / approve / reject
+    /// / advance.
+    Metadata {
+        #[command(subcommand)]
+        action: WriteMetadataAction,
+    },
+    /// Vector-store writes: ANN rebuild, brute-force drop, re-embed.
+    Vectors {
+        #[command(subcommand)]
+        action: WriteVectorsAction,
+    },
+    /// Corpus rebuild from the opaque envelopes.
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
+    /// Reconcile `corpus.db` index_meta stamps.
+    Stamps {
+        #[command(subcommand)]
+        action: StampsAction,
+    },
+    /// Drop a book from every store.
+    Remove {
+        intake_id: Option<i64>,
+        #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
+        sha: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[cfg(test)]
@@ -964,28 +840,11 @@ mod tests {
     }
 
     #[test]
-    fn metadata_subcommands_parse() {
+    fn metadata_read_subcommands_parse() {
+        // The read-side metadata surface is still on the external CLI.
         for argv in [
             vec!["bookrack", "metadata", "show", "1"],
             vec!["bookrack", "metadata", "show", "1", "--json"],
-            vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
-            vec!["bookrack", "metadata", "set", "1", "pub_place", "New York"],
-            vec!["bookrack", "metadata", "set", "1", "original_year", "1949"],
-            vec!["bookrack", "metadata", "clear", "1", "title"],
-            vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
-            vec!["bookrack", "metadata", "approve", "1"],
-            vec![
-                "bookrack", "metadata", "approve", "1", "--reason", "verified",
-            ],
-            vec![
-                "bookrack",
-                "metadata",
-                "reject",
-                "1",
-                "--reason",
-                "wrong file",
-            ],
-            vec!["bookrack", "metadata", "advance", "1"],
         ] {
             Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
@@ -993,9 +852,29 @@ mod tests {
     }
 
     #[test]
-    fn ingest_accepts_hold_for_metadata_flag() {
-        Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
-            .expect("the flag parses");
+    fn metadata_write_subcommands_parse_through_repl() {
+        // The write-side metadata surface lives inside `bookrack run`
+        // and is parsed against the REPL grammar with no binary prefix.
+        for argv in [
+            vec!["metadata", "set", "1", "title", "A New Title"],
+            vec!["metadata", "set", "1", "pub_place", "New York"],
+            vec!["metadata", "set", "1", "original_year", "1949"],
+            vec!["metadata", "clear", "1", "title"],
+            vec!["metadata", "ack", "1", "--reason", "test"],
+            vec!["metadata", "approve", "1"],
+            vec!["metadata", "approve", "1", "--reason", "verified"],
+            vec!["metadata", "reject", "1", "--reason", "wrong file"],
+            vec!["metadata", "advance", "1"],
+        ] {
+            ReplCli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn ingest_accepts_hold_for_metadata_flag_in_repl() {
+        ReplCli::try_parse_from(["ingest", "/x/book.epub", "--hold-for-metadata"])
+            .expect("the flag parses via ReplCli");
     }
 
     #[test]
@@ -1043,18 +922,19 @@ mod tests {
     }
 
     #[test]
-    fn remove_subcommand_parses_both_input_shapes() {
-        // Positional intake id, --sha alternative, and the destructive
-        // toggles must all parse without --library or --data-dir.
+    fn remove_subcommand_parses_through_repl() {
+        // `remove` is REPL-only after C3a; positional intake id, --sha
+        // alternative, and the destructive toggles must all parse
+        // against the REPL grammar.
         for argv in [
-            vec!["bookrack", "remove", "42"],
-            vec!["bookrack", "remove", "42", "--dry-run"],
-            vec!["bookrack", "remove", "42", "--yes"],
-            vec!["bookrack", "remove", "--sha", "deadbeef"],
-            vec!["bookrack", "remove", "--sha", "deadbeef", "--dry-run"],
+            vec!["remove", "42"],
+            vec!["remove", "42", "--dry-run"],
+            vec!["remove", "42", "--yes"],
+            vec!["remove", "--sha", "deadbeef"],
+            vec!["remove", "--sha", "deadbeef", "--dry-run"],
         ] {
-            Cli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            ReplCli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
         }
     }
 
@@ -1081,10 +961,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_rejects_both_intake_id_and_sha_together() {
+    fn remove_rejects_both_intake_id_and_sha_together_in_repl() {
         // The `--sha` and positional id select the same target two
         // different ways; supplying both is a user error.
-        let Err(err) = Cli::try_parse_from(["bookrack", "remove", "42", "--sha", "abc"]) else {
+        let Err(err) = ReplCli::try_parse_from(["remove", "42", "--sha", "abc"]) else {
             panic!("the two selectors must not be combined");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);

@@ -108,7 +108,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         "bookrack session lock acquired",
     );
 
-    let cfg = Config::resolve(&opts.selection).context("resolve configuration")?;
+    let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
     let _obs_guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
     let embed_cfg = EmbedConfig::from_env();
@@ -249,6 +249,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let queue_state_for_repl = Arc::clone(&queue_state);
     let queue_path_for_repl = queue_state_path.clone();
     let library_default_for_repl = library_name.clone();
+    let cfg_for_repl = Arc::clone(&cfg);
     let started_at = Instant::now();
     let repl_handle = tokio::task::spawn_blocking(move || {
         repl_loop(
@@ -260,6 +261,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             queue_state_for_repl,
             queue_path_for_repl,
             library_default_for_repl,
+            cfg_for_repl,
             started_at,
         )
     });
@@ -536,6 +538,7 @@ fn repl_loop(
     queue_state: Arc<Mutex<QueueState>>,
     queue_state_path: PathBuf,
     library_default: String,
+    cfg: Arc<Config>,
     started_at: Instant,
 ) -> Result<()> {
     let history_path = runtime_dir.join(HISTORY_FILE);
@@ -580,6 +583,7 @@ fn repl_loop(
                     &queue_state,
                     &queue_state_path,
                     &library_default,
+                    &cfg,
                     started_at,
                 ) {
                     ReplOutcome::Continue => {}
@@ -644,10 +648,11 @@ fn print_startup_banner(
 
 /// Evaluate one tokenised input line. Built-in commands (`exit`,
 /// `help`, `status`, `libs`, `use`, `queue`) execute directly;
-/// anything else is fed through `Cli::try_parse_from` so the user
-/// sees the grammar's actual error messages and discovers structure
-/// via `--help` — even though external-subcommand dispatch from the
-/// REPL is not wired until phase 5.
+/// anything else is fed through [`ReplCli::try_parse_from`] so the
+/// user sees the grammar's actual error messages and dispatch maps
+/// each variant to the matching `cmd::*` runner. Async dispatches go
+/// through `tokio::runtime::Handle::current().block_on(...)` because
+/// the REPL itself runs synchronously on a `spawn_blocking` worker.
 #[allow(clippy::too_many_arguments)]
 fn handle_line(
     line: &str,
@@ -657,6 +662,7 @@ fn handle_line(
     queue_state: &Arc<Mutex<QueueState>>,
     queue_state_path: &Path,
     library_default: &str,
+    cfg: &Arc<Config>,
     started_at: Instant,
 ) -> ReplOutcome {
     let tokens = match shlex::split(line) {
@@ -694,23 +700,124 @@ fn handle_line(
         _ => {}
     }
 
-    // Not a built-in. Validate the grammar via the same clap parser
-    // the binary uses; execution is parked until phase 5.
-    let argv: Vec<String> = std::iter::once("bookrack".to_string())
-        .chain(tokens)
-        .collect();
-    match crate::Cli::try_parse_from(&argv) {
-        Ok(_) => {
-            println!(
-                "bookrack: REPL dispatch for `{head}` is not yet wired; \
-                 run `bookrack {head} ...` from another terminal until phase 5 lands."
-            );
-        }
+    // Not a built-in. Parse against the REPL grammar — the in-session
+    // write surface for ingest, intake, metadata edits, vectors/corpus
+    // rebuilds, stamp reconciliation, and remove.
+    match crate::ReplCli::try_parse_from(&tokens) {
+        Ok(repl_cli) => execute_repl_command(repl_cli.command, cfg),
         Err(err) => {
             let _ = err.print();
         }
     }
     ReplOutcome::Continue
+}
+
+/// Dispatch a parsed [`crate::ReplCommand`] to the matching `cmd::*`
+/// runner. Async runners are driven on the current runtime through
+/// `Handle::block_on`; the REPL thread is a `spawn_blocking` worker
+/// so blocking the calling thread does not stall the async runtime.
+fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
+    use crate::ReplCommand;
+    use tokio::runtime::Handle;
+    let rt = Handle::current();
+    let cfg_ref: &Config = cfg.as_ref();
+    let result: anyhow::Result<()> = match command {
+        ReplCommand::Ingest {
+            path,
+            recursive,
+            hold_for_metadata,
+            force,
+        } => rt.block_on(crate::cmd::ingest::run(
+            cfg_ref,
+            &path,
+            recursive,
+            hold_for_metadata,
+            force,
+            None,
+        )),
+        ReplCommand::Intake { action } => match action {
+            crate::IntakeAction::Ocr {
+                ocr_md,
+                from_pdf,
+                expected_pages,
+                allow_partial,
+            } => rt.block_on(crate::cmd::intake_ocr::run(
+                cfg_ref,
+                &ocr_md,
+                &from_pdf,
+                expected_pages,
+                allow_partial,
+                None,
+            )),
+        },
+        ReplCommand::Metadata { action } => {
+            rt.block_on(crate::cmd::metadata::run_write(cfg_ref, action, None))
+        }
+        ReplCommand::Vectors { action } => match action {
+            crate::WriteVectorsAction::Rebuild {
+                kind,
+                num_partitions,
+                num_sub_vectors,
+                num_bits,
+                nprobes,
+                refine_factor,
+            } => rt.block_on(crate::cmd::vectors::rebuild(
+                cfg_ref,
+                kind.as_deref(),
+                num_partitions,
+                num_sub_vectors,
+                num_bits,
+                nprobes,
+                refine_factor,
+            )),
+            crate::WriteVectorsAction::Drop => rt.block_on(crate::cmd::vectors::drop(cfg_ref)),
+            crate::WriteVectorsAction::Reembed {
+                book,
+                stale_only,
+                dry_run,
+                yes,
+            } => rt.block_on(crate::cmd::vectors::reembed(
+                cfg_ref, book, stale_only, dry_run, yes, None,
+            )),
+        },
+        ReplCommand::Corpus { action } => match action {
+            crate::CorpusAction::Rebuild {
+                include_vectors,
+                book,
+                stale_only,
+                dry_run,
+                yes,
+            } => rt.block_on(crate::cmd::corpus::rebuild(
+                cfg_ref,
+                include_vectors,
+                book,
+                stale_only,
+                dry_run,
+                yes,
+                None,
+            )),
+        },
+        ReplCommand::Stamps { action } => match action {
+            crate::StampsAction::Reconcile => rt.block_on(crate::cmd::stamps::reconcile(cfg_ref)),
+        },
+        ReplCommand::Remove {
+            intake_id,
+            sha,
+            dry_run,
+            yes,
+        } => rt.block_on(crate::cmd::remove::run(
+            cfg_ref,
+            crate::cmd::remove::RemoveArgs {
+                intake_id,
+                sha,
+                dry_run,
+                yes,
+            },
+        )),
+    };
+    if let Err(err) = result {
+        eprintln!("bookrack: {err:#}");
+    }
 }
 
 fn handle_use(registry: &Arc<LibraryRegistry<OllamaEmbedClient>>, tokens: &[String]) {

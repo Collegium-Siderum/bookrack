@@ -17,38 +17,25 @@ use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 use crate::render;
-use crate::{AuditProfileAction, MetadataAction};
+use crate::{AuditProfileAction, MetadataAction, WriteMetadataAction};
 
 /// Logical address of the book root; the CLI's metadata commands only
 /// touch this scope, matching the audit and the ingest sub-step.
 const BOOK_SCOPE: &str = "book";
 
-pub async fn run(cfg: &Config, action: MetadataAction, profile_name: Option<&str>) -> Result<()> {
-    // Advance opens its own corpus + catalog + embedder, since it
-    // runs CHUNK→EMBED rather than touching catalog alone. The
-    // other actions only need catalog and can share this handle.
-    if let MetadataAction::Advance { book } = action {
-        return advance(cfg, book, profile_name).await;
-    }
+pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&str>) -> Result<()> {
     // The audit-profile reflection commands need no catalog and no audit
     // rules, so they short-circuit before the catalog open.
     if let MetadataAction::AuditProfile { action } = action {
         return audit_profile(action);
     }
     // Trigger any pending catalog migration (with a pre-migration
-    // backup snapshot) once before dispatching. The write ops below
-    // open their own per-call handles via ops, which only see the
-    // already-migrated database.
+    // backup snapshot) once before dispatching.
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
     match action {
         MetadataAction::Show { book, json } => show(&ops, book, json),
-        MetadataAction::Set { book, field, value } => set(&ops, book, &field, &value),
-        MetadataAction::Clear { book, field } => clear(&ops, book, &field),
-        MetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
-        MetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
-        MetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
         MetadataAction::List {
             needs_review,
             limit,
@@ -56,8 +43,32 @@ pub async fn run(cfg: &Config, action: MetadataAction, profile_name: Option<&str
             json,
         } => list(&ops, &catalog, needs_review, limit, offset, json),
         MetadataAction::AuditTrail { book, json } => audit_trail(&ops, book, json),
-        MetadataAction::Advance { .. } => unreachable!("handled above"),
         MetadataAction::AuditProfile { .. } => unreachable!("handled above"),
+    }
+}
+
+/// REPL-side dispatch for the write actions. Triggers a pending
+/// migration once via `open_with_backup` before each write so the
+/// per-call handles inside the ops layer only see the migrated
+/// database.
+pub async fn run_write(
+    cfg: &Config,
+    action: WriteMetadataAction,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    if let WriteMetadataAction::Advance { book } = action {
+        return advance(cfg, book, profile_name).await;
+    }
+    let _migrate =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let ops = catalog_only_ops(cfg);
+    match action {
+        WriteMetadataAction::Set { book, field, value } => set(&ops, book, &field, &value),
+        WriteMetadataAction::Clear { book, field } => clear(&ops, book, &field),
+        WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
+        WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
+        WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
+        WriteMetadataAction::Advance { .. } => unreachable!("handled above"),
     }
 }
 
