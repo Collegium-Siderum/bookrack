@@ -96,6 +96,10 @@ dotenvy = "0.15"
 # `diagnose` manifest. The `serde` feature lets DateTime<Utc> derive
 # Serialize / Deserialize for the persistent CLI queue state.
 chrono = { version = "0.4", features = ["serde"] }
+# UUIDv7 generator for the CLI ingest-queue job id. The id is stored as
+# a String so the queue command's prefix match is a simple str search;
+# only the `v7` feature is needed.
+uuid = { version = "1", features = ["v7"] }
 # Temp directories for tests that need an on-disk store (e.g. LanceDB).
 tempfile = "3"
 # The audit-profile crate, pinned at the workspace level so every

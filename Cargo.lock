@@ -658,6 +658,7 @@ dependencies = [
  "bookrack-query",
  "bookrack-search",
  "bookrack-vectors",
+ "chrono",
  "clap",
  "dirs 5.0.1",
  "fs2",
@@ -669,6 +670,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

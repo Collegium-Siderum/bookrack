@@ -40,3 +40,7 @@ shlex.workspace = true
 # `bookrack init` writes a tempdir for the end-to-end smoke ingest, so
 # the user's chosen data root stays untouched until validation passes.
 tempfile.workspace = true
+# Timestamps on persistent ingest-queue jobs.
+chrono.workspace = true
+# UUIDv7 ids for persistent ingest-queue jobs.
+uuid.workspace = true
