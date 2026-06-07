@@ -1143,11 +1143,6 @@ fn resolution_source_label(source: bookrack_config::ResolutionSource) -> &'stati
     }
 }
 
-/// Lock filename held under the data root for the duration of one
-/// ingest run, serializing concurrent `bookrack ingest` and
-/// `bookrack intake ocr` invocations against the same library.
-const INGEST_LOCK_NAME: &str = ".ingest.lock";
-
 /// Hard cap on the query text the embedder is asked to vectorize. The
 /// embedding model has its own context window; sending tens of
 /// kilobytes of text yields a low-quality vector and silently masks
@@ -1177,45 +1172,6 @@ fn truncate_query_with_warning(query: &str) -> String {
         MAX_QUERY_BYTES
     );
     truncated.to_string()
-}
-
-/// Acquire the per-data-root advisory write lock and return a guard
-/// that releases it on drop.
-///
-/// The lock is taken non-blocking: if another process already holds it,
-/// the call fails fast with a readable error rather than queueing. Two
-/// processes that point at the same data root and both run ingest would
-/// otherwise race on intake-id allocation and clobber each other's
-/// LanceDB partitions; the lock makes that race a clean refusal.
-fn acquire_ingest_lock(cfg: &Config) -> Result<IngestLockGuard> {
-    use fs2::FileExt;
-
-    let data_dir = cfg.data_dir();
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("create data root {} for ingest lock", data_dir.display()))?;
-    let lock_path = data_dir.join(INGEST_LOCK_NAME);
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("open ingest lock {}", lock_path.display()))?;
-    file.try_lock_exclusive().map_err(|err| {
-        anyhow::anyhow!(
-            "another bookrack process already holds the ingest lock at {} ({err})",
-            lock_path.display()
-        )
-    })?;
-    Ok(IngestLockGuard { file })
-}
-
-/// Drop guard for the data-root ingest lock. The OS releases the flock
-/// when the underlying `File` is closed; on Drop the file handle goes
-/// out of scope and the lock with it. The lock file itself stays on
-/// disk so its inode is stable across runs.
-struct IngestLockGuard {
-    #[allow(dead_code)]
-    file: std::fs::File,
 }
 
 fn run_books(cfg: &Config, action: BooksAction) -> Result<()> {
@@ -1873,7 +1829,6 @@ async fn run_ingest(
     force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let _lock = acquire_ingest_lock(cfg)?;
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
@@ -2018,7 +1973,6 @@ async fn run_intake_ocr(
     allow_partial: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let _lock = acquire_ingest_lock(cfg)?;
     let embed_cfg = EmbedConfig::from_env();
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
