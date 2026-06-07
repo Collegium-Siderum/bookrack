@@ -7,17 +7,13 @@
 //! commands depend on them through `crate::*`, not on each other.
 
 pub mod audit_profile;
-pub mod books;
 pub mod corpus;
 pub mod diagnose;
 pub mod dryrun;
-pub mod info;
 pub mod ingest;
 pub mod intake_ocr;
 pub mod libraries;
 pub mod metadata;
-pub mod pipeline_trail;
-pub mod query;
 pub mod remove;
 pub mod stamps;
 pub mod vectors;

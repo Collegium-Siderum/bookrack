@@ -39,16 +39,13 @@ Environment:
   BOOKRACK_EMBED_MODEL  embedding model tag (default qwen3-embedding:0.6b)
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
-Prerequisites:
-  ingest and query both call Ollama for embeddings. Start Ollama and pull
-  the embed model before either command runs, e.g.:
-      ollama pull qwen3-embedding:0.6b";
+Library reads (search, browse, metadata, status) live behind `bookrack exec
+library.<tool>`. Run `bookrack run` to start a session, then ask the live
+MCP server for its tool surface with `bookrack exec tools`.
 
-/// Trailing block shown by `bookrack query --help`.
-const QUERY_AFTER_HELP: &str = "\
-Examples:
-  bookrack query \"the history of madness\"
-  bookrack query \"recurring motifs\" --in-book 1";
+Prerequisites:
+  Start Ollama and pull the embed model before running the session, e.g.:
+      ollama pull qwen3-embedding:0.6b";
 
 #[derive(clap::Parser)]
 #[command(
@@ -89,58 +86,12 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Query the library and print cited passages.
-    #[command(after_help = QUERY_AFTER_HELP)]
-    Query {
-        /// The natural-language query.
-        text: String,
-        /// Restrict the recall to one book's id partition. Without the
-        /// flag, every book in the library is in scope.
-        #[arg(long, value_name = "INTAKE_ID")]
-        in_book: Option<i64>,
-        /// Force a brute-force scan for this query, ignoring any ANN
-        /// index. Useful for ground-truth checks.
-        #[arg(long)]
-        bypass_ann: bool,
-        /// Override the IVF probe count for this query only.
-        #[arg(long)]
-        nprobes: Option<usize>,
-        /// Override the IVF-PQ refinement multiplier for this query only.
-        #[arg(long)]
-        refine_factor: Option<u32>,
-    },
-    /// Inspect and edit a book's metadata.
-    Metadata {
-        #[command(subcommand)]
-        action: MetadataAction,
-    },
     /// Inspect and compare audit profiles. Pure reflection over the
     /// profiles compiled into the binary — no library, no MCP session.
     AuditProfile {
         #[command(subcommand)]
         action: AuditProfileAction,
     },
-    /// Print table size, ANN index state, and the persisted ANN config.
-    Vectors {
-        #[command(subcommand)]
-        action: VectorsAction,
-    },
-    /// Render `book_pipeline_audit` rows for a book, oldest first.
-    PipelineTrail {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Browse the library — list, find, show, table-of-contents, stats.
-    Books {
-        #[command(subcommand)]
-        action: BooksAction,
-    },
-    /// Print a one-screen status card: resolution, embedder, schema
-    /// versions, index stamps, and the on-disk size of each store.
-    Info,
     /// Verify the catalog and corpus schemas against the binary's
     /// TableSpecs and tally the cross-store counts (catalog intakes,
     /// vectors-meta chunk count, intake-file existence on disk).
@@ -294,75 +245,6 @@ pub(crate) enum StampsAction {
 }
 
 #[derive(clap::Subcommand, Debug)]
-pub(crate) enum BooksAction {
-    /// List books in catalog order, paginated.
-    List {
-        /// Maximum books to print.
-        #[arg(long, default_value_t = 20)]
-        limit: u32,
-        /// Skip this many books before printing.
-        #[arg(long, default_value_t = 0)]
-        offset: u32,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Filter books by title substring, contributor, or format.
-    Find {
-        /// Case-sensitive substring match against the book title.
-        #[arg(long)]
-        title: Option<String>,
-        /// Exact-equality match against a contributor name.
-        #[arg(long)]
-        contributor: Option<String>,
-        /// Restrict the contributor JOIN to one role (`author`,
-        /// `translator`, ...). Only takes effect with `--contributor`.
-        #[arg(long)]
-        role: Option<String>,
-        /// Exact-equality match against the file format.
-        #[arg(long)]
-        format: Option<String>,
-        /// Maximum books to print.
-        #[arg(long, default_value_t = 20)]
-        limit: u32,
-        /// Skip this many books before printing.
-        #[arg(long, default_value_t = 0)]
-        offset: u32,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print the full bibliographic record for one book.
-    Show {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print one book's table of contents, depth-first.
-    Toc {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Aggregate counts across the library.
-    Stats {
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub(crate) enum VectorsAction {
-    /// Print table size, ANN index state, and the persisted ANN config.
-    Status,
-}
-
-#[derive(clap::Subcommand, Debug)]
 pub(crate) enum WriteVectorsAction {
     /// Build or rebuild the ANN index from explicit parameters. Without
     /// any flag, reads the persisted config from `vectors_meta.json` and
@@ -441,43 +323,6 @@ pub(crate) enum CorpusAction {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
-    },
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub(crate) enum MetadataAction {
-    /// Show the metadata audit report for a book.
-    Show {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// List books, optionally narrowed to those that still need review.
-    List {
-        /// Restrict the listing to books whose root audit confidence is
-        /// `low` or `medium` *and* whose review status is `pending` or
-        /// `acknowledged`. Missing review rows count as `pending`.
-        #[arg(long)]
-        needs_review: bool,
-        /// Maximum rows to print.
-        #[arg(long, default_value_t = 50)]
-        limit: u32,
-        /// Skip this many rows before printing.
-        #[arg(long, default_value_t = 0)]
-        offset: u32,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Render the `metadata_audit` history for a book, oldest first.
-    AuditTrail {
-        /// The intake id of the book.
-        book: i64,
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -598,14 +443,21 @@ fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
 /// invocation. Returns the hint string already shaped for the user
 /// (multiple options joined with ` or `), or `None` for tokens not in
 /// the table — those fall through to clap's own similarity tip.
+///
+/// Library reads moved off the external CLI surface: the hints below
+/// point at the `bookrack exec library.<tool>` proxy that talks to
+/// the running daemon session.
 fn natural_name_hint(typed: &str) -> Option<String> {
     let suggestions: &[&str] = match typed {
-        "list" | "ls" => &["`bookrack books list`"],
-        "find" => &["`bookrack books find <text>`"],
-        "show" => &["`bookrack books show <id>`"],
-        "stats" => &["`bookrack books stats`"],
-        "status" => &["`bookrack info`", "`bookrack books stats`"],
-        "search" => &["`bookrack query <text>`"],
+        "list" | "ls" => &["`bookrack exec library.list_books`"],
+        "find" => &["`bookrack exec library.find_books`"],
+        "show" => &["`bookrack exec library.show_book`"],
+        "stats" => &["`bookrack exec library.stats`"],
+        "status" => &[
+            "`bookrack exec library.info`",
+            "`bookrack exec library.stats`",
+        ],
+        "search" => &["`bookrack exec library.search`"],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -681,25 +533,9 @@ async fn run() -> Result<()> {
     let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
     let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
 
-    let profile_name = cli.audit_profile.clone();
+    let _profile_name = cli.audit_profile.clone();
     match cli.command {
-        Command::Query {
-            text,
-            in_book,
-            bypass_ann,
-            nprobes,
-            refine_factor,
-        } => cmd::query::run(&cfg, &text, in_book, bypass_ann, nprobes, refine_factor).await,
-        Command::Metadata { action } => {
-            cmd::metadata::run(&cfg, action, profile_name.as_deref()).await
-        }
         Command::AuditProfile { action } => cmd::audit_profile::run(action),
-        Command::Vectors { action } => match action {
-            VectorsAction::Status => cmd::vectors::status(&cfg).await,
-        },
-        Command::PipelineTrail { book, json } => cmd::pipeline_trail::run(&cfg, book, json),
-        Command::Books { action } => cmd::books::run(&cfg, action),
-        Command::Info => cmd::info::run(&cfg).await,
         Command::Verify => cmd::verify::run(&cfg),
         Command::Libraries { action } => match action {
             LibrariesAction::List { json } => cmd::libraries::list(json),
@@ -813,31 +649,18 @@ mod tests {
             "/x",
             "--library",
             "test",
-            "query",
-            "q",
+            "verify",
         ]);
         assert!(parsed.is_err(), "the two selectors must not be combined");
     }
 
     #[test]
     fn selection_carries_the_flags_through() {
-        let cli = Cli::try_parse_from(["bookrack", "--library", "test", "query", "q"])
+        let cli = Cli::try_parse_from(["bookrack", "--library", "test", "verify"])
             .expect("a lone --library parses");
         let selection = cli.selection();
         assert_eq!(selection.library.as_deref(), Some("test"));
         assert!(selection.data_dir.is_none());
-    }
-
-    #[test]
-    fn metadata_read_subcommands_parse() {
-        // The read-side metadata surface is still on the external CLI.
-        for argv in [
-            vec!["bookrack", "metadata", "show", "1"],
-            vec!["bookrack", "metadata", "show", "1", "--json"],
-        ] {
-            Cli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
-        }
     }
 
     #[test]
@@ -887,12 +710,12 @@ mod tests {
     #[test]
     fn natural_name_hints_cover_the_common_typos_from_the_test_report() {
         for (typed, expected) in [
-            ("list", "`bookrack books list`"),
-            ("ls", "`bookrack books list`"),
-            ("find", "`bookrack books find <text>`"),
-            ("show", "`bookrack books show <id>`"),
-            ("stats", "`bookrack books stats`"),
-            ("search", "`bookrack query <text>`"),
+            ("list", "`bookrack exec library.list_books`"),
+            ("ls", "`bookrack exec library.list_books`"),
+            ("find", "`bookrack exec library.find_books`"),
+            ("show", "`bookrack exec library.show_book`"),
+            ("stats", "`bookrack exec library.stats`"),
+            ("search", "`bookrack exec library.search`"),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
@@ -900,8 +723,8 @@ mod tests {
         // `status` is ambiguous between library-level and per-book; the
         // hint surfaces both so the user picks.
         let status = natural_name_hint("status").expect("status maps");
-        assert!(status.contains("`bookrack info`"));
-        assert!(status.contains("`bookrack books stats`"));
+        assert!(status.contains("`bookrack exec library.info`"));
+        assert!(status.contains("`bookrack exec library.stats`"));
         assert!(status.contains(" or "));
 
         // Tokens not in the table fall through to clap's similarity tip;

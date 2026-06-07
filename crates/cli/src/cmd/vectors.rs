@@ -1,90 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bookrack vectors` — vector-store status, ANN rebuild, brute-force
-//! drop, and re-embed against the active model.
+//! REPL-side vector-store writes: ANN rebuild, brute-force drop, and
+//! re-embed against the active model. Status reads live at
+//! `bookrack exec library.vectors_status`.
 
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
-use bookrack_ops::dto::vectors_status::VectorsStatus;
 use bookrack_vectors::ChunkStore;
 
 use crate::embed_helpers::embedder;
-use crate::ops_helpers::catalog_only_ops;
 use crate::util::confirm;
-
-/// Render `bookrack vectors status` — a read-only summary of the
-/// table, the LanceDB index it carries, and the persisted ANN config.
-pub async fn status(cfg: &Config) -> Result<()> {
-    let ops = catalog_only_ops(cfg);
-    let status = bookrack_ops::reads::vectors::status(&ops)
-        .await
-        .context("read vectors status")?;
-    print_status(&status);
-    Ok(())
-}
-
-/// Write the status DTO to stdout. Pure over its input so the formatter
-/// can be exercised against a fixed snapshot without touching disk.
-fn print_status(status: &VectorsStatus) {
-    match status.row_count {
-        None => {
-            println!("table:           (empty -- no chunks ingested yet)");
-            println!("ann index:       (none)");
-            println!("ann config:      (no meta)");
-            println!("churn:           n/a");
-            return;
-        }
-        Some(rows) => println!("table:           {rows} rows"),
-    }
-    if status.indices.is_empty() {
-        println!("ann index:       (none -- brute-force)");
-    } else {
-        for idx in &status.indices {
-            println!("ann index:       {}", idx.name);
-            if let Some(s) = &idx.stats {
-                println!("  type:          {}", s.index_type);
-                println!("  num_indexed:   {}", s.num_indexed_rows);
-                println!("  num_unindexed: {}", s.num_unindexed_rows);
-                if let Some(ni) = s.num_indices {
-                    println!("  num_indices:   {ni}");
-                }
-                if let Some(loss) = s.loss {
-                    println!("  loss:          {loss}");
-                } else {
-                    println!("  loss:          n/a");
-                }
-            }
-        }
-    }
-    match &status.ann_config {
-        None => println!("ann config:      (no meta)"),
-        Some(c) => println!(
-            "ann config:      {} / np={} / nprobes={} / refine={}",
-            c.kind,
-            c.num_partitions,
-            c.nprobes,
-            c.refine_factor
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "n/a".to_string())
-        ),
-    }
-    match &status.meta {
-        None => println!("churn:           n/a"),
-        Some(m) => println!(
-            "churn:           {} since last rebuild",
-            m.churn_since_rebuild
-        ),
-    }
-    if let Some(drift) = &status.meta_drift {
-        println!(
-            "meta drift:      expected index {:?}, found {:?}; \
-             run bookrack vectors rebuild",
-            drift.expected_index, drift.found_indices
-        );
-    }
-}
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `bookrack metadata` — metadata reads, edits, audits, and the
-//! `advance` resume-from-CHUNK path. Also hosts the `audit-profile`
-//! reflection commands that need no catalog.
+//! REPL-side metadata edits and the `advance` resume-from-CHUNK path.
+//! Reads have moved to `bookrack exec library.show_metadata_audit` and
+//! siblings; this module covers only the write surface.
 
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
@@ -13,31 +13,10 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::{IngestParams, resume_from_chunk};
 use bookrack_ops::Ops;
 
+use crate::WriteMetadataAction;
 use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
-use crate::render;
-use crate::{MetadataAction, WriteMetadataAction};
-
-pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&str>) -> Result<()> {
-    // Trigger any pending catalog migration (with a pre-migration
-    // backup snapshot) once before dispatching. The handle is dropped
-    // immediately; every read below opens its own short-lived catalog
-    // through ops.
-    let _migrate =
-        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let ops = catalog_only_ops(cfg);
-    match action {
-        MetadataAction::Show { book, json } => show(&ops, book, json),
-        MetadataAction::List {
-            needs_review,
-            limit,
-            offset,
-            json,
-        } => list(&ops, needs_review, limit, offset, json),
-        MetadataAction::AuditTrail { book, json } => audit_trail(&ops, book, json),
-    }
-}
 
 /// REPL-side dispatch for the write actions. Triggers a pending
 /// migration once via `open_with_backup` before each write so the
@@ -62,59 +41,6 @@ pub async fn run_write(
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
         WriteMetadataAction::Advance { .. } => unreachable!("handled above"),
     }
-}
-
-fn list(
-    ops: &Ops<OllamaEmbedClient>,
-    needs_review: bool,
-    limit: u32,
-    offset: u32,
-    json: bool,
-) -> Result<()> {
-    let page = if needs_review {
-        bookrack_ops::reads::metadata::list_pending_reviews(ops, limit, offset)
-            .context("list pending reviews")?
-    } else {
-        bookrack_ops::reads::metadata::list_metadata(ops, limit, offset).context("list metadata")?
-    };
-    let rows: Vec<render::MetadataListRow> = page
-        .rows
-        .into_iter()
-        .map(|r| render::MetadataListRow {
-            intake_id: r.intake_id,
-            title: r.title,
-            confidence: r.confidence,
-            review_status: r.review_status,
-        })
-        .collect();
-    if json {
-        render::metadata_list_json(&rows, page.total);
-    } else {
-        render::metadata_list(&rows, page.total, needs_review);
-    }
-    Ok(())
-}
-
-fn audit_trail(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
-    let rows = bookrack_ops::reads::metadata::show_audit_trail(ops, book)
-        .context("read metadata audit")?;
-    if json {
-        render::metadata_audit_trail_json(book, &rows);
-    } else {
-        render::metadata_audit_trail(book, &rows);
-    }
-    Ok(())
-}
-
-fn show(ops: &Ops<OllamaEmbedClient>, book: i64, json: bool) -> Result<()> {
-    let report = bookrack_ops::reads::metadata::show_metadata_audit(ops, book)
-        .context("read metadata audit")?;
-    if json {
-        render::metadata_show_json(&report);
-    } else {
-        render::metadata_show(&report);
-    }
-    Ok(())
 }
 
 fn set(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str, value: &str) -> Result<()> {
