@@ -698,6 +698,12 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 yes,
             },
         )),
+        ReplCommand::Dryrun {
+            path,
+            out,
+            stdout,
+            no_chunk,
+        } => crate::cmd::dryrun::run(cfg_ref, &path, out.as_deref(), stdout, no_chunk, None),
     };
     if let Err(err) = result {
         eprintln!("bookrack: {err:#}");

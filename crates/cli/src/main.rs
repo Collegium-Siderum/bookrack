@@ -114,26 +114,6 @@ enum Command {
         #[command(subcommand)]
         action: MetadataAction,
     },
-    /// Simulate an ingest up to (but not including) embedding, and write
-    /// a JSON report of what the metadata audit would have produced. The
-    /// real catalog, corpus, and vector store are not touched.
-    Dryrun {
-        /// Source file, or a directory the dryrun walks recursively.
-        path: PathBuf,
-        /// Write the per-book report to this path instead of the default
-        /// `<data_root>/dryruns/...` location. Implies the summary is
-        /// written alongside with a `.summary.json` suffix.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Write JSONL to stdout instead of to a file. The summary still
-        /// lands on stderr at the end of the run.
-        #[arg(long)]
-        stdout: bool,
-        /// Skip the CHUNK step. Saves seconds per large book when only
-        /// the audit verdict is wanted.
-        #[arg(long)]
-        no_chunk: bool,
-    },
     /// Print table size, ANN index state, and the persisted ANN config.
     Vectors {
         #[command(subcommand)]
@@ -712,19 +692,6 @@ async fn run() -> Result<()> {
         Command::Metadata { action } => {
             cmd::metadata::run(&cfg, action, profile_name.as_deref()).await
         }
-        Command::Dryrun {
-            path,
-            out,
-            stdout,
-            no_chunk,
-        } => cmd::dryrun::run(
-            &cfg,
-            &path,
-            out.as_deref(),
-            stdout,
-            no_chunk,
-            profile_name.as_deref(),
-        ),
         Command::Vectors { action } => match action {
             VectorsAction::Status => cmd::vectors::status(&cfg).await,
         },
@@ -809,6 +776,26 @@ pub(crate) enum ReplCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Simulate an ingest up to (but not including) embedding, and write
+    /// a JSON report of what the metadata audit would have produced. The
+    /// real catalog, corpus, and vector store are not touched.
+    Dryrun {
+        /// Source file, or a directory the dryrun walks recursively.
+        path: PathBuf,
+        /// Write the per-book report to this path instead of the default
+        /// `<data_root>/dryruns/...` location. Implies the summary is
+        /// written alongside with a `.summary.json` suffix.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Write JSONL to stdout instead of to a file. The summary still
+        /// lands on stderr at the end of the run.
+        #[arg(long)]
+        stdout: bool,
+        /// Skip the CHUNK step. Saves seconds per large book when only
+        /// the audit verdict is wanted.
+        #[arg(long)]
+        no_chunk: bool,
+    },
 }
 
 #[cfg(test)]
@@ -878,15 +865,15 @@ mod tests {
     }
 
     #[test]
-    fn dryrun_subcommand_parses() {
+    fn dryrun_subcommand_parses_through_repl() {
         for argv in [
-            vec!["bookrack", "dryrun", "/x"],
-            vec!["bookrack", "dryrun", "/x", "--stdout"],
-            vec!["bookrack", "dryrun", "/x", "--no-chunk"],
-            vec!["bookrack", "dryrun", "/x", "--out", "/tmp/r.jsonl"],
+            vec!["dryrun", "/x"],
+            vec!["dryrun", "/x", "--stdout"],
+            vec!["dryrun", "/x", "--no-chunk"],
+            vec!["dryrun", "/x", "--out", "/tmp/r.jsonl"],
         ] {
-            Cli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            ReplCli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
         }
     }
 
