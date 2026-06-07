@@ -17,14 +17,9 @@ use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 use crate::render;
-use crate::{AuditProfileAction, MetadataAction, WriteMetadataAction};
+use crate::{MetadataAction, WriteMetadataAction};
 
 pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&str>) -> Result<()> {
-    // The audit-profile reflection commands need no catalog and no audit
-    // rules, so they short-circuit before the catalog open.
-    if let MetadataAction::AuditProfile { action } = action {
-        return audit_profile(action);
-    }
     // Trigger any pending catalog migration (with a pre-migration
     // backup snapshot) once before dispatching. The handle is dropped
     // immediately; every read below opens its own short-lived catalog
@@ -41,7 +36,6 @@ pub async fn run(cfg: &Config, action: MetadataAction, _profile_name: Option<&st
             json,
         } => list(&ops, needs_review, limit, offset, json),
         MetadataAction::AuditTrail { book, json } => audit_trail(&ops, book, json),
-        MetadataAction::AuditProfile { .. } => unreachable!("handled above"),
     }
 }
 
@@ -67,35 +61,6 @@ pub async fn run_write(
         WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
         WriteMetadataAction::Advance { .. } => unreachable!("handled above"),
-    }
-}
-
-fn audit_profile(action: AuditProfileAction) -> Result<()> {
-    match action {
-        AuditProfileAction::List { json } => {
-            if json {
-                render::audit_profile_names_json(bookrack_audit_profile::ALL_BUILT_IN_NAMES);
-            } else {
-                for name in bookrack_audit_profile::ALL_BUILT_IN_NAMES {
-                    println!("{name}");
-                }
-            }
-            Ok(())
-        }
-        AuditProfileAction::Show { name } => {
-            let profile = bookrack_audit_profile::AuditProfile::from_named(&name)
-                .with_context(|| format!("unknown profile {name:?}"))?;
-            render::audit_profile_show(&name, &profile);
-            Ok(())
-        }
-        AuditProfileAction::Diff { a, b } => {
-            let pa = bookrack_audit_profile::AuditProfile::from_named(&a)
-                .with_context(|| format!("unknown profile {a:?}"))?;
-            let pb = bookrack_audit_profile::AuditProfile::from_named(&b)
-                .with_context(|| format!("unknown profile {b:?}"))?;
-            render::audit_profile_diff(&a, &pa, &b, &pb);
-            Ok(())
-        }
     }
 }
 

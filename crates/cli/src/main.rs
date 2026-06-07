@@ -114,6 +114,12 @@ enum Command {
         #[command(subcommand)]
         action: MetadataAction,
     },
+    /// Inspect and compare audit profiles. Pure reflection over the
+    /// profiles compiled into the binary — no library, no MCP session.
+    AuditProfile {
+        #[command(subcommand)]
+        action: AuditProfileAction,
+    },
     /// Print table size, ANN index state, and the persisted ANN config.
     Vectors {
         #[command(subcommand)]
@@ -448,11 +454,6 @@ pub(crate) enum MetadataAction {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect and compare audit profiles.
-    AuditProfile {
-        #[command(subcommand)]
-        action: AuditProfileAction,
-    },
     /// List books, optionally narrowed to those that still need review.
     List {
         /// Restrict the listing to books whose root audit confidence is
@@ -692,6 +693,7 @@ async fn run() -> Result<()> {
         Command::Metadata { action } => {
             cmd::metadata::run(&cfg, action, profile_name.as_deref()).await
         }
+        Command::AuditProfile { action } => cmd::audit_profile::run(action),
         Command::Vectors { action } => match action {
             VectorsAction::Status => cmd::vectors::status(&cfg).await,
         },

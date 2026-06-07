@@ -6,6 +6,7 @@
 //! `ops_helpers`) and small utilities (`util`) live one level up so
 //! commands depend on them through `crate::*`, not on each other.
 
+pub mod audit_profile;
 pub mod books;
 pub mod corpus;
 pub mod diagnose;
