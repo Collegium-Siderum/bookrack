@@ -21,7 +21,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -30,6 +30,7 @@ use bookrack_config::{
     Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
 };
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_ingest::IngestParams;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops};
@@ -42,6 +43,8 @@ use reedline::{
     PromptHistorySearchStatus, Reedline, Signal,
 };
 use tokio::sync::broadcast;
+
+use bookrack_cli::queue::{self, Priority, QueueState};
 
 /// Environment variable naming the session runtime directory (lock
 /// file, REPL history). Optional; the default is platform-conventional.
@@ -162,6 +165,64 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 
     let signal_handle = tokio::spawn(signal_task(shutdown_tx.clone()));
 
+    // Persistent ingest queue: the file lives under the data root so
+    // the next session resumes its pending jobs. The Mutex guards both
+    // the REPL command surface (add / cancel / pause) and the worker
+    // pull/outcome loop.
+    let queue_state_path = cfg.data_dir().join(".bookrack-queue.json");
+    let queue_state = Arc::new(Mutex::new(
+        queue::load(&queue_state_path).context("load persistent queue state")?,
+    ));
+    let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
+    let worker_handle = {
+        let registry = Arc::clone(&registry);
+        let state = Arc::clone(&queue_state);
+        let state_path = queue_state_path.clone();
+        let params_template = queue_params_template.clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        let library_default = library_name.clone();
+        tokio::spawn(queue::worker_loop(
+            state_path,
+            state,
+            shutdown_rx,
+            move |job| {
+                let registry = Arc::clone(&registry);
+                let params_template = params_template.clone();
+                let library_default = library_default.clone();
+                // The ingest body holds non-Send Catalog / Corpus
+                // handles across `.await`, so the future is not Send.
+                // Park the whole call on a blocking worker and drive
+                // it with `Handle::block_on`: the outer JoinHandle is
+                // Send, and the blocking thread keeps the !Send chain
+                // off the runtime workers.
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let runtime = tokio::runtime::Handle::current();
+                        let library = if job.library.is_empty() {
+                            library_default
+                        } else {
+                            job.library.clone()
+                        };
+                        let mut params = params_template;
+                        params.force = job.force;
+                        runtime.block_on(async move {
+                            let handle = registry
+                                .get(Some(&library))
+                                .map_err(|e| format!("registry: {e}"))?;
+                            handle
+                                .ingest_book(&job.path, &params)
+                                .await
+                                .map_err(|e| format!("ingest: {e:#}"))?;
+                            Ok::<(), String>(())
+                        })
+                    })
+                    .await
+                    .map_err(|e| format!("queue worker join: {e}"))?
+                }
+            },
+        ))
+    };
+
     let mcp_handle = match mcp_addr {
         Some(addr) => {
             let registry = Arc::clone(&registry);
@@ -185,6 +246,9 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let runtime_dir_for_repl = runtime_dir.clone();
     let registry_for_repl = Arc::clone(&registry);
     let shutdown_tx_for_repl = shutdown_tx.clone();
+    let queue_state_for_repl = Arc::clone(&queue_state);
+    let queue_path_for_repl = queue_state_path.clone();
+    let library_default_for_repl = library_name.clone();
     let started_at = Instant::now();
     let repl_handle = tokio::task::spawn_blocking(move || {
         repl_loop(
@@ -193,6 +257,9 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             runtime_dir_for_repl,
             lock_path_for_repl,
             mcp_label_for_repl,
+            queue_state_for_repl,
+            queue_path_for_repl,
+            library_default_for_repl,
             started_at,
         )
     });
@@ -212,6 +279,12 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             Err(_) => tracing::warn!("MCP task did not exit within 3s; abandoning"),
         }
     }
+    match tokio::time::timeout(Duration::from_secs(3), worker_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => tracing::warn!(error = %err, "queue worker returned error"),
+        Ok(Err(err)) => tracing::warn!(error = %err, "queue worker join failed"),
+        Err(_) => tracing::warn!("queue worker did not exit within 3s; abandoning"),
+    }
     signal_handle.abort();
     // REPL thread may still be blocked on read_line if shutdown came
     // from a signal — abort the join handle (the OS thread is reaped
@@ -219,6 +292,24 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     repl_handle.abort();
 
     Ok(())
+}
+
+/// Build the [`IngestParams`] template the queue worker reuses for
+/// every job. Per-job toggles like `force` are overwritten inside the
+/// runner closure; everything else — the embed model knobs, the audit
+/// data overlay, the heading patterns, the active profile — is loaded
+/// once at daemon startup so the worker does not re-read the data root
+/// on every job.
+fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestParams {
+    IngestParams {
+        embed: embed_cfg.clone(),
+        hold_for_metadata: false,
+        force: false,
+        audit_data: crate::load_audit_data(cfg),
+        audit_profile: crate::load_audit_profile(cfg, None),
+        heading_patterns: crate::load_heading_patterns(cfg),
+        ..Default::default()
+    }
 }
 
 /// File name of the session-scoped lock under the runtime directory.
@@ -435,12 +526,16 @@ enum ReplOutcome {
 ///
 /// Runs synchronously on a [`tokio::task::spawn_blocking`] worker so
 /// reedline's blocking stdin reads never park the async runtime.
+#[allow(clippy::too_many_arguments)]
 fn repl_loop(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     shutdown_tx: broadcast::Sender<()>,
     runtime_dir: PathBuf,
     lock_path: PathBuf,
     mcp_label: String,
+    queue_state: Arc<Mutex<QueueState>>,
+    queue_state_path: PathBuf,
+    library_default: String,
     started_at: Instant,
 ) -> Result<()> {
     let history_path = runtime_dir.join(HISTORY_FILE);
@@ -477,7 +572,16 @@ fn repl_loop(
                 if trimmed.is_empty() {
                     continue;
                 }
-                match handle_line(trimmed, &registry, &lock_path, &mcp_label, started_at) {
+                match handle_line(
+                    trimmed,
+                    &registry,
+                    &lock_path,
+                    &mcp_label,
+                    &queue_state,
+                    &queue_state_path,
+                    &library_default,
+                    started_at,
+                ) {
                     ReplOutcome::Continue => {}
                     ReplOutcome::Exit => {
                         let _ = shutdown_tx.send(());
@@ -539,16 +643,20 @@ fn print_startup_banner(
 }
 
 /// Evaluate one tokenised input line. Built-in commands (`exit`,
-/// `help`, `status`, `libs`, `use`) execute directly; anything else
-/// is fed through `Cli::try_parse_from` so the user sees the
-/// grammar's actual error messages and discovers structure via
-/// `--help` — even though external-subcommand dispatch from the REPL
-/// is not wired until phase 5.
+/// `help`, `status`, `libs`, `use`, `queue`) execute directly;
+/// anything else is fed through `Cli::try_parse_from` so the user
+/// sees the grammar's actual error messages and discovers structure
+/// via `--help` — even though external-subcommand dispatch from the
+/// REPL is not wired until phase 5.
+#[allow(clippy::too_many_arguments)]
 fn handle_line(
     line: &str,
     registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
     lock_path: &Path,
     mcp_label: &str,
+    queue_state: &Arc<Mutex<QueueState>>,
+    queue_state_path: &Path,
+    library_default: &str,
     started_at: Instant,
 ) -> ReplOutcome {
     let tokens = match shlex::split(line) {
@@ -577,6 +685,10 @@ fn handle_line(
         }
         "use" => {
             handle_use(registry, &tokens);
+            return ReplOutcome::Continue;
+        }
+        "queue" => {
+            handle_queue(queue_state, queue_state_path, library_default, &tokens);
             return ReplOutcome::Continue;
         }
         _ => {}
@@ -613,6 +725,227 @@ fn handle_use(registry: &Arc<LibraryRegistry<OllamaEmbedClient>>, tokens: &[Stri
     }
 }
 
+/// Dispatch the REPL's `queue` subcommand. The persistent state is
+/// always mutated under the shared lock and persisted before the
+/// guard drops, so an `exit` immediately after `queue add` leaves a
+/// consistent file for the next session to resume.
+fn handle_queue(
+    state: &Arc<Mutex<QueueState>>,
+    state_path: &Path,
+    library_default: &str,
+    tokens: &[String],
+) {
+    let sub = match tokens.get(1) {
+        Some(s) => s.as_str(),
+        None => {
+            print_queue_usage();
+            return;
+        }
+    };
+    match sub {
+        "add" => queue_add(state, state_path, library_default, &tokens[2..]),
+        "list" | "ls" => queue_list(state),
+        "cancel" => queue_cancel(state, state_path, &tokens[2..]),
+        "clear" => queue_clear(state, state_path),
+        "pause" => queue_set_paused(state, state_path, true),
+        "resume" => queue_set_paused(state, state_path, false),
+        other => {
+            eprintln!("bookrack: unknown queue subcommand {other:?}");
+            print_queue_usage();
+        }
+    }
+}
+
+fn print_queue_usage() {
+    eprintln!("usage:");
+    eprintln!("  queue add <path> [--library X] [--priority low|normal|high] [--force]");
+    eprintln!("  queue list");
+    eprintln!("  queue cancel <id-prefix>");
+    eprintln!("  queue clear");
+    eprintln!("  queue pause | resume");
+}
+
+fn queue_add(
+    state: &Arc<Mutex<QueueState>>,
+    state_path: &Path,
+    library_default: &str,
+    args: &[String],
+) {
+    let mut path_arg: Option<PathBuf> = None;
+    let mut library = library_default.to_string();
+    let mut priority = Priority::Normal;
+    let mut force = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--library" => match args.get(i + 1) {
+                Some(v) => {
+                    library = v.clone();
+                    i += 2;
+                }
+                None => {
+                    eprintln!("bookrack: --library requires a value");
+                    return;
+                }
+            },
+            "--priority" => match args.get(i + 1).map(String::as_str) {
+                Some("low") => {
+                    priority = Priority::Low;
+                    i += 2;
+                }
+                Some("normal") => {
+                    priority = Priority::Normal;
+                    i += 2;
+                }
+                Some("high") => {
+                    priority = Priority::High;
+                    i += 2;
+                }
+                Some(other) => {
+                    eprintln!("bookrack: unknown priority {other:?}");
+                    return;
+                }
+                None => {
+                    eprintln!("bookrack: --priority requires a value");
+                    return;
+                }
+            },
+            "--force" => {
+                force = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => {
+                eprintln!("bookrack: unknown flag {other:?}");
+                return;
+            }
+            other => {
+                if path_arg.is_some() {
+                    eprintln!("bookrack: queue add takes one path; got extra {other:?}");
+                    return;
+                }
+                path_arg = Some(PathBuf::from(other));
+                i += 1;
+            }
+        }
+    }
+    let Some(path) = path_arg else {
+        eprintln!("bookrack: queue add requires a path");
+        return;
+    };
+    let resolved = match path.canonicalize() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("bookrack: resolve {}: {err}", path.display());
+            return;
+        }
+    };
+    let paths = if resolved.is_dir() {
+        match queue::collect_supported_files(&resolved) {
+            Ok(paths) => paths,
+            Err(err) => {
+                eprintln!("bookrack: walk {}: {err}", resolved.display());
+                return;
+            }
+        }
+    } else {
+        vec![resolved]
+    };
+    if paths.is_empty() {
+        println!("queue add: no supported files");
+        return;
+    }
+    let count = paths.len();
+    let ids = {
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                eprintln!("bookrack: queue state mutex poisoned: {err}");
+                return;
+            }
+        };
+        let ids = queue::enqueue_files(&mut guard, &paths, &library, priority, force);
+        if let Err(err) = queue::save_atomic(&guard, state_path) {
+            eprintln!("bookrack: persist queue state: {err}");
+            return;
+        }
+        ids
+    };
+    println!("queue add: enqueued {count} job(s)");
+    for id in ids {
+        let short: String = id.chars().take(8).collect();
+        println!("  {short}");
+    }
+}
+
+fn queue_list(state: &Arc<Mutex<QueueState>>) {
+    let snapshot = match state.lock() {
+        Ok(g) => g.clone(),
+        Err(err) => {
+            eprintln!("bookrack: queue state mutex poisoned: {err}");
+            return;
+        }
+    };
+    print!("{}", queue::render_list(&snapshot));
+}
+
+fn queue_cancel(state: &Arc<Mutex<QueueState>>, state_path: &Path, args: &[String]) {
+    let Some(prefix) = args.first() else {
+        eprintln!("bookrack: queue cancel requires an id prefix");
+        return;
+    };
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("bookrack: queue state mutex poisoned: {err}");
+            return;
+        }
+    };
+    match queue::cancel_with_prefix(&mut guard, prefix) {
+        Ok(id) => {
+            if let Err(err) = queue::save_atomic(&guard, state_path) {
+                eprintln!("bookrack: persist queue state: {err}");
+                return;
+            }
+            println!("queue cancel: {id}");
+        }
+        Err(err) => eprintln!("bookrack: {err}"),
+    }
+}
+
+fn queue_clear(state: &Arc<Mutex<QueueState>>, state_path: &Path) {
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("bookrack: queue state mutex poisoned: {err}");
+            return;
+        }
+    };
+    let n = queue::cancel_all_pending(&mut guard);
+    if let Err(err) = queue::save_atomic(&guard, state_path) {
+        eprintln!("bookrack: persist queue state: {err}");
+        return;
+    }
+    println!("queue clear: cancelled {n} pending job(s)");
+}
+
+fn queue_set_paused(state: &Arc<Mutex<QueueState>>, state_path: &Path, paused: bool) {
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(err) => {
+            eprintln!("bookrack: queue state mutex poisoned: {err}");
+            return;
+        }
+    };
+    let prev = std::mem::replace(&mut guard.paused, paused);
+    if let Err(err) = queue::save_atomic(&guard, state_path) {
+        eprintln!("bookrack: persist queue state: {err}");
+        return;
+    }
+    let _ = prev;
+    let label = if paused { "paused" } else { "running" };
+    println!("queue: {label}");
+}
+
 fn print_repl_help() {
     println!("Built-in commands:");
     println!("  exit, quit       Leave the bookrack session");
@@ -620,6 +953,10 @@ fn print_repl_help() {
     println!("  status           Show session pid, uptime, libraries, MCP address");
     println!("  libs             List all registered libraries");
     println!("  use <lib>        Switch the default library");
+    println!("  queue add <path> [--library X] [--priority {{low|normal|high}}] [--force]");
+    println!("                   Enqueue a file or every supported file under a directory");
+    println!("  queue list       Show the persistent ingest queue");
+    println!("  queue cancel <id-prefix> | clear | pause | resume");
     println!();
     println!("Other subcommands are parsed against the bookrack CLI grammar;");
     println!("execution from the REPL is wired in a later phase.");

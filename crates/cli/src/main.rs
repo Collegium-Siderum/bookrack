@@ -1920,7 +1920,7 @@ async fn run_ingest(
             path.display()
         );
     }
-    let files = collect_supported_files(path)?;
+    let files = bookrack_cli::queue::collect_supported_files(path)?;
     if files.is_empty() {
         println!("No supported files under {}.", path.display());
         return Ok(());
@@ -2008,49 +2008,6 @@ async fn run_ingest(
         anyhow::bail!("{} file(s) failed during recursive ingest", failed.len());
     }
     Ok(())
-}
-
-/// Walk `dir` depth-first and collect every regular file whose extension
-/// is one of the formats `bookrack ingest` supports. Hidden files (those
-/// whose name starts with `.`) are skipped.
-fn collect_supported_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    const SUPPORTED: &[&str] = &["epub", "pdf", "mobi", "azw3", "txt"];
-    let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        let entries = std::fs::read_dir(&current)
-            .with_context(|| format!("read_dir {}", current.display()))?;
-        for entry in entries {
-            let entry = entry.with_context(|| format!("entry of {}", current.display()))?;
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            let metadata = entry
-                .metadata()
-                .with_context(|| format!("metadata of {}", path.display()))?;
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if !metadata.is_file() {
-                continue;
-            }
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase);
-            if let Some(ext) = ext
-                && SUPPORTED.contains(&ext.as_str())
-            {
-                out.push(path);
-            }
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 async fn run_intake_ocr(
