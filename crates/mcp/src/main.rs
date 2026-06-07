@@ -61,7 +61,13 @@ async fn run() -> Result<()> {
         library: cli.library,
     };
     let cfg = Config::resolve(&selection).context("resolve configuration")?;
-    let _guard = bookrack_obs::init(&cfg, &LogConfig::from_env());
+    // The headless daemon's stderr is the operator's primary log
+    // surface (systemd journal, docker logs, foreground supervision).
+    // `for_headless_daemon` mirrors the file directive onto the console
+    // layer unless `BOOKRACK_LOG_CONSOLE` overrides — `bookrack run`
+    // gets the quiet REPL default through `LogConfig::from_env`
+    // instead.
+    let _guard = bookrack_obs::init(&cfg, &LogConfig::for_headless_daemon());
 
     let mcp_cfg = McpConfig::from_env();
 

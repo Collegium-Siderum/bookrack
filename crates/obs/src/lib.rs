@@ -16,18 +16,28 @@ use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bookrack_config::{Config, LogConfig};
+use bookrack_config::{Config, DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Install the global subscriber and return its flush guard.
 ///
-/// The console layer writes human-readable lines to **stderr**, leaving
-/// stdout for command results so the two never interleave. The file layer
-/// writes JSON lines to a daily-rolling `bookrack.log` under
-/// [`Config::logs_dir`], created if it does not yet exist. The level
-/// filter comes from [`LogConfig::directive`]; an unparseable directive is
-/// dropped rather than fatal.
+/// The subscriber carries two filtered layers driven by independent
+/// `EnvFilter` directives so the foreground REPL and the persisted
+/// operational log can run at different verbosities:
+///
+/// * The **stderr console layer** writes human-readable lines and is
+///   filtered by [`LogConfig::console_level`]. Default `error` keeps
+///   an attached terminal clear of daemon-internal telemetry; set
+///   `BOOKRACK_LOG_CONSOLE` to override.
+/// * The **file layer** writes JSON lines to a daily-rolling
+///   `bookrack.log` under [`Config::logs_dir`] (created if missing)
+///   and is filtered by [`LogConfig::directive`].
+///
+/// Stdout is left alone for command results, so the two output streams
+/// never interleave. An unparseable directive on either side is replaced
+/// with the corresponding default rather than panicking, so a typo in an
+/// environment variable cannot brick startup.
 ///
 /// When the logs directory cannot be created or is not writable, the file
 /// layer is omitted and a notice is printed to stderr; stderr logging
@@ -46,10 +56,18 @@ pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
     // may not; the appender does not create it, so do it here.
     let logs_dir_writable = std::fs::create_dir_all(&logs_dir).is_ok() && probe_writable(&logs_dir);
 
+    let file_filter =
+        EnvFilter::try_new(&log.directive).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
+    let console_filter = EnvFilter::try_new(&log.console_level)
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_CONSOLE));
+
     let (file_layer, guard) = if logs_dir_writable {
         let file_appender = tracing_appender::rolling::daily(&logs_dir, "bookrack.log");
         let (file_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
-        let file = fmt::layer().json().with_writer(file_writer);
+        let file = fmt::layer()
+            .json()
+            .with_writer(file_writer)
+            .with_filter(file_filter);
         (Some(file), Some(worker_guard))
     } else {
         eprintln!(
@@ -59,10 +77,11 @@ pub fn init(cfg: &Config, log: &LogConfig) -> Option<WorkerGuard> {
         (None, None)
     };
 
-    let console = fmt::layer().with_writer(io::stderr);
+    let console = fmt::layer()
+        .with_writer(io::stderr)
+        .with_filter(console_filter);
 
     tracing_subscriber::registry()
-        .with(EnvFilter::new(&log.directive))
         .with(console)
         .with(file_layer)
         .init();

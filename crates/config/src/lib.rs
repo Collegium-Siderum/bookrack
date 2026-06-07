@@ -689,6 +689,30 @@ impl LogConfig {
                 .unwrap_or_else(|| DEFAULT_LOG_CONSOLE.to_string()),
         }
     }
+
+    /// Resolve a [`LogConfig`] suitable for a headless daemon binary
+    /// whose stderr is the operator's primary log surface
+    /// (systemd / journalctl / docker logs).
+    ///
+    /// Behaves like [`from_env`](Self::from_env) for the file directive
+    /// and any explicit [`LOG_CONSOLE_ENV`] override, but when the
+    /// console override is unset it mirrors the file directive instead
+    /// of falling to [`DEFAULT_LOG_CONSOLE`] — so the daemon's full
+    /// telemetry reaches stderr by default.
+    pub fn for_headless_daemon() -> LogConfig {
+        LogConfig::resolve_headless_from(|key| std::env::var(key).ok())
+    }
+
+    /// Pure resolution for [`for_headless_daemon`](Self::for_headless_daemon),
+    /// factored out for testing.
+    fn resolve_headless_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
+        let directive = env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string());
+        let console_level = env_trimmed(get(LOG_CONSOLE_ENV)).unwrap_or_else(|| directive.clone());
+        LogConfig {
+            directive,
+            console_level,
+        }
+    }
 }
 
 /// Trim an environment value, treating whitespace-only as unset.
@@ -1482,6 +1506,33 @@ mod tests {
             _ => None,
         });
         assert_eq!(blank.console_level, DEFAULT_LOG_CONSOLE);
+    }
+
+    #[test]
+    fn log_config_headless_daemon_mirrors_file_directive() {
+        // With both overrides unset, the console mirrors the file
+        // default so journalctl gets full daemon telemetry.
+        let unset = LogConfig::resolve_headless_from(|_| None);
+        assert_eq!(unset.directive, DEFAULT_LOG);
+        assert_eq!(unset.console_level, DEFAULT_LOG);
+
+        // BOOKRACK_LOG carries through to console as well when the
+        // console override is unset.
+        let file_only = LogConfig::resolve_headless_from(|key| match key {
+            LOG_ENV => Some("bookrack=trace".to_string()),
+            _ => None,
+        });
+        assert_eq!(file_only.directive, "bookrack=trace");
+        assert_eq!(file_only.console_level, "bookrack=trace");
+
+        // An explicit BOOKRACK_LOG_CONSOLE wins, leaving the file
+        // directive untouched.
+        let console_override = LogConfig::resolve_headless_from(|key| match key {
+            LOG_CONSOLE_ENV => Some("warn".to_string()),
+            _ => None,
+        });
+        assert_eq!(console_override.directive, DEFAULT_LOG);
+        assert_eq!(console_override.console_level, "warn");
     }
 
     #[test]
