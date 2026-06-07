@@ -18,6 +18,7 @@
 !.env.example
 .claude/
 /.cargo/
+/.serena/
 
 # Agent instructions — local working file, deliberately not committed
 /CLAUDE.md
