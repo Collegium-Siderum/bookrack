@@ -17,7 +17,7 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::BookFilter;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{OpsError, SearchOptions, reads, writes};
+use bookrack_ops::{OpsError, SearchOptions, reads, with_source_override, writes};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -750,6 +750,22 @@ impl ServerHandler for BookrackServer {
              search confined to one book)."
                 .to_string(),
         )
+    }
+
+    /// Override the `#[tool_handler]`-generated dispatch so every tool
+    /// call records its `source` as `mcp`, regardless of the [`Caller`]
+    /// baked into the shared [`Ops`] handle. The `bookrack run` daemon
+    /// builds one [`Ops`] tagged `Caller::cli()` and shares it across
+    /// REPL, HTTP, and queue worker; without this wrap, every recorded
+    /// tool call would read as `source=cli` and the cli / mcp split on
+    /// `mcp_tool_calls` would collapse.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        with_source_override(bookrack_ops::ACTOR_DETAIL_MCP, self.tool_router.call(tcc)).await
     }
 }
 

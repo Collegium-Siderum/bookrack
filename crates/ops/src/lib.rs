@@ -36,6 +36,7 @@ use bookrack_query::{Library, QueryError};
 
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
+pub use recorder::with_source_override;
 
 /// Why an op failed.
 #[derive(Debug, thiserror::Error)]
