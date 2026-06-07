@@ -2,23 +2,27 @@
 
 //! `bookrack doctor`: one-screen health check of an install.
 //!
-//! Each environment expectation — a resolved data root, openable
-//! databases, a loadable PDFium library, a reachable Ollama daemon
-//! carrying the configured embed model — becomes one row in a fixed
-//! three-column table. A row is `OK`, `WARN`, or `FAIL`; any FAIL exits
-//! the process with status 1 so a script can branch on the result.
+//! Each environment expectation — a resolved data root, the on-disk
+//! presence of each database store, a loadable PDFium library, a
+//! reachable Ollama daemon carrying the configured embed model —
+//! becomes one row in a fixed three-column table. A row is `OK`,
+//! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
+//! script can branch on the result.
+//!
+//! The store rows deliberately stop at `path.exists()`. Opening the
+//! catalog or corpus would race the daemon's exclusive write lock and
+//! could deadlock or corrupt a running session; deeper introspection
+//! lives behind the REPL `status` command instead.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
 //! short-circuiting the very diagnosis the user needs.
 
 use anyhow::Result;
-use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
     LibrarySelection, ResolutionSource, default_registry_path, pdfium_lib_dir,
 };
-use bookrack_corpus::Corpus;
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use serde::Serialize;
 
@@ -194,58 +198,31 @@ fn pdfium_filename() -> &'static str {
 }
 
 fn push_catalog_row(rows: &mut Vec<Row>, cfg: &Config) {
-    let path = cfg.catalog_db();
-    if !path.exists() {
-        rows.push(Row {
-            label: "catalog.db".to_string(),
-            value: "(not initialised)".to_string(),
-            status: Status::Warn {
-                note: "no books ingested yet; the first `bookrack ingest` creates it".to_string(),
-            },
-        });
-        return;
-    }
-    match Catalog::open_read_only(&path) {
-        Ok(_) => rows.push(Row {
-            label: "catalog.db".to_string(),
-            value: path.display().to_string(),
-            status: Status::Ok { note: None },
-        }),
-        Err(e) => rows.push(Row {
-            label: "catalog.db".to_string(),
-            value: path.display().to_string(),
-            status: Status::Fail {
-                note: format!("{e:#}"),
-            },
-        }),
-    }
+    push_store_row(rows, "catalog.db", &cfg.catalog_db());
 }
 
 fn push_corpus_row(rows: &mut Vec<Row>, cfg: &Config) {
-    let path = cfg.corpus_db();
-    if !path.exists() {
+    push_store_row(rows, "corpus.db", &cfg.corpus_db());
+}
+
+/// Report a database store by filesystem presence only. Opening a handle
+/// is deferred to the daemon so doctor never competes with a live
+/// session for the exclusive write lock.
+fn push_store_row(rows: &mut Vec<Row>, label: &str, path: &std::path::Path) {
+    if path.exists() {
         rows.push(Row {
-            label: "corpus.db".to_string(),
+            label: label.to_string(),
+            value: path.display().to_string(),
+            status: Status::Ok { note: None },
+        });
+    } else {
+        rows.push(Row {
+            label: label.to_string(),
             value: "(not initialised)".to_string(),
             status: Status::Warn {
                 note: "no books ingested yet; the first `bookrack ingest` creates it".to_string(),
             },
         });
-        return;
-    }
-    match Corpus::open(&path) {
-        Ok(_) => rows.push(Row {
-            label: "corpus.db".to_string(),
-            value: path.display().to_string(),
-            status: Status::Ok { note: None },
-        }),
-        Err(e) => rows.push(Row {
-            label: "corpus.db".to_string(),
-            value: path.display().to_string(),
-            status: Status::Fail {
-                note: format!("{e:#}"),
-            },
-        }),
     }
 }
 
