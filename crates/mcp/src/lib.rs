@@ -10,10 +10,11 @@
 //! only on `bookrack-ops`, never on the database crates behind it, so
 //! a schema change downstream leaves it untouched.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Context;
+use bookrack_core::queue::{JobState, QueueState};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::BookFilter;
@@ -245,6 +246,52 @@ pub struct SessionLogsTailResult {
     pub returned: usize,
 }
 
+/// Arguments for `session.queue_status`. The tool takes no inputs.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct SessionQueueStatusArgs {}
+
+/// Compact projection of one queued ingest job, used in the `recent`
+/// list returned by `session.queue_status`.
+#[derive(Debug, Serialize)]
+pub struct QueueJobSummary {
+    /// UUIDv7 string identifying the job.
+    pub id: String,
+    /// Lifecycle state, lowercased to match the persisted serde form.
+    pub state: String,
+    /// Library name the job runs against.
+    pub library: String,
+    /// Source file path the job ingests.
+    pub path: String,
+}
+
+/// Response shape returned by `session.queue_status`: counts by state
+/// and a small recent-job tail.
+#[derive(Debug, Serialize)]
+pub struct SessionQueueStatusResult {
+    /// Whether the worker is currently paused.
+    pub paused: bool,
+    /// Jobs in `Pending` state.
+    pub pending: usize,
+    /// Jobs in `Running` state.
+    pub running: usize,
+    /// Jobs in `Done` state.
+    pub done: usize,
+    /// Jobs in `Failed` state.
+    pub failed: usize,
+    /// Jobs in `Cancelled` state.
+    pub cancelled: usize,
+    /// The most-recent [`SESSION_QUEUE_STATUS_RECENT`] jobs, newest
+    /// first.
+    pub recent: Vec<QueueJobSummary>,
+}
+
+/// Cap on the `recent` field returned by `session.queue_status`.
+pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
+
+/// Arguments for `session.shutdown`. The tool takes no inputs.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+pub struct SessionShutdownArgs {}
+
 /// Arguments for `library.metadata.set`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataSetArgs {
@@ -322,6 +369,8 @@ pub struct BookrackServer {
     info_context: LibraryInfoContext,
     started_at: Instant,
     log_stream: LogStreamHandle,
+    queue_state: Arc<Mutex<QueueState>>,
+    shutdown_tx: broadcast::Sender<()>,
     tool_router: ToolRouter<BookrackServer>,
 }
 
@@ -334,20 +383,29 @@ impl BookrackServer {
     /// every call. `started_at` stamps the daemon's birth so
     /// `session.info` can report uptime. `log_stream` is the shared
     /// in-process log fan-out the `session.logs_tail` tool reads its
-    /// ring-buffer snapshot from. Tools route each call through the
-    /// registry, scoped to either an explicit `library` selector or
-    /// the current default when the selector is absent.
+    /// ring-buffer snapshot from. `queue_state` is the shared snapshot
+    /// of the ingest queue the daemon-REPL drives; the headless mcp
+    /// binary passes an inert default since it does not run a queue
+    /// worker. `shutdown_tx` carries the session-wide graceful-shutdown
+    /// signal so the `session.shutdown` tool can ask the daemon to
+    /// stop. Tools route each call through the registry, scoped to
+    /// either an explicit `library` selector or the current default
+    /// when the selector is absent.
     pub fn new(
         registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
         info_context: LibraryInfoContext,
         started_at: Instant,
         log_stream: LogStreamHandle,
+        queue_state: Arc<Mutex<QueueState>>,
+        shutdown_tx: broadcast::Sender<()>,
     ) -> BookrackServer {
         BookrackServer {
             registry,
             info_context,
             started_at,
             log_stream,
+            queue_state,
+            shutdown_tx,
             tool_router: Self::tool_router(),
         }
     }
@@ -726,6 +784,83 @@ impl BookrackServer {
         respond_with(&SessionLogsTailResult { events, returned })
     }
 
+    /// Snapshot the daemon-REPL's ingest queue: counts by lifecycle
+    /// state plus the most recent jobs.
+    ///
+    /// The headless `bookrack-mcp` binary does not drive a queue
+    /// worker; against it this tool reports an inert empty state.
+    #[tool(
+        name = "session.queue_status",
+        description = "Snapshot of the ingest queue: counts by lifecycle state plus the \
+                       most recent jobs (newest first, capped at 10). Returns an empty \
+                       snapshot when run against a daemon that does not host a queue worker."
+    )]
+    async fn session_queue_status(
+        &self,
+        Parameters(_): Parameters<SessionQueueStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let state = self
+            .queue_state
+            .lock()
+            .map_err(|e| ErrorData::internal_error(format!("queue state lock: {e}"), None))?;
+        let mut counts = [0usize; 5];
+        for job in &state.jobs {
+            let idx = match job.state {
+                JobState::Pending => 0,
+                JobState::Running => 1,
+                JobState::Done => 2,
+                JobState::Failed => 3,
+                JobState::Cancelled => 4,
+            };
+            counts[idx] += 1;
+        }
+        let recent: Vec<QueueJobSummary> = state
+            .jobs
+            .iter()
+            .rev()
+            .take(SESSION_QUEUE_STATUS_RECENT)
+            .map(|j| QueueJobSummary {
+                id: j.id.clone(),
+                state: format!("{:?}", j.state).to_ascii_lowercase(),
+                library: j.library.clone(),
+                path: j.path.display().to_string(),
+            })
+            .collect();
+        let result = SessionQueueStatusResult {
+            paused: state.paused,
+            pending: counts[0],
+            running: counts[1],
+            done: counts[2],
+            failed: counts[3],
+            cancelled: counts[4],
+            recent,
+        };
+        respond_with(&result)
+    }
+
+    /// Ask the daemon to perform a graceful shutdown. Fires the
+    /// session-wide broadcast signal that the signal listener, REPL,
+    /// queue worker, and MCP listener all subscribe to; the daemon's
+    /// own join logic then closes everything in order.
+    ///
+    /// The tool returns immediately once the signal is sent — the
+    /// shutdown itself happens asynchronously in the daemon's main
+    /// loop, and the calling client sees the connection close as the
+    /// listener winds down.
+    #[tool(
+        name = "session.shutdown",
+        description = "Ask the daemon to perform a graceful shutdown. Returns immediately \
+                       after firing the shutdown signal; the listener and queue worker \
+                       then wind down asynchronously."
+    )]
+    async fn session_shutdown(
+        &self,
+        Parameters(_): Parameters<SessionShutdownArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let _ = self.shutdown_tx.send(());
+        respond_with(&serde_json::json!({"status": "shutting down"}))
+    }
+
     /// Snapshot the vector store.
     #[tool(
         name = "library.vectors_status",
@@ -924,16 +1059,29 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// buffer through it and future endpoints (live SSE under
 /// `/session/logs`) subscribe to its broadcast channel.
 ///
-/// `shutdown_rx` lets the caller drive graceful shutdown from a
-/// broadcast channel shared with sibling tasks (signal listener, REPL,
-/// queue worker). A standalone caller can wire its own `ctrl_c` task
-/// into the channel; the embedded daemon-REPL feeds its session-wide
-/// shutdown signal through here.
+/// `queue_state` is the shared snapshot of the ingest queue the
+/// daemon-REPL drives; the headless `bookrack-mcp` binary passes an
+/// inert default since it does not run a queue worker.
+///
+/// `shutdown_tx` is the session-wide graceful-shutdown broadcaster
+/// that the signal listener, REPL, queue worker, and this listener
+/// all subscribe to. The `session.shutdown` MCP tool calls `send` on
+/// it; this function also subscribes through `shutdown_rx` (the
+/// receiver side of the same broadcast) for its own listener loop.
+// Eight separate handles are the natural shape here: each is owned by a
+// distinct subsystem (registry, info, log fan-out, queue, shutdown
+// fan-in/out, listener address) that the caller threaded through its
+// own state machine. Bundling them into a struct buys nothing — the
+// only two call sites are already passing each handle exactly once —
+// and would just trade names for repetition.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     info_context: LibraryInfoContext,
     started_at: Instant,
     log_stream: LogStreamHandle,
+    queue_state: Arc<Mutex<QueueState>>,
+    shutdown_tx: broadcast::Sender<()>,
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
@@ -944,6 +1092,8 @@ pub async fn serve(
                 info_context.clone(),
                 started_at,
                 log_stream.clone(),
+                queue_state.clone(),
+                shutdown_tx.clone(),
             ))
         },
         LocalSessionManager::default().into(),

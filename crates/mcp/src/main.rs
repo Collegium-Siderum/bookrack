@@ -12,6 +12,7 @@
 //! means restarting with a different `--data-dir` / `--library`.
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -19,6 +20,7 @@ use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
 };
+use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
@@ -157,16 +159,24 @@ async fn run() -> Result<()> {
     // Ctrl-C subscriber feeds the shared shutdown signal that the
     // embedded daemon-REPL drives through the same channel.
     let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
+    let shutdown_tx_for_signal = shutdown_tx.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = shutdown_tx.send(());
+            let _ = shutdown_tx_for_signal.send(());
         }
     });
+    // The headless daemon does not host an ingest queue worker, but
+    // `session.queue_status` still needs a state handle to report
+    // against. Hand the listener an inert default — every count
+    // reports as zero — so the tool's contract holds.
+    let queue_state = Arc::new(Mutex::new(QueueState::default()));
     bookrack_mcp::serve(
         registry,
         info_context,
         started_at,
         log_stream,
+        queue_state,
+        shutdown_tx,
         &mcp_cfg.addr,
         shutdown_rx,
     )

@@ -795,6 +795,7 @@ dependencies = [
  "axum",
  "bookrack-catalog",
  "bookrack-config",
+ "bookrack-core",
  "bookrack-embed",
  "bookrack-obs",
  "bookrack-ops",

@@ -222,8 +222,20 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             let registry = Arc::clone(&registry);
             let rx = shutdown_tx.subscribe();
             let log_stream = log_stream.clone();
+            let queue_state_for_mcp = Arc::clone(&queue_state);
+            let shutdown_tx_for_mcp = shutdown_tx.clone();
             Some(tokio::spawn(async move {
-                bookrack_mcp::serve(registry, info_context, started_at, log_stream, &addr, rx).await
+                bookrack_mcp::serve(
+                    registry,
+                    info_context,
+                    started_at,
+                    log_stream,
+                    queue_state_for_mcp,
+                    shutdown_tx_for_mcp,
+                    &addr,
+                    rx,
+                )
+                .await
             }))
         }
         None => {
