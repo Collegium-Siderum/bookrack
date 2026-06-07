@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -150,7 +151,11 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
-    let signal_handle = tokio::spawn(signal_task(shutdown_tx.clone()));
+    let signal_triggered = Arc::new(AtomicBool::new(false));
+    let signal_handle = tokio::spawn(signal_task(
+        shutdown_tx.clone(),
+        Arc::clone(&signal_triggered),
+    ));
 
     // Persistent ingest queue: the file lives under the data root so
     // the next session resumes its pending jobs. The Mutex guards both
@@ -280,6 +285,17 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     // on process exit) and don't wait for it.
     repl_handle.abort();
 
+    // Signal-driven shutdown leaves the reedline thread parked inside
+    // its sync `read_line`, holding a blocking-pool worker the runtime
+    // cannot cancel. Letting `main` return would have tokio's Runtime
+    // drop wait on that worker forever (observed under SIGTERM and
+    // SIGHUP). `std::process::exit` skips the Runtime drop and lets
+    // the OS reap the blocking thread when the process tears down.
+    // REPL-driven `exit` / Ctrl-D returns normally because read_line
+    // has already returned and the blocking worker is idle.
+    if signal_triggered.load(Ordering::SeqCst) {
+        std::process::exit(0);
+    }
     Ok(())
 }
 
@@ -318,7 +334,13 @@ fn resolution_source_label(source: ResolutionSource) -> &'static str {
 /// Unix listens for SIGINT, SIGTERM, and SIGHUP — the third covers
 /// the "terminal window closed" path, which is the primary way the
 /// session ends today. Windows listens for Ctrl-C and the close event.
-async fn signal_task(shutdown_tx: broadcast::Sender<()>) -> Result<()> {
+///
+/// Sets `triggered` to `true` before forwarding the broadcast so the
+/// caller can distinguish a signal-driven shutdown — where the
+/// blocking reedline thread is still parked inside its sync read_line
+/// and the tokio Runtime drop would wait for it forever — from a
+/// REPL-driven `exit` / Ctrl-D path that returns cleanly.
+async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBool>) -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -343,6 +365,7 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>) -> Result<()> {
             _ = close.recv() => tracing::info!("received Ctrl-Close"),
         }
     }
+    triggered.store(true, Ordering::SeqCst);
     let _ = shutdown_tx.send(());
     Ok(())
 }
