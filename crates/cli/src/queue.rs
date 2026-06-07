@@ -435,6 +435,8 @@ where
             Err(msg) => JobOutcome::Failed(msg),
         };
 
+        announce_outcome(&job, &outcome);
+
         {
             let mut guard = state.lock().expect("queue state mutex poisoned");
             apply_outcome(&mut guard, &job.id, outcome);
@@ -442,6 +444,25 @@ where
                 tracing::error!(error = %err, "queue worker: persist after outcome");
             }
         }
+    }
+}
+
+/// Emit one terminating line per job onto stderr — a job-completion
+/// marker that lands on its own line after the long tail of tracing /
+/// progress output an ingest produces. The line gives the operator a
+/// clean visual cue that the worker has finished; without it, the last
+/// terminal row is the trailing progress line and the REPL prompt sits
+/// invisibly N rows above, indistinguishable from a hung daemon.
+fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
+    let short: String = job.id.chars().take(8).collect();
+    let name = job
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| job.path.display().to_string());
+    match outcome {
+        JobOutcome::Done => eprintln!("queue: {short} {name} done"),
+        JobOutcome::Failed(msg) => eprintln!("queue: {short} {name} failed: {msg}"),
     }
 }
 
