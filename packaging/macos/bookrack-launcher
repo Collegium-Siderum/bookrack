@@ -1,0 +1,11 @@
+#!/bin/sh
+# CFBundleExecutable for Bookrack.app.
+#
+# Resolves the bundle's Resources directory and asks Terminal.app to
+# run the .command file that lives there. The bookrack binary itself
+# is staged in Resources so `current_exe().parent()` returns the
+# Resources directory -- the PDFium loader and the portable
+# data-directory probe both look next to the running binary.
+set -eu
+res="$(cd "$(dirname "$0")/../Resources" && pwd)"
+open -a Terminal "$res/bookrack-run.command"
