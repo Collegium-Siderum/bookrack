@@ -90,7 +90,10 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 
     let lock_path = runtime_dir.join(tty_lock_name());
     let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
-    let _tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label)?;
+    let _tty_lock = match TtyLock::acquire(&lock_path, std::process::id(), &mcp_label) {
+        Ok(lock) => lock,
+        Err(err) => return handle_lock_conflict(err, &lock_path),
+    };
     let started_at = Instant::now();
     tracing::info!(
         path = %lock_path.display(),
@@ -328,6 +331,42 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     if signal_triggered.load(Ordering::SeqCst) {
         std::process::exit(0);
     }
+    Ok(())
+}
+
+/// Print a friendly message when the session lock is already held and,
+/// on an interactive TTY, wait for a keypress before exiting so a
+/// double-click launcher does not vanish its terminal window. Returns
+/// `Ok(())` on the TTY path (the operator chose to close the window),
+/// the original error on the non-TTY path so callers see a non-zero
+/// exit. The lock's flock is OS-released on crash, so this branch only
+/// fires for a truly live predecessor.
+fn handle_lock_conflict(err: anyhow::Error, lock_path: &Path) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let info = std::fs::read_to_string(lock_path)
+        .ok()
+        .map(|text| crate::exec::parse_lock(&text))
+        .unwrap_or_else(|| crate::exec::LockInfo {
+            pid: None,
+            mcp: None,
+        });
+    let pid_label = info
+        .pid
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let mcp_label = info.mcp.clone().unwrap_or_else(|| "<unknown>".to_string());
+    eprintln!("bookrack is already running.");
+    eprintln!("  pid:  {pid_label}");
+    eprintln!("  mcp:  {mcp_label}");
+    eprintln!("Inspect with:   bookrack exec info");
+    eprintln!("Stop with:      kill {pid_label}    (or via the session.shutdown MCP tool)");
+    if !std::io::stdin().is_terminal() {
+        return Err(err);
+    }
+    eprint!("Press Enter to close this window. ");
+    let _ = std::io::stderr().flush();
+    let mut buf = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut buf);
     Ok(())
 }
 
