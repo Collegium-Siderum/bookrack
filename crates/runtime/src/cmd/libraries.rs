@@ -44,7 +44,17 @@ pub enum CopyMode {
 /// catalog, corpus, and envelope store into a sibling library. The
 /// vector store is NOT carried over; the caller runs `vectors reset`
 /// against the new library to rebuild it under the new model.
-pub fn fork(cfg: &Config, new_name: &str, target: &Path, mode: CopyMode, yes: bool) -> Result<()> {
+pub fn fork<F>(
+    cfg: &Config,
+    new_name: &str,
+    target: &Path,
+    mode: CopyMode,
+    yes: bool,
+    ask: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
     validate_inputs(cfg, new_name, target)?;
     let registry_path = registry_target_path()?;
 
@@ -88,7 +98,7 @@ pub fn fork(cfg: &Config, new_name: &str, target: &Path, mode: CopyMode, yes: bo
     println!("  sources/    NOT carried over");
     println!("  config.toml NOT carried over");
 
-    if !yes && !crate::util::confirm("Type 'yes' to continue: ")? {
+    if !yes && !ask("Type 'yes' to continue: ")? {
         println!("aborted; no changes written");
         return Ok(());
     }

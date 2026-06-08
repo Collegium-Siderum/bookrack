@@ -7,8 +7,30 @@
 
 use anyhow::{Context, Result};
 
-use crate::AuditProfileAction;
 use crate::render;
+
+#[derive(clap::Subcommand, Debug)]
+pub enum AuditProfileAction {
+    /// Print every built-in profile name, one per line.
+    List {
+        /// Emit machine-readable JSON instead of the plain listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pretty-print the effective toggle settings for a named profile.
+    Show {
+        /// Built-in profile name (`default`, `trust-source`, `strict`).
+        name: String,
+    },
+    /// List the sub-section names that differ between two named profiles
+    /// and pretty-print each side's settings for those sections.
+    Diff {
+        /// First profile name.
+        a: String,
+        /// Second profile name.
+        b: String,
+    },
+}
 
 pub fn run(action: AuditProfileAction) -> Result<()> {
     match action {

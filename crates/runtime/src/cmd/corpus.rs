@@ -9,10 +9,9 @@ use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
 
 use crate::embed_helpers::embedder;
-use crate::util::confirm;
 
 #[allow(clippy::too_many_arguments)]
-pub async fn rebuild(
+pub async fn rebuild<F>(
     cfg: &Config,
     include_vectors: bool,
     book: Option<i64>,
@@ -20,7 +19,11 @@ pub async fn rebuild(
     dry_run: bool,
     yes: bool,
     profile_name: Option<&str>,
-) -> Result<()> {
+    ask: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -74,7 +77,7 @@ pub async fn rebuild(
          This is irreversible (the existing corpus tree is replaced).\n\
          Type 'yes' to continue: "
     };
-    if !yes && !confirm(prompt)? {
+    if !yes && !ask(prompt)? {
         println!("aborted; no changes written");
         return Ok(());
     }

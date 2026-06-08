@@ -2,32 +2,17 @@
 
 //! bookrack MCP daemon entry point.
 //!
-//! Resolve configuration, install the tracing subscriber, build the
-//! embedding client and warm query library, then serve the MCP protocol
-//! over streamable HTTP until Ctrl-C. The heavy startup cost — probing the
-//! embedding dimension and opening the vector store — is paid once here, so
-//! a client connection is a cheap HTTP handshake rather than a cold start.
-//!
-//! The daemon serves one library for its lifetime; switching libraries
-//! means restarting with a different `--data-dir` / `--library`.
+//! Wraps [`bookrack_runtime::DaemonRuntime`] with the headless profile:
+//! no queue worker, stderr-mirrored logging, and the MCP-tagged
+//! [`bookrack_ops::Caller`]. Serves MCP over streamable HTTP until
+//! the shared shutdown broadcast fires (Ctrl-C, the
+//! `session.shutdown` MCP tool).
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
-use anyhow::{Context, Result};
-use bookrack_catalog::Catalog;
-use bookrack_config::{
-    Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
-};
-use bookrack_core::queue::QueueState;
-use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{Caller, Ops};
-use bookrack_query::Library;
-use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
-use tokio::sync::broadcast;
+use anyhow::Result;
+use bookrack_config::McpConfig;
+use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 
 #[derive(clap::Parser)]
 #[command(
@@ -58,139 +43,41 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<()> {
-    let started_at = Instant::now();
     let cli = <Cli as clap::Parser>::parse();
-    let selection = LibrarySelection {
-        data_dir: cli.data_dir,
-        library: cli.library,
-    };
-    let cfg = Config::resolve(&selection).context("resolve configuration")?;
-    // The headless daemon's stderr is the operator's primary log
-    // surface (systemd journal, docker logs, foreground supervision).
-    // `for_headless_daemon` mirrors the file directive onto the console
-    // layer unless `BOOKRACK_LOG_CONSOLE` overrides — `bookrack run`
-    // gets the quiet REPL default through `LogConfig::from_env`
-    // instead.
-    let (_guard, log_stream) = bookrack_obs::init(&cfg, &LogConfig::for_headless_daemon());
-
     let mcp_cfg = McpConfig::from_env();
+    let runtime = DaemonRuntime::start(RuntimeOpts::headless(cli.data_dir, cli.library)).await?;
 
-    // Hold the session-scoped tty lock for the daemon's lifetime so
-    // another `bookrack run` or `bookrack-mcp` on the same machine
-    // refuses to open a competing write handle on the catalog or
-    // corpus.
-    let runtime_dir =
-        resolve_runtime_dir(None).context("resolve BOOKRACK_RUNTIME_DIR for bookrack-mcp")?;
-    std::fs::create_dir_all(&runtime_dir).with_context(|| {
-        format!(
-            "create runtime directory {} for the bookrack session lock",
-            runtime_dir.display()
+    let shutdown_tx = runtime.shutdown_tx.clone();
+    let shutdown_rx = shutdown_tx.subscribe();
+    let registry = runtime.registry.clone();
+    let info_context = runtime.info_context.clone();
+    let log_stream = runtime.log_stream.clone();
+    let queue_state = runtime.queue_state.clone();
+    let started_at = runtime.started_at;
+    let addr = mcp_cfg.addr.clone();
+
+    let serve_handle = tokio::spawn(async move {
+        bookrack_mcp::serve(
+            registry,
+            info_context,
+            started_at,
+            log_stream,
+            queue_state,
+            shutdown_tx,
+            &addr,
+            shutdown_rx,
         )
-    })?;
-    let lock_path = runtime_dir.join(tty_lock_name());
-    let _tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_cfg.addr)?;
-    tracing::info!(
-        path = %lock_path.display(),
-        mcp = %mcp_cfg.addr,
-        "bookrack session lock acquired",
-    );
-
-    let embed_cfg = EmbedConfig::from_env();
-    let embedder = OllamaEmbedClient::new(
-        cfg.ollama_url(),
-        &embed_cfg.model,
-        embed_cfg.request_timeout,
-        embed_cfg.max_retries,
-        embed_cfg.backoff_base,
-    )
-    .context("build embedding client")?;
-
-    // Reject a catalog the binary cannot serve before the listener binds.
-    // Lazy opens inside tool handlers used to let the daemon accept
-    // connections and then fail every catalog-touching call with
-    // SchemaTooNew or ReaderTooOld; this preflight surfaces the mismatch
-    // at startup instead.
-    let catalog_db = cfg.catalog_db();
-    if catalog_db.exists() {
-        Catalog::open_read_only(&catalog_db).context("preflight catalog schema check failed")?;
-    }
-
-    let search_cfg = SearchConfig::from_env();
-    let library = Library::open(
-        cfg.corpus_db(),
-        cfg.catalog_db(),
-        &cfg.lancedb_dir(),
-        embedder,
-        embed_cfg.model.clone(),
-        search_cfg.top_k,
-    )
-    .await
-    .context("open query library")?;
-
-    let ops = Ops::with_library(
-        library,
-        cfg.corpus_db(),
-        cfg.catalog_db(),
-        &cfg.lancedb_dir(),
-        cfg.books_dir(),
-        cfg.backup_dir(),
-        Caller::mcp(),
-    );
-
-    let info_context = LibraryInfoContext {
-        data_dir: cfg.data_dir().display().to_string(),
-        library_name: cfg.library().map(str::to_string),
-        resolution_source: resolution_source_label(cfg.source()).to_string(),
-        ollama_url: cfg.ollama_url().to_string(),
-        embed_model_configured: embed_cfg.model.clone(),
-        mcp_addr: mcp_cfg.addr.clone(),
-    };
-
-    // Wrap the single warm Ops in a one-element LibraryRegistry. The
-    // registry routes every later phase's call (REPL, queue worker,
-    // future MCP per-tool library selector) through one chokepoint;
-    // this binary still serves exactly one library, but its plumbing
-    // now matches the multi-library shape.
-    let library_name = cfg.library().unwrap_or("default").to_string();
-    let handle = LibraryHandle::new(library_name, ops);
-    let registry = LibraryRegistry::single(handle);
-
-    // Headless mcp binary wires its own broadcast channel: a single
-    // Ctrl-C subscriber feeds the shared shutdown signal that the
-    // embedded daemon-REPL drives through the same channel.
-    let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
-    let shutdown_tx_for_signal = shutdown_tx.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = shutdown_tx_for_signal.send(());
-        }
+        .await
     });
-    // The headless daemon does not host an ingest queue worker, but
-    // `session.queue_status` still needs a state handle to report
-    // against. Hand the listener an inert default — every count
-    // reports as zero — so the tool's contract holds.
-    let queue_state = Arc::new(Mutex::new(QueueState::default()));
-    bookrack_mcp::serve(
-        registry,
-        info_context,
-        started_at,
-        log_stream,
-        queue_state,
-        shutdown_tx,
-        &mcp_cfg.addr,
-        shutdown_rx,
-    )
-    .await
-}
 
-fn resolution_source_label(source: ResolutionSource) -> &'static str {
-    match source {
-        ResolutionSource::DataDirFlag => "--data-dir flag",
-        ResolutionSource::LibraryFlag => "--library flag",
-        ResolutionSource::EnvVar => "BOOKRACK_DATA_DIR env",
-        ResolutionSource::PortableExeNeighbor => "portable layout",
-        ResolutionSource::RegistryDefault => "registry default",
-        ResolutionSource::DefaultRegistryDefault => "default registry default",
-        ResolutionSource::Explicit => "explicit",
-    }
+    // Headless profile has no REPL; park a no-op blocking thread so
+    // the shared `run_until_shutdown` join contract is satisfied.
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> {
+        std::thread::park();
+        Ok(())
+    });
+
+    runtime
+        .run_until_shutdown(Some(serve_handle), repl_handle)
+        .await
 }

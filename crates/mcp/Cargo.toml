@@ -13,6 +13,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-catalog = { path = "../catalog" }
+bookrack-runtime = { path = "../runtime" }
 bookrack-session = { path = "../session" }
 rmcp.workspace = true
 axum.workspace = true

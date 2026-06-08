@@ -1,0 +1,40 @@
+[package]
+name = "bookrack-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bookrack-audit-profile = { path = "../audit-profile" }
+bookrack-catalog = { path = "../catalog" }
+bookrack-config = { path = "../config" }
+bookrack-core = { path = "../core" }
+bookrack-corpus = { path = "../corpus" }
+bookrack-diagnose = { path = "../diagnose" }
+bookrack-embed = { path = "../embed" }
+bookrack-ingest = { path = "../ingest" }
+bookrack-metadata = { path = "../metadata" }
+bookrack-obs = { path = "../obs" }
+bookrack-ops = { path = "../ops" }
+bookrack-query = { path = "../query" }
+bookrack-session = { path = "../session" }
+bookrack-vectors = { path = "../vectors" }
+anyhow.workspace = true
+chrono.workspace = true
+# `cmd::libraries::CopyMode`, `cmd::audit_profile::AuditProfileAction`,
+# and `cmd::metadata::WriteMetadataAction` derive clap traits so the
+# cli `bin` consumes them directly. The runtime crate hosts the
+# definitions and re-exports the derives.
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `cmd::dryrun` hashes file contents to name per-book JSONL outputs.
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

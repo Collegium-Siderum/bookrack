@@ -70,7 +70,7 @@ pub async fn run(
             path.display()
         );
     }
-    let files = bookrack_cli::queue::collect_supported_files(path)?;
+    let files = crate::queue::collect_supported_files(path)?;
     if files.is_empty() {
         println!("No supported files under {}.", path.display());
         return Ok(());

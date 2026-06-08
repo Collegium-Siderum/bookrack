@@ -11,7 +11,6 @@ use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
 
 use crate::embed_helpers::embedder;
-use crate::util::{confirm, confirm_token};
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
@@ -82,14 +81,18 @@ pub async fn rebuild(
 /// Render `bookrack vectors reembed` — read each book's chunks back
 /// from LanceDB, drop the vectors, and run the active embedder over
 /// them. Use after switching `embed_model` / `embed_dim`.
-pub async fn reembed(
+pub async fn reembed<F>(
     cfg: &Config,
     book: Option<i64>,
     stale_only: bool,
     dry_run: bool,
     yes: bool,
     profile_name: Option<&str>,
-) -> Result<()> {
+    ask: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -124,7 +127,7 @@ pub async fn reembed(
                   Existing vectors will be overwritten by fresh embeddings\n\
                   from the currently configured model. This is irreversible.\n\
                   Type 'yes' to continue: ";
-    if !yes && !confirm(prompt)? {
+    if !yes && !ask(prompt)? {
         println!("aborted; no changes written");
         return Ok(());
     }
@@ -197,7 +200,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
 /// embedding model. The old vectors are unrecoverable. Use after
 /// switching `BOOKRACK_EMBED_MODEL`; for a non-destructive trial of a
 /// new model, use `libraries fork` instead.
-pub async fn reset(cfg: &Config, yes: bool, resume: bool) -> Result<()> {
+pub async fn reset<F>(cfg: &Config, yes: bool, resume: bool, ask: F) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<bool>,
+{
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -266,7 +272,7 @@ pub async fn reset(cfg: &Config, yes: bool, resume: bool) -> Result<()> {
              up the new model."
         );
         let prompt = "Type RESET (exact, uppercase) to continue: ";
-        if !yes && !confirm_token(prompt, "RESET")? {
+        if !yes && !ask(prompt)? {
             println!("aborted; no changes written");
             return Ok(());
         }

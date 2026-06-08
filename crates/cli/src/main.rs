@@ -11,14 +11,8 @@
 //! command surface carries no tuning flags, so there is a single source of
 //! truth for every default.
 
-mod audit_helpers;
-mod cmd;
-mod doctor;
-mod embed_helpers;
 mod exec;
 mod init;
-mod ops_helpers;
-mod render;
 mod run;
 mod util;
 
@@ -26,6 +20,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use bookrack_config::{Config, ConfigError, LibrarySelection, LogConfig};
+use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
+use bookrack_runtime::cmd::libraries::CopyMode;
+use bookrack_runtime::cmd::metadata::WriteMetadataAction;
 
 /// Trailing block shown by `bookrack --help`. Names the environment
 /// variables that select the library and the embed backend, and the
@@ -244,8 +241,8 @@ pub(crate) enum LibrariesAction {
         data_dir: std::path::PathBuf,
         /// How the envelope store is shared. `hardlink` (default)
         /// keeps disk usage flat; `copy` duplicates bytes outright.
-        #[arg(long, value_enum, default_value_t = cmd::libraries::CopyMode::Hardlink)]
-        copy_mode: cmd::libraries::CopyMode,
+        #[arg(long, value_enum, default_value_t = CopyMode::Hardlink)]
+        copy_mode: CopyMode,
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -360,84 +357,6 @@ pub(crate) enum CorpusAction {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
-    },
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub(crate) enum WriteMetadataAction {
-    /// Set (or change) one metadata field's value.
-    Set {
-        /// The intake id of the book.
-        book: i64,
-        /// The field column on `node_publication_attrs` to write
-        /// (e.g. `title`, `publisher`, `year`, `language`).
-        field: String,
-        /// The new value.
-        value: String,
-    },
-    /// Clear an override, falling back to the extracted base value.
-    Clear {
-        /// The intake id of the book.
-        book: i64,
-        /// The field whose override is removed.
-        field: String,
-    },
-    /// Acknowledge a metadata gap and let the book through, signing
-    /// the override with a reason for the audit trail.
-    Ack {
-        /// The intake id of the book.
-        book: i64,
-        /// Why the gap was accepted.
-        #[arg(long)]
-        reason: String,
-    },
-    /// Mark the record reviewed and correct. A human or LLM uses this
-    /// after confirming the metadata; the pipeline never writes this
-    /// status itself.
-    Approve {
-        /// The intake id of the book.
-        book: i64,
-        /// Optional note for the audit trail.
-        #[arg(long)]
-        reason: Option<String>,
-    },
-    /// Reject the book outright (e.g. wrong source file, irrecoverable
-    /// metadata). The book stays ingested but downstream consumers can
-    /// filter on the rejected status.
-    Reject {
-        /// The intake id of the book.
-        book: i64,
-        /// Why the book was rejected.
-        #[arg(long)]
-        reason: String,
-    },
-    /// Resume CHUNK→EMBED for a book held at the metadata gate.
-    Advance {
-        /// The intake id of the book.
-        book: i64,
-    },
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub(crate) enum AuditProfileAction {
-    /// Print every built-in profile name, one per line.
-    List {
-        /// Emit machine-readable JSON instead of the plain listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Pretty-print the effective toggle settings for a named profile.
-    Show {
-        /// Built-in profile name (`default`, `trust-source`, `strict`).
-        name: String,
-    },
-    /// List the sub-section names that differ between two named profiles
-    /// and pretty-print each side's settings for those sections.
-    Diff {
-        /// First profile name.
-        a: String,
-        /// Second profile name.
-        b: String,
     },
 }
 
@@ -557,7 +476,7 @@ async fn run() -> Result<()> {
     // before resolve for the same reason: it is the wizard that turns
     // an unconfigured install into a configured one.
     if let Command::Doctor { json } = &cli.command {
-        return doctor::run(&cli.selection(), *json).await;
+        return bookrack_runtime::doctor::run(&cli.selection(), *json).await;
     }
     if let Command::Init {
         data_dir,
@@ -623,22 +542,29 @@ async fn run() -> Result<()> {
 
     let _profile_name = cli.audit_profile.clone();
     match cli.command {
-        Command::AuditProfile { action } => cmd::audit_profile::run(action),
-        Command::Verify => cmd::verify::run(&cfg),
+        Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
+        Command::Verify => bookrack_runtime::cmd::verify::run(&cfg),
         Command::Libraries { action } => match action {
-            LibrariesAction::List { json } => cmd::libraries::list(json),
+            LibrariesAction::List { json } => bookrack_runtime::cmd::libraries::list(json),
             LibrariesAction::Fork {
                 new_name,
                 data_dir,
                 copy_mode,
                 yes,
-            } => cmd::libraries::fork(&cfg, &new_name, &data_dir, copy_mode, yes),
+            } => bookrack_runtime::cmd::libraries::fork(
+                &cfg,
+                &new_name,
+                &data_dir,
+                copy_mode,
+                yes,
+                util::confirm,
+            ),
         },
         Command::Diagnose {
             out,
             days,
             no_scrub,
-        } => cmd::diagnose::run(&cfg, out, days, no_scrub),
+        } => bookrack_runtime::cmd::diagnose::run(&cfg, out, days, no_scrub),
         Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
         Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
         Command::Run { .. } => unreachable!("Run is dispatched before Config::resolve"),
@@ -853,7 +779,7 @@ mod tests {
         // verify is supposed to only read).
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = Config::new(tmp.path().to_path_buf(), "http://localhost:0".to_string());
-        let report = crate::cmd::verify::build_verify_report(&cfg);
+        let report = bookrack_runtime::cmd::verify::build_verify_report(&cfg);
         assert!(report.not_initialised);
         assert!(!report.catalog_schema_ok);
         assert!(report.catalog_schema_error.is_none());
@@ -924,7 +850,7 @@ mod tests {
         std::fs::create_dir_all(data_dir.join("logs")).unwrap();
         let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
         let out = tmp.path().join("custom.tar.gz");
-        crate::cmd::diagnose::run(&cfg, Some(out.clone()), 7, false).expect("collect");
+        bookrack_runtime::cmd::diagnose::run(&cfg, Some(out.clone()), 7, false).expect("collect");
         assert!(out.exists());
     }
 }

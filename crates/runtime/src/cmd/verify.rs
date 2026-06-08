@@ -22,7 +22,7 @@ pub fn run(cfg: &Config) -> Result<()> {
 /// directory whose `catalog.db` does not yet exist is reported as
 /// `not_initialised` and no stores are opened, so verify stays
 /// side-effect-free on a freshly created directory.
-pub(crate) fn build_verify_report(cfg: &Config) -> render::VerifyReport {
+pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
     let mut report = render::VerifyReport::default();
 
     if !cfg.catalog_db().exists() {

@@ -642,36 +642,29 @@ name = "bookrack-cli"
 version = "0.4.0-dev"
 dependencies = [
  "anyhow",
- "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-diagnose",
  "bookrack-embed",
- "bookrack-extract",
  "bookrack-ingest",
  "bookrack-mcp",
- "bookrack-metadata",
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
- "bookrack-search",
+ "bookrack-runtime",
  "bookrack-session",
- "bookrack-vectors",
- "chrono",
  "clap",
  "reedline",
  "reqwest 0.13.4",
  "rmcp",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "shlex 2.0.1",
  "tempfile",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -800,6 +793,7 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
+ "bookrack-runtime",
  "bookrack-session",
  "clap",
  "rmcp",
@@ -884,6 +878,36 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bookrack-runtime"
+version = "0.4.0-dev"
+dependencies = [
+ "anyhow",
+ "bookrack-audit-profile",
+ "bookrack-catalog",
+ "bookrack-config",
+ "bookrack-core",
+ "bookrack-corpus",
+ "bookrack-diagnose",
+ "bookrack-embed",
+ "bookrack-ingest",
+ "bookrack-metadata",
+ "bookrack-obs",
+ "bookrack-ops",
+ "bookrack-query",
+ "bookrack-session",
+ "bookrack-vectors",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

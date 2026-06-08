@@ -19,23 +19,17 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use bookrack_catalog::Catalog;
-use bookrack_config::{
-    Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
-};
+use bookrack_config::{Config, LibrarySelection, LogConfig};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ingest::IngestParams;
 use bookrack_obs::LogStreamHandle;
-use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{Caller, Ops};
-use bookrack_query::Library;
-use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
+use bookrack_ops::Caller;
+use bookrack_ops::registry::LibraryRegistry;
+use bookrack_runtime::queue::{self, Priority, QueueState};
+use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use clap::CommandFactory;
 use clap::Parser;
 use reedline::{
@@ -43,8 +37,6 @@ use reedline::{
     PromptHistorySearchStatus, Reedline, Signal,
 };
 use tokio::sync::broadcast;
-
-use bookrack_cli::queue::{self, Priority, QueueState};
 
 /// CLI inputs for [`run_daemon`]. Parsed from the `Run` clap variant.
 pub struct RunOpts {
@@ -63,223 +55,101 @@ pub struct RunOpts {
     pub runtime_dir: Option<PathBuf>,
 }
 
-/// Run the daemon-REPL process to completion.
-///
-/// Returns once the shutdown broadcast fires (signal, future REPL
-/// `exit`, or an MCP listener that bailed out on its own) and every
-/// spawned task has joined.
 pub async fn run_daemon(opts: RunOpts) -> Result<()> {
-    let runtime_dir =
-        resolve_runtime_dir(opts.runtime_dir.as_deref()).context("resolve BOOKRACK_RUNTIME_DIR")?;
-    std::fs::create_dir_all(&runtime_dir).with_context(|| {
-        format!(
-            "create runtime directory {} for the bookrack session lock",
-            runtime_dir.display()
-        )
-    })?;
+    let runtime_dir = bookrack_session::resolve_runtime_dir(opts.runtime_dir.as_deref())
+        .context("resolve BOOKRACK_RUNTIME_DIR")?;
+    let lock_path = runtime_dir.join(bookrack_session::tty_lock_name());
 
-    let mcp_addr = if opts.no_mcp {
-        None
-    } else {
-        Some(
-            opts.mcp_addr
-                .map(|a| a.to_string())
-                .unwrap_or_else(|| McpConfig::from_env().addr),
-        )
+    let runtime_opts = RuntimeOpts {
+        selection: opts.selection,
+        runtime_dir: opts.runtime_dir,
+        mcp_addr: opts.mcp_addr,
+        no_mcp: opts.no_mcp,
+        spawn_queue_worker: true,
+        log_config: LogConfig::from_env(),
+        caller: Caller::cli(),
     };
 
-    let lock_path = runtime_dir.join(tty_lock_name());
-    let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
-    let _tty_lock = match TtyLock::acquire(&lock_path, std::process::id(), &mcp_label) {
-        Ok(lock) => lock,
-        Err(err) => return handle_lock_conflict(err, &lock_path),
+    let runtime = match DaemonRuntime::start(runtime_opts).await {
+        Ok(rt) => rt,
+        Err(err) => {
+            if err.chain().any(|cause| {
+                cause
+                    .to_string()
+                    .contains("bookrack session already running")
+            }) {
+                return handle_lock_conflict(err, &lock_path);
+            }
+            return Err(err);
+        }
     };
-    let started_at = Instant::now();
-    tracing::info!(
-        path = %lock_path.display(),
-        mcp = %mcp_label,
-        "bookrack session lock acquired",
-    );
 
-    let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
-    let (_obs_guard, log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
+    let mcp_handle = spawn_mcp_listener(&runtime);
+    let repl_handle = spawn_repl_if_tty(&runtime);
 
-    let embed_cfg = EmbedConfig::from_env();
-    let embedder = OllamaEmbedClient::new(
-        cfg.ollama_url(),
-        &embed_cfg.model,
-        embed_cfg.request_timeout,
-        embed_cfg.max_retries,
-        embed_cfg.backoff_base,
-    )
-    .context("build embedding client")?;
+    runtime.run_until_shutdown(mcp_handle, repl_handle).await
+}
 
-    if cfg.catalog_db().exists() {
-        Catalog::open_read_only(&cfg.catalog_db())
-            .context("preflight catalog schema check failed")?;
+/// Spawn the MCP listener as a session-scoped task. Returns `None` for
+/// `--no-mcp`, which Phase 0 surfaces by setting `mcp_label` to
+/// `"disabled"` inside the [`DaemonRuntime`].
+fn spawn_mcp_listener(runtime: &DaemonRuntime) -> Option<tokio::task::JoinHandle<Result<()>>> {
+    if runtime.mcp_label == "disabled" {
+        tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
+        return None;
     }
+    let registry = Arc::clone(&runtime.registry);
+    let info_context = runtime.info_context.clone();
+    let started_at = runtime.started_at;
+    let log_stream = runtime.log_stream.clone();
+    let queue_state = Arc::clone(&runtime.queue_state);
+    let shutdown_tx = runtime.shutdown_tx.clone();
+    let addr = runtime.mcp_label.clone();
+    let rx = runtime.shutdown_tx.subscribe();
+    Some(tokio::spawn(async move {
+        bookrack_mcp::serve(
+            registry,
+            info_context,
+            started_at,
+            log_stream,
+            queue_state,
+            shutdown_tx,
+            &addr,
+            rx,
+        )
+        .await
+    }))
+}
 
-    let search_cfg = SearchConfig::from_env();
-    let library = Library::open(
-        cfg.corpus_db(),
-        cfg.catalog_db(),
-        &cfg.lancedb_dir(),
-        embedder,
-        embed_cfg.model.clone(),
-        search_cfg.top_k,
-    )
-    .await
-    .context("open query library")?;
-
-    let ops = Ops::with_library(
-        library,
-        cfg.corpus_db(),
-        cfg.catalog_db(),
-        &cfg.lancedb_dir(),
-        cfg.books_dir(),
-        cfg.backup_dir(),
-        Caller::cli(),
-    );
-
-    let library_name = cfg.library().unwrap_or("default").to_string();
-    let handle = LibraryHandle::new(&library_name, ops);
-    let registry = LibraryRegistry::single(handle);
-    tracing::info!(library = %library_name, "library registry warmed up");
-
-    let info_context = LibraryInfoContext {
-        data_dir: cfg.data_dir().display().to_string(),
-        library_name: cfg.library().map(str::to_string),
-        resolution_source: resolution_source_label(cfg.source()).to_string(),
-        ollama_url: cfg.ollama_url().to_string(),
-        embed_model_configured: embed_cfg.model.clone(),
-        mcp_addr: mcp_label.clone(),
-    };
-
-    let (shutdown_tx, _) = broadcast::channel::<()>(8);
-
-    let signal_triggered = Arc::new(AtomicBool::new(false));
-    let signal_handle = tokio::spawn(signal_task(
-        shutdown_tx.clone(),
-        Arc::clone(&signal_triggered),
-    ));
-
-    // Persistent ingest queue: the file lives under the data root so
-    // the next session resumes its pending jobs. The Mutex guards both
-    // the REPL command surface (add / cancel / pause) and the worker
-    // pull/outcome loop.
-    let queue_state_path = cfg.data_dir().join(".bookrack-queue.json");
-    let queue_state = Arc::new(Mutex::new(
-        queue::load(&queue_state_path).context("load persistent queue state")?,
-    ));
-    let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
-    let worker_handle = {
-        let registry = Arc::clone(&registry);
-        let state = Arc::clone(&queue_state);
-        let state_path = queue_state_path.clone();
-        let params_template = queue_params_template.clone();
-        let shutdown_rx = shutdown_tx.subscribe();
-        let library_default = library_name.clone();
-        tokio::spawn(queue::worker_loop(
-            state_path,
-            state,
-            shutdown_rx,
-            move |job| {
-                let registry = Arc::clone(&registry);
-                let params_template = params_template.clone();
-                let library_default = library_default.clone();
-                // The ingest body holds non-Send Catalog / Corpus
-                // handles across `.await`, so the future is not Send.
-                // Park the whole call on a blocking worker and drive
-                // it with `Handle::block_on`: the outer JoinHandle is
-                // Send, and the blocking thread keeps the !Send chain
-                // off the runtime workers.
-                async move {
-                    tokio::task::spawn_blocking(move || {
-                        let runtime = tokio::runtime::Handle::current();
-                        let library = if job.library.is_empty() {
-                            library_default
-                        } else {
-                            job.library.clone()
-                        };
-                        let mut params = params_template;
-                        params.force = job.force;
-                        runtime.block_on(async move {
-                            let handle = registry
-                                .get(Some(&library))
-                                .map_err(|e| format!("registry: {e}"))?;
-                            handle
-                                .ingest_book(&job.path, &params)
-                                .await
-                                .map_err(|e| format!("ingest: {e:#}"))?;
-                            Ok::<(), String>(())
-                        })
-                    })
-                    .await
-                    .map_err(|e| format!("queue worker join: {e}"))?
-                }
-            },
-        ))
-    };
-
-    let mcp_handle = match mcp_addr {
-        Some(addr) => {
-            let registry = Arc::clone(&registry);
-            let rx = shutdown_tx.subscribe();
-            let log_stream = log_stream.clone();
-            let queue_state_for_mcp = Arc::clone(&queue_state);
-            let shutdown_tx_for_mcp = shutdown_tx.clone();
-            Some(tokio::spawn(async move {
-                bookrack_mcp::serve(
-                    registry,
-                    info_context,
-                    started_at,
-                    log_stream,
-                    queue_state_for_mcp,
-                    shutdown_tx_for_mcp,
-                    &addr,
-                    rx,
-                )
-                .await
-            }))
-        }
-        None => {
-            tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
-            None
-        }
-    };
-
-    // Foreground task: reedline REPL on a `spawn_blocking` thread. The
-    // synchronous read_line blocks an OS thread — keeping it off the
-    // async runtime is critical (a parked async task would starve the
-    // signal listener and the MCP server). When stdin is not a TTY
-    // (launched without a controlling terminal: a wrapper script, a
-    // future systemd unit, `bookrack run </dev/null`), park a no-op
-    // blocking thread instead; shutdown is then driven by signals or
-    // the `session.shutdown` MCP tool.
-    let repl_handle = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        let mcp_label_for_repl = mcp_label.clone();
-        let lock_path_for_repl = lock_path.clone();
-        let runtime_dir_for_repl = runtime_dir.clone();
-        let registry_for_repl = Arc::clone(&registry);
-        let shutdown_tx_for_repl = shutdown_tx.clone();
-        let queue_state_for_repl = Arc::clone(&queue_state);
-        let queue_path_for_repl = queue_state_path.clone();
-        let library_default_for_repl = library_name.clone();
-        let cfg_for_repl = Arc::clone(&cfg);
-        let log_stream_for_repl = log_stream.clone();
+/// Spawn the foreground task: the reedline REPL on a TTY, an
+/// `std::thread::park` on stdin redirection. The synchronous read_line
+/// blocks an OS thread — keeping it off the async runtime is critical.
+fn spawn_repl_if_tty(runtime: &DaemonRuntime) -> tokio::task::JoinHandle<Result<()>> {
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let mcp_label = runtime.mcp_label.clone();
+        let lock_path = runtime.lock_path.clone();
+        let runtime_dir = runtime.runtime_dir.clone();
+        let registry = Arc::clone(&runtime.registry);
+        let shutdown_tx = runtime.shutdown_tx.clone();
+        let queue_state = Arc::clone(&runtime.queue_state);
+        let queue_state_path = runtime.queue_state_path.clone();
+        let library_default = runtime.cfg.library().unwrap_or("default").to_string();
+        let cfg = Arc::clone(&runtime.cfg);
+        let started_at = runtime.started_at;
+        let log_stream = runtime.log_stream.clone();
         tokio::task::spawn_blocking(move || {
             repl_loop(
-                registry_for_repl,
-                shutdown_tx_for_repl,
-                runtime_dir_for_repl,
-                lock_path_for_repl,
-                mcp_label_for_repl,
-                queue_state_for_repl,
-                queue_path_for_repl,
-                library_default_for_repl,
-                cfg_for_repl,
+                registry,
+                shutdown_tx,
+                runtime_dir,
+                lock_path,
+                mcp_label,
+                queue_state,
+                queue_state_path,
+                library_default,
+                cfg,
                 started_at,
-                log_stream_for_repl,
+                log_stream,
             )
         })
     } else {
@@ -291,47 +161,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             std::thread::park();
             Ok(())
         })
-    };
-
-    // Wait for any subscriber to signal shutdown — the REPL on
-    // `exit` / `Ctrl-D`, the signal listener on SIGINT / SIGTERM /
-    // SIGHUP, or the MCP task if it bails out on its own.
-    let mut foreground_rx = shutdown_tx.subscribe();
-    let _ = foreground_rx.recv().await;
-    tracing::info!("shutdown signalled, joining session tasks");
-
-    if let Some(handle) = mcp_handle {
-        match tokio::time::timeout(Duration::from_secs(3), handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(err))) => tracing::warn!(error = %err, "MCP task returned error"),
-            Ok(Err(err)) => tracing::warn!(error = %err, "MCP task join failed"),
-            Err(_) => tracing::warn!("MCP task did not exit within 3s; abandoning"),
-        }
     }
-    match tokio::time::timeout(Duration::from_secs(3), worker_handle).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(err))) => tracing::warn!(error = %err, "queue worker returned error"),
-        Ok(Err(err)) => tracing::warn!(error = %err, "queue worker join failed"),
-        Err(_) => tracing::warn!("queue worker did not exit within 3s; abandoning"),
-    }
-    signal_handle.abort();
-    // REPL thread may still be blocked on read_line if shutdown came
-    // from a signal — abort the join handle (the OS thread is reaped
-    // on process exit) and don't wait for it.
-    repl_handle.abort();
-
-    // Signal-driven shutdown leaves the reedline thread parked inside
-    // its sync `read_line`, holding a blocking-pool worker the runtime
-    // cannot cancel. Letting `main` return would have tokio's Runtime
-    // drop wait on that worker forever (observed under SIGTERM and
-    // SIGHUP). `std::process::exit` skips the Runtime drop and lets
-    // the OS reap the blocking thread when the process tears down.
-    // REPL-driven `exit` / Ctrl-D returns normally because read_line
-    // has already returned and the blocking worker is idle.
-    if signal_triggered.load(Ordering::SeqCst) {
-        std::process::exit(0);
-    }
-    Ok(())
 }
 
 /// Print a friendly message when the session lock is already held and,
@@ -367,77 +197,6 @@ fn handle_lock_conflict(err: anyhow::Error, lock_path: &Path) -> Result<()> {
     let _ = std::io::stderr().flush();
     let mut buf = String::new();
     let _ = std::io::stdin().lock().read_line(&mut buf);
-    Ok(())
-}
-
-/// Build the [`IngestParams`] template the queue worker reuses for
-/// every job. Per-job toggles like `force` are overwritten inside the
-/// runner closure; everything else — the embed model knobs, the audit
-/// data overlay, the heading patterns, the active profile — is loaded
-/// once at daemon startup so the worker does not re-read the data root
-/// on every job.
-fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestParams {
-    IngestParams {
-        embed: embed_cfg.clone(),
-        hold_for_metadata: false,
-        force: false,
-        audit_data: crate::audit_helpers::load_audit_data(cfg),
-        audit_profile: crate::audit_helpers::load_audit_profile(cfg, None),
-        heading_patterns: crate::audit_helpers::load_heading_patterns(cfg),
-        ..Default::default()
-    }
-}
-
-fn resolution_source_label(source: ResolutionSource) -> &'static str {
-    match source {
-        ResolutionSource::DataDirFlag => "--data-dir flag",
-        ResolutionSource::LibraryFlag => "--library flag",
-        ResolutionSource::EnvVar => "BOOKRACK_DATA_DIR env",
-        ResolutionSource::PortableExeNeighbor => "portable layout",
-        ResolutionSource::RegistryDefault => "registry default",
-        ResolutionSource::DefaultRegistryDefault => "default registry default",
-        ResolutionSource::Explicit => "explicit",
-    }
-}
-
-/// Aggregate the platform's shutdown signals onto the shared broadcast.
-///
-/// Unix listens for SIGINT, SIGTERM, and SIGHUP — the third covers
-/// the "terminal window closed" path, which is the primary way the
-/// session ends today. Windows listens for Ctrl-C and the close event.
-///
-/// Sets `triggered` to `true` before forwarding the broadcast so the
-/// caller can distinguish a signal-driven shutdown — where the
-/// blocking reedline thread is still parked inside its sync read_line
-/// and the tokio Runtime drop would wait for it forever — from a
-/// REPL-driven `exit` / Ctrl-D path that returns cleanly.
-async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBool>) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigint = signal(SignalKind::interrupt()).context("install SIGINT handler")?;
-        let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;
-        let mut sighup = signal(SignalKind::hangup()).context("install SIGHUP handler")?;
-        tokio::select! {
-            _ = sigint.recv() => tracing::info!("received SIGINT"),
-            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
-            _ = sighup.recv() => tracing::info!("received SIGHUP"),
-        }
-    }
-    #[cfg(windows)]
-    {
-        let mut close =
-            tokio::signal::windows::ctrl_close().context("install Ctrl-Close handler")?;
-        tokio::select! {
-            res = tokio::signal::ctrl_c() => {
-                res.context("await Ctrl-C")?;
-                tracing::info!("received Ctrl-C");
-            }
-            _ = close.recv() => tracing::info!("received Ctrl-Close"),
-        }
-    }
-    triggered.store(true, Ordering::SeqCst);
-    let _ = shutdown_tx.send(());
     Ok(())
 }
 
@@ -712,7 +471,7 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             recursive,
             hold_for_metadata,
             force,
-        } => rt.block_on(crate::cmd::ingest::run(
+        } => rt.block_on(bookrack_runtime::cmd::ingest::run(
             cfg_ref,
             &path,
             recursive,
@@ -726,7 +485,7 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 from_pdf,
                 expected_pages,
                 allow_partial,
-            } => rt.block_on(crate::cmd::intake_ocr::run(
+            } => rt.block_on(bookrack_runtime::cmd::intake_ocr::run(
                 cfg_ref,
                 &ocr_md,
                 &from_pdf,
@@ -735,9 +494,9 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 None,
             )),
         },
-        ReplCommand::Metadata { action } => {
-            rt.block_on(crate::cmd::metadata::run_write(cfg_ref, action, None))
-        }
+        ReplCommand::Metadata { action } => rt.block_on(
+            bookrack_runtime::cmd::metadata::run_write(cfg_ref, action, None),
+        ),
         ReplCommand::Vectors { action } => match action {
             crate::WriteVectorsAction::Rebuild {
                 kind,
@@ -746,7 +505,7 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 num_bits,
                 nprobes,
                 refine_factor,
-            } => rt.block_on(crate::cmd::vectors::rebuild(
+            } => rt.block_on(bookrack_runtime::cmd::vectors::rebuild(
                 cfg_ref,
                 kind.as_deref(),
                 num_partitions,
@@ -755,18 +514,28 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 nprobes,
                 refine_factor,
             )),
-            crate::WriteVectorsAction::Drop => rt.block_on(crate::cmd::vectors::drop(cfg_ref)),
+            crate::WriteVectorsAction::Drop => {
+                rt.block_on(bookrack_runtime::cmd::vectors::drop(cfg_ref))
+            }
             crate::WriteVectorsAction::Reembed {
                 book,
                 stale_only,
                 dry_run,
                 yes,
-            } => rt.block_on(crate::cmd::vectors::reembed(
-                cfg_ref, book, stale_only, dry_run, yes, None,
+            } => rt.block_on(bookrack_runtime::cmd::vectors::reembed(
+                cfg_ref,
+                book,
+                stale_only,
+                dry_run,
+                yes,
+                None,
+                crate::util::confirm,
             )),
-            crate::WriteVectorsAction::Reset { yes, resume } => {
-                rt.block_on(crate::cmd::vectors::reset(cfg_ref, yes, resume))
-            }
+            crate::WriteVectorsAction::Reset { yes, resume } => rt.block_on(
+                bookrack_runtime::cmd::vectors::reset(cfg_ref, yes, resume, |prompt| {
+                    crate::util::confirm_token(prompt, "RESET")
+                }),
+            ),
         },
         ReplCommand::Corpus { action } => match action {
             crate::CorpusAction::Rebuild {
@@ -775,7 +544,7 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 stale_only,
                 dry_run,
                 yes,
-            } => rt.block_on(crate::cmd::corpus::rebuild(
+            } => rt.block_on(bookrack_runtime::cmd::corpus::rebuild(
                 cfg_ref,
                 include_vectors,
                 book,
@@ -783,19 +552,22 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 dry_run,
                 yes,
                 None,
+                crate::util::confirm,
             )),
         },
         ReplCommand::Stamps { action } => match action {
-            crate::StampsAction::Reconcile => rt.block_on(crate::cmd::stamps::reconcile(cfg_ref)),
+            crate::StampsAction::Reconcile => {
+                rt.block_on(bookrack_runtime::cmd::stamps::reconcile(cfg_ref))
+            }
         },
         ReplCommand::Remove {
             intake_id,
             sha,
             dry_run,
             yes,
-        } => rt.block_on(crate::cmd::remove::run(
+        } => rt.block_on(bookrack_runtime::cmd::remove::run(
             cfg_ref,
-            crate::cmd::remove::RemoveArgs {
+            bookrack_runtime::cmd::remove::RemoveArgs {
                 intake_id,
                 sha,
                 dry_run,
@@ -807,7 +579,14 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             out,
             stdout,
             no_chunk,
-        } => crate::cmd::dryrun::run(cfg_ref, &path, out.as_deref(), stdout, no_chunk, None),
+        } => bookrack_runtime::cmd::dryrun::run(
+            cfg_ref,
+            &path,
+            out.as_deref(),
+            stdout,
+            no_chunk,
+            None,
+        ),
     };
     if let Err(err) = result {
         eprintln!("bookrack: {err:#}");
