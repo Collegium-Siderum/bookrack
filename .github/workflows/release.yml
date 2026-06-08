@@ -134,28 +134,65 @@ jobs:
           stage="bookrack-${version}-${{ matrix.target }}"
           mkdir -p "dist/${stage}"
 
+          # macOS lays the binaries into a Bookrack.app bundle so the
+          # tarball can be double-clicked; Windows and Linux keep the
+          # flat layout and add a small launcher next to the binaries.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            payload_dir="dist/${stage}/Bookrack.app/Contents/Resources"
+            macos_dir="dist/${stage}/Bookrack.app/Contents/MacOS"
+            mkdir -p "${payload_dir}" "${macos_dir}"
+          else
+            payload_dir="dist/${stage}"
+          fi
+
           # Native binaries
           bin_suffix=""
           if [ "${{ runner.os }}" = "Windows" ]; then bin_suffix=".exe"; fi
-          cp "target/${{ matrix.target }}/release/bookrack${bin_suffix}" "dist/${stage}/"
-          cp "target/${{ matrix.target }}/release/bookrack-mcp${bin_suffix}" "dist/${stage}/"
+          cp "target/${{ matrix.target }}/release/bookrack${bin_suffix}" "${payload_dir}/"
+          cp "target/${{ matrix.target }}/release/bookrack-mcp${bin_suffix}" "${payload_dir}/"
 
           # PDFium loaded by the adapter from the binary's own directory
           # when BOOKRACK_PDFIUM_LIB is unset, so place it beside the
           # binaries inside the tarball.
           cp "pdfium-extracted/${{ matrix.pdfium_path_in_archive }}" \
-             "dist/${stage}/${{ matrix.pdfium_lib_name }}"
+             "${payload_dir}/${{ matrix.pdfium_lib_name }}"
 
           # Project documentation and license
-          cp LICENSE README.md CHANGELOG.md "dist/${stage}/"
+          cp LICENSE README.md CHANGELOG.md "${payload_dir}/"
 
           # PDFium upstream license (the archives ship one). The PDFium
           # static-link bundle (FreeType, LCMS2, libjpeg-turbo, libpng,
           # zlib, libtiff, OpenJPEG, etc.) is permissively licensed; the
           # archive's LICENSE file carries every required attribution.
           if [ -f pdfium-extracted/LICENSE ]; then
-            cp pdfium-extracted/LICENSE "dist/${stage}/LICENSE-PDFIUM"
+            cp pdfium-extracted/LICENSE "${payload_dir}/LICENSE-PDFIUM"
           fi
+
+          # Platform launcher: each one is the double-click target the
+          # user runs on a fresh install.
+          case "${{ runner.os }}" in
+            macOS)
+              sed -e "s/__VERSION__/${version}/g" \
+                packaging/macos/Info.plist \
+                > "dist/${stage}/Bookrack.app/Contents/Info.plist"
+              cp packaging/macos/bookrack-launcher "${macos_dir}/"
+              cp packaging/macos/bookrack-run.command "${payload_dir}/"
+              chmod 755 "${macos_dir}/bookrack-launcher" \
+                "${payload_dir}/bookrack-run.command" \
+                "${payload_dir}/bookrack" \
+                "${payload_dir}/bookrack-mcp"
+              # Ad-hoc sign so Gatekeeper sees a signature on the
+              # bundle. No paid Developer ID; first launch still
+              # requires right-click -> Open on a quarantined copy.
+              codesign --force --deep --sign - "dist/${stage}/Bookrack.app"
+              ;;
+            Windows)
+              cp "packaging/windows/Start Bookrack.cmd" "${payload_dir}/"
+              ;;
+            Linux)
+              cp packaging/linux/bookrack.desktop "${payload_dir}/"
+              ;;
+          esac
 
           # Pack
           cd dist
