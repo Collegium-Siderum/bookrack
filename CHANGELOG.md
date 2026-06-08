@@ -8,6 +8,118 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-08
+
+### Added
+
+- `bookrack run`: single-process daemon-REPL. Acquires the machine-wide
+  session lock, serves MCP over streamable-HTTP, hosts a reedline REPL
+  on the foreground tty, and drives a persistent ingest queue worker.
+- `bookrack exec`: out-of-process discovery surface. Reads the session
+  lock without opening any database; subcommands `info`, `tools`,
+  `library.<tool>`, `logs {tail,follow}` reach the live daemon over
+  MCP and SSE.
+- `session.*` MCP tool family: `session.info`, `session.queue_status`,
+  `session.logs_tail`, `session.shutdown`. Lets agent clients query
+  daemon state, follow logs, and request a graceful stop without
+  touching the host process directly.
+- `/session/logs` SSE endpoint on the MCP axum router for live log
+  streaming with a 15-second keep-alive.
+- Service-architecture log pipeline: file + broadcast ring buffer +
+  SSE. `LogConfig.console_level` controls the console layer
+  independently of the file layer; the headless `bookrack-mcp` binary
+  mirrors the file directive to the console for systemd / journalctl.
+- `bookrack vectors reset` and `bookrack libraries fork`: in-place
+  swap of the embedding model with a clean rebuild of the vector store
+  or a copy-on-write side-by-side library.
+- `bookrack run` on a fresh install offers the setup wizard inline
+  when no library is configured. Non-interactive callers still get the
+  resolver error and a pointer at `bookrack init`.
+- `bookrack run` runs headless when stdin is not a tty. Shutdown is
+  driven by signal handlers or the `session.shutdown` MCP tool.
+- `bookrack run` prints a five-line summary (pid, MCP address,
+  inspect-with, stop-with) when the session lock is already held, and
+  waits for Enter on an interactive tty so a launcher window does not
+  vanish.
+- Double-click launchers for all three release platforms:
+  `Bookrack.app` on macOS (ad-hoc signed, opens Terminal.app on the
+  Resources/bookrack-run.command stub), `Start Bookrack.cmd` on
+  Windows (runs `bookrack.exe run`, pauses on error), and
+  `bookrack.desktop` on Linux (asks the desktop environment to host
+  the daemon in its native terminal emulator).
+
+### Changed
+
+- The CLI surface is now eight external subcommands: `run`, `exec`,
+  `init`, `doctor`, `verify`, `diagnose`, `libraries`,
+  `audit-profile`. Every write command (`ingest`, `metadata.*`,
+  `vectors.*`, `corpus rebuild`, `intake ocr`) moves into the
+  `bookrack run` REPL; every read command (`books`, `find`,
+  `metadata show`, `pipeline-trail`, `vectors status`, `info`) moves
+  behind `bookrack exec library.<tool>`. Hard guarantee: every write
+  goes through the in-process scheduler, so no two processes ever
+  touch the catalog or vector store at the same time.
+- macOS release tarball now contains `Bookrack.app` rather than a
+  flat layout. Windows and Linux keep the flat layout.
+
+### Fixed
+
+- Queue worker pulls ingest jobs through the in-process
+  `LibraryRegistry`, so a `--force` reingest no longer needs an
+  external `bookrack` invocation.
+- Signal-driven shutdown (SIGINT / SIGTERM / SIGHUP) exits the
+  process within ~6s instead of parking on the reedline blocking
+  thread.
+- `Library.store` refreshes after every successful ingest, so a
+  newly-ingested book is searchable in the same daemon session.
+
+## [0.2.0] - 2026-06-07
+
+### Added
+
+- `bookrack run`: daemon-REPL skeleton. Acquires the session tty
+  lock, listens for signals, and serves MCP over streamable-HTTP on
+  the foreground process. The REPL hosts every write command moved
+  off the external CLI.
+- `bookrack exec`: out-of-process discovery surface that reads the
+  session lock to find the live daemon and calls MCP tools over HTTP.
+- `LibraryRegistry`: in-process scheduler that owns the only
+  `Catalog`, `Corpus`, and vector-store handles. MCP and the REPL
+  both route through it; `bookrack-mcp` opens its own scheduler when
+  run standalone.
+- Persistent ingest queue under `<data_root>/.bookrack-queue.json`.
+  Jobs survive across sessions and resume on the next `bookrack run`.
+- TXT chapter-heading detection across Sinographic, Latin, and
+  Germanic families; rules live under `<data_root>/audit-rules/`.
+- `library.list_metadata` and `library.vectors_status` read MCP
+  tools.
+- `bookrack audit-profile` top-level command for inspecting and
+  comparing audit profiles.
+
+### Changed
+
+- The external CLI shrinks to nine commands: every write command
+  (`ingest`, `metadata.*`, `corpus rebuild`, `vectors.*`, `intake
+  ocr`, `dryrun`) moves into the REPL grammar of `bookrack run`;
+  every library read command moves behind `bookrack exec
+  library.<tool>`.
+- HTML / quality / language thresholds previously hard-coded in
+  `bookrack-extract` are now externalised to `headings.toml` and
+  `audit_data.toml`. The extractor version stamp bumps accordingly.
+- `bookrack-mcp` acquires the session tty lock too, so a standalone
+  MCP daemon and a `bookrack run` daemon cannot start in the same
+  data root.
+
+### Fixed
+
+- `Library.store` refreshes after each ingest so a newly-ingested
+  book is searchable inside the same daemon session.
+- Signal-driven shutdown no longer parks on the reedline blocking
+  thread; the process exits within seconds of SIGINT / SIGTERM /
+  SIGHUP.
+- Broken-pipe panics from the obs layer silently exit instead of
+  printing a stack trace.
+
 ## [0.1.0-rc4] - 2026-06-05
 
 Re-cut of `v0.1.0-rc3` to drop the `x86_64-apple-darwin` build target.
@@ -115,5 +227,7 @@ is finalised; small-batch testing precedes a stable v0.1.0 cut.
   per-platform SHA-256 checksums (Linux x86_64, Windows x86_64, macOS
   arm64, macOS x86_64).
 
-[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.1.0-rc1...HEAD
+[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.1.0-rc4...v0.2.0
 [0.1.0-rc1]: https://github.com/Collegium-Siderum/bookrack/releases/tag/v0.1.0-rc1
