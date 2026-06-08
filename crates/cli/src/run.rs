@@ -248,32 +248,47 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     // Foreground task: reedline REPL on a `spawn_blocking` thread. The
     // synchronous read_line blocks an OS thread — keeping it off the
     // async runtime is critical (a parked async task would starve the
-    // signal listener and the MCP server).
-    let mcp_label_for_repl = mcp_label.clone();
-    let lock_path_for_repl = lock_path.clone();
-    let runtime_dir_for_repl = runtime_dir.clone();
-    let registry_for_repl = Arc::clone(&registry);
-    let shutdown_tx_for_repl = shutdown_tx.clone();
-    let queue_state_for_repl = Arc::clone(&queue_state);
-    let queue_path_for_repl = queue_state_path.clone();
-    let library_default_for_repl = library_name.clone();
-    let cfg_for_repl = Arc::clone(&cfg);
-    let log_stream_for_repl = log_stream.clone();
-    let repl_handle = tokio::task::spawn_blocking(move || {
-        repl_loop(
-            registry_for_repl,
-            shutdown_tx_for_repl,
-            runtime_dir_for_repl,
-            lock_path_for_repl,
-            mcp_label_for_repl,
-            queue_state_for_repl,
-            queue_path_for_repl,
-            library_default_for_repl,
-            cfg_for_repl,
-            started_at,
-            log_stream_for_repl,
-        )
-    });
+    // signal listener and the MCP server). When stdin is not a TTY
+    // (launched without a controlling terminal: a wrapper script, a
+    // future systemd unit, `bookrack run </dev/null`), park a no-op
+    // blocking thread instead; shutdown is then driven by signals or
+    // the `session.shutdown` MCP tool.
+    let repl_handle = if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        let mcp_label_for_repl = mcp_label.clone();
+        let lock_path_for_repl = lock_path.clone();
+        let runtime_dir_for_repl = runtime_dir.clone();
+        let registry_for_repl = Arc::clone(&registry);
+        let shutdown_tx_for_repl = shutdown_tx.clone();
+        let queue_state_for_repl = Arc::clone(&queue_state);
+        let queue_path_for_repl = queue_state_path.clone();
+        let library_default_for_repl = library_name.clone();
+        let cfg_for_repl = Arc::clone(&cfg);
+        let log_stream_for_repl = log_stream.clone();
+        tokio::task::spawn_blocking(move || {
+            repl_loop(
+                registry_for_repl,
+                shutdown_tx_for_repl,
+                runtime_dir_for_repl,
+                lock_path_for_repl,
+                mcp_label_for_repl,
+                queue_state_for_repl,
+                queue_path_for_repl,
+                library_default_for_repl,
+                cfg_for_repl,
+                started_at,
+                log_stream_for_repl,
+            )
+        })
+    } else {
+        tracing::info!(
+            "stdin is not a TTY; running headless. Stop with a signal or the \
+             `session.shutdown` MCP tool."
+        );
+        tokio::task::spawn_blocking(|| -> Result<()> {
+            std::thread::park();
+            Ok(())
+        })
+    };
 
     // Wait for any subscriber to signal shutdown — the REPL on
     // `exit` / `Ctrl-D`, the signal listener on SIGINT / SIGTERM /
