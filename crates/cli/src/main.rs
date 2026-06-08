@@ -25,7 +25,7 @@ mod util;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bookrack_config::{Config, LibrarySelection, LogConfig};
+use bookrack_config::{Config, ConfigError, LibrarySelection, LogConfig};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
 /// variables that select the library and the embed backend, and the
@@ -500,6 +500,43 @@ fn natural_name_hint(typed: &str) -> Option<String> {
     Some(suggestions.join(" or "))
 }
 
+/// Handle an unconfigured-install case when the operator typed
+/// `bookrack run`. On an interactive TTY, offer to launch the setup
+/// wizard inline; on a non-TTY, point at `bookrack init` and propagate
+/// the resolver error so the exit code is non-zero.
+async fn offer_init_or_exit(err: ConfigError) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        eprintln!("No library configured.");
+        eprintln!("Run `bookrack init` from an interactive terminal first.");
+        return Err(anyhow::Error::new(err));
+    }
+    eprintln!("No library configured.");
+    print!("Launch the setup wizard now? [Y/n]: ");
+    std::io::stdout().flush().context("flush stdout")?;
+    let mut buf = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut buf)
+        .context("read line")?;
+    let answer = buf.trim();
+    if !(answer.is_empty()
+        || answer.eq_ignore_ascii_case("y")
+        || answer.eq_ignore_ascii_case("yes"))
+    {
+        eprintln!("Aborted. Run `bookrack init` to configure, then `bookrack run`.");
+        return Err(anyhow::Error::new(err));
+    }
+    init::run(init::Args {
+        data_dir: None,
+        non_interactive: false,
+        force: false,
+        no_smoke: false,
+    })
+    .await
+    .context("setup wizard")
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     match run().await {
@@ -549,8 +586,22 @@ async fn run() -> Result<()> {
         runtime_dir,
     } = &cli.command
     {
+        let selection = cli.selection();
+        // Probe the resolver before acquiring the session lock. On an
+        // unconfigured install, the operator gets the wizard inline
+        // instead of an opaque "no library configured" bail -- the
+        // platform launchers count on `bookrack run` to be a
+        // self-contained first-run flow.
+        if let Err(err) = Config::resolve(&selection) {
+            match err {
+                ConfigError::MissingDataDir | ConfigError::DataDirNotFound(_) => {
+                    offer_init_or_exit(err).await?;
+                }
+                other => return Err(anyhow::Error::new(other).context("resolve configuration")),
+            }
+        }
         return run::run_daemon(run::RunOpts {
-            selection: cli.selection(),
+            selection,
             mcp_addr: *mcp_addr,
             no_mcp: *no_mcp,
             runtime_dir: runtime_dir.clone(),
