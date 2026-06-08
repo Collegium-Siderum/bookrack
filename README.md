@@ -10,9 +10,11 @@ clients like Claude Code can search the library as a tool.
 ## Status
 
 Pre-release. The end-to-end pipeline — extract, ingest, embed, and
-cited search — runs from the CLI and over the MCP server.
-Pre-production hardening (schema migrations, approximate-nearest-
-neighbour indexing, metadata) is still in progress.
+cited search — runs through the `bookrack run` daemon-REPL and over
+MCP. The vector store ships with an IVF index family (flat / SQ / PQ
+and the IVF-HNSW variants) selectable through `vectors rebuild`.
+Schema migrations and metadata workflows are still being hardened
+for production use.
 
 ## 30-second install
 
@@ -64,21 +66,31 @@ neighbour indexing, metadata) is still in progress.
    pointer in your platform's config directory so subsequent
    `bookrack` invocations work from any shell.
 
-4. **Ingest a book and start the MCP server.**
+4. **Start the session and ingest a book.** `bookrack run` opens a
+   daemon-REPL: it serves MCP over streamable-HTTP at
+   `127.0.0.1:8765/mcp` and hosts a foreground prompt where the write
+   commands live. Ingest from inside it; the daemon's queue worker
+   handles long runs without blocking the prompt.
 
    macOS / Linux:
 
    ```
-   ./bookrack ingest /path/to/book.epub
-   ./bookrack-mcp                          # 127.0.0.1:8765/mcp
+   ./bookrack run
+   bookrack> ingest /path/to/book.epub
    ```
 
    Windows (PowerShell):
 
    ```
-   .\bookrack.exe ingest path\to\book.epub
-   .\bookrack-mcp.exe                      # 127.0.0.1:8765/mcp
+   .\bookrack.exe run
+   bookrack> ingest path\to\book.epub
    ```
+
+   For a headless deployment — systemd unit, Windows service — run
+   `bookrack-mcp` instead; it serves the same MCP endpoint without a
+   REPL. The two are mutually exclusive against one library because
+   each holds the machine-wide session lock; stop one before starting
+   the other.
 
 ## Connecting an MCP client
 
@@ -140,37 +152,34 @@ time spent asleep, which makes a run that crossed an idle-sleep
 window read as far slower than it really was.
 
 On every desktop platform the default idle-sleep policy will suspend
-a backgrounded shell. Wrap a long ingest to opt out of idle sleep for
-its duration:
+a backgrounded shell. The natural unit to wrap is the `bookrack run`
+session itself: queue work from the REPL with `queue add <path>`,
+then leave the session open while the worker grinds away.
 
 macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
 ```
-caffeinate -i bookrack ingest <file>     # single book
-caffeinate -i bash bulk-ingest.sh        # batch driver
+caffeinate -i ./bookrack run
 ```
 
 Linux (systemd) — `systemd-inhibit` takes the same kind of lock the
 desktop environment uses for media playback:
 
 ```
-systemd-inhibit --what=idle --why="bookrack ingest" \
-    bookrack ingest <file>
-systemd-inhibit --what=idle --why="bookrack ingest" \
-    bash bulk-ingest.sh
+systemd-inhibit --what=idle --why="bookrack" ./bookrack run
 ```
 
 Windows (PowerShell) — flip the active power scheme's idle-sleep
-timeout to zero for the duration of the run, then restore it:
+timeout to zero for the duration of the session, then restore it:
 
 ```
 powercfg /change standby-timeout-ac 0
-.\bookrack.exe ingest path\to\book.epub
+.\bookrack.exe run
 powercfg /change standby-timeout-ac 30   # restore the previous value
 ```
 
 For an unattended overnight run, prefer a wrapper that runs the
-restore step even when the ingest exits with an error.
+restore step even when the session exits with an error.
 
 ### Audit profile
 
@@ -179,30 +188,31 @@ and the extract-side HTML / quality / language gates read every
 toggle and threshold from an audit profile. Three built-in presets
 ship with the binary:
 
-- `default` — the previous hard-coded behaviour, expressed as
-  toggles. Year range 1450–2100, every per-field signal active, every
-  TOC shape signal active.
+- `default` — every per-field signal active, every TOC shape signal
+  active, year range 1450–2100. This is the active profile at
+  ingest time.
 - `trust-source` — every toggle off. The audit substep is skipped
-  entirely. The pipeline still seeds the base attrs and writes a
-  `pending` review row stamped `bookrack-ingest:trust-source`, but no
-  signal weakens or strengthens any field. Use this when you want
-  bookrack to ingest "whatever the source says" and defer every
-  quality call to a human or downstream LLM reviewer.
+  entirely; the pipeline still seeds the base attrs and writes a
+  `pending` review row stamped `bookrack-ingest:trust-source`, but
+  no signal weakens or strengthens any field. Useful when ingesting
+  "whatever the source says" and deferring every quality call to a
+  human or downstream LLM reviewer.
 - `strict` — same toggle set as `default`; reserved for future
   upgrades that promote selected signals to higher severities.
 
-The active preset is selected per command with the global flag:
+Inspect them with the `audit-profile` subcommand:
 
 ```
-bookrack --audit-profile trust-source ingest <file>
-bookrack --audit-profile strict dryrun <dir>
+bookrack audit-profile list
+bookrack audit-profile show trust-source
+bookrack audit-profile diff default strict
 ```
 
-Without the flag, the shipped `default` profile is merged with an
-optional overlay at `<data_root>/audit-rules/audit_profile.local.toml`
-so a deployment can adjust individual thresholds, the HTML block /
-skip tag lists, the PDF text-quality cutoffs, or the BCP-47 script
-buckets without recompiling.
+The shipped `default` profile is merged with an optional overlay at
+`<data_root>/audit-rules/audit_profile.local.toml` so a deployment
+can adjust individual thresholds, the HTML block / skip tag lists,
+the PDF text-quality cutoffs, or the BCP-47 script buckets without
+recompiling.
 
 Two further on-disk schemas live under the same directory and follow
 the same shipped-default-plus-overlay merge:
@@ -230,25 +240,26 @@ An upgraded binary may read older derived data exactly, or it may
 need that data rebuilt before it can serve correct results. The
 trigger is whether the upgrade bumps a behaviour-sensitive
 dependency or a stamp constant. Three commands cover every refresh
-case:
+case; all run inside the `bookrack run` REPL because they take the
+write scheduler:
 
-- `bookrack corpus rebuild` — regenerate `corpus.db` from the v1
-  extraction envelopes. Use this after a corpus schema bump, or to
-  recover from a deleted `corpus.db` when the chunks table is still
-  on disk.
-- `bookrack vectors reembed` — re-run the active embedder over the
-  existing chunk text. Use this after bumping the embedding model,
-  the vector width, `CHUNK_VERSION`, or `NORMALIZE_VERSION`.
-- Re-ingest the source files — the only path that refreshes
-  `extractor_version`. Use this after bumping a behaviour-sensitive
-  parser dependency (`rbook`, `scraper`, `encoding_rs`,
-  `unicode-normalization`, `pdfium-render`).
+- `corpus rebuild` — regenerate `corpus.db` from the v1 extraction
+  envelopes. Use this after a corpus schema bump, or to recover
+  from a deleted `corpus.db` when the chunks table is still on disk.
+- `vectors reembed` — re-run the active embedder over the existing
+  chunk text. Use this after bumping the vector width,
+  `CHUNK_VERSION`, or `NORMALIZE_VERSION`. For an embedding-model
+  swap, see [Switching the embedding model](#switching-the-embedding-model).
+- `ingest <file> --force` — re-ingest a source file. The only path
+  that refreshes `extractor_version`. Use this after bumping a
+  behaviour-sensitive parser dependency (`rbook`, `scraper`,
+  `encoding_rs`, `unicode-normalization`, `pdfium-render`).
 
 The `--stale-only` flag on `corpus rebuild` and `vectors reembed`
 scopes the refresh to the partitions whose stored
 `extractor_version` lags this binary's. A reembed that touches every
 book is the most expensive refresh; schedule it for a low-activity
-window and wrap long runs with the platform's idle-sleep override
+window and wrap the session with the platform's idle-sleep override
 covered under [Long ingestions](#long-ingestions).
 
 See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
@@ -296,19 +307,21 @@ this file outside of `init`.
 embed and query refuse a mismatch. Editing the field on an existing
 library leaves the on-disk vectors orphaned. The supported swaps are:
 
-- **`bookrack libraries fork <name> --data-dir <path>`** — clone the
-  current library into a sibling under `<path>` (envelope store
+- **`bookrack libraries fork <name> --data-dir <path>`** — clone
+  the current library into a sibling under `<path>` (envelope store
   hardlinked, catalog + corpus snapshotted, vector store dropped),
-  then run `bookrack --library <name> vectors reset` against the
-  clone to rebuild under the new model. The original library stays
-  intact; throw the clone away if the new model is worse.
-- **`bookrack vectors reset`** — in-place: drops the chunks table
-  and re-embeds every book under the env-configured model. The old
-  vectors are unrecoverable. Use when disk space is tight or the
+  then start a `bookrack run` session against the clone
+  (`bookrack --library <name> run`) and execute `vectors reset` in
+  its REPL to rebuild under the new model. The original library
+  stays intact; throw the clone away if the new model is worse.
+  `libraries fork` is a top-level command; stop any `bookrack run`
+  session on the source library before invoking it.
+- **`vectors reset`** — REPL command, in place: drops the chunks
+  table and re-embeds every book under the env-configured model. The
+  old vectors are unrecoverable. Use when disk space is tight or the
   swap is settled.
 
-Both paths require the daemon to be stopped first. See
-[docs/UPGRADE.md](docs/UPGRADE.md#switching-the-embedding-model)
+See [docs/UPGRADE.md](docs/UPGRADE.md#switching-the-embedding-model)
 for the full procedure.
 
 ## License
