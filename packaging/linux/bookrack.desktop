@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Bookrack
+Comment=Local-first book RAG library
+Exec=sh -c 'cd "$(dirname %k)" && ./bookrack run; exec ${SHELL:-/bin/sh}'
+Terminal=true
+Categories=Office;Utility;
