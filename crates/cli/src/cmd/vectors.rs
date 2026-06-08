@@ -5,13 +5,13 @@
 //! `bookrack exec library.vectors_status`.
 
 use anyhow::{Context, Result};
-use bookrack_catalog::Catalog;
+use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::{Config, EmbedConfig};
-use bookrack_corpus::Corpus;
+use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
 
 use crate::embed_helpers::embedder;
-use crate::util::confirm;
+use crate::util::{confirm, confirm_token};
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
@@ -189,5 +189,113 @@ pub async fn drop(cfg: &Config) -> Result<()> {
         .await
         .context("drop ann index")?;
     println!("dropped: kind=brute-force");
+    Ok(())
+}
+
+/// Render `bookrack vectors reset` — drop the chunks table, clear the
+/// corpus stamps, and re-embed every book with the env-configured
+/// embedding model. The old vectors are unrecoverable. Use after
+/// switching `BOOKRACK_EMBED_MODEL`; for a non-destructive trial of a
+/// new model, use `libraries fork` instead.
+pub async fn reset(cfg: &Config, yes: bool, resume: bool) -> Result<()> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let embed_cfg = EmbedConfig::from_env();
+    let embedder_client = embedder(cfg, &embed_cfg)?;
+
+    let embedded_intakes = catalog
+        .intakes_with_status(IntakeStatus::Embedded)
+        .context("count embedded intakes")?;
+    let extracted_intakes = catalog
+        .intakes_with_status(IntakeStatus::Extracted)
+        .context("count extracted intakes")?;
+    let current_model = corpus
+        .meta_get(EMBED_MODEL_KEY)
+        .context("read embed_model stamp")?;
+    let current_dim = corpus
+        .meta_get(VECTOR_DIM_KEY)
+        .context("read vector_dim stamp")?;
+    let store_dim = ChunkStore::try_open(&lancedb_dir)
+        .await
+        .context("probe chunk store")?
+        .map(|s| s.dimension());
+
+    if resume {
+        if extracted_intakes.is_empty() {
+            println!(
+                "nothing to resume: no intakes are in the Extracted state.\n\
+                 If you meant to start a fresh reset, drop --resume."
+            );
+            return Ok(());
+        }
+        println!(
+            "resume reset: {} intake(s) in Extracted will be re-embedded with model '{}'.",
+            extracted_intakes.len(),
+            embed_cfg.model
+        );
+    } else {
+        println!("vectors reset plan:");
+        match (current_model.as_deref(), current_dim.as_deref()) {
+            (Some(m), Some(d)) => println!("  current library: model='{m}', dim={d}"),
+            _ => println!("  current library: no stamps recorded"),
+        }
+        match store_dim {
+            Some(d) => println!("  chunks table:    dim={d}"),
+            None => println!("  chunks table:    absent"),
+        }
+        println!(
+            "  target model:    '{}' (probed dim deferred to first embed)",
+            embed_cfg.model
+        );
+        println!(
+            "  affected:        {} Embedded intake(s) -> will be re-embedded",
+            embedded_intakes.len()
+        );
+        if !extracted_intakes.is_empty() {
+            println!(
+                "  also pending:    {} Extracted intake(s) already waiting",
+                extracted_intakes.len()
+            );
+        }
+        println!(
+            "This drops the chunks table, clears the corpus index stamps, and\n\
+             reembeds every book from the corpus node tree. The old vectors are\n\
+             unrecoverable. Restart the daemon after this completes so it picks\n\
+             up the new model."
+        );
+        let prompt = "Type RESET (exact, uppercase) to continue: ";
+        if !yes && !confirm_token(prompt, "RESET")? {
+            println!("aborted; no changes written");
+            return Ok(());
+        }
+    }
+
+    let report = bookrack_ingest::reset::reset_and_rechunk(
+        &catalog,
+        &corpus,
+        &lancedb_dir,
+        &embedder_client,
+        &embed_cfg,
+        resume,
+    )
+    .await
+    .context("reset_and_rechunk")?;
+
+    println!(
+        "reset complete: {} intake(s) re-embedded, {} chunk row(s) written",
+        report.intakes_reembedded, report.chunks_written,
+    );
+    if !report.skipped_empty.is_empty() {
+        println!("skipped (no prose leaves): {:?}", report.skipped_empty);
+    }
+    if let Some(failed) = report.failed_intake {
+        println!(
+            "intake {failed} failed; rerun with `bookrack vectors reset --resume` once the cause is addressed",
+        );
+    } else {
+        println!("restart the daemon so the new model takes effect.");
+    }
     Ok(())
 }

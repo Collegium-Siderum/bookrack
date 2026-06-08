@@ -230,6 +230,26 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         json: bool,
     },
+    /// Clone the current library into a sibling at a new data root,
+    /// share `books/` (envelope store) via hardlinks by default, and
+    /// register the new library so `--library <name>` resolves it.
+    /// The new library has no vector store; run `vectors reset`
+    /// against it to rebuild under whatever model the env points at.
+    Fork {
+        /// Short name to register in the library registry.
+        new_name: String,
+        /// Absolute path where the new data root lives. Must not
+        /// already contain a library.
+        #[arg(long)]
+        data_dir: std::path::PathBuf,
+        /// How the envelope store is shared. `hardlink` (default)
+        /// keeps disk usage flat; `copy` duplicates bytes outright.
+        #[arg(long, value_enum, default_value_t = cmd::libraries::CopyMode::Hardlink)]
+        copy_mode: cmd::libraries::CopyMode,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -270,7 +290,9 @@ pub(crate) enum WriteVectorsAction {
     /// Re-embed every (or a single) book's chunks in place: read the
     /// existing chunk rows back from LanceDB, drop their vectors, run
     /// them back through the active embedder, and write them as the
-    /// new vectors. Use after switching `embed_model` or `embed_dim`.
+    /// new vectors. Use when the chunking or normalization algorithm
+    /// bumped; for an embedding model swap use `libraries fork` or
+    /// `vectors reset`.
     Reembed {
         /// Restrict the reembed to one intake id. Without this flag,
         /// every intake currently in the `Embedded` state is reembedded.
@@ -289,6 +311,24 @@ pub(crate) enum WriteVectorsAction {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
+    },
+    /// Drop the chunks table, clear the corpus index stamps, and
+    /// re-derive every book's vectors with the env-configured
+    /// embedding model. Use after switching `BOOKRACK_EMBED_MODEL`.
+    /// The old vectors are unrecoverable; consider `libraries fork`
+    /// for a non-destructive trial first.
+    Reset {
+        /// Skip the destructive-action confirmation prompt. The
+        /// command still rejects the run if the typed sentinel is not
+        /// `RESET`, unless this flag is set.
+        #[arg(long)]
+        yes: bool,
+        /// Skip the destructive A-D steps and only re-embed any
+        /// intakes still in `Extracted`. Use after a `reset` that
+        /// aborted mid-run; refuses to run if the library does not
+        /// look like an interrupted reset.
+        #[arg(long)]
+        resume: bool,
     },
 }
 
@@ -536,6 +576,12 @@ async fn run() -> Result<()> {
         Command::Verify => cmd::verify::run(&cfg),
         Command::Libraries { action } => match action {
             LibrariesAction::List { json } => cmd::libraries::list(json),
+            LibrariesAction::Fork {
+                new_name,
+                data_dir,
+                copy_mode,
+                yes,
+            } => cmd::libraries::fork(&cfg, &new_name, &data_dir, copy_mode, yes),
         },
         Command::Diagnose {
             out,

@@ -441,6 +441,46 @@ impl ChunkStore {
         Ok(Some(ChunkStore { table, dim }))
     }
 
+    /// Drop the chunks table under `lancedb_dir` and remove the
+    /// `vectors_meta.json` sidecar in the same call.
+    ///
+    /// Use this when the next embed run must build the table with a
+    /// different vector dimension than the existing one — model swap is
+    /// the canonical case. The two side effects are coupled because the
+    /// ANN configuration in `vectors_meta.json` is tied to the
+    /// dimension that the table schema fixes; leaving one behind after
+    /// dropping the other yields an inconsistent intermediate state the
+    /// later open path cannot reason about.
+    ///
+    /// Idempotent: a missing directory, a missing table, and a missing
+    /// meta file are all silently accepted. Safe to call repeatedly,
+    /// either as a cleanup before reembedding or to recover from a
+    /// half-finished reset.
+    ///
+    /// This is an associated function rather than a method because the
+    /// caller may not hold a [`ChunkStore`] handle — and any handle held
+    /// at the moment of drop is invalidated by the drop anyway.
+    pub async fn drop_chunks_table(lancedb_dir: &Path) -> Result<()> {
+        ensure_lance_env();
+        // Mirror try_open's short-circuit: `lancedb::connect` materializes
+        // the directory it points at, so an absent dir would otherwise be
+        // re-established as an empty lance layout — visible side effect on
+        // a no-op.
+        if !lancedb_dir.exists() {
+            meta::remove(lancedb_dir)?;
+            return Ok(());
+        }
+        let conn = lancedb::connect(&lancedb_dir.to_string_lossy())
+            .execute()
+            .await?;
+        let names = conn.table_names().execute().await?;
+        if names.iter().any(|name| name == TABLE) {
+            conn.drop_table(TABLE, &[]).await?;
+        }
+        meta::remove(lancedb_dir)?;
+        Ok(())
+    }
+
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
         // Reader-version axis: a meta file written by a future binary
@@ -1277,6 +1317,79 @@ mod tests {
             .expect("second drop");
         let meta = meta::load(dir.path()).expect("load").expect("meta present");
         assert_eq!(meta.kind, "brute-force");
+    }
+
+    #[tokio::test]
+    async fn drop_chunks_table_on_a_missing_dir_is_a_noop() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("never-created");
+        ChunkStore::drop_chunks_table(&target)
+            .await
+            .expect("drop on missing dir");
+        assert!(!target.exists(), "dir must not be materialized");
+    }
+
+    #[tokio::test]
+    async fn drop_chunks_table_clears_table_and_meta() {
+        let (dir, store) = fresh_store().await;
+        store
+            .append(&[row(1, 1, [0.1, 0.2, 0.3, 0.4])])
+            .await
+            .expect("append seed");
+        store
+            .drop_ann_index(dir.path(), fixed_ts())
+            .await
+            .expect("seed meta");
+        assert!(meta::load(dir.path()).expect("load").is_some());
+        drop(store);
+
+        ChunkStore::drop_chunks_table(dir.path())
+            .await
+            .expect("drop");
+
+        assert!(
+            ChunkStore::try_open(dir.path())
+                .await
+                .expect("try_open")
+                .is_none(),
+            "chunks table must be gone",
+        );
+        assert!(
+            meta::load(dir.path()).expect("load").is_none(),
+            "vectors_meta.json must be gone",
+        );
+    }
+
+    #[tokio::test]
+    async fn drop_chunks_table_lets_a_fresh_table_take_a_new_dim() {
+        let (dir, store) = fresh_store().await;
+        store
+            .append(&[row(1, 1, [0.1, 0.2, 0.3, 0.4])])
+            .await
+            .expect("seed");
+        assert_eq!(store.dimension(), DIM);
+        drop(store);
+
+        ChunkStore::drop_chunks_table(dir.path())
+            .await
+            .expect("drop");
+
+        const NEW_DIM: usize = 8;
+        let fresh = ChunkStore::open(dir.path(), NEW_DIM)
+            .await
+            .expect("reopen with new dim");
+        assert_eq!(fresh.dimension(), NEW_DIM);
+    }
+
+    #[tokio::test]
+    async fn drop_chunks_table_is_idempotent() {
+        let (dir, _store) = fresh_store().await;
+        ChunkStore::drop_chunks_table(dir.path())
+            .await
+            .expect("first drop");
+        ChunkStore::drop_chunks_table(dir.path())
+            .await
+            .expect("second drop");
     }
 
     #[tokio::test]

@@ -710,6 +710,9 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             } => rt.block_on(crate::cmd::vectors::reembed(
                 cfg_ref, book, stale_only, dry_run, yes, None,
             )),
+            crate::WriteVectorsAction::Reset { yes, resume } => {
+                rt.block_on(crate::cmd::vectors::reset(cfg_ref, yes, resume))
+            }
         },
         ReplCommand::Corpus { action } => match action {
             crate::CorpusAction::Rebuild {

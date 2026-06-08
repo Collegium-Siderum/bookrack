@@ -289,6 +289,28 @@ log_directive = "info,lance=warn"
 Every field is optional. Edit by hand; bookrack does not rewrite
 this file outside of `init`.
 
+### Switching the embedding model
+
+`embed_model` is part of the library's identity: stamps in
+`corpus.db` pin the model name and its vector dimension, and both
+embed and query refuse a mismatch. Editing the field on an existing
+library leaves the on-disk vectors orphaned. The supported swaps are:
+
+- **`bookrack libraries fork <name> --data-dir <path>`** — clone the
+  current library into a sibling under `<path>` (envelope store
+  hardlinked, catalog + corpus snapshotted, vector store dropped),
+  then run `bookrack --library <name> vectors reset` against the
+  clone to rebuild under the new model. The original library stays
+  intact; throw the clone away if the new model is worse.
+- **`bookrack vectors reset`** — in-place: drops the chunks table
+  and re-embeds every book under the env-configured model. The old
+  vectors are unrecoverable. Use when disk space is tight or the
+  swap is settled.
+
+Both paths require the daemon to be stopped first. See
+[docs/UPGRADE.md](docs/UPGRADE.md#switching-the-embedding-model)
+for the full procedure.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).

@@ -21,6 +21,7 @@ pub mod envelope;
 pub mod ocr;
 pub mod rebuild;
 pub mod reembed;
+pub mod reset;
 pub mod sentences;
 mod structure;
 

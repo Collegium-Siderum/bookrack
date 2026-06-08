@@ -34,7 +34,7 @@ earlier ones already happened.
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
 | `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` |
 | `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` |
-| Embedding model name or vector width | `embed_model` / `vector_dim` | vectors only | `bookrack vectors reembed` |
+| Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
 | `catalog.db` schema bump | catalog `user_version` | none — migrated forward in place | open the library (migration is automatic) |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
@@ -53,10 +53,31 @@ chunks, so search keeps running afterwards. Pair with
 
 `bookrack vectors reembed` — read each book's chunks back from
 LanceDB, drop their vectors, and run the active embedder over the
-unchanged chunk text. Run this after bumping the embedding model,
-the vector width, `CHUNK_VERSION`, or `NORMALIZE_VERSION`. The
-delete-then-append flow is per-partition, so a long run can be
+unchanged chunk text. Run this after a `CHUNK_VERSION` or
+`NORMALIZE_VERSION` bump — the chunks are re-derived in-place at the
+existing vector dimension, so the embedding model must stay the same.
+The delete-then-append flow is per-partition, so a long run can be
 interrupted and resumed without losing progress.
+
+`bookrack libraries fork <name> --data-dir <path>` — clone the
+current data root into a sibling library. The envelope store
+(`books/`) is hardlinked by default (falls back to copy when the
+target lives on a different filesystem), and `catalog.db` /
+`corpus.db` are copied as snapshots. The `lancedb/` directory is
+**not** carried over: the new library starts with no vectors and
+no `index_meta` stamps. Follow up with `vectors reset` against the
+new library to rebuild it under whatever embedding model the env
+points at. The recommended path for trying a new embedding model.
+
+`bookrack vectors reset` — drop the chunks table and the
+`vectors_meta.json` sidecar, clear the corpus `index_meta` stamps,
+demote every `Embedded` intake back to `Extracted`, then re-chunk
+from the corpus nodes and re-embed with whatever embedding model
+the env points at. **The old vectors are unrecoverable** — there
+is no rollback. Use this when switching the embedding model in
+place; use `libraries fork` first if you would rather trial the
+new model on a clone. Resumable with `--resume` after an
+interruption.
 
 `bookrack vectors rebuild` — rebuild the ANN index on top of the
 existing chunks table. Run this after the indexing parameters
@@ -102,3 +123,68 @@ rebuild --stale-only` and the matching `vectors reembed --stale-only`
 flag fold the on-disk `extractor_version` against this binary's,
 which is the closest the tool gets to "tell me what needs work";
 neither command runs without the operator typing it.
+
+## Switching the embedding model
+
+The chunks table is single-dim and tied to one model: stamps in
+`corpus.db`'s `index_meta` encode the exact `embed_model` /
+`vector_dim` pair, and both the build-side gate (next embed run) and
+the serve-side gate (every query) refuse anything else. A library is
+not a multi-model index.
+
+Two supported workflows, both require the daemon to be stopped (the
+session lock takes a single process at a time, and the daemon caches
+the model + dimension at startup so it must be restarted before the
+new state is observable).
+
+### Side by side: `libraries fork` then `vectors reset` on the clone
+
+The recommended path. The old library stays intact while a trial
+clone runs against the new model.
+
+```sh
+bookrack libraries fork trial --data-dir /abs/path/to/trial
+BOOKRACK_EMBED_MODEL=qwen3-embedding:4b \
+  bookrack --library trial vectors reset
+# evaluate the clone, compare with the original library
+# decide:
+#   keep the new model: rm -rf <old data root>, point the registry's
+#     default at 'trial'
+#   discard: rm -rf /abs/path/to/trial, remove the trial entry from
+#     the registry
+```
+
+`fork` hardlinks the envelope store (`books/`) by default, so the
+trial library carries no extra envelope bytes. It falls back to a
+byte copy automatically when the target lives on a different
+filesystem; `--copy-mode copy` forces the byte copy unconditionally.
+
+### In place: `vectors reset`
+
+For users on disk-tight hosts or fully confident in the new model.
+
+```sh
+BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack vectors reset
+# type `RESET` at the prompt
+# restart the daemon
+```
+
+The old vectors are dropped before the new ones land — there is no
+rollback. To "go back" to the previous model, repeat `reset` with the
+old `BOOKRACK_EMBED_MODEL`; bookrack treats reverse as another
+reset, not as undo.
+
+If `reset` is interrupted mid-run (a kill or an embed-backend
+outage), rerun with `bookrack vectors reset --resume` to pick up
+whatever intakes are still in `Extracted` without redoing the
+destructive A-D steps.
+
+### What bookrack does not do
+
+- **Zero-downtime swap, A/B querying, per-book model routing** —
+  none are supported. The data model is one model per library; use
+  `fork` and run two libraries side by side for any of these.
+- **Detect that Ollama silently retagged a model** — bookrack
+  compares model name strings, not content digests. If a model tag
+  gets new weights upstream with the same dimension, bookrack will
+  serve the old library against the new embedder without warning.

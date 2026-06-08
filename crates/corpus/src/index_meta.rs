@@ -8,6 +8,7 @@
 //! longer matches its compiled-in constants.
 
 use bookrack_dbkit::{ColumnSpec, TableSpec};
+use rusqlite::params;
 
 use crate::{Corpus, CorpusError, Result};
 
@@ -69,6 +70,32 @@ impl Corpus {
     /// Write an `index_meta` scalar, replacing any previous value.
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
         bookrack_dbkit::meta_set(&self.conn, SPEC.name, key, value)?;
+        Ok(())
+    }
+
+    /// Clear the four build-parameter stamps, returning the index to an
+    /// unstamped state.
+    ///
+    /// Deletes `embed_model` / `vector_dim` / `chunk_version` /
+    /// `normalize_version` from `index_meta` in one statement. Keys absent
+    /// from the table are silently ignored; the operation is idempotent.
+    ///
+    /// After this runs, the next [`Self::reconcile_index_stamps`] call
+    /// writes the supplied stamps verbatim instead of validating against
+    /// them, so any subsequent `embed_book_chunks` can commit a fresh model
+    /// / dimension pair. The serve-side [`Self::verify_index_stamps`] gate
+    /// rejects the cleared index with [`CorpusError::IndexNotStamped`]
+    /// until something embeds again.
+    pub fn clear_index_stamps(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM index_meta WHERE key IN (?1, ?2, ?3, ?4)",
+            params![
+                EMBED_MODEL_KEY,
+                VECTOR_DIM_KEY,
+                CHUNK_VERSION_KEY,
+                NORMALIZE_VERSION_KEY,
+            ],
+        )?;
         Ok(())
     }
 
@@ -266,5 +293,49 @@ mod tests {
             .verify_index_stamps(&stamps())
             .expect_err("must reject");
         assert!(matches!(err, CorpusError::IndexNotStamped));
+    }
+
+    #[test]
+    fn clear_on_an_unstamped_index_is_a_noop() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.clear_index_stamps().expect("clear");
+        let err = corpus
+            .verify_index_stamps(&stamps())
+            .expect_err("still unstamped");
+        assert!(matches!(err, CorpusError::IndexNotStamped));
+    }
+
+    #[test]
+    fn clear_lets_a_new_model_take_the_stamps() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        corpus.clear_index_stamps().expect("clear");
+
+        let new = IndexStamps {
+            embed_model: "qwen3-embedding:4b".to_string(),
+            vector_dim: 2560,
+            ..stamps()
+        };
+        corpus
+            .reconcile_index_stamps(&new)
+            .expect("fresh stamps accepted");
+        corpus
+            .verify_index_stamps(&new)
+            .expect("new stamps survive verify");
+    }
+
+    #[test]
+    fn clear_removes_every_stamp_key() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        corpus.clear_index_stamps().expect("clear");
+        for key in [
+            EMBED_MODEL_KEY,
+            VECTOR_DIM_KEY,
+            CHUNK_VERSION_KEY,
+            NORMALIZE_VERSION_KEY,
+        ] {
+            assert_eq!(corpus.meta_get(key).expect("get"), None, "{key} cleared");
+        }
     }
 }
