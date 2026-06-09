@@ -9,45 +9,57 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-struct SetParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataSetParams {
     book: i64,
     field: String,
     value: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ClearParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataClearParams {
     book: i64,
     field: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct AckParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataAckParams {
     book: i64,
     reason: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ApproveParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataApproveParams {
     book: i64,
     #[serde(default)]
     reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RejectParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataRejectParams {
     book: i64,
     reason: String,
 }
 
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: SetParams = parse(params, "metadata.set")?;
+    let parsed: MetadataSetParams = parse(params, "metadata.set")?;
     let action = WriteMetadataAction::Set {
         book: parsed.book,
         field: parsed.field,
@@ -57,7 +69,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 }
 
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: ClearParams = parse(params, "metadata.clear")?;
+    let parsed: MetadataClearParams = parse(params, "metadata.clear")?;
     let action = WriteMetadataAction::Clear {
         book: parsed.book,
         field: parsed.field,
@@ -66,7 +78,7 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 }
 
 pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: AckParams = parse(params, "metadata.ack")?;
+    let parsed: MetadataAckParams = parse(params, "metadata.ack")?;
     let action = WriteMetadataAction::Ack {
         book: parsed.book,
         reason: parsed.reason,
@@ -75,7 +87,7 @@ pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 }
 
 pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: ApproveParams = parse(params, "metadata.approve")?;
+    let parsed: MetadataApproveParams = parse(params, "metadata.approve")?;
     let action = WriteMetadataAction::Approve {
         book: parsed.book,
         reason: parsed.reason,
@@ -84,7 +96,7 @@ pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 }
 
 pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: RejectParams = parse(params, "metadata.reject")?;
+    let parsed: MetadataRejectParams = parse(params, "metadata.reject")?;
     let action = WriteMetadataAction::Reject {
         book: parsed.book,
         reason: parsed.reason,

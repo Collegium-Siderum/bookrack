@@ -225,3 +225,11 @@ second concurrent write returns `-32001 busy`.
   cannot tell handler-emitted ticks apart from worker-emitted
   ones. The MCP tool set, the on-disk queue schema, and the
   session-lock schema are unchanged.
+- **PR-2** — TypeScript binding generation. The `Event` enum and
+  every control-plane Params / Response struct derive `ts_rs::TS`
+  under `#[cfg(test)]`; `cargo test --workspace` writes one `.ts`
+  file per type into `crates/app/web/src/generated/`, where the
+  future webview imports them. Routing is set by
+  `.cargo/config.toml`'s `TS_RS_EXPORT_DIR` entry; the runtime
+  crate's release build does not link `ts-rs`, and the wire
+  schema, serde derives, and method registry are unchanged.

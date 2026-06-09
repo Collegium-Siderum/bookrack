@@ -6,13 +6,19 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::MethodContext;
 
 /// One row in the `daemon.methods` response.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MethodSignature {
+    #[cfg_attr(test, ts(type = "string"))]
     pub name: &'static str,
+    #[cfg_attr(test, ts(type = "string"))]
     pub kind: &'static str,
 }
 
@@ -20,9 +26,32 @@ pub struct MethodSignature {
 /// startup from the live MCP server so the runtime crate does not
 /// take a direct dependency on rmcp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct McpToolInfo {
     pub name: String,
     pub description: String,
+}
+
+/// Closed enumeration of every control-plane method routed by
+/// [`super::dispatch`]. Exported as a TypeScript literal union so the
+/// webview's `ControlClient` can type its method names against the
+/// Rust-side registry with no hand maintenance. `current()` mirrors
+/// the runtime [`REGISTRY`] verbatim.
+#[cfg(test)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "./")]
+pub struct MethodCatalog {
+    pub names: Vec<String>,
+}
+
+#[cfg(test)]
+impl MethodCatalog {
+    pub fn current() -> Self {
+        Self {
+            names: REGISTRY.iter().map(|m| m.name.to_string()).collect(),
+        }
+    }
 }
 
 /// Static registry of every method [`super::dispatch`] routes. Kept
@@ -177,6 +206,21 @@ pub fn mcp_tools(ctx: &MethodContext) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ts_rs::TS;
+
+    #[test]
+    fn method_catalog_ts_matches_registry_len() {
+        MethodCatalog::export_all().expect("ts-rs export MethodCatalog");
+        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR not set");
+        let path = std::path::PathBuf::from(dir).join("MethodCatalog.ts");
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        assert!(
+            contents.contains("names"),
+            "MethodCatalog.ts missing `names` field:\n{contents}"
+        );
+        assert_eq!(MethodCatalog::current().names.len(), REGISTRY.len());
+    }
 
     #[test]
     fn registry_names_are_unique() {

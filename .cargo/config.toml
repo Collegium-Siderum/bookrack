@@ -1,0 +1,16 @@
+# Bookrack-tracked cargo configuration.
+#
+# `config.local.toml` is gitignored and holds machine-specific overrides
+# (e.g. an external `target-dir`); contributors create it as needed. The
+# tracked file here only carries cross-workspace settings.
+#
+# `TS_RS_EXPORT_DIR` reroutes every `#[ts(export, export_to = "...")]`
+# in the workspace under `crates/app/web/src/generated/`, where the
+# future Tauri shell's webview imports them. `relative = true` resolves
+# the path against this file's directory, i.e. the workspace root, so
+# the setting works on any contributor's machine.
+
+include = ["config.local.toml"]
+
+[env]
+TS_RS_EXPORT_DIR = { value = "crates/app/web/src/generated", relative = true }

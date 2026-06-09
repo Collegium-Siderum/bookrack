@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["spikes"]
+# `crates/app/` holds the webview's `web/src/generated/` directory only
+# until the F1 patch creates a real `Cargo.toml` there. Excluding it
+# keeps `crates/*` from tripping on the missing manifest.
+exclude = ["spikes", "crates/app"]
 
 [workspace.package]
 version = "0.4.0-dev"
@@ -140,6 +143,12 @@ shlex = "2"
 # in-process log stream as a Server-Sent Events endpoint under
 # `/session/logs`. License: MIT; in lockstep with `tokio` itself.
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
+# Compile-time TypeScript binding generator. Used as a dev-dependency
+# of `bookrack-runtime` so `cargo test` exports `.ts` files mirroring
+# the `Event` enum and the control-plane DTOs into
+# `crates/app/web/src/generated/`. The runtime crate's release build
+# does not link it. License: MIT.
+ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 
 # Test binaries link the full lance / datafusion / arrow / rustls
 # dependency tree once per crate under test. Full debug info pushes the

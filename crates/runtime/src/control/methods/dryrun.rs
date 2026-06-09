@@ -8,15 +8,21 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::dryrun;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
-struct DryrunParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct DryrunParams {
+    #[cfg_attr(test, ts(type = "string"))]
     path: PathBuf,
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
     out: Option<PathBuf>,
     #[serde(default)]
     stdout: bool,

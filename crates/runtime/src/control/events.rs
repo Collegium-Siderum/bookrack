@@ -22,6 +22,8 @@ use bookrack_core::queue::JobState;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
+#[cfg(test)]
+use ts_rs::TS;
 
 /// Default capacity for the event broadcast. Matches the `obs`
 /// log-event channel.
@@ -30,6 +32,8 @@ pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 512;
 /// Discrete daemon lifecycle state, exposed to clients through both
 /// the `status` method's `state` field and the `daemon.state` event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "snake_case")]
 pub enum DaemonState {
     Idle,
@@ -93,6 +97,8 @@ impl Default for DaemonStateFlag {
 /// Aligned with the three top-level phases the ingest pipeline drives a
 /// book through.
 #[derive(Debug, Clone, Copy, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Extract,
@@ -104,11 +110,18 @@ pub enum Stage {
 /// [`QueueTick::last_finished`] so subscribers can render the most
 /// recent outcome without re-fetching the queue document.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct JobOutcomeSummary {
     pub job_id: String,
+    #[cfg_attr(
+        test,
+        ts(type = "\"pending\" | \"running\" | \"done\" | \"failed\" | \"cancelled\"")
+    )]
     pub state: JobState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[cfg_attr(test, ts(type = "string"))]
     pub finished_at: DateTime<Utc>,
 }
 
@@ -116,6 +129,8 @@ pub struct JobOutcomeSummary {
 /// follows a `save_atomic` on `.bookrack-queue.json`, so the values
 /// here are guaranteed to be derivable from the on-disk document.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct QueueTick {
     /// Id of the job currently in `Running`, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +146,8 @@ pub struct QueueTick {
 /// boundary. `stage_progress` is a 0.0..=1.0 fraction when measurable,
 /// otherwise omitted.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct WorkerProgress {
     pub job_id: String,
     pub stage: Stage,
@@ -146,20 +163,28 @@ pub struct WorkerProgress {
 /// `value`, so dispatchers can serialise the variant directly into an
 /// `event` notification.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(tag = "channel", content = "value")]
 pub enum Event {
     #[serde(rename = "daemon.state")]
+    #[cfg_attr(test, ts(rename = "daemon.state"))]
     DaemonState(DaemonState),
     #[serde(rename = "queue.tick")]
+    #[cfg_attr(test, ts(rename = "queue.tick"))]
     QueueTick(QueueTick),
     #[serde(rename = "worker.progress")]
+    #[cfg_attr(test, ts(rename = "worker.progress"))]
     WorkerProgress(WorkerProgress),
     #[serde(rename = "library.changed")]
+    #[cfg_attr(test, ts(rename = "library.changed"))]
     LibraryChanged { library: String },
     #[serde(rename = "mcp.availability")]
+    #[cfg_attr(test, ts(rename = "mcp.availability"))]
     McpAvailability { paused: bool },
     #[serde(rename = "log")]
-    Log(bookrack_obs::stream::LogEvent),
+    #[cfg_attr(test, ts(rename = "log"))]
+    Log(#[cfg_attr(test, ts(type = "Record<string, unknown>"))] bookrack_obs::stream::LogEvent),
 }
 
 impl Event {
@@ -247,6 +272,29 @@ impl Default for EventStreamHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ts_rs::TS;
+
+    #[test]
+    fn event_ts_export_contains_every_channel() {
+        Event::export_all().expect("ts-rs export Event");
+        let dir = std::env::var("TS_RS_EXPORT_DIR").expect("TS_RS_EXPORT_DIR not set");
+        let path = std::path::PathBuf::from(dir).join("Event.ts");
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for ch in [
+            "daemon.state",
+            "queue.tick",
+            "worker.progress",
+            "library.changed",
+            "mcp.availability",
+            "log",
+        ] {
+            assert!(
+                contents.contains(ch),
+                "Event.ts missing channel {ch}:\n{contents}"
+            );
+        }
+    }
 
     #[test]
     fn daemon_state_round_trips_through_u8() {

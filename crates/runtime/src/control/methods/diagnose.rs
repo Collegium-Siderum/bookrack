@@ -8,13 +8,18 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use super::MethodContext;
 
 #[derive(Debug, Deserialize)]
-pub struct DiagnoseParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct DiagnoseRunParams {
     #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
     pub out: Option<PathBuf>,
     #[serde(default = "default_days")]
     pub days: u32,
@@ -27,10 +32,10 @@ fn default_days() -> u32 {
 }
 
 pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: DiagnoseParams = match params {
+    let parsed: DiagnoseRunParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone())
             .map_err(|e| RpcError::new(INVALID_PARAMS, format!("diagnose.run params: {e}")))?,
-        _ => DiagnoseParams {
+        _ => DiagnoseRunParams {
             out: None,
             days: default_days(),
             no_scrub: false,

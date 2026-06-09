@@ -9,13 +9,17 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::vectors;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Default, Deserialize)]
-struct RebuildParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct VectorsRebuildParams {
     #[serde(default)]
     kind: Option<String>,
     #[serde(default)]
@@ -31,7 +35,7 @@ struct RebuildParams {
 }
 
 pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: RebuildParams = parse(params, "vectors.rebuild")?;
+    let parsed: VectorsRebuildParams = parse(params, "vectors.rebuild")?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         vectors::rebuild(
@@ -51,7 +55,9 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ReembedParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct VectorsReembedParams {
     #[serde(default)]
     book: Option<i64>,
     #[serde(default)]
@@ -63,7 +69,7 @@ struct ReembedParams {
 }
 
 pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: ReembedParams = parse(params, "vectors.reembed")?;
+    let parsed: VectorsReembedParams = parse(params, "vectors.reembed")?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         vectors::reembed(
@@ -83,7 +89,9 @@ pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct ResetParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct VectorsResetParams {
     #[serde(default)]
     yes: bool,
     #[serde(default)]
@@ -91,7 +99,7 @@ struct ResetParams {
 }
 
 pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: ResetParams = parse(params, "vectors.reset")?;
+    let parsed: VectorsResetParams = parse(params, "vectors.reset")?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         vectors::reset(&cfg, parsed.yes, parsed.resume, approve_destructive)

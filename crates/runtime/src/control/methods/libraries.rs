@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::super::jsonrpc::{INVALID_PARAMS, RpcError};
 use super::MethodContext;
@@ -15,8 +17,11 @@ use super::run_write;
 use crate::cmd::libraries::CopyMode;
 
 #[derive(Debug, Deserialize)]
-pub struct ForkParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct LibraryForkParams {
     pub new_name: String,
+    #[cfg_attr(test, ts(type = "string"))]
     pub data_dir: PathBuf,
     /// `"hardlink"` (default) or `"copy"`. Mirrors the cli's
     /// `--copy-mode` flag.
@@ -37,7 +42,7 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let raw = params
         .clone()
         .ok_or_else(|| RpcError::new(INVALID_PARAMS, "library.fork: missing params"))?;
-    let parsed: ForkParams = serde_json::from_value(raw)
+    let parsed: LibraryForkParams = serde_json::from_value(raw)
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("library.fork params: {e}")))?;
     if !parsed.yes {
         return Err(RpcError::new(

@@ -4,13 +4,17 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::remove::{RemoveArgs, run as run_remove};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Default, Deserialize)]
-struct RemoveParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct RemoveParams {
     #[serde(default)]
     intake_id: Option<i64>,
     #[serde(default)]

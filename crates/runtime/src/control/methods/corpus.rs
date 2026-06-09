@@ -4,13 +4,17 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::corpus;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Default, Deserialize)]
-struct RebuildParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct CorpusRebuildParams {
     #[serde(default)]
     include_vectors: bool,
     #[serde(default)]
@@ -24,14 +28,14 @@ struct RebuildParams {
 }
 
 pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: RebuildParams = match params {
+    let parsed: CorpusRebuildParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
             RpcError::new(
                 INVALID_PARAMS,
                 format!("invalid corpus.rebuild params: {e}"),
             )
         })?,
-        _ => RebuildParams::default(),
+        _ => CorpusRebuildParams::default(),
     };
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {

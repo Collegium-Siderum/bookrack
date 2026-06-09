@@ -15,6 +15,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+#[cfg(test)]
+use ts_rs::TS;
 
 use super::MethodContext;
 use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
@@ -22,7 +24,10 @@ use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, JobState, Priority};
 
 #[derive(Debug, Deserialize)]
-struct SubmitParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct IngestSubmitParams {
+    #[cfg_attr(test, ts(type = "Array<string>"))]
     paths: Vec<PathBuf>,
     #[serde(default)]
     library: Option<String>,
@@ -33,8 +38,10 @@ struct SubmitParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 #[serde(rename_all = "lowercase")]
-enum PriorityRepr {
+pub enum PriorityRepr {
     Low,
     Normal,
     High,
@@ -51,7 +58,7 @@ impl PriorityRepr {
 }
 
 pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: SubmitParams = match params {
+    let parsed: IngestSubmitParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
             RpcError::new(INVALID_PARAMS, format!("invalid ingest.submit params: {e}"))
         })?,
@@ -86,12 +93,14 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 }
 
 #[derive(Debug, Deserialize)]
-struct CancelParams {
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct IngestCancelParams {
     job_id: String,
 }
 
 pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let parsed: CancelParams = match params {
+    let parsed: IngestCancelParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {
             RpcError::new(INVALID_PARAMS, format!("invalid ingest.cancel params: {e}"))
         })?,
