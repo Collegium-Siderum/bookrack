@@ -484,17 +484,12 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
     let rt = Handle::current();
     let cfg_ref: &Config = cfg.as_ref();
     let result: anyhow::Result<()> = match command {
-        ReplCommand::Ingest {
-            path,
-            recursive,
-            hold_for_metadata,
-            force,
-        } => rt.block_on(bookrack_runtime::cmd::ingest::run(
+        ReplCommand::Ingest(args) => rt.block_on(bookrack_runtime::cmd::ingest::run(
             cfg_ref,
-            &path,
-            recursive,
-            hold_for_metadata,
-            force,
+            &args.path,
+            args.recursive,
+            args.hold_for_metadata,
+            args.force,
             None,
         )),
         ReplCommand::Intake { action } => match action {
@@ -578,31 +573,21 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
                 rt.block_on(bookrack_runtime::cmd::stamps::reconcile(cfg_ref))
             }
         },
-        ReplCommand::Remove {
-            intake_id,
-            sha,
-            dry_run,
-            yes,
-        } => rt.block_on(bookrack_runtime::cmd::remove::run(
+        ReplCommand::Remove(args) => rt.block_on(bookrack_runtime::cmd::remove::run(
             cfg_ref,
             bookrack_runtime::cmd::remove::RemoveArgs {
-                intake_id,
-                sha,
-                dry_run,
-                yes,
+                intake_id: args.intake_id,
+                sha: args.sha,
+                dry_run: args.dry_run,
+                yes: args.yes,
             },
         )),
-        ReplCommand::Dryrun {
-            path,
-            out,
-            stdout,
-            no_chunk,
-        } => bookrack_runtime::cmd::dryrun::run(
+        ReplCommand::Dryrun(args) => bookrack_runtime::cmd::dryrun::run(
             cfg_ref,
-            &path,
-            out.as_deref(),
-            stdout,
-            no_chunk,
+            &args.path,
+            args.out.as_deref(),
+            args.stdout,
+            args.no_chunk,
             None,
         ),
     };

@@ -24,15 +24,7 @@ pub enum ReplCommand {
     /// supported file under a directory) into the library. Inside the
     /// REPL this runs synchronously; queue an entire directory through
     /// the queue worker with `queue add <path>` instead.
-    Ingest {
-        path: PathBuf,
-        #[arg(long)]
-        recursive: bool,
-        #[arg(long)]
-        hold_for_metadata: bool,
-        #[arg(long)]
-        force: bool,
-    },
+    Ingest(IngestArgs),
     /// Drive an intake from a derived source manifestation.
     Intake {
         #[command(subcommand)]
@@ -60,35 +52,58 @@ pub enum ReplCommand {
         action: StampsAction,
     },
     /// Drop a book from every store.
-    Remove {
-        intake_id: Option<i64>,
-        #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
-        sha: Option<String>,
-        #[arg(long)]
-        dry_run: bool,
-        #[arg(long)]
-        yes: bool,
-    },
+    Remove(RemoveArgs),
     /// Simulate an ingest up to (but not including) embedding, and write
     /// a JSON report of what the metadata audit would have produced. The
     /// real catalog, corpus, and vector store are not touched.
-    Dryrun {
-        /// Source file, or a directory the dryrun walks recursively.
-        path: PathBuf,
-        /// Write the per-book report to this path instead of the default
-        /// `<data_root>/dryruns/...` location. Implies the summary is
-        /// written alongside with a `.summary.json` suffix.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Write JSONL to stdout instead of to a file. The summary still
-        /// lands on stderr at the end of the run.
-        #[arg(long)]
-        stdout: bool,
-        /// Skip the CHUNK step. Saves seconds per large book when only
-        /// the audit verdict is wanted.
-        #[arg(long)]
-        no_chunk: bool,
-    },
+    Dryrun(DryrunArgs),
+}
+
+/// Positional + flag bundle for `ingest`. Lives in a standalone struct
+/// so the same type can be embedded in `ReplCommand::Ingest` (parsed
+/// from inside the REPL) and `Command::Ingest` (parsed from the
+/// top-level CLI) without duplicating attributes.
+#[derive(clap::Args, Debug, Clone)]
+pub struct IngestArgs {
+    pub path: PathBuf,
+    #[arg(long)]
+    pub recursive: bool,
+    #[arg(long)]
+    pub hold_for_metadata: bool,
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Positional + flag bundle for `remove`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct RemoveArgs {
+    pub intake_id: Option<i64>,
+    #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
+    pub sha: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// Positional + flag bundle for `dryrun`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DryrunArgs {
+    /// Source file, or a directory the dryrun walks recursively.
+    pub path: PathBuf,
+    /// Write the per-book report to this path instead of the default
+    /// `<data_root>/dryruns/...` location. Implies the summary is
+    /// written alongside with a `.summary.json` suffix.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Write JSONL to stdout instead of to a file. The summary still
+    /// lands on stderr at the end of the run.
+    #[arg(long)]
+    pub stdout: bool,
+    /// Skip the CHUNK step. Saves seconds per large book when only
+    /// the audit verdict is wanted.
+    #[arg(long)]
+    pub no_chunk: bool,
 }
 
 /// Intake-side write commands (currently OCR-only).

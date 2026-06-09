@@ -395,24 +395,19 @@ async fn handle_queue(client: &ControlClient, tokens: &[String]) -> bool {
 
 async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> bool {
     match command {
-        ReplCommand::Ingest {
-            path,
-            recursive,
-            hold_for_metadata,
-            force,
-        } => {
-            if recursive {
+        ReplCommand::Ingest(args) => {
+            if args.recursive {
                 eprintln!(
                     "bookrack: --recursive is not yet wired over the control plane; submit individual files or use `queue add`",
                 );
                 return true;
             }
-            if hold_for_metadata {
+            if args.hold_for_metadata {
                 eprintln!(
                     "bookrack: --hold-for-metadata is not yet wired over the control plane; the daemon proceeds without holding",
                 );
             }
-            let params = json!({"paths": [path], "force": force});
+            let params = json!({"paths": [args.path], "force": args.force});
             call_and_print(client, "ingest.submit", params).await
         }
         ReplCommand::Intake {
@@ -447,31 +442,21 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
         ReplCommand::Stamps {
             action: StampsAction::Reconcile,
         } => call_and_print(client, "stamps.reconcile", Value::Null).await,
-        ReplCommand::Remove {
-            intake_id,
-            sha,
-            dry_run,
-            yes,
-        } => {
+        ReplCommand::Remove(args) => {
             let params = json!({
-                "intake_id": intake_id,
-                "sha": sha,
-                "dry_run": dry_run,
-                "yes": yes,
+                "intake_id": args.intake_id,
+                "sha": args.sha,
+                "dry_run": args.dry_run,
+                "yes": args.yes,
             });
             call_and_print(client, "remove", params).await
         }
-        ReplCommand::Dryrun {
-            path,
-            out,
-            stdout,
-            no_chunk,
-        } => {
+        ReplCommand::Dryrun(args) => {
             let params = json!({
-                "path": path,
-                "out": out,
-                "stdout": stdout,
-                "no_chunk": no_chunk,
+                "path": args.path,
+                "out": args.out,
+                "stdout": args.stdout,
+                "no_chunk": args.no_chunk,
             });
             call_and_print(client, "dryrun", params).await
         }
