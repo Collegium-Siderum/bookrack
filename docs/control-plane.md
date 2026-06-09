@@ -211,3 +211,17 @@ second concurrent write returns `-32001 busy`.
   `pid=… / mcp=… / control_sock=…`, with unknown keys ignored
   per Phase 1's append-only rule), and the on-disk queue schema
   are unchanged.
+- **PR-1** — queue lifecycle. `queue.pause`, `queue.resume`, and
+  `queue.clear` are added to the control plane; the standalone
+  REPL gains `queue pause`, `queue resume`, and `queue clear`
+  routed through the same dispatch, and the shared grammar
+  exposes a matching `ReplCommand::Queue { action }` variant. The
+  worker loop honours an `Arc<AtomicBool>` pause flag that is
+  mirrored onto `QueueState::paused`, so the on-disk snapshot and
+  the in-memory behaviour agree across a process restart; a
+  `pause` blocks new pickups but lets the running job finish on
+  its own. Every mutation emits one `Event::QueueTick`; the
+  payload schema matches the worker-side tick, so subscribers
+  cannot tell handler-emitted ticks apart from worker-emitted
+  ones. The MCP tool set, the on-disk queue schema, and the
+  session-lock schema are unchanged.

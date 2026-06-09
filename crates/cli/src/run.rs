@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,7 @@ use bookrack_obs::LogStreamHandle;
 use bookrack_ops::Caller;
 use bookrack_ops::registry::LibraryRegistry;
 use bookrack_runtime::control::HealthProbe;
+use bookrack_runtime::control::events::{Event, EventStreamHandle};
 use bookrack_runtime::queue::{self, Priority, QueueState};
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use clap::CommandFactory;
@@ -148,6 +150,8 @@ fn spawn_repl_if_tty(
         let shutdown_tx = runtime.shutdown_tx.clone();
         let queue_state = Arc::clone(&runtime.queue_state);
         let queue_state_path = runtime.queue_state_path.clone();
+        let queue_paused = Arc::clone(&runtime.queue_paused);
+        let event_stream = runtime.event_stream.clone();
         let library_default = runtime.cfg.library().unwrap_or("default").to_string();
         let cfg = Arc::clone(&runtime.cfg);
         let started_at = runtime.started_at;
@@ -161,6 +165,8 @@ fn spawn_repl_if_tty(
                 mcp_label,
                 queue_state,
                 queue_state_path,
+                queue_paused,
+                event_stream,
                 library_default,
                 cfg,
                 started_at,
@@ -318,6 +324,8 @@ fn repl_loop(
     mcp_label: String,
     queue_state: Arc<Mutex<QueueState>>,
     queue_state_path: PathBuf,
+    queue_paused: Arc<AtomicBool>,
+    event_stream: EventStreamHandle,
     library_default: String,
     cfg: Arc<Config>,
     started_at: Instant,
@@ -364,6 +372,8 @@ fn repl_loop(
                     &mcp_label,
                     &queue_state,
                     &queue_state_path,
+                    &queue_paused,
+                    &event_stream,
                     &library_default,
                     &cfg,
                     started_at,
@@ -444,6 +454,8 @@ fn handle_line(
     mcp_label: &str,
     queue_state: &Arc<Mutex<QueueState>>,
     queue_state_path: &Path,
+    queue_paused: &Arc<AtomicBool>,
+    event_stream: &EventStreamHandle,
     library_default: &str,
     cfg: &Arc<Config>,
     started_at: Instant,
@@ -478,7 +490,14 @@ fn handle_line(
             return ReplOutcome::Continue;
         }
         "queue" => {
-            handle_queue(queue_state, queue_state_path, library_default, &tokens);
+            handle_queue(
+                queue_state,
+                queue_state_path,
+                queue_paused,
+                event_stream,
+                library_default,
+                &tokens,
+            );
             return ReplOutcome::Continue;
         }
         "logs" => {
@@ -616,6 +635,11 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             args.no_chunk,
             None,
         ),
+        ReplCommand::Queue { .. } => {
+            // The REPL intercepts `queue` ahead of the clap grammar so
+            // the worker-loop pause flag and event stream stay in scope.
+            unreachable!("queue subcommand is handled by handle_queue");
+        }
     };
     if let Err(err) = result {
         eprintln!("bookrack: {err:#}");
@@ -634,13 +658,11 @@ fn handle_use(registry: &Arc<LibraryRegistry<OllamaEmbedClient>>, tokens: &[Stri
     }
 }
 
-/// Dispatch the REPL's `queue` subcommand. The persistent state is
-/// always mutated under the shared lock and persisted before the
-/// guard drops, so an `exit` immediately after `queue add` leaves a
-/// consistent file for the next session to resume.
 fn handle_queue(
     state: &Arc<Mutex<QueueState>>,
     state_path: &Path,
+    queue_paused: &Arc<AtomicBool>,
+    event_stream: &EventStreamHandle,
     library_default: &str,
     tokens: &[String],
 ) {
@@ -655,9 +677,9 @@ fn handle_queue(
         "add" => queue_add(state, state_path, library_default, &tokens[2..]),
         "list" | "ls" => queue_list(state),
         "cancel" => queue_cancel(state, state_path, &tokens[2..]),
-        "clear" => queue_clear(state, state_path),
-        "pause" => queue_set_paused(state, state_path, true),
-        "resume" => queue_set_paused(state, state_path, false),
+        "clear" => queue_clear(state, state_path, queue_paused, event_stream),
+        "pause" => queue_set_paused(state, state_path, queue_paused, event_stream, true),
+        "resume" => queue_set_paused(state, state_path, queue_paused, event_stream, false),
         other => {
             eprintln!("bookrack: unknown queue subcommand {other:?}");
             print_queue_usage();
@@ -861,36 +883,56 @@ fn queue_cancel(state: &Arc<Mutex<QueueState>>, state_path: &Path, args: &[Strin
     }
 }
 
-fn queue_clear(state: &Arc<Mutex<QueueState>>, state_path: &Path) {
-    let mut guard = match state.lock() {
-        Ok(g) => g,
-        Err(err) => {
-            eprintln!("bookrack: queue state mutex poisoned: {err}");
+fn queue_clear(
+    state: &Arc<Mutex<QueueState>>,
+    state_path: &Path,
+    _queue_paused: &Arc<AtomicBool>,
+    event_stream: &EventStreamHandle,
+) {
+    let (n, tick) = {
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                eprintln!("bookrack: queue state mutex poisoned: {err}");
+                return;
+            }
+        };
+        let n = queue::cancel_all_pending(&mut guard);
+        if let Err(err) = queue::save_atomic(&guard, state_path) {
+            eprintln!("bookrack: persist queue state: {err}");
             return;
         }
+        let tick = queue::derive_tick(&guard, None);
+        (n, tick)
     };
-    let n = queue::cancel_all_pending(&mut guard);
-    if let Err(err) = queue::save_atomic(&guard, state_path) {
-        eprintln!("bookrack: persist queue state: {err}");
-        return;
-    }
+    event_stream.publish(Event::QueueTick(tick));
     println!("queue clear: cancelled {n} pending job(s)");
 }
 
-fn queue_set_paused(state: &Arc<Mutex<QueueState>>, state_path: &Path, paused: bool) {
-    let mut guard = match state.lock() {
-        Ok(g) => g,
-        Err(err) => {
-            eprintln!("bookrack: queue state mutex poisoned: {err}");
+fn queue_set_paused(
+    state: &Arc<Mutex<QueueState>>,
+    state_path: &Path,
+    queue_paused: &Arc<AtomicBool>,
+    event_stream: &EventStreamHandle,
+    paused: bool,
+) {
+    queue_paused.store(paused, Ordering::Release);
+    let tick = {
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(err) => {
+                eprintln!("bookrack: queue state mutex poisoned: {err}");
+                return;
+            }
+        };
+        guard.paused = paused;
+        if let Err(err) = queue::save_atomic(&guard, state_path) {
+            eprintln!("bookrack: persist queue state: {err}");
             return;
         }
+        queue::derive_tick(&guard, None)
     };
-    let prev = std::mem::replace(&mut guard.paused, paused);
-    if let Err(err) = queue::save_atomic(&guard, state_path) {
-        eprintln!("bookrack: persist queue state: {err}");
-        return;
-    }
-    let _ = prev;
+    event_stream.publish(Event::QueueTick(tick));
     let label = if paused { "paused" } else { "running" };
     println!("queue: {label}");
 }

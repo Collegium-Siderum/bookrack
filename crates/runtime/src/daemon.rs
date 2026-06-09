@@ -167,6 +167,11 @@ pub struct DaemonRuntime {
     /// Held here so a GUI entry that builds a `DaemonRuntime` in the
     /// same process can clone the handle and attach its own waiter.
     pub tray_focus_signal: Arc<tokio::sync::Notify>,
+    /// Worker-loop pause flag. `queue.pause` flips it to `true`, the
+    /// worker idles instead of pulling pending jobs; `queue.resume`
+    /// flips it back. Mirrors `QueueState::paused` so the on-disk
+    /// snapshot and the in-memory worker behaviour agree.
+    pub queue_paused: Arc<AtomicBool>,
     /// Drop-only field: holds the session-scoped flock. The
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
@@ -317,9 +322,10 @@ impl DaemonRuntime {
 
         // 11. queue state load + (opt) worker spawn
         let queue_state_path = cfg.data_dir().join(".bookrack-queue.json");
-        let queue_state = Arc::new(Mutex::new(
-            queue::load(&queue_state_path).context("load persistent queue state")?,
-        ));
+        let initial_queue_state =
+            queue::load(&queue_state_path).context("load persistent queue state")?;
+        let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
+        let queue_state = Arc::new(Mutex::new(initial_queue_state));
         let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
 
         // Event stream, daemon-state flag, and control accept loop
@@ -343,6 +349,7 @@ impl DaemonRuntime {
             let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
             let events_for_runner = event_stream.clone();
+            let queue_paused_worker = Arc::clone(&queue_paused);
             Some(tokio::spawn(queue::worker_loop(
                 state_path,
                 state,
@@ -383,6 +390,7 @@ impl DaemonRuntime {
                     }
                 },
                 events_for_loop,
+                queue_paused_worker,
             )))
         } else {
             None
@@ -409,6 +417,7 @@ impl DaemonRuntime {
             mcp_tools,
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
+            queue_paused: Arc::clone(&queue_paused),
         };
 
         // Bridge the obs log stream into the control-plane event
@@ -452,6 +461,7 @@ impl DaemonRuntime {
             control_sock,
             signal_triggered,
             tray_focus_signal,
+            queue_paused,
             _tty_lock: tty_lock,
             queue_worker,
             signal_handle,

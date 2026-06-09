@@ -15,6 +15,7 @@
 //! handler.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use bookrack_config::{Config, LibrarySelection};
@@ -35,6 +36,7 @@ pub mod ingest;
 pub mod libraries;
 pub mod meta;
 pub mod metadata;
+pub mod queue_writes;
 pub mod reads;
 pub mod remove;
 pub mod stamps;
@@ -74,6 +76,12 @@ pub struct MethodContext {
     /// attached the notification has no consumer and the call is a
     /// no-op.
     pub tray_focus_signal: Arc<Notify>,
+    /// Worker-loop pause flag. The `queue.pause` / `queue.resume`
+    /// handlers flip this atomic; the worker loop reads it before
+    /// pulling the next pending job. Mirrored onto
+    /// `QueueState::paused` so the on-disk snapshot agrees with the
+    /// in-memory behaviour.
+    pub queue_paused: Arc<AtomicBool>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -102,6 +110,15 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
             &req.params,
             ctx,
         )?)),
+        "queue.pause" => Ok(DispatchOutcome::Result(
+            queue_writes::pause(&req.params, ctx).await?,
+        )),
+        "queue.resume" => Ok(DispatchOutcome::Result(
+            queue_writes::resume(&req.params, ctx).await?,
+        )),
+        "queue.clear" => Ok(DispatchOutcome::Result(
+            queue_writes::clear(&req.params, ctx).await?,
+        )),
         "library.list" => Ok(DispatchOutcome::Result(reads::library_list(ctx)?)),
         "library.info" => Ok(DispatchOutcome::Result(
             reads::library_info(&req.params, ctx).await?,

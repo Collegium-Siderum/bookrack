@@ -60,6 +60,18 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "read",
     },
     MethodSignature {
+        name: "queue.pause",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "queue.resume",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "queue.clear",
+        kind: "write",
+    },
+    MethodSignature {
         name: "library.list",
         kind: "read",
     },

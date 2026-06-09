@@ -57,6 +57,25 @@ pub enum ReplCommand {
     /// a JSON report of what the metadata audit would have produced. The
     /// real catalog, corpus, and vector store are not touched.
     Dryrun(DryrunArgs),
+    /// Queue lifecycle: pause / resume / clear pending rows.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+}
+
+/// One of three lifecycle actions on the persistent ingest queue.
+/// Dispatch maps each variant to the matching control-plane RPC.
+#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueAction {
+    /// Pause the worker loop. Running jobs run to completion; pending
+    /// rows stay pending until `resume`.
+    Pause,
+    /// Resume the worker loop, allowing it to pull pending rows again.
+    Resume,
+    /// Cancel every pending row in one sweep. Running jobs are left
+    /// alone.
+    Clear,
 }
 
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct

@@ -13,6 +13,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -311,6 +312,7 @@ pub async fn worker_loop<R, Fut>(
     mut shutdown_rx: broadcast::Receiver<()>,
     runner: R,
     events: EventStreamHandle,
+    paused: Arc<AtomicBool>,
 ) -> Result<()>
 where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
@@ -331,6 +333,10 @@ where
         tokio::select! {
             _ = shutdown_rx.recv() => return Ok(()),
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+
+        if paused.load(Ordering::Acquire) {
+            continue;
         }
 
         let pulled = {
@@ -379,7 +385,7 @@ where
 /// captured at the same `save_atomic` boundary so a tick that closes
 /// out a job can carry the just-recorded outcome without a second
 /// pass over the jobs vector.
-fn derive_tick(state: &QueueState, last_finished: Option<JobOutcomeSummary>) -> QueueTick {
+pub fn derive_tick(state: &QueueState, last_finished: Option<JobOutcomeSummary>) -> QueueTick {
     let mut pending = 0u32;
     let mut running = 0u32;
     let mut current = None;
@@ -733,6 +739,7 @@ mod tests {
             rx,
             |_| async { Ok::<(), String>(()) },
             EventStreamHandle::default(),
+            Arc::new(AtomicBool::new(false)),
         ));
         tx.send(()).expect("send shutdown");
         let res = tokio::time::timeout(Duration::from_secs(2), handle)
@@ -763,6 +770,7 @@ mod tests {
                 rx,
                 |_job| async { Ok::<(), String>(()) },
                 EventStreamHandle::default(),
+                Arc::new(AtomicBool::new(false)),
             ))
         };
         // The worker's tick is 200 ms; wait long enough for it to pull,

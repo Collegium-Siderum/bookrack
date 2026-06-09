@@ -14,8 +14,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use bookrack_repl_grammar::{
-    CorpusAction, IntakeAction, ReplCli, ReplCommand, StampsAction, WriteMetadataAction,
-    WriteVectorsAction,
+    CorpusAction, IntakeAction, QueueAction, ReplCli, ReplCommand, StampsAction,
+    WriteMetadataAction, WriteVectorsAction,
 };
 use clap::Parser;
 use reedline::{
@@ -382,10 +382,9 @@ async fn handle_queue(client: &ControlClient, tokens: &[String]) -> bool {
             }
             call_and_print(client, "ingest.submit", params).await
         }
-        Some("clear" | "pause" | "resume") => {
-            print_phase_unavailable("queue.clear / queue.pause / queue.resume");
-            true
-        }
+        Some("clear") => call_and_print(client, "queue.clear", Value::Null).await,
+        Some("pause") => call_and_print(client, "queue.pause", Value::Null).await,
+        Some("resume") => call_and_print(client, "queue.resume", Value::Null).await,
         Some(other) => {
             eprintln!("queue: unknown subcommand {other:?}");
             true
@@ -460,6 +459,11 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
             });
             call_and_print(client, "dryrun", params).await
         }
+        ReplCommand::Queue { action } => match action {
+            QueueAction::Pause => call_and_print(client, "queue.pause", Value::Null).await,
+            QueueAction::Resume => call_and_print(client, "queue.resume", Value::Null).await,
+            QueueAction::Clear => call_and_print(client, "queue.clear", Value::Null).await,
+        },
     }
 }
 
