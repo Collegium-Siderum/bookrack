@@ -158,6 +158,8 @@ pub enum Event {
     LibraryChanged { library: String },
     #[serde(rename = "mcp.availability")]
     McpAvailability { paused: bool },
+    #[serde(rename = "log")]
+    Log(bookrack_obs::stream::LogEvent),
 }
 
 impl Event {
@@ -171,6 +173,7 @@ impl Event {
             Event::WorkerProgress(_) => "worker.progress",
             Event::LibraryChanged { .. } => "library.changed",
             Event::McpAvailability { .. } => "mcp.availability",
+            Event::Log(_) => "log",
         }
     }
 
@@ -183,6 +186,7 @@ impl Event {
             Event::WorkerProgress(progress) => serde_json::to_value(progress).unwrap_or_default(),
             Event::LibraryChanged { library } => serde_json::json!({ "library": library }),
             Event::McpAvailability { paused } => serde_json::json!({ "paused": paused }),
+            Event::Log(event) => serde_json::to_value(event).unwrap_or_default(),
         }
     }
 }

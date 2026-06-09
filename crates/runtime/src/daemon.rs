@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::control::events::{
-    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, EventStreamHandle, Stage,
+    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, Event, EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
 use crate::control::progress::{EventProgressSink, ProgressSink};
@@ -75,6 +75,13 @@ pub struct RuntimeOpts {
     /// [`Caller`] tag woven into [`Ops`] audit rows so the catalog
     /// distinguishes daemon-REPL writes from MCP-driven writes.
     pub caller: Caller,
+    /// MCP tool surface, as published by the live `BookrackServer`.
+    /// Empty for entry points that do not bring up the MCP listener;
+    /// otherwise populated by the caller from
+    /// `bookrack_mcp::list_tools()` so the control-plane
+    /// `daemon.mcp_tools` method can answer without spinning up an
+    /// MCP transport.
+    pub mcp_tools: Vec<crate::control::methods::meta::McpToolInfo>,
 }
 
 impl RuntimeOpts {
@@ -89,6 +96,7 @@ impl RuntimeOpts {
             spawn_queue_worker: false,
             log_config: LogConfig::for_headless_daemon(),
             caller: Caller::mcp(),
+            mcp_tools: Vec::new(),
         }
     }
 }
@@ -356,6 +364,7 @@ impl DaemonRuntime {
         // the listener; per-connection tasks reuse the same broadcast
         // so a `shutdown_tx.send(())` tears down both the loop and
         // every attached client.
+        let mcp_tools = Arc::new(opts.mcp_tools);
         let method_ctx = MethodContext {
             cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
@@ -368,7 +377,25 @@ impl DaemonRuntime {
             started_at_rfc3339: started_at_wall.to_rfc3339(),
             selection: selection_for_doctor,
             library_name: library_name.clone(),
+            mcp_tools,
         };
+
+        // Bridge the obs log stream into the control-plane event
+        // stream so subscribers to the `log` channel receive every
+        // tracing event the daemon emits. The bridge dies when the
+        // log broadcast channel closes (i.e. when the obs guard
+        // drops at runtime shutdown).
+        let log_bridge_events = event_stream.clone();
+        let mut log_rx = log_stream.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match log_rx.recv().await {
+                    Ok(ev) => log_bridge_events.publish(Event::Log(ev)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
         let control_accept_handle = tokio::spawn(run_accept_loop(
             control_listener,
             method_ctx,

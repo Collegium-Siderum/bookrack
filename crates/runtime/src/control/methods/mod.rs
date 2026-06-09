@@ -29,13 +29,17 @@ use super::events::{DaemonState, Event, EventStreamHandle};
 use super::jsonrpc::{BUSY, METHOD_NOT_FOUND, Request, RpcError};
 
 pub mod corpus;
+pub mod diagnose;
 pub mod dryrun;
 pub mod ingest;
+pub mod libraries;
+pub mod meta;
 pub mod metadata;
 pub mod reads;
 pub mod remove;
 pub mod stamps;
 pub mod vectors;
+pub mod verify;
 
 pub use reads::SNAPSHOT_CHANNELS;
 pub use reads::snapshot_for;
@@ -55,6 +59,10 @@ pub struct MethodContext {
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
     pub library_name: String,
+    /// Cached MCP tool list, populated by the daemon at startup from
+    /// `bookrack_mcp::list_tools()`. Empty in entry points that do
+    /// not bring up the MCP listener.
+    pub mcp_tools: Arc<Vec<meta::McpToolInfo>>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -133,6 +141,15 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "dryrun" => Ok(DispatchOutcome::Result(
             dryrun::run(&req.params, ctx).await?,
         )),
+        "verify.run" => Ok(DispatchOutcome::Result(verify::run(ctx).await?)),
+        "library.fork" => Ok(DispatchOutcome::Result(
+            libraries::fork(&req.params, ctx).await?,
+        )),
+        "diagnose.run" => Ok(DispatchOutcome::Result(
+            diagnose::run(&req.params, ctx).await?,
+        )),
+        "daemon.methods" => Ok(DispatchOutcome::Result(meta::methods(ctx))),
+        "daemon.mcp_tools" => Ok(DispatchOutcome::Result(meta::mcp_tools(ctx))),
         other => Err(RpcError::new(
             METHOD_NOT_FOUND,
             format!("unknown method: {other}"),

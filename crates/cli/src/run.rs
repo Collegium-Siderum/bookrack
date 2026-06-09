@@ -73,6 +73,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         spawn_queue_worker: true,
         log_config: LogConfig::from_env(),
         caller: Caller::cli(),
+        mcp_tools: bookrack_mcp::list_tools(),
     };
 
     let runtime = match DaemonRuntime::start(runtime_opts).await {

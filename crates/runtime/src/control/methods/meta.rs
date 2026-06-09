@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! `daemon.methods` and `daemon.mcp_tools` — runtime reflection for
+//! `bookrack exec tools` and any future GUI surface that wants to
+//! enumerate what is callable on this daemon.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::MethodContext;
+
+/// One row in the `daemon.methods` response.
+#[derive(Debug, Clone, Serialize)]
+pub struct MethodSignature {
+    pub name: &'static str,
+    pub kind: &'static str,
+}
+
+/// One row in the `daemon.mcp_tools` response. Populated at daemon
+/// startup from the live MCP server so the runtime crate does not
+/// take a direct dependency on rmcp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpToolInfo {
+    pub name: String,
+    pub description: String,
+}
+
+/// Static registry of every method [`super::dispatch`] routes. Kept
+/// in lockstep with the match table by hand; `clippy::pedantic`
+/// would normally flag stringly-typed registries, but this one is the
+/// single source of truth a client uses to populate completion and
+/// help surfaces, so duplication is the lesser cost.
+pub const REGISTRY: &[MethodSignature] = &[
+    MethodSignature {
+        name: "daemon.version",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "daemon.shutdown",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "daemon.methods",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "daemon.mcp_tools",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "status",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "doctor.gather",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "queue.list",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.list",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.info",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.fork",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "events.subscribe",
+        kind: "stream",
+    },
+    MethodSignature {
+        name: "events.snapshot",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "ingest.submit",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "ingest.cancel",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.set",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.clear",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.ack",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.approve",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.reject",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "vectors.rebuild",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "vectors.reembed",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "vectors.reset",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "vectors.drop",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "corpus.rebuild",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "stamps.reconcile",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "remove",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "dryrun",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "verify.run",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "diagnose.run",
+        kind: "read",
+    },
+];
+
+pub fn methods(_ctx: &MethodContext) -> Value {
+    json!({ "methods": REGISTRY })
+}
+
+pub fn mcp_tools(ctx: &MethodContext) -> Value {
+    let tools: &Vec<McpToolInfo> = ctx.mcp_tools.as_ref();
+    json!({ "tools": tools })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_names_are_unique() {
+        let mut names: Vec<&str> = REGISTRY.iter().map(|m| m.name).collect();
+        names.sort_unstable();
+        for pair in names.windows(2) {
+            assert_ne!(
+                pair[0], pair[1],
+                "method {} appears twice in the registry",
+                pair[0]
+            );
+        }
+    }
+
+    #[test]
+    fn registry_kinds_are_known() {
+        for sig in REGISTRY {
+            assert!(
+                matches!(sig.kind, "read" | "write" | "stream"),
+                "method {} has unknown kind {:?}",
+                sig.name,
+                sig.kind
+            );
+        }
+    }
+}

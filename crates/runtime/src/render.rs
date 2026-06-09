@@ -210,7 +210,7 @@ pub fn audit_profile_diff(a_name: &str, a: &AuditProfile, b_name: &str, b: &Audi
 /// rendering. Every field is optional: an unverifiable store leaves its
 /// schema flag false and its error populated, and the rest skip the
 /// counts that depend on it.
-#[derive(Default)]
+#[derive(Default, serde::Serialize)]
 pub struct VerifyReport {
     /// Set when the data directory has no `catalog.db` yet — verify
     /// short-circuits in that case and reports nothing else.
