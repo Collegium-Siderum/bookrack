@@ -21,4 +21,4 @@ pub mod ops_helpers;
 pub mod queue;
 pub mod render;
 
-pub use daemon::{DaemonRuntime, RuntimeOpts};
+pub use daemon::{DaemonRuntime, LaunchMode, RuntimeOpts};

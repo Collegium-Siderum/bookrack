@@ -16,9 +16,11 @@
 pub mod events;
 pub mod jsonrpc;
 pub mod methods;
+pub mod probe;
 pub mod progress;
 pub mod socket;
 
 pub use events::{DaemonState, DaemonStateFlag, Event, EventStreamHandle};
+pub use probe::{HealthProbe, probe};
 pub use progress::{EventProgressSink, NoopProgressSink, ProgressSink};
 pub use socket::{BoundListener, ControlSocketPath, bind, run_accept_loop};

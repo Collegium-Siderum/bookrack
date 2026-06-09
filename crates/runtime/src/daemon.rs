@@ -50,6 +50,21 @@ use crate::control::progress::{EventProgressSink, ProgressSink};
 use crate::control::socket::{ControlSocketPath, bind as bind_control_socket, run_accept_loop};
 use crate::queue;
 
+/// Origin of a daemon bring-up, threaded into the second-launch
+/// handler so a CLI entry surfaces the recorded address while a GUI
+/// entry routes a `tray.focus` RPC at the live daemon before exiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LaunchMode {
+    /// `bookrack run` or `bookrack-mcp`; a second launch prints the
+    /// recorded pid and control socket and exits zero.
+    #[default]
+    Cli,
+    /// Tauri-driven GUI entry; a second launch raises the existing
+    /// window through `tray.focus` and exits zero. Reserved for the
+    /// GUI Phase.
+    Gui,
+}
+
 /// Caller-facing bring-up options. Public fields keep construction
 /// declarative; helper constructors capture the two stable entry-point
 /// profiles.
@@ -82,6 +97,13 @@ pub struct RuntimeOpts {
     /// `daemon.mcp_tools` method can answer without spinning up an
     /// MCP transport.
     pub mcp_tools: Vec<crate::control::methods::meta::McpToolInfo>,
+    /// Origin of this daemon instance, threaded through to the
+    /// second-launch handler so the CLI prints the recorded address
+    /// while a GUI entry would instead route a `tray.focus` RPC at
+    /// the live daemon. Today every entry point passes
+    /// [`LaunchMode::Cli`]; the GUI entry that wires
+    /// [`LaunchMode::Gui`] arrives with the Tauri tray Phase.
+    pub launch_mode: LaunchMode,
 }
 
 impl RuntimeOpts {
@@ -97,6 +119,7 @@ impl RuntimeOpts {
             log_config: LogConfig::for_headless_daemon(),
             caller: Caller::mcp(),
             mcp_tools: Vec::new(),
+            launch_mode: LaunchMode::Cli,
         }
     }
 }
@@ -139,6 +162,11 @@ pub struct DaemonRuntime {
     /// fast-path through `std::process::exit` (signal-driven shutdown
     /// leaves the synchronous reedline thread parked).
     pub signal_triggered: Arc<AtomicBool>,
+    /// Notification handle the GUI tray (if any) waits on. The
+    /// `tray.focus` control-plane method signals one waiter per call.
+    /// Held here so a GUI entry that builds a `DaemonRuntime` in the
+    /// same process can clone the handle and attach its own waiter.
+    pub tray_focus_signal: Arc<tokio::sync::Notify>,
     /// Drop-only field: holds the session-scoped flock. The
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
@@ -365,6 +393,7 @@ impl DaemonRuntime {
         // so a `shutdown_tx.send(())` tears down both the loop and
         // every attached client.
         let mcp_tools = Arc::new(opts.mcp_tools);
+        let tray_focus_signal = Arc::new(tokio::sync::Notify::new());
         let method_ctx = MethodContext {
             cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
@@ -378,6 +407,8 @@ impl DaemonRuntime {
             selection: selection_for_doctor,
             library_name: library_name.clone(),
             mcp_tools,
+            queue_worker_enabled: opts.spawn_queue_worker,
+            tray_focus_signal: Arc::clone(&tray_focus_signal),
         };
 
         // Bridge the obs log stream into the control-plane event
@@ -420,6 +451,7 @@ impl DaemonRuntime {
             write_guard,
             control_sock,
             signal_triggered,
+            tray_focus_signal,
             _tty_lock: tty_lock,
             queue_worker,
             signal_handle,

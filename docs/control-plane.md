@@ -182,3 +182,32 @@ second concurrent write returns `-32001 busy`.
   and `bookrack quit` are the documented exceptions. The MCP
   tool set, the session-lock schema, the on-disk queue schema,
   and the REPL client are unchanged.
+- **Phase 5** — second-launch semantics and `bookrack-mcp`
+  control-plane parity. `LockInfo` and `peek_lock` move from the
+  `bookrack-cli` `exec` module into `bookrack-session`; the new
+  `bookrack_runtime::control::probe` resolves a recorded session
+  into one of `Healthy(pid, control_sock)` / `Stale` /
+  `Unprobeable` inside a hard 2 s budget by attempting
+  `daemon.version` against the recorded socket. A second
+  `bookrack run` (or `bookrack-mcp`) invocation against a healthy
+  lock prints `bookrack daemon already running: pid=… control_sock=…`
+  and exits zero; a lock pointing at a dead daemon exits with
+  status 3 so the operator removes the lock by hand; an
+  unprobeable lock (no `control_sock=` recorded) falls back to
+  surfacing the original acquire error. New `RuntimeOpts.launch_mode`
+  (`LaunchMode::Cli` / `LaunchMode::Gui`) routes a future GUI
+  entry through the new `tray.focus` control-plane method instead
+  of competing for the lock; with no GUI attached the method is a
+  no-op and still returns `{ ok: true }` so the contract stays
+  stable between CLI-only and GUI builds. `bookrack-mcp` gains a
+  `--with-queue-worker` flag: without it, queue-bound write
+  methods (`ingest.submit`, `ingest.cancel`, `vectors.*`,
+  `corpus.rebuild`, `stamps.reconcile`, `remove`, `dryrun`)
+  short-circuit at dispatch with JSON-RPC error
+  `-32002 queue worker disabled in headless mode` rather than
+  enqueueing work no one will run; with it, the headless entry
+  exposes the same full method set as `bookrack run`. The MCP
+  tool set, the session-lock schema (still
+  `pid=… / mcp=… / control_sock=…`, with unknown keys ignored
+  per Phase 1's append-only rule), and the on-disk queue schema
+  are unchanged.

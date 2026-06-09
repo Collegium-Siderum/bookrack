@@ -147,6 +147,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         name: "diagnose.run",
         kind: "read",
     },
+    MethodSignature {
+        name: "tray.focus",
+        kind: "write",
+    },
 ];
 
 pub fn methods(_ctx: &MethodContext) -> Value {

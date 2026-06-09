@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use bookrack_session::{resolve_runtime_dir, tty_lock_name};
+use bookrack_session::{peek_lock, resolve_runtime_dir, tty_lock_name};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -44,54 +44,26 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct LockInfo {
-    pub(crate) pid: Option<String>,
-    pub(crate) mcp: Option<String>,
-    pub(crate) control_sock: Option<String>,
-}
-
-/// Parse a lock-file body into [`LockInfo`]. Unknown keys are ignored
-/// so future schema additions stay backward-compatible.
-pub(crate) fn parse_lock(raw: &str) -> LockInfo {
-    let mut info = LockInfo::default();
-    for line in raw.lines() {
-        if let Some(value) = line.strip_prefix("pid=") {
-            info.pid = Some(value.to_string());
-        } else if let Some(value) = line.strip_prefix("mcp=") {
-            info.mcp = Some(value.to_string());
-        } else if let Some(value) = line.strip_prefix("control_sock=") {
-            info.control_sock = Some(value.to_string());
+fn print_info(lock_path: &Path) -> Result<()> {
+    println!("lock      {}", lock_path.display());
+    match peek_lock(lock_path)? {
+        None => {
+            println!("pid       (lock file does not exist — no running daemon)");
+            println!("mcp       (lock file does not exist)");
+            println!("control   (lock file does not exist)");
+        }
+        Some(info) => {
+            println!("pid       {}", info.pid);
+            println!("mcp       {}", info.mcp);
+            println!(
+                "control   {}",
+                info.control_sock
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(missing — daemon predates Phase 1)".to_string())
+            );
         }
     }
-    info
-}
-
-fn read_lock_info(lock_path: &Path) -> Result<LockInfo> {
-    let raw = std::fs::read_to_string(lock_path)
-        .with_context(|| format!("read session lock at {}", lock_path.display()))?;
-    Ok(parse_lock(&raw))
-}
-
-fn print_info(lock_path: &Path) -> Result<()> {
-    let info = read_lock_info(lock_path)?;
-    println!("lock      {}", lock_path.display());
-    println!(
-        "pid       {}",
-        info.pid.as_deref().unwrap_or("(missing in lock)")
-    );
-    println!(
-        "mcp       {}",
-        info.mcp
-            .as_deref()
-            .unwrap_or("(none — daemon ran with --no-mcp)")
-    );
-    println!(
-        "control   {}",
-        info.control_sock
-            .as_deref()
-            .unwrap_or("(missing — daemon predates Phase 1)")
-    );
     Ok(())
 }
 
@@ -189,36 +161,4 @@ async fn tail_logs(limit: u64) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_lock_info_parses_lines() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let lock = tmp.path().join("bookrack.tty.lock");
-        std::fs::write(
-            &lock,
-            "pid=4242\nmcp=127.0.0.1:8765\ncontrol_sock=/tmp/x.sock\n",
-        )?;
-        let info = read_lock_info(&lock)?;
-        assert_eq!(info.pid.as_deref(), Some("4242"));
-        assert_eq!(info.mcp.as_deref(), Some("127.0.0.1:8765"));
-        assert_eq!(info.control_sock.as_deref(), Some("/tmp/x.sock"));
-        Ok(())
-    }
-
-    #[test]
-    fn read_lock_info_tolerates_unknown_lines() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let lock = tmp.path().join("bookrack.tty.lock");
-        std::fs::write(&lock, "pid=1\nfuture_key=ignored\nmcp=:0\n")?;
-        let info = read_lock_info(&lock)?;
-        assert_eq!(info.pid.as_deref(), Some("1"));
-        assert_eq!(info.mcp.as_deref(), Some(":0"));
-        assert!(info.control_sock.is_none());
-        Ok(())
-    }
 }

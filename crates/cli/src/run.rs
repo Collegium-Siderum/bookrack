@@ -28,14 +28,16 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
 use bookrack_ops::Caller;
 use bookrack_ops::registry::LibraryRegistry;
+use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::queue::{self, Priority, QueueState};
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use clap::CommandFactory;
 use clap::Parser;
 use reedline::{
     FileBackedHistory, History, Prompt, PromptEditMode, PromptHistorySearch,
     PromptHistorySearchStatus, Reedline, Signal,
 };
+use serde_json::Value;
 use tokio::sync::broadcast;
 
 /// CLI inputs for [`run_daemon`]. Parsed from the `Run` clap variant.
@@ -74,6 +76,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         log_config: LogConfig::from_env(),
         caller: Caller::cli(),
         mcp_tools: bookrack_mcp::list_tools(),
+        launch_mode: LaunchMode::Cli,
     };
 
     let runtime = match DaemonRuntime::start(runtime_opts).await {
@@ -84,7 +87,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
                     .to_string()
                     .contains("bookrack session already running")
             }) {
-                return handle_lock_conflict(err, &lock_path);
+                return handle_lock_conflict(err, &lock_path, LaunchMode::Cli).await;
             }
             return Err(err);
         }
@@ -182,41 +185,63 @@ fn spawn_repl_if_tty(
     }
 }
 
-/// Print a friendly message when the session lock is already held and,
-/// on an interactive TTY, wait for a keypress before exiting so a
-/// double-click launcher does not vanish its terminal window. Returns
-/// `Ok(())` on the TTY path (the operator chose to close the window),
-/// the original error on the non-TTY path so callers see a non-zero
-/// exit. The lock's flock is OS-released on crash, so this branch only
-/// fires for a truly live predecessor.
-fn handle_lock_conflict(err: anyhow::Error, lock_path: &Path) -> Result<()> {
-    use std::io::{BufRead, IsTerminal, Write};
-    let info = std::fs::read_to_string(lock_path)
-        .ok()
-        .map(|text| crate::exec::parse_lock(&text))
-        .unwrap_or_else(|| crate::exec::LockInfo {
-            pid: None,
-            mcp: None,
-            control_sock: None,
-        });
-    let pid_label = info
-        .pid
-        .map(|p| p.to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let mcp_label = info.mcp.clone().unwrap_or_else(|| "<unknown>".to_string());
-    eprintln!("bookrack is already running.");
-    eprintln!("  pid:  {pid_label}");
-    eprintln!("  mcp:  {mcp_label}");
-    eprintln!("Inspect with:   bookrack exec info");
-    eprintln!("Stop with:      kill {pid_label}    (or via the session.shutdown MCP tool)");
-    if !std::io::stdin().is_terminal() {
-        return Err(err);
+/// Resolve a session-lock conflict by probing the running daemon and
+/// taking the action that matches the entry point. `LaunchMode::Cli`
+/// prints the recorded pid and control socket and exits zero so a
+/// second `bookrack run` invocation is a no-op; `LaunchMode::Gui`
+/// routes a `tray.focus` RPC at the live daemon and exits zero so a
+/// double-launched GUI raises its existing window. A lock pointing at
+/// a dead daemon exits with status 3; an unprobeable lock (no
+/// `control_sock=` recorded) falls back to surfacing the original
+/// acquire error.
+async fn handle_lock_conflict(
+    err: anyhow::Error,
+    lock_path: &Path,
+    mode: LaunchMode,
+) -> Result<()> {
+    let info = match bookrack_session::peek_lock(lock_path) {
+        Ok(Some(i)) => i,
+        Ok(None) | Err(_) => {
+            eprintln!("{err:#}");
+            std::process::exit(1);
+        }
+    };
+    let probe = bookrack_runtime::control::probe(&info, Duration::from_secs(2)).await;
+    match (mode, probe) {
+        (LaunchMode::Cli, HealthProbe::Healthy(pid, sock)) => {
+            println!(
+                "bookrack daemon already running: pid={pid} control_sock={}",
+                sock.display()
+            );
+            std::process::exit(0);
+        }
+        (LaunchMode::Gui, HealthProbe::Healthy(_pid, sock)) => {
+            let socket = bookrack_control_client::ControlSocket::from_path(sock);
+            let client = bookrack_control_client::connect(&socket)
+                .await
+                .context("connect to live daemon control socket for tray.focus")?;
+            let _: Value = client
+                .call("tray.focus", Value::Null)
+                .await
+                .context("tray.focus rpc")?;
+            std::process::exit(0);
+        }
+        (_, HealthProbe::Stale) => {
+            eprintln!(
+                "bookrack session lock at {} is stale (no live daemon answered within 2s).",
+                lock_path.display()
+            );
+            eprintln!(
+                "Remove the lock file manually and re-run bookrack: rm {}",
+                lock_path.display()
+            );
+            std::process::exit(3);
+        }
+        (_, HealthProbe::Unprobeable) => {
+            eprintln!("{err:#}");
+            std::process::exit(1);
+        }
     }
-    eprint!("Press Enter to close this window. ");
-    let _ = std::io::stderr().flush();
-    let mut buf = String::new();
-    let _ = std::io::stdin().lock().read_line(&mut buf);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

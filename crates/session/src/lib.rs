@@ -153,6 +153,76 @@ impl TtyLock {
     }
 }
 
+/// Snapshot of a session lock file's contents. Returned by
+/// [`peek_lock`] for callers that want to discover a live session
+/// (its pid, MCP listener label, and control-plane socket path)
+/// without taking the lock themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockInfo {
+    pub pid: u32,
+    pub mcp: String,
+    pub control_sock: Option<PathBuf>,
+}
+
+/// Read the session lock at `path` without acquiring it.
+///
+/// Returns `Ok(None)` when the file does not exist. Returns `Err`
+/// when the file cannot be read, or when its contents are missing
+/// the required `pid=` / `mcp=` lines or carry a `pid` value that
+/// is not a `u32`. The `control_sock=` line is optional: a lock
+/// file written by a daemon that predates Phase 1, or one whose
+/// daemon ran without a control-plane listener, parses cleanly with
+/// `control_sock: None`.
+pub fn peek_lock(path: &Path) -> Result<Option<LockInfo>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("read session lock at {}", path.display()))
+            );
+        }
+    };
+    parse_lock(&raw, path).map(Some)
+}
+
+fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
+    let mut pid: Option<u32> = None;
+    let mut mcp: Option<String> = None;
+    let mut control_sock: Option<PathBuf> = None;
+    for line in raw.lines() {
+        if let Some(value) = line.strip_prefix("pid=") {
+            pid = Some(value.parse::<u32>().with_context(|| {
+                format!(
+                    "parse `pid=` line in session lock at {}: not a u32",
+                    source.display()
+                )
+            })?);
+        } else if let Some(value) = line.strip_prefix("mcp=") {
+            mcp = Some(value.to_string());
+        } else if let Some(value) = line.strip_prefix("control_sock=") {
+            control_sock = Some(PathBuf::from(value));
+        }
+    }
+    let pid = pid.ok_or_else(|| {
+        anyhow!(
+            "session lock at {} missing required `pid=` line",
+            source.display()
+        )
+    })?;
+    let mcp = mcp.ok_or_else(|| {
+        anyhow!(
+            "session lock at {} missing required `mcp=` line",
+            source.display()
+        )
+    })?;
+    Ok(LockInfo {
+        pid,
+        mcp,
+        control_sock,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +326,54 @@ mod tests {
     fn resolve_runtime_dir_prefers_explicit_override() {
         let path = PathBuf::from("/tmp/bookrack-test-override");
         assert_eq!(resolve_runtime_dir(Some(&path)).unwrap(), path);
+    }
+
+    #[test]
+    fn peek_lock_returns_none_when_file_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("missing.lock");
+        assert!(peek_lock(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn peek_lock_parses_pid_mcp_and_optional_control_sock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bookrack.tty.lock");
+        std::fs::write(
+            &path,
+            "pid=4242\nmcp=127.0.0.1:8765\ncontrol_sock=/tmp/x.sock\n",
+        )
+        .unwrap();
+        let info = peek_lock(&path).unwrap().unwrap();
+        assert_eq!(info.pid, 4242);
+        assert_eq!(info.mcp, "127.0.0.1:8765");
+        assert_eq!(info.control_sock.as_deref(), Some(Path::new("/tmp/x.sock")));
+    }
+
+    #[test]
+    fn peek_lock_tolerates_unknown_lines_and_omitted_control_sock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bookrack.tty.lock");
+        std::fs::write(&path, "pid=1\nfuture_key=ignored\nmcp=disabled\n").unwrap();
+        let info = peek_lock(&path).unwrap().unwrap();
+        assert_eq!(info.pid, 1);
+        assert_eq!(info.mcp, "disabled");
+        assert!(info.control_sock.is_none());
+    }
+
+    #[test]
+    fn peek_lock_errors_when_pid_missing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bookrack.tty.lock");
+        std::fs::write(&path, "mcp=disabled\n").unwrap();
+        assert!(peek_lock(&path).is_err());
+    }
+
+    #[test]
+    fn peek_lock_errors_when_pid_not_a_u32() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bookrack.tty.lock");
+        std::fs::write(&path, "pid=not-a-number\nmcp=disabled\n").unwrap();
+        assert!(peek_lock(&path).is_err());
     }
 }

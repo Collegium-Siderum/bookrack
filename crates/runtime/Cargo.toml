@@ -9,6 +9,7 @@ repository.workspace = true
 bookrack-audit-profile = { path = "../audit-profile" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
+bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-diagnose = { path = "../diagnose" }

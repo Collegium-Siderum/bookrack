@@ -36,3 +36,6 @@ shlex.workspace = true
 # `bookrack init` writes a tempdir for the end-to-end smoke ingest, so
 # the user's chosen data root stays untouched until validation passes.
 tempfile.workspace = true
+
+[dev-dependencies]
+fs2.workspace = true

@@ -29,6 +29,14 @@ struct Cli {
     /// Mutually exclusive with `--data-dir`.
     #[arg(long)]
     library: Option<String>,
+    /// Spawn the persistent ingest queue worker. Off by default so a
+    /// server-class headless entry does not start work the operator
+    /// did not ask for; on, the control-plane `ingest.submit` /
+    /// `vectors.*` / `corpus.rebuild` family of methods become live.
+    /// With the flag off, those methods return JSON-RPC error
+    /// `-32002 queue worker disabled in headless mode`.
+    #[arg(long)]
+    with_queue_worker: bool,
 }
 
 #[tokio::main]
@@ -45,7 +53,10 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
     let mcp_cfg = McpConfig::from_env();
-    let runtime = DaemonRuntime::start(RuntimeOpts::headless(cli.data_dir, cli.library)).await?;
+    let mut runtime_opts = RuntimeOpts::headless(cli.data_dir, cli.library);
+    runtime_opts.spawn_queue_worker = cli.with_queue_worker;
+    runtime_opts.mcp_tools = bookrack_mcp::list_tools();
+    let runtime = DaemonRuntime::start(runtime_opts).await?;
 
     let shutdown_tx = runtime.shutdown_tx.clone();
     let shutdown_rx = shutdown_tx.subscribe();

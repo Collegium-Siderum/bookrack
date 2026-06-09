@@ -23,7 +23,7 @@ use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
-use tokio::sync::{Mutex as TokioMutex, broadcast};
+use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
 
 use super::events::{DaemonState, Event, EventStreamHandle};
 use super::jsonrpc::{BUSY, METHOD_NOT_FOUND, Request, RpcError};
@@ -38,6 +38,7 @@ pub mod metadata;
 pub mod reads;
 pub mod remove;
 pub mod stamps;
+pub mod tray;
 pub mod vectors;
 pub mod verify;
 
@@ -63,6 +64,16 @@ pub struct MethodContext {
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
     /// not bring up the MCP listener.
     pub mcp_tools: Arc<Vec<meta::McpToolInfo>>,
+    /// `true` when the runtime spawned a queue worker. Headless
+    /// `bookrack-mcp` entries leave it `false`, in which case the
+    /// dispatch routes queue-bound write methods to a
+    /// `-32002 not_ready` response without invoking the handler.
+    pub queue_worker_enabled: bool,
+    /// Notification handle the GUI tray (if any) waits on. The
+    /// `tray.focus` method signals one waiter per call; with no GUI
+    /// attached the notification has no consumer and the call is a
+    /// no-op.
+    pub tray_focus_signal: Arc<Notify>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -76,6 +87,12 @@ pub enum DispatchOutcome {
 /// Method router. Method names are matched verbatim against the table
 /// in [`docs/control-plane.md`](../../../../docs/control-plane.md).
 pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutcome, RpcError> {
+    if !ctx.queue_worker_enabled && is_queue_bound_method(req.method.as_str()) {
+        return Err(RpcError::new(
+            QUEUE_WORKER_DISABLED,
+            "queue worker disabled in headless mode".to_string(),
+        ));
+    }
     match req.method.as_str() {
         "daemon.version" => Ok(DispatchOutcome::Result(reads::daemon_version(ctx))),
         "daemon.shutdown" => Ok(DispatchOutcome::Shutdown(reads::daemon_shutdown(ctx))),
@@ -150,11 +167,39 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         )),
         "daemon.methods" => Ok(DispatchOutcome::Result(meta::methods(ctx))),
         "daemon.mcp_tools" => Ok(DispatchOutcome::Result(meta::mcp_tools(ctx))),
+        "tray.focus" => Ok(DispatchOutcome::Result(tray::focus(ctx))),
         other => Err(RpcError::new(
             METHOD_NOT_FOUND,
             format!("unknown method: {other}"),
         )),
     }
+}
+
+/// JSON-RPC application code returned when the daemon cannot honour a
+/// queue-bound write because the queue worker was not spawned.
+/// Stable: callers (`bookrack-mcp` clients, the CLI) match on it to
+/// distinguish a misconfigured headless entry from a transient busy
+/// state.
+pub const QUEUE_WORKER_DISABLED: i32 = -32002;
+
+/// Method names that route work through the persistent queue worker.
+/// In a headless `bookrack-mcp` profile without `--with-queue-worker`,
+/// the dispatch short-circuits these to a `-32002 not_ready` response
+/// rather than enqueueing tasks no one will run.
+fn is_queue_bound_method(method: &str) -> bool {
+    matches!(
+        method,
+        "ingest.submit"
+            | "ingest.cancel"
+            | "vectors.rebuild"
+            | "vectors.reembed"
+            | "vectors.reset"
+            | "vectors.drop"
+            | "corpus.rebuild"
+            | "stamps.reconcile"
+            | "remove"
+            | "dryrun"
+    )
 }
 
 /// Acquire the runtime-wide write mutex, flip the daemon into
@@ -209,4 +254,63 @@ where
 #[allow(dead_code)]
 pub fn selection_data_dir(selection: &LibrarySelection) -> Option<&PathBuf> {
     selection.data_dir.as_ref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_bound_method_set_matches_dispatch_table() {
+        for name in [
+            "ingest.submit",
+            "ingest.cancel",
+            "vectors.rebuild",
+            "vectors.reembed",
+            "vectors.reset",
+            "vectors.drop",
+            "corpus.rebuild",
+            "stamps.reconcile",
+            "remove",
+            "dryrun",
+        ] {
+            assert!(is_queue_bound_method(name), "{name} should be queue-bound");
+        }
+    }
+
+    #[test]
+    fn non_queue_methods_are_not_short_circuited() {
+        for name in [
+            "daemon.version",
+            "daemon.shutdown",
+            "daemon.methods",
+            "daemon.mcp_tools",
+            "status",
+            "doctor.gather",
+            "queue.list",
+            "library.list",
+            "library.info",
+            "library.fork",
+            "events.subscribe",
+            "events.snapshot",
+            "metadata.set",
+            "metadata.clear",
+            "metadata.ack",
+            "metadata.approve",
+            "metadata.reject",
+            "verify.run",
+            "diagnose.run",
+            "tray.focus",
+        ] {
+            assert!(
+                !is_queue_bound_method(name),
+                "{name} should pass through dispatch in headless mode"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_worker_disabled_code_is_stable() {
+        assert_eq!(QUEUE_WORKER_DISABLED, -32002);
+    }
 }
