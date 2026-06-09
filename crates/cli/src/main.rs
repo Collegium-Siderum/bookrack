@@ -12,6 +12,7 @@
 //! truth for every default.
 
 mod exec;
+mod exec_control;
 mod init;
 mod run;
 mod util;

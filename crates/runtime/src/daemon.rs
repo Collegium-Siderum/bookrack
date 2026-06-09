@@ -43,9 +43,10 @@ use tokio::task::JoinHandle;
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::control::events::{
-    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, EventStreamHandle,
+    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
+use crate::control::progress::{EventProgressSink, ProgressSink};
 use crate::control::socket::{ControlSocketPath, bind as bind_control_socket, run_accept_loop};
 use crate::queue;
 
@@ -115,6 +116,12 @@ pub struct DaemonRuntime {
     pub mcp_label: String,
     /// Broadcast handle for control-plane events.
     pub event_stream: EventStreamHandle,
+    /// Process-wide write mutex held by every control-plane write
+    /// handler for the duration of its underlying business call.
+    /// Distinct from the cross-process [`TtyLock`]: this serialises
+    /// concurrent writers attached to the same daemon, while the
+    /// `TtyLock` keeps a second daemon from coming up at all.
+    pub write_guard: Arc<tokio::sync::Mutex<()>>,
     /// Discovered path of the control-plane listener, used by callers
     /// (e.g. `bookrack exec`) that read the session lock and want to
     /// reach the control plane.
@@ -285,6 +292,7 @@ impl DaemonRuntime {
         let state_flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
         let event_stream =
             EventStreamHandle::new(DEFAULT_EVENT_CHANNEL_CAPACITY, Arc::clone(&state_flag));
+        let write_guard = Arc::new(tokio::sync::Mutex::new(()));
         let selection_for_doctor = LibrarySelection {
             data_dir: opts.selection.data_dir.clone(),
             library: opts.selection.library.clone(),
@@ -297,6 +305,8 @@ impl DaemonRuntime {
             let params_template = queue_params_template.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             let library_default = library_name.clone();
+            let events_for_loop = event_stream.clone();
+            let events_for_runner = event_stream.clone();
             Some(tokio::spawn(queue::worker_loop(
                 state_path,
                 state,
@@ -305,8 +315,10 @@ impl DaemonRuntime {
                     let registry = Arc::clone(&registry);
                     let params_template = params_template.clone();
                     let library_default = library_default.clone();
+                    let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
-                        tokio::task::spawn_blocking(move || {
+                        sink.report(Stage::Extract, None, None);
+                        let outcome = tokio::task::spawn_blocking(move || {
                             let runtime = tokio::runtime::Handle::current();
                             let library = if job.library.is_empty() {
                                 library_default
@@ -327,9 +339,14 @@ impl DaemonRuntime {
                             })
                         })
                         .await
-                        .map_err(|e| format!("queue worker join: {e}"))?
+                        .map_err(|e| format!("queue worker join: {e}"))?;
+                        if outcome.is_ok() {
+                            sink.report(Stage::Embed, None, None);
+                        }
+                        outcome
                     }
                 },
+                events_for_loop,
             )))
         } else {
             None
@@ -340,13 +357,17 @@ impl DaemonRuntime {
         // so a `shutdown_tx.send(())` tears down both the loop and
         // every attached client.
         let method_ctx = MethodContext {
+            cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
             info_context: info_context.clone(),
             queue_state: Arc::clone(&queue_state),
+            queue_state_path: queue_state_path.clone(),
             event_stream: event_stream.clone(),
+            write_guard: Arc::clone(&write_guard),
             shutdown_tx: shutdown_tx.clone(),
             started_at_rfc3339: started_at_wall.to_rfc3339(),
             selection: selection_for_doctor,
+            library_name: library_name.clone(),
         };
         let control_accept_handle = tokio::spawn(run_accept_loop(
             control_listener,
@@ -369,6 +390,7 @@ impl DaemonRuntime {
             started_at_wall,
             mcp_label,
             event_stream,
+            write_guard,
             control_sock,
             signal_triggered,
             _tty_lock: tty_lock,

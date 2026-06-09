@@ -191,6 +191,10 @@ pub const ACTOR_DETAIL_CLI: &str = "cli";
 /// Conventional `actor_detail` value for the MCP surface.
 pub const ACTOR_DETAIL_MCP: &str = "mcp";
 
+/// Conventional `actor_detail` value for control-plane callers
+/// reaching the daemon over the local JSON-RPC socket.
+pub const ACTOR_DETAIL_CONTROL_PLANE: &str = "control_plane";
+
 impl Caller {
     /// A CLI caller: [`ActorKind::Human`] with `actor_detail = "cli"`.
     pub fn cli() -> Caller {
@@ -207,6 +211,19 @@ impl Caller {
         Caller {
             actor_kind: ActorKind::Llm,
             actor_detail: Some(ACTOR_DETAIL_MCP.to_string()),
+            session_id: None,
+            reason: None,
+        }
+    }
+
+    /// A control-plane caller: [`ActorKind::Human`] with
+    /// `actor_detail = "control_plane"`. Used by JSON-RPC handlers that
+    /// reach the runtime business functions on behalf of a local socket
+    /// client.
+    pub fn control_plane() -> Caller {
+        Caller {
+            actor_kind: ActorKind::Human,
+            actor_detail: Some(ACTOR_DETAIL_CONTROL_PLANE.to_string()),
             session_id: None,
             reason: None,
         }

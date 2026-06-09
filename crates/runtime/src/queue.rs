@@ -24,6 +24,8 @@ use uuid::Uuid;
 
 pub use bookrack_core::queue::{JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState};
 
+use crate::control::events::{Event, EventStreamHandle, JobOutcomeSummary, QueueTick};
+
 /// Read the queue state at `path`. A missing file deserialises to the
 /// default state so a freshly initialised data root just works.
 pub fn load(path: &Path) -> Result<QueueState> {
@@ -303,24 +305,12 @@ pub fn render_list(state: &QueueState) -> String {
     out
 }
 
-/// The single-puller worker.
-///
-/// Crash-recovers on entry (any `Running` job from a prior session is
-/// reset to `Pending`, see [`crash_recovery_reset`]), then loops:
-/// `select` on the shutdown broadcast or a 200 ms tick, pull the next
-/// pending job, drive it through `runner`, write the outcome back,
-/// repeat. `runner` is intentionally a closure so the production wiring
-/// can route through the registry while tests inject a fake outcome
-/// without standing up a real ingest.
-///
-/// State file writes that fail are logged through `tracing::error`
-/// and the loop continues — losing one rewrite is recoverable on the
-/// next save, but exiting the worker would strand the queue.
 pub async fn worker_loop<R, Fut>(
     state_path: PathBuf,
     state: Arc<Mutex<QueueState>>,
     mut shutdown_rx: broadcast::Receiver<()>,
     runner: R,
+    events: EventStreamHandle,
 ) -> Result<()>
 where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
@@ -333,6 +323,8 @@ where
         if let Err(err) = save_atomic(&guard, &state_path) {
             tracing::error!(error = %err, "queue worker: persist after crash recovery");
         }
+        let tick = derive_tick(&guard, None);
+        events.publish(Event::QueueTick(tick));
     }
 
     loop {
@@ -344,10 +336,12 @@ where
         let pulled = {
             let mut guard = state.lock().expect("queue state mutex poisoned");
             let job = pull_pending(&mut guard);
-            if job.is_some()
-                && let Err(err) = save_atomic(&guard, &state_path)
-            {
-                tracing::error!(error = %err, "queue worker: persist after pull");
+            if job.is_some() {
+                if let Err(err) = save_atomic(&guard, &state_path) {
+                    tracing::error!(error = %err, "queue worker: persist after pull");
+                }
+                let tick = derive_tick(&guard, None);
+                events.publish(Event::QueueTick(tick));
             }
             job
         };
@@ -368,7 +362,53 @@ where
             if let Err(err) = save_atomic(&guard, &state_path) {
                 tracing::error!(error = %err, "queue worker: persist after outcome");
             }
+            let last_finished = guard
+                .jobs
+                .iter()
+                .find(|j| j.id == job.id)
+                .map(summarize_outcome);
+            let tick = derive_tick(&guard, last_finished);
+            events.publish(Event::QueueTick(tick));
         }
+    }
+}
+
+/// Build a [`QueueTick`] from the on-disk queue document.
+///
+/// The caller hands ownership of an optional [`JobOutcomeSummary`]
+/// captured at the same `save_atomic` boundary so a tick that closes
+/// out a job can carry the just-recorded outcome without a second
+/// pass over the jobs vector.
+fn derive_tick(state: &QueueState, last_finished: Option<JobOutcomeSummary>) -> QueueTick {
+    let mut pending = 0u32;
+    let mut running = 0u32;
+    let mut current = None;
+    for job in &state.jobs {
+        match job.state {
+            JobState::Pending => pending += 1,
+            JobState::Running => {
+                running += 1;
+                if current.is_none() {
+                    current = Some(job.id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    QueueTick {
+        current,
+        pending,
+        running,
+        last_finished,
+    }
+}
+
+fn summarize_outcome(job: &QueueJob) -> JobOutcomeSummary {
+    JobOutcomeSummary {
+        job_id: job.id.clone(),
+        state: job.state,
+        error: job.error.clone(),
+        finished_at: job.finished_at.unwrap_or_else(Utc::now),
     }
 }
 
@@ -687,9 +727,13 @@ mod tests {
         let path = dir.path().join("queue.json");
         let state = Arc::new(Mutex::new(QueueState::default()));
         let (tx, rx) = broadcast::channel::<()>(2);
-        let handle = tokio::spawn(worker_loop(path, Arc::clone(&state), rx, |_| async {
-            Ok::<(), String>(())
-        }));
+        let handle = tokio::spawn(worker_loop(
+            path,
+            Arc::clone(&state),
+            rx,
+            |_| async { Ok::<(), String>(()) },
+            EventStreamHandle::default(),
+        ));
         tx.send(()).expect("send shutdown");
         let res = tokio::time::timeout(Duration::from_secs(2), handle)
             .await
@@ -713,9 +757,13 @@ mod tests {
         let (tx, rx) = broadcast::channel::<()>(2);
         let handle = {
             let state = Arc::clone(&state);
-            tokio::spawn(worker_loop(path.clone(), state, rx, |_job| async {
-                Ok::<(), String>(())
-            }))
+            tokio::spawn(worker_loop(
+                path.clone(),
+                state,
+                rx,
+                |_job| async { Ok::<(), String>(()) },
+                EventStreamHandle::default(),
+            ))
         };
         // The worker's tick is 200 ms; wait long enough for it to pull,
         // resolve the runner, and persist the outcome.

@@ -25,11 +25,17 @@ pub const INVALID_PARAMS: i32 = -32602;
 /// Standard JSON-RPC error code for a handler-side failure.
 pub const INTERNAL_ERROR: i32 = -32603;
 /// bookrack-specific: another write command is in flight.
-#[allow(dead_code)]
 pub const BUSY: i32 = -32001;
 /// bookrack-specific: runtime is not yet ready to serve this method.
 #[allow(dead_code)]
 pub const NOT_READY: i32 = -32002;
+/// bookrack-specific: multi-library handler received a `library`
+/// field that does not exist in the registry.
+#[allow(dead_code)]
+pub const INVALID_LIBRARY: i32 = -32010;
+/// bookrack-specific: `ingest.cancel` referenced a job id no longer
+/// in the queue document.
+pub const JOB_NOT_FOUND: i32 = -32011;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]

@@ -43,6 +43,10 @@ use bookrack_session::{resolve_runtime_dir, tty_lock_name};
 ///   the daemon shuts down or the client is interrupted.
 /// - `logs tail [<n>]`: print the most recent `n` log events
 ///   (defaults to 100). Calls the `session.logs_tail` MCP tool.
+/// - `call <method> [<json-params>]`: send one JSON-RPC request to
+///   the control-plane socket and print the `result`. Honours
+///   `BOOKRACK_EXEC_CHANNEL=mcp` by erroring out so a forced MCP
+///   channel does not silently take the control path.
 /// - `<namespace>.<tool> [<json-object>]` for `library.*` and
 ///   `session.*`: call the named MCP tool with the second positional
 ///   token as raw JSON arguments. `{}` and omitted-args both encode
@@ -57,6 +61,7 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
         "info" => print_info(&lock_path),
         "tools" => print_tools_live(&lock_path).await,
         "logs" => run_logs(&lock_path, &args[1..]).await,
+        "call" => run_call(&lock_path, &args[1..]).await,
         name if name.starts_with("library.") || name.starts_with("session.") => {
             // Parse the optional JSON-object argument before connecting
             // so a syntax error stays local and does not waste an MCP
@@ -73,9 +78,38 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
         other => {
             bail!(
                 "bookrack exec: unknown subcommand `{other}`; \
-                 expected `info`, `tools`, `logs`, or `library.<tool> [<json>]`"
+                 expected `info`, `tools`, `logs`, `call`, or `library.<tool> [<json>]`"
             )
         }
+    }
+}
+
+/// Drive the control-plane channel for `bookrack exec call`. Refuses
+/// to run when [`crate::exec_control::ExecChannel::from_env`] resolves
+/// to MCP, so the env-driven channel switch stays honest.
+async fn run_call(lock_path: &Path, args: &[String]) -> Result<()> {
+    use crate::exec_control::{ExecChannel, call_method};
+
+    let method = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("bookrack exec call: method name required"))?;
+    let params = match args.get(1).map(String::as_str) {
+        None | Some("") => None,
+        Some(raw) => Some(
+            serde_json::from_str::<serde_json::Value>(raw)
+                .with_context(|| format!("parse JSON params for `{method}`: {raw}"))?,
+        ),
+    };
+    match ExecChannel::from_env() {
+        ExecChannel::Control => {
+            let result = call_method(lock_path, method, params).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        ExecChannel::Mcp => bail!(
+            "bookrack exec call: BOOKRACK_EXEC_CHANNEL=mcp forces the legacy MCP path, \
+             which has no equivalent for arbitrary control-plane methods"
+        ),
     }
 }
 

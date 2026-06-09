@@ -18,6 +18,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use bookrack_core::queue::JobState;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
@@ -87,6 +89,57 @@ impl Default for DaemonStateFlag {
     }
 }
 
+/// Ingest pipeline stage tag carried on [`Event::WorkerProgress`].
+/// Aligned with the three top-level phases the ingest pipeline drives a
+/// book through.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Extract,
+    Ingest,
+    Embed,
+}
+
+/// Per-job snapshot of a terminal queue transition, attached to
+/// [`QueueTick::last_finished`] so subscribers can render the most
+/// recent outcome without re-fetching the queue document.
+#[derive(Debug, Clone, Serialize)]
+pub struct JobOutcomeSummary {
+    pub job_id: String,
+    pub state: JobState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub finished_at: DateTime<Utc>,
+}
+
+/// Coarse view of the queue at one persisted moment. Each tick
+/// follows a `save_atomic` on `.bookrack-queue.json`, so the values
+/// here are guaranteed to be derivable from the on-disk document.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueTick {
+    /// Id of the job currently in `Running`, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    pub pending: u32,
+    pub running: u32,
+    /// Outcome captured at the tick that closed out a job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_finished: Option<JobOutcomeSummary>,
+}
+
+/// Intra-stage progress emitted by the queue worker around each phase
+/// boundary. `stage_progress` is a 0.0..=1.0 fraction when measurable,
+/// otherwise omitted.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerProgress {
+    pub job_id: String,
+    pub stage: Stage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_progress: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 /// Wire-level event published on the broadcast.
 ///
 /// The enum tags itself with `channel` and carries the payload in
@@ -97,6 +150,14 @@ impl Default for DaemonStateFlag {
 pub enum Event {
     #[serde(rename = "daemon.state")]
     DaemonState(DaemonState),
+    #[serde(rename = "queue.tick")]
+    QueueTick(QueueTick),
+    #[serde(rename = "worker.progress")]
+    WorkerProgress(WorkerProgress),
+    #[serde(rename = "library.changed")]
+    LibraryChanged { library: String },
+    #[serde(rename = "mcp.availability")]
+    McpAvailability { paused: bool },
 }
 
 impl Event {
@@ -106,6 +167,10 @@ impl Event {
     pub fn channel(&self) -> &'static str {
         match self {
             Event::DaemonState(_) => "daemon.state",
+            Event::QueueTick(_) => "queue.tick",
+            Event::WorkerProgress(_) => "worker.progress",
+            Event::LibraryChanged { .. } => "library.changed",
+            Event::McpAvailability { .. } => "mcp.availability",
         }
     }
 
@@ -114,6 +179,10 @@ impl Event {
     pub fn value(&self) -> serde_json::Value {
         match self {
             Event::DaemonState(state) => serde_json::to_value(state).unwrap_or_default(),
+            Event::QueueTick(tick) => serde_json::to_value(tick).unwrap_or_default(),
+            Event::WorkerProgress(progress) => serde_json::to_value(progress).unwrap_or_default(),
+            Event::LibraryChanged { library } => serde_json::json!({ "library": library }),
+            Event::McpAvailability { paused } => serde_json::json!({ "paused": paused }),
         }
     }
 }

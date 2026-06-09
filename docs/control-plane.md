@@ -37,6 +37,10 @@ and tool-scoped.
 - `-32001` busy (bookrack-specific; a write command is already in flight)
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
+- `-32010` invalid library (bookrack-specific; a `library` param does
+  not exist in the registry)
+- `-32011` job not found (bookrack-specific; `ingest.cancel` named a
+  job id no longer in the queue document)
 
 ## Methods (Phase 1)
 
@@ -54,15 +58,53 @@ and tool-scoped.
   `params.name` selects which.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,
-  `library.list`, `daemon.version`.
+  `queue.tick`, `library.list`, `library.changed`,
+  `mcp.availability`, `daemon.version`.
 - `events.snapshot` — explicit re-fetch of named channels;
   `params.channels` is the list to refresh.
 
-## Events (Phase 1)
+## Methods (Phase 2)
 
-- `daemon.state` — emitted on transitions between `idle`, `writing`,
-  `degraded`, `stopping`. Phase 1 emits only `idle` and `stopping`;
-  Phase 2 will flip `writing` around write commands.
+- `ingest.submit` — `{ paths, library?, priority?, force? }` →
+  `{ job_ids: [<uuid v7>] }`. Appends jobs to the persistent queue
+  document; the worker picks them up on the next 200 ms tick.
+- `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
+  pending or running job as cancelled.
+- `metadata.set` / `metadata.clear` / `metadata.ack` /
+  `metadata.approve` / `metadata.reject` — same params as the
+  `bookrack metadata` REPL subcommands; return `{ ok: true }` on
+  success.
+- `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
+  `vectors.drop` — mirror the matching `bookrack vectors` actions.
+  `vectors.drop` takes no params.
+- `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?, yes? }`.
+- `stamps.reconcile` — no params; rewrites the corpus index stamps.
+- `remove` — `{ intake_id?, sha?, dry_run?, yes? }`. Exactly one of
+  `intake_id` or `sha` must be set.
+- `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL
+  plus a summary sidecar under `<data_root>/dryruns/`.
+
+Every write command takes the runtime-wide write mutex on entry; a
+second concurrent write returns `-32001 busy`.
+
+## Events (Phase 2)
+
+- `daemon.state` — `idle` / `writing` / `degraded` / `stopping`. The
+  flag flips to `writing` around every write command.
+- `queue.tick` — `{ current, pending, running, last_finished? }`
+  published immediately after every persisted change to
+  `.bookrack-queue.json`, so a subscriber's view always coincides
+  with what a crash recovery would replay.
+- `worker.progress` — `{ job_id, stage, stage_progress?, message? }`
+  with `stage` in `extract` / `ingest` / `embed`. Phase 2 emits at
+  the runner's two visible boundaries (`extract` on pull,
+  `embed` on success); finer-grained progress is deferred.
+- `library.changed` — `{ library }` published after every successful
+  write command finishes.
+- `mcp.availability` — `{ paused }` published `true` at the start of
+  every write command and `false` after it returns, so subscribers
+  can advertise the MCP write surface as temporarily paused even
+  though the runtime currently does not expose any MCP write tools.
 
 ## Phase log
 
@@ -72,3 +114,12 @@ and tool-scoped.
   `.bookrack-queue.json` schema, and the session lock path are
   unchanged; the session lock gains a non-breaking
   `control_sock=<path>` line.
+- **Phase 2** — write methods + queue / worker event flow +
+  `bookrack exec call` over the control channel. New methods:
+  `ingest.submit` / `ingest.cancel`, `metadata.{set,clear,ack,approve,reject}`,
+  `vectors.{rebuild,reembed,reset,drop}`, `corpus.rebuild`,
+  `stamps.reconcile`, `remove`, `dryrun`. New events: `queue.tick`,
+  `worker.progress`, `library.changed`, `mcp.availability`. New error
+  codes: `-32010 invalid_library`, `-32011 job_not_found`. The MCP
+  tool set is still read-only and unchanged; the REPL still runs
+  in-process; the on-disk queue document keeps its v1 schema.
