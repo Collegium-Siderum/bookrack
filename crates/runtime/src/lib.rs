@@ -20,5 +20,6 @@ pub mod embed_helpers;
 pub mod ops_helpers;
 pub mod queue;
 pub mod render;
+pub mod wizard;
 
 pub use daemon::{DaemonRuntime, LaunchMode, RuntimeOpts};

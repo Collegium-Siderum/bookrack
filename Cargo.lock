@@ -642,18 +642,14 @@ name = "bookrack-cli"
 version = "0.4.0-dev"
 dependencies = [
  "anyhow",
- "bookrack-catalog",
  "bookrack-config",
  "bookrack-control-client",
  "bookrack-core",
- "bookrack-corpus",
  "bookrack-diagnose",
  "bookrack-embed",
- "bookrack-ingest",
  "bookrack-mcp",
  "bookrack-obs",
  "bookrack-ops",
- "bookrack-query",
  "bookrack-repl-grammar",
  "bookrack-runtime",
  "bookrack-session",
@@ -907,6 +903,7 @@ name = "bookrack-runtime"
 version = "0.4.0-dev"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",

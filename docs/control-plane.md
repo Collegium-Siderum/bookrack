@@ -233,3 +233,15 @@ second concurrent write returns `-32001 busy`.
   `.cargo/config.toml`'s `TS_RS_EXPORT_DIR` entry; the runtime
   crate's release build does not link `ts-rs`, and the wire
   schema, serde derives, and method registry are unchanged.
+- **PR-3** — `WizardDriver` trait.
+  `bookrack_runtime::wizard::{Wizard, WizardDriver, WizardOpts}`
+  carries the first-run flow; `CliWizardDriver` is the only
+  implementation today. Five steps in a fixed order: data root,
+  PDFium file check, Ollama probe, smoke ingest+search, finalize.
+  The trait's `Result` is the only abort path — the runner does
+  not auto-retry. Finalize is three writes: skeleton directories,
+  `<data_root>/config.toml`, and a merge into the platform-default
+  registry. A GUI driver drives the same probes and the same
+  writes through the same trait. `bookrack init` keeps its exact
+  flag set and terminal transcript; `crates/cli/src/init.rs` is a
+  thin shim that pairs `CliWizardDriver` with the runner.

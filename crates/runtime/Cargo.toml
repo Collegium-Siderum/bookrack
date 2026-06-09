@@ -23,6 +23,8 @@ bookrack-repl-grammar = { path = "../repl-grammar" }
 bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 anyhow.workspace = true
+# `wizard::WizardDriver` exposes async methods behind a dyn-safe trait.
+async-trait.workspace = true
 chrono.workspace = true
 # `cmd::libraries::CopyMode` and `cmd::audit_profile::AuditProfileAction`
 # derive clap traits so the cli `bin` consumes them directly. The

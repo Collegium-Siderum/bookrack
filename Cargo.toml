@@ -15,6 +15,10 @@ repository = "https://github.com/Collegium-Siderum/bookrack"
 # Shared dependency versions. Member crates opt in with `<dep>.workspace = true`.
 [workspace.dependencies]
 anyhow = "1"
+# Dyn-safe async methods on the `WizardDriver` trait in `runtime`, so
+# the CLI and GUI front ends can implement the first-run wizard's
+# interactive surface behind one object-safe interface.
+async-trait = "0.1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
