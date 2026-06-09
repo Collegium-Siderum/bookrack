@@ -13,6 +13,7 @@
 
 pub mod audit_helpers;
 pub mod cmd;
+pub mod control;
 pub mod daemon;
 pub mod doctor;
 pub mod embed_helpers;

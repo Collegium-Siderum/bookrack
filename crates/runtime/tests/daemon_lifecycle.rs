@@ -53,7 +53,7 @@ async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> 
         lock_path.file_name().and_then(|s| s.to_str()),
         Some(tty_lock_name())
     );
-    let reacquired = TtyLock::acquire(&lock_path, std::process::id(), "test");
+    let reacquired = TtyLock::acquire(&lock_path, std::process::id(), "test", None);
     assert!(
         reacquired.is_ok(),
         "session lock should be released after run_until_shutdown",

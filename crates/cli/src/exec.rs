@@ -22,7 +22,7 @@
 //! the daemon-REPL session its single-writer guarantee.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
@@ -180,6 +180,7 @@ fn require_mcp_addr(lock_path: &Path) -> Result<String> {
 pub(crate) struct LockInfo {
     pub(crate) pid: Option<u32>,
     pub(crate) mcp: Option<String>,
+    pub(crate) control_sock: Option<PathBuf>,
 }
 
 /// Parse a session-lock file body. Format is line-oriented
@@ -189,17 +190,23 @@ pub(crate) struct LockInfo {
 pub(crate) fn parse_lock(text: &str) -> LockInfo {
     let mut pid = None;
     let mut mcp = None;
+    let mut control_sock = None;
     for line in text.lines() {
         let line = line.trim();
         if let Some((key, value)) = line.split_once('=') {
             match key.trim() {
                 "pid" => pid = value.trim().parse::<u32>().ok(),
                 "mcp" => mcp = Some(value.trim().to_string()),
+                "control_sock" => control_sock = Some(PathBuf::from(value.trim())),
                 _ => {}
             }
         }
     }
-    LockInfo { pid, mcp }
+    LockInfo {
+        pid,
+        mcp,
+        control_sock,
+    }
 }
 
 fn read_lock_info(path: &Path) -> Result<Option<LockInfo>> {
@@ -229,6 +236,9 @@ fn print_info(lock_path: &Path) -> Result<()> {
                     .unwrap_or_else(|| "unknown".to_string())
             );
             println!("  mcp       {}", info.mcp.as_deref().unwrap_or("unknown"));
+            if let Some(sock) = info.control_sock.as_ref() {
+                println!("  control   {}", sock.display());
+            }
             println!("  lock      {}", lock_path.display());
             println!();
             println!("Connect an MCP client to http://<mcp>/mcp.");
@@ -347,6 +357,23 @@ mod tests {
         let info = parse_lock("pid=not-a-number\nmcp=127.0.0.1:9090\n");
         assert!(info.pid.is_none());
         assert_eq!(info.mcp.as_deref(), Some("127.0.0.1:9090"));
+    }
+
+    #[test]
+    fn parse_lock_extracts_control_sock_when_present() {
+        let info = parse_lock("pid=1\nmcp=127.0.0.1:1\ncontrol_sock=/run/bookrack/control.sock\n");
+        assert_eq!(info.pid, Some(1));
+        assert_eq!(info.mcp.as_deref(), Some("127.0.0.1:1"));
+        assert_eq!(
+            info.control_sock.as_deref().map(Path::to_path_buf),
+            Some(PathBuf::from("/run/bookrack/control.sock")),
+        );
+    }
+
+    #[test]
+    fn parse_lock_leaves_control_sock_none_when_absent() {
+        let info = parse_lock("pid=1\nmcp=127.0.0.1:1\n");
+        assert!(info.control_sock.is_none());
     }
 
     #[tokio::test]

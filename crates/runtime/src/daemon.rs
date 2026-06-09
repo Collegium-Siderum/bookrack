@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+
 use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
@@ -40,6 +42,11 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
+use crate::control::events::{
+    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, EventStreamHandle,
+};
+use crate::control::methods::MethodContext;
+use crate::control::socket::{ControlSocketPath, bind as bind_control_socket, run_accept_loop};
 use crate::queue;
 
 /// Caller-facing bring-up options. Public fields keep construction
@@ -101,7 +108,17 @@ pub struct DaemonRuntime {
     pub runtime_dir: PathBuf,
     pub lock_path: PathBuf,
     pub started_at: Instant,
+    /// Wall-clock instant the daemon entered service. Reported to
+    /// control-plane clients through `daemon.version` so they can
+    /// derive an uptime.
+    pub started_at_wall: DateTime<Utc>,
     pub mcp_label: String,
+    /// Broadcast handle for control-plane events.
+    pub event_stream: EventStreamHandle,
+    /// Discovered path of the control-plane listener, used by callers
+    /// (e.g. `bookrack exec`) that read the session lock and want to
+    /// reach the control plane.
+    pub control_sock: ControlSocketPath,
     /// Set by the platform signal aggregator before forwarding the
     /// broadcast; daemon-REPL callers read it to decide whether to
     /// fast-path through `std::process::exit` (signal-driven shutdown
@@ -113,6 +130,7 @@ pub struct DaemonRuntime {
     pub _tty_lock: TtyLock,
     queue_worker: Option<JoinHandle<Result<()>>>,
     signal_handle: JoinHandle<Result<()>>,
+    control_accept_handle: JoinHandle<Result<()>>,
 }
 
 impl DaemonRuntime {
@@ -146,13 +164,37 @@ impl DaemonRuntime {
         let lock_path = runtime_dir.join(tty_lock_name());
         let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
 
-        // 3. TtyLock acquire
-        let tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label)?;
+        // 3. TtyLock acquire (control_sock added in step 3b once the
+        //    socket is bound; recording the path before the listener
+        //    actually came up would let `bookrack exec` reach for a
+        //    socket that never existed).
+        let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label, None)?;
         let started_at = Instant::now();
+        let started_at_wall = Utc::now();
         tracing::info!(
             path = %lock_path.display(),
             mcp = %mcp_label,
             "bookrack session lock acquired",
+        );
+
+        // 3b. Bind the control-plane socket and record its path on
+        //     the lock file. A bind failure releases the lock through
+        //     the `TtyLock` drop and returns the error.
+        let (control_listener, control_sock) =
+            bind_control_socket(&runtime_dir).await.inspect_err(|_| {
+                tracing::warn!("control socket bind failed; releasing session lock");
+            })?;
+        tty_lock
+            .record_control_sock(&control_sock.path)
+            .with_context(|| {
+                format!(
+                    "record control socket path {} in session lock",
+                    control_sock.path.display()
+                )
+            })?;
+        tracing::info!(
+            path = %control_sock.path.display(),
+            "control plane socket bound",
         );
 
         // 4. Config::resolve + obs init
@@ -237,6 +279,17 @@ impl DaemonRuntime {
         ));
         let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
 
+        // Event stream, daemon-state flag, and control accept loop
+        // come up after the queue state is loaded so the initial
+        // snapshot includes the on-disk queue.
+        let state_flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let event_stream =
+            EventStreamHandle::new(DEFAULT_EVENT_CHANNEL_CAPACITY, Arc::clone(&state_flag));
+        let selection_for_doctor = LibrarySelection {
+            data_dir: opts.selection.data_dir.clone(),
+            library: opts.selection.library.clone(),
+        };
+
         let queue_worker = if opts.spawn_queue_worker {
             let registry = Arc::clone(&registry);
             let state = Arc::clone(&queue_state);
@@ -282,6 +335,25 @@ impl DaemonRuntime {
             None
         };
 
+        // Spawn the control-plane accept loop. The accept loop owns
+        // the listener; per-connection tasks reuse the same broadcast
+        // so a `shutdown_tx.send(())` tears down both the loop and
+        // every attached client.
+        let method_ctx = MethodContext {
+            registry: Arc::clone(&registry),
+            info_context: info_context.clone(),
+            queue_state: Arc::clone(&queue_state),
+            event_stream: event_stream.clone(),
+            shutdown_tx: shutdown_tx.clone(),
+            started_at_rfc3339: started_at_wall.to_rfc3339(),
+            selection: selection_for_doctor,
+        };
+        let control_accept_handle = tokio::spawn(run_accept_loop(
+            control_listener,
+            method_ctx,
+            shutdown_tx.subscribe(),
+        ));
+
         Ok(Self {
             cfg,
             registry,
@@ -294,11 +366,15 @@ impl DaemonRuntime {
             runtime_dir,
             lock_path,
             started_at,
+            started_at_wall,
             mcp_label,
+            event_stream,
+            control_sock,
             signal_triggered,
             _tty_lock: tty_lock,
             queue_worker,
             signal_handle,
+            control_accept_handle,
         })
     }
 
@@ -319,12 +395,28 @@ impl DaemonRuntime {
             signal_triggered,
             queue_worker,
             signal_handle,
+            control_accept_handle,
+            control_sock,
+            event_stream,
             ..
         } = self;
 
         let mut foreground_rx = shutdown_tx.subscribe();
         let _ = foreground_rx.recv().await;
         tracing::info!("shutdown signalled, joining session tasks");
+
+        // Flip the daemon-state flag before draining clients so the
+        // `daemon.state=stopping` notification reaches every attached
+        // subscriber before its connection task exits.
+        event_stream.set_state(DaemonState::Stopping);
+
+        match tokio::time::timeout(Duration::from_secs(3), control_accept_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) => tracing::warn!(error = %err, "control accept loop returned error"),
+            Ok(Err(err)) => tracing::warn!(error = %err, "control accept loop join failed"),
+            Err(_) => tracing::warn!("control accept loop did not exit within 3s; abandoning"),
+        }
+        control_sock.cleanup();
 
         if let Some(handle) = mcp_handle {
             match tokio::time::timeout(Duration::from_secs(3), handle).await {

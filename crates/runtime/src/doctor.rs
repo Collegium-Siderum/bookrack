@@ -103,7 +103,7 @@ pub async fn run(selection: &LibrarySelection, json: bool) -> Result<()> {
 /// Build a [`Report`] for the given selection. Pure over its inputs in
 /// the sense that every observation is fresh — there is no in-process
 /// cache to invalidate between successive calls.
-async fn gather(selection: &LibrarySelection) -> Report {
+pub async fn gather(selection: &LibrarySelection) -> Report {
     let mut rows = Vec::new();
 
     let cfg = push_data_root_row(&mut rows, selection);

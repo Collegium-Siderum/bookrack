@@ -179,6 +179,7 @@ fn handle_lock_conflict(err: anyhow::Error, lock_path: &Path) -> Result<()> {
         .unwrap_or_else(|| crate::exec::LockInfo {
             pid: None,
             mcp: None,
+            control_sock: None,
         });
     let pid_label = info
         .pid
