@@ -8,6 +8,33 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- `bookrack repl`: standalone control-socket client process. Reedline
+  runs in the client; every command is dispatched as a JSON-RPC call
+  over the daemon's control plane. The prompt shows a live
+  `[<state-indicator>bookrack:<library>/queue:<n>] >` status line
+  driven by `events.subscribe`. When stdin is not a TTY the client
+  runs a batch loop: each line is parsed via the shared
+  `bookrack-repl-grammar` and dispatched in sequence, and the
+  process exits non-zero on the first RPC failure. When the daemon
+  is not running the client exits with code 2 and the message
+  `bookrack daemon not running; start it with: bookrack run`.
+
+### Changed
+
+- `bookrack run` defaults to the silent daemon: it no longer reads
+  stdin, no longer spawns reedline, and emits no banner. Open an
+  interactive REPL with `bookrack repl` in another process.
+
+### Deprecated
+
+- `bookrack run --legacy-repl`: one-release transition flag (hidden
+  from `--help`) that re-enables the in-process reedline REPL for CI
+  scripts that fed it via stdin. The flag will be removed in the
+  next release after this one; migrate to `bookrack repl` (which
+  accepts stdin in batch mode for the same scripted use case).
+
 ## [0.3.0] - 2026-06-08
 
 ### Added

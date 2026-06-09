@@ -53,6 +53,11 @@ pub struct RunOpts {
     /// or the platform default. Primarily a test hook so suites can
     /// isolate the tty lock from the operator's session.
     pub runtime_dir: Option<PathBuf>,
+    /// Re-enable the in-process reedline REPL for the lifetime of the
+    /// daemon. Default is `false`: the daemon owns no stdin and runs
+    /// headless; the operator opens an interactive REPL with
+    /// `bookrack repl` in another process.
+    pub legacy_repl: bool,
 }
 
 pub async fn run_daemon(opts: RunOpts) -> Result<()> {
@@ -85,7 +90,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     };
 
     let mcp_handle = spawn_mcp_listener(&runtime);
-    let repl_handle = spawn_repl_if_tty(&runtime);
+    let repl_handle = spawn_repl_if_tty(&runtime, opts.legacy_repl);
 
     runtime.run_until_shutdown(mcp_handle, repl_handle).await
 }
@@ -121,11 +126,17 @@ fn spawn_mcp_listener(runtime: &DaemonRuntime) -> Option<tokio::task::JoinHandle
     }))
 }
 
-/// Spawn the foreground task: the reedline REPL on a TTY, an
-/// `std::thread::park` on stdin redirection. The synchronous read_line
-/// blocks an OS thread — keeping it off the async runtime is critical.
-fn spawn_repl_if_tty(runtime: &DaemonRuntime) -> tokio::task::JoinHandle<Result<()>> {
-    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+/// Spawn the foreground task. The default is a parked OS thread (the
+/// daemon owns no stdin and runs headless); `--legacy-repl` re-enables
+/// the in-process reedline REPL for one transition release so the CI
+/// scripts that fed REPL via stdin have a window to migrate to
+/// `bookrack repl`. The synchronous read_line blocks an OS thread —
+/// keeping it off the async runtime is critical.
+fn spawn_repl_if_tty(
+    runtime: &DaemonRuntime,
+    legacy_repl: bool,
+) -> tokio::task::JoinHandle<Result<()>> {
+    if legacy_repl && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let mcp_label = runtime.mcp_label.clone();
         let lock_path = runtime.lock_path.clone();
         let runtime_dir = runtime.runtime_dir.clone();
@@ -153,10 +164,16 @@ fn spawn_repl_if_tty(runtime: &DaemonRuntime) -> tokio::task::JoinHandle<Result<
             )
         })
     } else {
-        tracing::info!(
-            "stdin is not a TTY; running headless. Stop with a signal or the \
-             `session.shutdown` MCP tool."
-        );
+        if !legacy_repl {
+            tracing::info!(
+                "daemon running headless; open an interactive REPL with `bookrack repl`."
+            );
+        } else {
+            tracing::info!(
+                "stdin is not a TTY; running headless. Stop with a signal or the \
+                 `session.shutdown` MCP tool.",
+            );
+        }
         tokio::task::spawn_blocking(|| -> Result<()> {
             std::thread::park();
             Ok(())

@@ -17,60 +17,7 @@ use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 
-#[derive(clap::Subcommand, Debug)]
-pub enum WriteMetadataAction {
-    /// Set (or change) one metadata field's value.
-    Set {
-        /// The intake id of the book.
-        book: i64,
-        /// The field column on `node_publication_attrs` to write
-        /// (e.g. `title`, `publisher`, `year`, `language`).
-        field: String,
-        /// The new value.
-        value: String,
-    },
-    /// Clear an override, falling back to the extracted base value.
-    Clear {
-        /// The intake id of the book.
-        book: i64,
-        /// The field whose override is removed.
-        field: String,
-    },
-    /// Acknowledge a metadata gap and let the book through, signing
-    /// the override with a reason for the audit trail.
-    Ack {
-        /// The intake id of the book.
-        book: i64,
-        /// Why the gap was accepted.
-        #[arg(long)]
-        reason: String,
-    },
-    /// Mark the record reviewed and correct. A human or LLM uses this
-    /// after confirming the metadata; the pipeline never writes this
-    /// status itself.
-    Approve {
-        /// The intake id of the book.
-        book: i64,
-        /// Optional note for the audit trail.
-        #[arg(long)]
-        reason: Option<String>,
-    },
-    /// Reject the book outright (e.g. wrong source file, irrecoverable
-    /// metadata). The book stays ingested but downstream consumers can
-    /// filter on the rejected status.
-    Reject {
-        /// The intake id of the book.
-        book: i64,
-        /// Why the book was rejected.
-        #[arg(long)]
-        reason: String,
-    },
-    /// Resume CHUNK→EMBED for a book held at the metadata gate.
-    Advance {
-        /// The intake id of the book.
-        book: i64,
-    },
-}
+pub use bookrack_repl_grammar::WriteMetadataAction;
 
 /// REPL-side dispatch for the write actions. Triggers a pending
 /// migration once via `open_with_backup` before each write so the

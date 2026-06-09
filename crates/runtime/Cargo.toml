@@ -18,14 +18,16 @@ bookrack-metadata = { path = "../metadata" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
+bookrack-repl-grammar = { path = "../repl-grammar" }
 bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 anyhow.workspace = true
 chrono.workspace = true
-# `cmd::libraries::CopyMode`, `cmd::audit_profile::AuditProfileAction`,
-# and `cmd::metadata::WriteMetadataAction` derive clap traits so the
-# cli `bin` consumes them directly. The runtime crate hosts the
-# definitions and re-exports the derives.
+# `cmd::libraries::CopyMode` and `cmd::audit_profile::AuditProfileAction`
+# derive clap traits so the cli `bin` consumes them directly. The
+# runtime crate hosts those definitions and re-exports the derives;
+# `cmd::metadata::WriteMetadataAction` lives in `bookrack-repl-grammar`
+# and is re-exported through `cmd::metadata`.
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

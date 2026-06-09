@@ -644,6 +644,7 @@ dependencies = [
  "anyhow",
  "bookrack-catalog",
  "bookrack-config",
+ "bookrack-control-client",
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-diagnose",
@@ -653,6 +654,7 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
+ "bookrack-repl-grammar",
  "bookrack-runtime",
  "bookrack-session",
  "clap",
@@ -677,6 +679,20 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
+]
+
+[[package]]
+name = "bookrack-control-client"
+version = "0.4.0-dev"
+dependencies = [
+ "anyhow",
+ "bookrack-session",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -881,6 +897,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-repl-grammar"
+version = "0.4.0-dev"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "bookrack-runtime"
 version = "0.4.0-dev"
 dependencies = [
@@ -897,6 +920,7 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
+ "bookrack-repl-grammar",
  "bookrack-session",
  "bookrack-vectors",
  "chrono",
