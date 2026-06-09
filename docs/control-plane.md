@@ -149,3 +149,36 @@ second concurrent write returns `-32001 busy`.
   one-shot CLI dispatch path are unchanged. The reedline history
   file path (`<runtime_dir>/.bookrack-history`) is preserved across
   the client move.
+- **Phase 4** — one-shot CLI subcommands rewired as control-plane
+  clients. New top-level subcommands `bookrack ingest`,
+  `bookrack metadata {set,clear,ack,approve,reject}`,
+  `bookrack vectors {rebuild,reembed,reset,drop}`,
+  `bookrack corpus rebuild`, `bookrack stamps reconcile`,
+  `bookrack remove`, `bookrack dryrun`, and `bookrack quit`, each
+  dispatched as the matching RPC over the control plane. The
+  existing `bookrack verify`, `bookrack libraries`, and
+  `bookrack diagnose` subcommands move to the same path; the
+  daemon now answers them via the new `verify.run`,
+  `library.fork`, and `diagnose.run` methods. Two reflection
+  endpoints land alongside: `daemon.methods` returns the
+  registry of every control-plane method (used by
+  `bookrack exec tools` to enumerate the live surface), and
+  `daemon.mcp_tools` returns the MCP tool list as published by
+  the live `BookrackServer`. `bookrack exec` no longer holds an
+  rmcp client; its `info` / `tools` / `logs` subcommands route
+  through the control plane only, the `BOOKRACK_EXEC_CHANNEL`
+  selector is gone, and the `rmcp` / `reqwest` crates are
+  dropped from `bookrack-cli`'s dependency manifest. A new `log`
+  event channel forwards every tracing event captured by
+  `bookrack_obs::stream::LogStreamHandle` through the control-plane
+  broadcast so `events.subscribe` consumers can multiplex log
+  output instead of opening a separate MCP SSE channel. The
+  `bookrack doctor` subcommand keeps its local fallback: when no
+  daemon is running it gathers checks directly via
+  `bookrack_runtime::doctor::run`; when a daemon is running it
+  calls `doctor.gather` and renders the same report.
+  Daemon-not-running exits with code 2 from every one-shot
+  client, matching the REPL client's contract; `bookrack doctor`
+  and `bookrack quit` are the documented exceptions. The MCP
+  tool set, the session-lock schema, the on-disk queue schema,
+  and the REPL client are unchanged.

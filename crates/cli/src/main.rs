@@ -13,7 +13,6 @@
 
 mod cmd;
 mod exec;
-mod exec_control;
 mod init;
 mod run;
 mod util;
@@ -21,9 +20,10 @@ mod util;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bookrack_config::{Config, ConfigError, LibrarySelection, LogConfig};
+use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_repl_grammar::{
-    CorpusAction, IntakeAction, ReplCli, ReplCommand, StampsAction, WriteVectorsAction,
+    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, RemoveArgs, ReplCli, ReplCommand,
+    StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
@@ -185,6 +185,37 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Submit one or more files for ingest. Requires a running
+    /// bookrack daemon; the command exits with code 2 if no daemon is
+    /// found.
+    Ingest(IngestArgs),
+    /// Edit one book's metadata via the daemon's control plane.
+    Metadata {
+        #[command(subcommand)]
+        action: WriteMetadataAction,
+    },
+    /// Vector-store writes via the daemon's control plane.
+    Vectors {
+        #[command(subcommand)]
+        action: WriteVectorsAction,
+    },
+    /// Corpus rebuild via the daemon's control plane.
+    Corpus {
+        #[command(subcommand)]
+        action: CorpusAction,
+    },
+    /// Reconcile corpus index stamps via the daemon's control plane.
+    Stamps {
+        #[command(subcommand)]
+        action: StampsAction,
+    },
+    /// Drop a book from every store via the daemon's control plane.
+    Remove(RemoveArgs),
+    /// Simulate an ingest without writing into the live stores.
+    Dryrun(DryrunArgs),
+    /// Ask the running bookrack daemon to shut down. Exits with code
+    /// 0 whether or not a daemon was found.
+    Quit,
     /// Walk the operator through a five-step install: pick a data root,
     /// check the PDFium library, probe Ollama, smoke-test the
     /// ingest -> embed -> query pipeline end-to-end in a tempdir, and
@@ -352,13 +383,13 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<()> {
     let cli = parse_cli_with_natural_name_hints();
 
-    // `doctor` runs before `Config::resolve` so an unconfigured install
-    // surfaces as a row in its report instead of a hard error from the
-    // resolver -- the very diagnosis the operator needs. `init` runs
-    // before resolve for the same reason: it is the wizard that turns
-    // an unconfigured install into a configured one.
+    // `doctor` resolves on its own — it has a daemon-running path
+    // (control plane) and a daemon-not-running fallback that probes
+    // the data root directly without going through `Config::resolve`,
+    // so an unconfigured install surfaces as a row instead of an
+    // opaque resolver bail.
     if let Command::Doctor { json } = &cli.command {
-        return bookrack_runtime::doctor::run(&cli.selection(), *json).await;
+        return cmd::cli_client::doctor::run(&cli.selection(), *json, None).await;
     }
     if let Command::Init {
         data_dir,
@@ -429,39 +460,34 @@ async fn run() -> Result<()> {
         return exec::run(args, None).await;
     }
 
-    let cfg = Config::resolve(&cli.selection()).context("resolve configuration")?;
-    let (_guard, _log_stream) = bookrack_obs::init(&cfg, &LogConfig::from_env());
-
+    // Every remaining write/read subcommand reaches the daemon
+    // through the control plane and never touches the local data
+    // root from this process. The `AuditProfile` reflection runner
+    // is the lone exception — it reads compiled-in profiles and
+    // needs no config.
     let _profile_name = cli.audit_profile.clone();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
-        Command::Verify => bookrack_runtime::cmd::verify::run(&cfg),
-        Command::Libraries { action } => match action {
-            LibrariesAction::List { json } => bookrack_runtime::cmd::libraries::list(json),
-            LibrariesAction::Fork {
-                new_name,
-                data_dir,
-                copy_mode,
-                yes,
-            } => bookrack_runtime::cmd::libraries::fork(
-                &cfg,
-                &new_name,
-                &data_dir,
-                copy_mode,
-                yes,
-                util::confirm,
-            ),
-        },
+        Command::Verify => cmd::cli_client::verify::run(None).await,
+        Command::Libraries { action } => cmd::cli_client::libraries::run(action, None).await,
         Command::Diagnose {
             out,
             days,
             no_scrub,
-        } => bookrack_runtime::cmd::diagnose::run(&cfg, out, days, no_scrub),
-        Command::Doctor { .. } => unreachable!("Doctor is dispatched before Config::resolve"),
-        Command::Init { .. } => unreachable!("Init is dispatched before Config::resolve"),
-        Command::Run { .. } => unreachable!("Run is dispatched before Config::resolve"),
-        Command::Repl { .. } => unreachable!("Repl is dispatched before Config::resolve"),
-        Command::Exec { .. } => unreachable!("Exec is dispatched before Config::resolve"),
+        } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
+        Command::Ingest(args) => cmd::cli_client::ingest::run(args, None).await,
+        Command::Metadata { action } => cmd::cli_client::metadata::run(action, None).await,
+        Command::Vectors { action } => cmd::cli_client::vectors::run(action, None).await,
+        Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,
+        Command::Stamps { action } => cmd::cli_client::stamps::run(action, None).await,
+        Command::Remove(args) => cmd::cli_client::remove::run(args, None).await,
+        Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
+        Command::Quit => cmd::cli_client::quit::run(None).await,
+        Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
+        Command::Init { .. } => unreachable!("Init is dispatched above"),
+        Command::Run { .. } => unreachable!("Run is dispatched above"),
+        Command::Repl { .. } => unreachable!("Repl is dispatched above"),
+        Command::Exec { .. } => unreachable!("Exec is dispatched above"),
     }
 }
 

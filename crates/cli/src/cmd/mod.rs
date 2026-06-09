@@ -3,4 +3,5 @@
 //! module is for client-side dispatch that goes through the control
 //! socket instead.
 
+pub mod cli_client;
 pub mod repl_client;

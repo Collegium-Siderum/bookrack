@@ -1,0 +1,61 @@
+//! `bookrack metadata {set,clear,ack,approve,reject,advance}` —
+//! route the matching write to the control-plane method.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use bookrack_repl_grammar::WriteMetadataAction;
+use serde_json::json;
+
+use super::helpers;
+
+pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    match action {
+        WriteMetadataAction::Set { book, field, value } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.set",
+                json!({"book": book, "field": field, "value": value}),
+            )
+            .await
+        }
+        WriteMetadataAction::Clear { book, field } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.clear",
+                json!({"book": book, "field": field}),
+            )
+            .await
+        }
+        WriteMetadataAction::Ack { book, reason } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.ack",
+                json!({"book": book, "reason": reason}),
+            )
+            .await
+        }
+        WriteMetadataAction::Approve { book, reason } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.approve",
+                json!({"book": book, "reason": reason}),
+            )
+            .await
+        }
+        WriteMetadataAction::Reject { book, reason } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.reject",
+                json!({"book": book, "reason": reason}),
+            )
+            .await
+        }
+        WriteMetadataAction::Advance { book: _ } => {
+            anyhow::bail!(
+                "metadata advance is not yet wired through the control plane; tracked for a follow-up release",
+            )
+        }
+    }
+}

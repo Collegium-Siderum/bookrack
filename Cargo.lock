@@ -659,8 +659,6 @@ dependencies = [
  "bookrack-session",
  "clap",
  "reedline",
- "reqwest 0.13.4",
- "rmcp",
  "serde",
  "serde_json",
  "shlex 2.0.1",

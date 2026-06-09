@@ -18,7 +18,7 @@
 //! install still produces a row stating that — rather than the resolver
 //! short-circuiting the very diagnosis the user needs.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
     LibrarySelection, ResolutionSource, default_registry_path, pdfium_lib_dir,
@@ -27,7 +27,7 @@ use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use serde::Serialize;
 
 /// One row of the health report.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 pub struct Row {
     /// Short label rendered in the first column.
     pub label: String,
@@ -41,11 +41,11 @@ pub struct Row {
 /// Outcome of one check. `note` carries the actionable hint for the
 /// non-OK paths so a user can pipe `bookrack doctor` to a bug report
 /// without rerunning anything.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum Status {
     Ok {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none", default)]
         note: Option<String>,
     },
     Warn {
@@ -64,7 +64,7 @@ impl Status {
 
 /// Materialised report with a deterministic row order. Tests build one
 /// of these directly against tempdirs so the renderer can stay pure.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
 pub struct Report {
     pub rows: Vec<Row>,
 }
@@ -86,6 +86,27 @@ impl Report {
 /// FAIL by `bail!`ing.
 pub async fn run(selection: &LibrarySelection, json: bool) -> Result<()> {
     let report = gather(selection).await;
+    if json {
+        render_json(&report);
+    } else {
+        render_text(&report);
+    }
+    if report.has_failures() {
+        anyhow::bail!(
+            "bookrack is not ready: {} problem(s)",
+            report.failure_count()
+        );
+    }
+    Ok(())
+}
+
+/// Render a [`Report`] previously returned by the control-plane
+/// `doctor.gather` RPC. The CLI-side `bookrack doctor` client calls
+/// this to keep the text/JSON output identical between the
+/// daemon-running and daemon-not-running paths.
+pub fn render_value(value: &serde_json::Value, json: bool) -> Result<()> {
+    let report: Report =
+        serde_json::from_value(value.clone()).context("decode doctor.gather response")?;
     if json {
         render_json(&report);
     } else {

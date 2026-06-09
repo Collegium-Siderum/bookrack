@@ -36,11 +36,3 @@ shlex.workspace = true
 # `bookrack init` writes a tempdir for the end-to-end smoke ingest, so
 # the user's chosen data root stays untouched until validation passes.
 tempfile.workspace = true
-# MCP client-side transport for `bookrack exec`: connects to the
-# session's streamable-HTTP endpoint to call tools without opening
-# any database itself.
-rmcp.workspace = true
-# HTTP client used by the rmcp streamable-HTTP transport. The crate is
-# already in the workspace; declare it here so the StreamableHttpClient
-# constructor receives an explicit handle.
-reqwest.workspace = true
