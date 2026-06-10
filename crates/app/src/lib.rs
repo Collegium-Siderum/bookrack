@@ -66,12 +66,14 @@ pub fn run() -> Result<()> {
                 // run_until_shutdown consumes the runtime by value and
                 // owns the drain logic (worker / MCP / accept-loop join
                 // with timeout). The foreground handle mirrors the
-                // CLI's headless path: a parked thread that only
-                // exists to satisfy the signature.
+                // CLI's headless path: an async task resolving on the
+                // shutdown broadcast, so no blocking thread outlives
+                // the drain and stalls runtime teardown.
                 let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
-                let fg_handle = tokio::task::spawn_blocking(|| -> Result<()> {
-                    std::thread::park();
-                    Ok(())
+                let mut shutdown_rx = runtime.shutdown_tx.subscribe();
+                let fg_handle = tokio::spawn(async move {
+                    let _ = shutdown_rx.recv().await;
+                    anyhow::Ok(())
                 });
                 if let Err(err) = runtime.run_until_shutdown(mcp_handle, fg_handle).await {
                     eprintln!("bookrack-app: daemon exited with error: {err:#}");

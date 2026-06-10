@@ -91,18 +91,29 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         }
     };
 
+    println!(
+        "bookrack daemon running: pid={} mcp={} control_sock={}",
+        std::process::id(),
+        runtime.mcp_label,
+        runtime.control_sock.path.display(),
+    );
+    println!("stop with Ctrl-C or `bookrack quit`; interactive REPL: `bookrack repl`");
+
     let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
     let repl_handle = spawn_repl_if_tty(&runtime, opts.legacy_repl);
 
     runtime.run_until_shutdown(mcp_handle, repl_handle).await
 }
 
-/// Spawn the foreground task. The default is a parked OS thread (the
-/// daemon owns no stdin and runs headless); `--legacy-repl` re-enables
-/// the in-process reedline REPL for one transition release so the CI
-/// scripts that fed REPL via stdin have a window to migrate to
-/// `bookrack repl`. The synchronous read_line blocks an OS thread —
-/// keeping it off the async runtime is critical.
+/// Spawn the foreground task. The default is an async task that
+/// resolves on the shutdown broadcast (the daemon owns no stdin and
+/// runs headless); a blocking thread here would stall the tokio
+/// runtime's teardown, leaving the process alive after a
+/// control-plane `daemon.shutdown` has already drained everything.
+/// `--legacy-repl` re-enables the in-process reedline REPL for one
+/// transition release so the CI scripts that fed REPL via stdin have
+/// a window to migrate to `bookrack repl`. The synchronous read_line
+/// blocks an OS thread — keeping it off the async runtime is critical.
 fn spawn_repl_if_tty(
     runtime: &DaemonRuntime,
     legacy_repl: bool,
@@ -149,9 +160,10 @@ fn spawn_repl_if_tty(
                  `session.shutdown` MCP tool.",
             );
         }
-        tokio::task::spawn_blocking(|| -> Result<()> {
-            std::thread::park();
-            Ok(())
+        let mut shutdown_rx = runtime.shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let _ = shutdown_rx.recv().await;
+            anyhow::Ok(())
         })
     }
 }
