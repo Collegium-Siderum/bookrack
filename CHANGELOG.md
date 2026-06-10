@@ -8,8 +8,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-11
+
 ### Added
 
+- JSON-RPC control plane: the daemon serves a control socket, and
+  every other process is a client of it. The method surface covers
+  the write commands with progress events, queue lifecycle
+  (`queue.pause` / `queue.resume` / `queue.clear`), `verify.run`,
+  `library.fork`, `diagnose.run`, introspection (`daemon.methods`,
+  `daemon.mcp_tools`), and a subscribable log/event channel.
 - `bookrack repl`: standalone control-socket client process. Reedline
   runs in the client; every command is dispatched as a JSON-RPC call
   over the daemon's control plane. The prompt shows a live
@@ -20,12 +28,40 @@ release workflow extracts the matching section verbatim from this file.
   process exits non-zero on the first RPC failure. When the daemon
   is not running the client exits with code 2 and the message
   `bookrack daemon not running; start it with: bookrack run`.
+- `library.read_context` and `library.read_span` MCP tools:
+  structural passage reads around a hit, backed by a document-order
+  `leaves_in_doc_span` corpus query, so an agent can widen a citation
+  to its surroundings without a second search.
+- Search citations carry the intake id and structural anchors of the
+  cited span.
+- `crates/app`: Tauri shell hosting the daemon in-process with a
+  minimal Svelte 5 panel — groundwork for the tray GUI, not yet part
+  of the release artifacts. Control-plane DTOs and events derive
+  ts-rs schemas, generated as `.ts` files for the webview at test
+  time.
+- `WizardDriver` trait behind the first-run wizard, with the CLI
+  driver as the first implementation and room for a GUI driver.
+- The daemon raises its soft `RLIMIT_NOFILE` to the hard limit at
+  startup, and `bookrack doctor` reports the effective limit. A
+  GUI-launched daemon previously inherited a 256-fd default and
+  starved mid-batch on LanceDB fragment files.
 
 ### Changed
 
 - `bookrack run` defaults to the silent daemon: it no longer reads
   stdin, no longer spawns reedline, and emits no banner. Open an
   interactive REPL with `bookrack repl` in another process.
+- One-shot subcommands are rewritten as control-plane clients and
+  dispatch their work to the running daemon over the control socket.
+- A second `bookrack run` against a live session brings the existing
+  daemon to the front and exits cleanly; `bookrack-mcp` gains the
+  same re-entry behaviour.
+- The ingest queue pauses on process-level failures instead of
+  rapidly failing every remaining job; the error is the process's,
+  not the books'.
+- Ingest error strings keep their flattened source chains, so root
+  causes such as `Too many open files` reach the pipeline audit
+  instead of an opaque `vector store error`.
 
 ### Deprecated
 
@@ -34,6 +70,16 @@ release workflow extracts the matching section verbatim from this file.
   scripts that fed it via stdin. The flag will be removed in the
   next release after this one; migrate to `bookrack repl` (which
   accepts stdin in batch mode for the same scripted use case).
+
+### Fixed
+
+- The RESET confirmation on destructive vector-store commands
+  survives the control-plane client split.
+- The daemon process exits after a control-plane shutdown request
+  instead of lingering, and the `--legacy-repl` path prints its
+  session banner again.
+- The hint printed after `library.fork` names the correct
+  model-switch command.
 
 ## [0.3.0] - 2026-06-08
 
