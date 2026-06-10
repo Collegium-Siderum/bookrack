@@ -53,6 +53,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Free runner disk space
+        # The workspace debug build (lancedb + datafusion + tauri) plus
+        # the restored target/ cache outgrows the ~14 GB free on a
+        # hosted runner; when the disk fills, the linker dies with
+        # SIGBUS mid-link. Dropping preinstalled toolchains the build
+        # never touches frees roughly 15 GB up front.
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
