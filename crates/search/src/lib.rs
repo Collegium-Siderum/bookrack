@@ -76,6 +76,15 @@ pub struct Citation {
     /// A `Book \u{203a} Chapter \u{203a} Section` trail of titled
     /// ancestors; empty when no ancestor carries a title.
     pub breadcrumb: String,
+    /// The book the passage belongs to, by catalog intake id.
+    pub intake_id: i64,
+    /// Document-order position of the passage's start leaf within its
+    /// book; `None` when the leaf carries no position.
+    pub toc_position: Option<i64>,
+    /// The nearest organizing ancestor (section, chapter, ... up to
+    /// the book root) of the passage's start leaf; `None` when the
+    /// leaf has no resolvable ancestor.
+    pub enclosing_node_id: Option<NodeId>,
     /// The leaf the passage starts in.
     pub start_node_id: NodeId,
     /// Character offset of the passage start within `start_node_id`.
@@ -306,8 +315,12 @@ pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<
     let breadcrumb_started = Instant::now();
     let mut citations = Vec::with_capacity(hits.len());
     for hit in hits {
+        let context = leaf_context(corpus, catalog, hit.start_node_id)?;
         citations.push(Citation {
-            breadcrumb: breadcrumb(corpus, catalog, hit.start_node_id)?,
+            breadcrumb: context.breadcrumb,
+            intake_id: hit.start_node_id.partition().get(),
+            toc_position: context.toc_position,
+            enclosing_node_id: context.enclosing_node_id,
             text: hit.text,
             start_node_id: hit.start_node_id,
             start_char_offset: hit.start_char_offset,
@@ -325,8 +338,22 @@ pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<
     Ok(citations)
 }
 
+/// Structural context resolved from the corpus for one hit's start
+/// leaf: the breadcrumb trail plus the machine-readable anchors a
+/// caller needs to navigate from the citation into the node tree.
+struct LeafContext {
+    /// The `Book \u{203a} Chapter \u{203a} Section` trail.
+    breadcrumb: String,
+    /// The start leaf's document-order position within its book.
+    toc_position: Option<i64>,
+    /// The leaf's nearest organizing ancestor, up to the book root.
+    enclosing_node_id: Option<NodeId>,
+}
+
 /// Build the breadcrumb for a leaf by walking its organizing ancestors to
-/// the book root, collecting their titles top-down.
+/// the book root, collecting their titles top-down. The same walk
+/// yields the leaf's document-order position and its nearest
+/// organizing ancestor, returned alongside the trail.
 ///
 /// The book root's title is read from `catalog`'s effective
 /// publication-attrs view — so a post-hoc `metadata set title <new>`
@@ -338,14 +365,21 @@ pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<
 /// across books. Internal organizing nodes (chapter / section / …)
 /// keep reading from the corpus, since those titles are TOC structure,
 /// not publication metadata.
-fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<String> {
+fn leaf_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<LeafContext> {
     let mut titles = Vec::new();
     let mut book_title = None;
+    let mut toc_position = None;
+    let mut enclosing_node_id = None;
     let mut current = Some(start_node_id);
     while let Some(id) = current {
         let Some(node) = corpus.get_node(id)? else {
             break;
         };
+        if id == start_node_id {
+            toc_position = node.toc_lo;
+        } else if enclosing_node_id.is_none() && node.node_type.is_organizing() {
+            enclosing_node_id = Some(id);
+        }
         if node.parent_id.is_none() {
             // The book partition is keyed by intake_id, so the root's
             // partition index is the intake id we look up in catalog.
@@ -380,7 +414,11 @@ fn breadcrumb(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Resu
     {
         titles.insert(0, book);
     }
-    Ok(titles.join(BREADCRUMB_SEP))
+    Ok(LeafContext {
+        breadcrumb: titles.join(BREADCRUMB_SEP),
+        toc_position,
+        enclosing_node_id,
+    })
 }
 
 /// Look up the intake's filename stem from `original_path`, returning
@@ -475,6 +513,9 @@ mod tests {
         let citation = Citation {
             text: "hello".to_string(),
             breadcrumb: "Book \u{203a} Chapter".to_string(),
+            intake_id: 1,
+            toc_position: Some(7),
+            enclosing_node_id: Some(NodeId::new(100_000_000)),
             start_node_id: NodeId::new(100_000_001),
             start_char_offset: 0,
             end_node_id: NodeId::new(100_000_001),
@@ -483,8 +524,11 @@ mod tests {
             distance: 0.25,
         };
         let value = serde_json::to_value(&citation).expect("serialize citation");
-        // The newtype id flattens to a bare integer, not a wrapper object.
+        // The newtype ids flatten to bare integers, not wrapper objects.
         assert_eq!(value["start_node_id"], serde_json::json!(100_000_001));
+        assert_eq!(value["enclosing_node_id"], serde_json::json!(100_000_000));
+        assert_eq!(value["intake_id"], 1);
+        assert_eq!(value["toc_position"], 7);
         assert_eq!(value["text"], "hello");
         assert_eq!(value["distance"], 0.25);
     }
@@ -635,6 +679,36 @@ mod tests {
         assert_eq!(hits[0].start_node_id, leaf);
         // The book title appears exactly once, then the chapter.
         assert_eq!(hits[0].breadcrumb, "A Test Book \u{203a} Chapter One");
+
+        // The structural anchors point back into the corpus: the book
+        // by intake id, the start leaf by document-order position, and
+        // the chapter as the nearest organizing ancestor.
+        assert_eq!(hits[0].intake_id, 1);
+        let leaf_node = corpus.get_node(leaf).expect("get").expect("present");
+        assert_eq!(hits[0].toc_position, leaf_node.toc_lo);
+        assert!(hits[0].toc_position.is_some());
+        let chapter = corpus
+            .get_node(hits[0].enclosing_node_id.expect("an enclosing node"))
+            .expect("get")
+            .expect("present");
+        assert!(chapter.node_type.is_organizing());
+        assert_eq!(chapter.title.as_deref(), Some("Chapter One"));
+    }
+
+    #[tokio::test]
+    async fn enclosing_node_falls_back_to_the_book_root_without_chapters() {
+        // A chapterless book: the leaf hangs directly off the root, so
+        // the nearest organizing ancestor is the root itself.
+        let (dir, corpus, catalog, store, leaf) = fixture(Some("A Flat Book"), false).await;
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        let enclosing = hits[0].enclosing_node_id.expect("an enclosing node");
+        assert_eq!(enclosing, leaf.partition().root());
     }
 
     #[tokio::test]

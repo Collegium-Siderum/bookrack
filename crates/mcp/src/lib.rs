@@ -1322,6 +1322,9 @@ mod tests {
         Citation {
             text: "passage".to_string(),
             breadcrumb: "A Test Book \u{203a} Chapter One".to_string(),
+            intake_id: NodeId::new(node).partition().get(),
+            toc_position: Some(0),
+            enclosing_node_id: Some(NodeId::new(node).partition().root()),
             start_node_id: NodeId::new(node),
             start_char_offset: 0,
             end_node_id: NodeId::new(node),
