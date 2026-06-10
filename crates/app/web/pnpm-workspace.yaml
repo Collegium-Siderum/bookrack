@@ -1,0 +1,4 @@
+# Marks this directory as its own pnpm workspace root and approves
+# esbuild's binary-install script (the only postinstall in the tree).
+allowBuilds:
+  esbuild: true
