@@ -22,7 +22,8 @@
 use anyhow::{Context, Result};
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
-    LibrarySelection, ResolutionSource, default_registry_path, pdfium_lib_dir,
+    LibrarySelection, ResolutionSource, default_registry_path, locate_pdfium,
+    pdfium_library_filename,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use serde::Serialize;
@@ -185,26 +186,33 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
 }
 
 fn push_pdfium_row(rows: &mut Vec<Row>) {
-    let dir = pdfium_lib_dir();
-    let filename = pdfium_filename();
-    let path = dir.join(filename);
-    if path.is_file() {
-        rows.push(Row {
+    let filename = pdfium_library_filename();
+    let location = locate_pdfium();
+    match location.dir {
+        Some(dir) => rows.push(Row {
             label: "PDFium library".to_string(),
-            value: path.display().to_string(),
+            value: dir.join(filename).display().to_string(),
             status: Status::Ok { note: None },
-        });
-    } else {
-        rows.push(Row {
-            label: "PDFium library".to_string(),
-            value: format!("(missing) expected {}", path.display()),
-            status: Status::Fail {
-                note: format!(
-                    "drop {filename} next to the binary, \
-                     or set BOOKRACK_PDFIUM_LIB to its directory"
-                ),
-            },
-        });
+        }),
+        None => {
+            let searched = location
+                .probed
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            rows.push(Row {
+                label: "PDFium library".to_string(),
+                value: format!("(missing) searched {searched}"),
+                status: Status::Fail {
+                    note: format!(
+                        "run `bookrack doctor --install-pdfium` to download \
+                         the pinned build, or set BOOKRACK_PDFIUM_LIB to a \
+                         directory containing {filename}"
+                    ),
+                },
+            });
+        }
     }
 }
 
@@ -241,18 +249,6 @@ fn push_fd_limit_row(rows: &mut Vec<Row>) {
                 note: format!("could not raise RLIMIT_NOFILE: {e}"),
             },
         }),
-    }
-}
-
-/// Platform-conventional filename of the PDFium dynamic library. The
-/// adapter loads `pdfium_lib_dir().join(this)`.
-fn pdfium_filename() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "pdfium.dll"
-    } else if cfg!(target_os = "macos") {
-        "libpdfium.dylib"
-    } else {
-        "libpdfium.so"
     }
 }
 
@@ -531,17 +527,5 @@ mod tests {
             !serialised.contains(r#""note""#),
             "note should be elided: {serialised}"
         );
-    }
-
-    #[test]
-    fn pdfium_filename_is_platform_specific() {
-        let name = pdfium_filename();
-        if cfg!(target_os = "windows") {
-            assert_eq!(name, "pdfium.dll");
-        } else if cfg!(target_os = "macos") {
-            assert_eq!(name, "libpdfium.dylib");
-        } else {
-            assert_eq!(name, "libpdfium.so");
-        }
     }
 }

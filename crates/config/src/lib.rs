@@ -1046,34 +1046,77 @@ fn load_default_registry() -> Result<Option<Registry>, ConfigError> {
     Ok(Some(registry))
 }
 
-/// Resolve the directory to load the PDFium dynamic library from.
+/// Filename of the PDFium dynamic library on this platform.
+pub fn pdfium_library_filename() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pdfium.dll"
+    } else if cfg!(target_os = "macos") {
+        "libpdfium.dylib"
+    } else {
+        "libpdfium.so"
+    }
+}
+
+/// Per-user directory where an operator-initiated install places the
+/// pinned PDFium library; the last stop in the [`locate_pdfium`] search
+/// chain. `None` when the platform data directory cannot be located.
+pub fn pdfium_managed_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("bookrack").join("pdfium"))
+}
+
+/// Outcome of the PDFium library search.
+#[derive(Debug)]
+pub struct PdfiumLocation {
+    /// First searched directory holding the platform library, if any.
+    pub dir: Option<PathBuf>,
+    /// Every directory that was checked, in search order.
+    pub probed: Vec<PathBuf>,
+}
+
+/// Locate the directory to load the PDFium dynamic library from.
+///
+/// `BOOKRACK_PDFIUM_LIB`, when set, is authoritative: only that
+/// directory is checked, so a typo in the override surfaces as a miss
+/// instead of being papered over by a fallback. When unset, the running
+/// executable's own directory (the release-archive layout) is checked
+/// first, then the per-user managed directory installs land in.
 ///
 /// This is a free function, not a [`Config`] method: the PDF adapter
 /// needs the directory but takes no `Config`, and threading one through
 /// only to reach this would widen its signature for nothing.
-pub fn pdfium_lib_dir() -> PathBuf {
-    pdfium_lib_dir_from(std::env::var(PDFIUM_LIB_ENV).ok())
+pub fn locate_pdfium() -> PdfiumLocation {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    locate_pdfium_from(
+        std::env::var(PDFIUM_LIB_ENV).ok(),
+        exe_dir,
+        pdfium_managed_dir(),
+        &|dir| dir.join(pdfium_library_filename()).is_file(),
+    )
 }
 
-/// Pure resolution logic for [`pdfium_lib_dir`], factored out so it can
-/// be tested without mutating process-global environment variables.
-///
-/// The override wins when set; otherwise the running executable's own
-/// directory is used. A failure to locate the executable falls back to
-/// the current directory rather than panicking — a missing PDFium
-/// library is then reported by the adapter, where the error has
-/// context, not here.
-fn pdfium_lib_dir_from(override_dir: Option<String>) -> PathBuf {
-    if let Some(dir) = override_dir
+/// Pure search logic for [`locate_pdfium`], factored out so the chain
+/// can be tested without mutating process-global environment variables
+/// or touching the filesystem.
+fn locate_pdfium_from(
+    override_dir: Option<String>,
+    exe_dir: Option<PathBuf>,
+    managed_dir: Option<PathBuf>,
+    has_library: &dyn Fn(&Path) -> bool,
+) -> PdfiumLocation {
+    let candidates: Vec<PathBuf> = match override_dir
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        return PathBuf::from(dir);
+        Some(dir) => vec![PathBuf::from(dir)],
+        None => [exe_dir, managed_dir].into_iter().flatten().collect(),
+    };
+    let dir = candidates.iter().find(|d| has_library(d)).cloned();
+    PdfiumLocation {
+        dir,
+        probed: candidates,
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[cfg(test)]
@@ -1536,18 +1579,50 @@ mod tests {
     }
 
     #[test]
-    fn pdfium_lib_dir_uses_the_override_when_set() {
-        let pinned = "a/pinned/pdfium/dir";
-        assert_eq!(
-            pdfium_lib_dir_from(Some(pinned.to_string())),
-            PathBuf::from(pinned),
+    fn locate_pdfium_only_checks_the_override_when_set() {
+        let pinned = PathBuf::from("a/pinned/pdfium/dir");
+        let exe = PathBuf::from("exe/dir");
+        let managed = PathBuf::from("managed/dir");
+
+        let found = locate_pdfium_from(
+            Some(pinned.display().to_string()),
+            Some(exe.clone()),
+            Some(managed.clone()),
+            &|_| true,
         );
-        // Whitespace-only counts as unset and falls through to the
-        // executable-directory default.
-        assert_ne!(
-            pdfium_lib_dir_from(Some("   ".to_string())),
-            PathBuf::from("   "),
+        assert_eq!(found.dir, Some(pinned.clone()));
+        assert_eq!(found.probed, vec![pinned.clone()]);
+
+        // An override without the library is a miss, not a fallthrough:
+        // the other candidates must not even be probed.
+        let missing = locate_pdfium_from(
+            Some(pinned.display().to_string()),
+            Some(exe),
+            Some(managed),
+            &|_| false,
         );
+        assert_eq!(missing.dir, None);
+        assert_eq!(missing.probed, vec![pinned]);
+    }
+
+    #[test]
+    fn locate_pdfium_checks_exe_then_managed_dir_without_an_override() {
+        let exe = PathBuf::from("exe/dir");
+        let managed = PathBuf::from("managed/dir");
+
+        // Whitespace-only override counts as unset.
+        let hit = locate_pdfium_from(
+            Some("   ".to_string()),
+            Some(exe.clone()),
+            Some(managed.clone()),
+            &|d| d == managed.as_path(),
+        );
+        assert_eq!(hit.dir, Some(managed.clone()));
+        assert_eq!(hit.probed, vec![exe.clone(), managed.clone()]);
+
+        let miss = locate_pdfium_from(None, Some(exe.clone()), Some(managed.clone()), &|_| false);
+        assert_eq!(miss.dir, None);
+        assert_eq!(miss.probed, vec![exe, managed]);
     }
 
     #[test]
@@ -1582,11 +1657,23 @@ mod tests {
     }
 
     #[test]
-    fn pdfium_lib_dir_falls_back_to_a_usable_directory_when_unset() {
-        // With no override, resolution must still yield a non-empty
-        // directory (the running executable's own folder), never an
-        // empty path the loader could not use.
-        assert!(!pdfium_lib_dir_from(None).as_os_str().is_empty());
+    fn pdfium_library_filename_is_platform_specific() {
+        let name = pdfium_library_filename();
+        if cfg!(target_os = "windows") {
+            assert_eq!(name, "pdfium.dll");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(name, "libpdfium.dylib");
+        } else {
+            assert_eq!(name, "libpdfium.so");
+        }
+    }
+
+    #[test]
+    fn locate_pdfium_probes_a_real_directory_in_a_live_process() {
+        // The impure entry point must always have at least the running
+        // executable's own directory to probe; an empty candidate list
+        // would make the not-found report useless.
+        assert!(!locate_pdfium().probed.is_empty());
     }
 
     #[test]

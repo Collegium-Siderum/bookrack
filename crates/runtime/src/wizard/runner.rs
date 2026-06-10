@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig, OLLAMA_URL_ENV,
-    ROOT_CONFIG_NAME, default_registry_path, merge_library_into_registry, pdfium_lib_dir,
-    portable_data_dir,
+    ROOT_CONFIG_NAME, default_registry_path, locate_pdfium, merge_library_into_registry,
+    pdfium_library_filename, portable_data_dir,
 };
 use bookrack_corpus::Corpus;
 use bookrack_embed::{OllamaEmbedClient, probe_ollama};
@@ -23,8 +23,8 @@ use bookrack_ops::{Caller, Ops, SearchOptions, reads};
 use bookrack_query::Library;
 
 use super::{
-    DataRootHint, FinalizeSummary, OllamaStep, PdfiumReport, SmokeOutcome, SmokeReport,
-    WizardDriver,
+    DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
+    SmokeOutcome, SmokeReport, WizardDriver,
 };
 
 /// Synthetic fixture the smoke step ingests. Carries a unique marker
@@ -75,7 +75,13 @@ impl Wizard {
         validate_unused_or_force(&data_root, opts.force)?;
 
         let pdfium = probe_pdfium();
-        driver.step_pdfium(&pdfium).await?;
+        if driver.step_pdfium(&pdfium).await? == PdfiumChoice::Install {
+            let outcome = match crate::pdfium_install::install_pinned_pdfium().await {
+                Ok(path) => PdfiumInstallOutcome::Installed(path),
+                Err(e) => PdfiumInstallOutcome::Failed(format!("{e:#}")),
+            };
+            driver.step_pdfium_install(&outcome).await?;
+        }
 
         let (url, embed_model) = resolve_ollama_target();
         let report = probe_ollama(&url).await.context("probe Ollama")?;
@@ -101,27 +107,16 @@ impl Wizard {
     }
 }
 
-/// Step 2 probe: file existence of the PDFium dynamic library at the
-/// conventional location.
+/// Step 2 probe: walk the PDFium library search chain and note whether
+/// a pinned binary could be installed for this platform.
 fn probe_pdfium() -> PdfiumReport {
-    let filename = pdfium_filename();
-    let expected_path = pdfium_lib_dir().join(filename);
-    let present = expected_path.is_file();
+    let filename = pdfium_library_filename();
+    let location = locate_pdfium();
     PdfiumReport {
-        expected_path,
         filename,
-        present,
-    }
-}
-
-/// Platform-conventional filename of the PDFium dynamic library.
-fn pdfium_filename() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "pdfium.dll"
-    } else if cfg!(target_os = "macos") {
-        "libpdfium.dylib"
-    } else {
-        "libpdfium.so"
+        found: location.dir.map(|d| d.join(filename)),
+        probed: location.probed,
+        installable: bookrack_extract::pdfium_pin::pinned_pdfium_binary().is_some(),
     }
 }
 
@@ -326,18 +321,6 @@ fn write_default_registry(data_root: &Path) -> Result<Option<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pdfium_filename_is_platform_specific() {
-        let name = pdfium_filename();
-        if cfg!(target_os = "windows") {
-            assert_eq!(name, "pdfium.dll");
-        } else if cfg!(target_os = "macos") {
-            assert_eq!(name, "libpdfium.dylib");
-        } else {
-            assert_eq!(name, "libpdfium.so");
-        }
-    }
 
     #[test]
     fn smoke_fixture_contains_the_query_marker() {

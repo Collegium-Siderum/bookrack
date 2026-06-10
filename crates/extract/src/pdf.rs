@@ -316,7 +316,7 @@ fn parse_pdf_year(date: &str) -> Option<i32> {
 /// A load failure is an environment / deployment problem — the pinned
 /// binary is missing or unreadable — not a property of any one book.
 /// It is reported as [`ExtractError::Io`] with a message naming the
-/// directory that was searched: `Io` already means "the host
+/// directories that were searched: `Io` already means "the host
 /// environment could not satisfy this request", so no dedicated
 /// contract variant is minted for it.
 pub(crate) fn pdfium() -> Result<&'static Pdfium, ExtractError> {
@@ -326,11 +326,15 @@ pub(crate) fn pdfium() -> Result<&'static Pdfium, ExtractError> {
     }
 }
 
-/// Bind the PDFium native library from the configured directory. The
-/// error is a plain `String` so it can be stored in the `OnceLock` and
-/// re-reported on every later call — `PdfiumError` is not `Clone`.
+/// Bind the PDFium native library from the first directory in the
+/// search chain that holds it. The error is a plain `String` so it can
+/// be stored in the `OnceLock` and re-reported on every later call —
+/// `PdfiumError` is not `Clone`.
 fn load_pdfium() -> Result<Pdfium, String> {
-    let dir = bookrack_config::pdfium_lib_dir();
+    let location = bookrack_config::locate_pdfium();
+    let Some(dir) = location.dir else {
+        return Err(missing_library_message(&location.probed));
+    };
     let library = Pdfium::pdfium_platform_library_name_at_path(&dir);
     Pdfium::bind_to_library(&library)
         .map(Pdfium::new)
@@ -340,6 +344,23 @@ fn load_pdfium() -> Result<Pdfium, String> {
                 dir.display()
             )
         })
+}
+
+/// Compose the not-found report: the directories searched plus the
+/// remedies, so the operator never sees a raw dynamic-loader trace.
+fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
+    let searched = probed
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "PDFium library {filename} not found; searched: {searched}. \
+         Run `bookrack doctor --install-pdfium` to download the pinned build, \
+         or set {env} to a directory containing it.",
+        filename = bookrack_config::pdfium_library_filename(),
+        env = bookrack_config::PDFIUM_LIB_ENV,
+    )
 }
 
 // --- block assembly ------------------------------------------------------

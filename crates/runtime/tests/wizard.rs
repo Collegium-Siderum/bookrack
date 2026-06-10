@@ -14,8 +14,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bookrack_config::ROOT_CONFIG_NAME;
 use bookrack_runtime::wizard::{
-    DataRootHint, FinalizeSummary, OllamaStep, PdfiumReport, SmokeOutcome, Wizard, WizardDriver,
-    WizardOpts,
+    DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
+    SmokeOutcome, Wizard, WizardDriver, WizardOpts,
 };
 
 static HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -52,8 +52,12 @@ impl WizardDriver for MockDriver {
         self.visited.lock().unwrap().push("data_root");
         Ok(self.data_root.clone())
     }
-    async fn step_pdfium(&self, _r: &PdfiumReport) -> Result<()> {
+    async fn step_pdfium(&self, _r: &PdfiumReport) -> Result<PdfiumChoice> {
         self.visited.lock().unwrap().push("pdfium");
+        Ok(PdfiumChoice::Continue)
+    }
+    async fn step_pdfium_install(&self, _o: &PdfiumInstallOutcome) -> Result<()> {
+        self.visited.lock().unwrap().push("pdfium_install");
         Ok(())
     }
     async fn step_ollama(&self, _s: &OllamaStep<'_>) -> Result<()> {

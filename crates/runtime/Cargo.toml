@@ -14,6 +14,9 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-diagnose = { path = "../diagnose" }
 bookrack-embed = { path = "../embed" }
+# `pdfium_install` reads the pinned-binary constants published next to
+# the PDF adapter that consumes the library.
+bookrack-extract = { path = "../extract" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-obs = { path = "../obs" }
@@ -32,10 +35,16 @@ chrono.workspace = true
 # `cmd::metadata::WriteMetadataAction` lives in `bookrack-repl-grammar`
 # and is re-exported through `cmd::metadata`.
 clap.workspace = true
+# `pdfium_install` downloads the pinned PDFium archive over HTTPS and
+# unpacks it (gzip + tar) into the managed directory.
+flate2.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# `cmd::dryrun` hashes file contents to name per-book JSONL outputs.
+# `cmd::dryrun` hashes file contents to name per-book JSONL outputs;
+# `pdfium_install` verifies the downloaded archive against its pin.
 sha2.workspace = true
+tar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -47,11 +47,20 @@ The Windows archive holds the library at `bin/pdfium.dll`; the Linux
 archive at `lib/libpdfium.so`; the macOS archives at
 `lib/libpdfium.dylib`.
 
-## Local development
+## How the library is found
 
-Set `BOOKRACK_PDFIUM_LIB` to a directory holding the platform library
-(`pdfium.dll` / `libpdfium.so`) for this build. When unset, the
-adapter loads the library from the running executable's own directory.
+The adapter searches a chain of directories, first hit wins:
+
+1. `BOOKRACK_PDFIUM_LIB` — authoritative when set; no fallback, so a
+   typo surfaces as a miss instead of being papered over.
+2. The running executable's own directory (the release-archive
+   layout, where the library ships next to the binaries).
+3. The per-user managed directory (`<platform data dir>/bookrack/
+   pdfium`), which `bookrack doctor --install-pdfium` and the
+   first-run wizard's download offer populate with the pinned build.
+
+`src/pdfium_pin.rs` carries the values in the tables above as
+constants for that installer.
 
 ## When this changes
 
@@ -61,7 +70,9 @@ re-extract on. Update, in lockstep:
 
 - the `pdfium-render` cargo feature in the workspace `Cargo.toml`,
 - the tag, URL, and SHA-256 in the CI `Fetch pinned PDFium` step,
-- the values in the table above.
+- the release tag, asset names, and SHA-256 values in
+  `src/pdfium_pin.rs` (the installer's copy of the pin),
+- the values in the tables above.
 
 Bumping the `pdfium-render` crate version itself also flips the
 behaviour-sensitive deps hash that `crates/extract/tests/dep_hash.rs`

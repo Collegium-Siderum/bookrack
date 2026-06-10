@@ -48,12 +48,38 @@ pub struct DataRootHint {
     pub force: bool,
 }
 
-/// Result of step 2: pure file existence at the conventional library
-/// location. Warn-only; EPUB and TXT ingest still work without it.
+/// Result of step 2: the PDFium library search. Warn-only; EPUB and
+/// TXT ingest still work without the library.
 pub struct PdfiumReport {
-    pub expected_path: PathBuf,
+    /// Platform filename of the dynamic library.
     pub filename: &'static str,
-    pub present: bool,
+    /// Full path of the library, when the search found it.
+    pub found: Option<PathBuf>,
+    /// Every directory the search checked, in order.
+    pub probed: Vec<PathBuf>,
+    /// Whether a pinned binary is published for this platform, i.e.
+    /// whether offering a download is meaningful.
+    pub installable: bool,
+}
+
+/// Driver's answer to the PDFium step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfiumChoice {
+    /// Proceed without the library; PDF ingest stays unavailable until
+    /// it appears.
+    Continue,
+    /// Download the pinned binary into the managed directory. Only
+    /// meaningful when the report says `installable` and nothing was
+    /// found.
+    Install,
+}
+
+/// Outcome of the wizard-initiated PDFium install, for presentation.
+pub enum PdfiumInstallOutcome {
+    /// The library now sits at this path.
+    Installed(PathBuf),
+    /// The download or unpack failed; the wizard continues without it.
+    Failed(String),
 }
 
 /// Step 3 inputs. `report` is the existing embed probe; `embed_model`
@@ -93,9 +119,17 @@ pub trait WizardDriver: Send + Sync {
     /// will operate on. Driver owns prompts, defaults, and refusal.
     async fn step_data_root(&self, hint: DataRootHint) -> Result<PathBuf>;
 
-    /// Step 2: present a file-existence finding. Warn-only — driver
-    /// must not abort on `!report.present`.
-    async fn step_pdfium(&self, report: &PdfiumReport) -> Result<()>;
+    /// Step 2: present the library search finding and decide whether
+    /// to install the pinned binary. Warn-only — driver must not abort
+    /// on a missing library, and must answer
+    /// [`PdfiumChoice::Continue`] when the library was found or no
+    /// pinned binary exists for the platform.
+    async fn step_pdfium(&self, report: &PdfiumReport) -> Result<PdfiumChoice>;
+
+    /// Step 2b: present the install outcome. Only called when step 2
+    /// answered [`PdfiumChoice::Install`]. Warn-only — a failed
+    /// install leaves PDF ingest unavailable, nothing worse.
+    async fn step_pdfium_install(&self, outcome: &PdfiumInstallOutcome) -> Result<()>;
 
     /// Step 3: present the Ollama probe. Driver decides whether to
     /// abort on unreachable / missing model.

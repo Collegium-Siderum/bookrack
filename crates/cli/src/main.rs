@@ -184,6 +184,11 @@ enum Command {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
+        /// Download the pinned PDFium build into the per-user managed
+        /// directory before gathering the report. PDF ingest needs the
+        /// library; the other formats do not.
+        #[arg(long)]
+        install_pdfium: bool,
     },
     /// Submit one or more files for ingest. Requires a running
     /// bookrack daemon; the command exits with code 2 if no daemon is
@@ -388,8 +393,12 @@ async fn run() -> Result<()> {
     // the data root directly without going through `Config::resolve`,
     // so an unconfigured install surfaces as a row instead of an
     // opaque resolver bail.
-    if let Command::Doctor { json } = &cli.command {
-        return cmd::cli_client::doctor::run(&cli.selection(), *json, None).await;
+    if let Command::Doctor {
+        json,
+        install_pdfium,
+    } = &cli.command
+    {
+        return cmd::cli_client::doctor::run(&cli.selection(), *json, *install_pdfium, None).await;
     }
     if let Command::Init {
         data_dir,

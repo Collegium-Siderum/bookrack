@@ -15,8 +15,19 @@ use serde_json::Value;
 pub async fn run(
     selection: &LibrarySelection,
     json: bool,
+    install_pdfium: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<()> {
+    // The install is a host-level action: it lands in the per-user
+    // managed directory regardless of whether a daemon is running, so
+    // it happens before the report path forks. A running daemon picks
+    // the library up on its next start.
+    if install_pdfium {
+        let path = bookrack_runtime::pdfium_install::install_pinned_pdfium().await?;
+        if !json {
+            println!("installed {}", path.display());
+        }
+    }
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
             Ok(client) => {

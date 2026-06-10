@@ -18,6 +18,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod embed_helpers;
 pub mod ops_helpers;
+pub mod pdfium_install;
 pub mod queue;
 pub mod render;
 pub mod rlimit;

@@ -44,5 +44,8 @@ pub async fn run(args: Args) -> Result<()> {
         non_interactive: args.non_interactive,
         data_dir: args.data_dir,
     };
-    Wizard::run(&CliWizardDriver, opts).await
+    let driver = CliWizardDriver {
+        non_interactive: opts.non_interactive,
+    };
+    Wizard::run(&driver, opts).await
 }

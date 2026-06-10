@@ -13,9 +13,16 @@ use anyhow::{Context, Result};
 use bookrack_embed::ProbeReport as EmbedProbeReport;
 
 use super::runner::validate_unused_or_force;
-use super::{DataRootHint, FinalizeSummary, OllamaStep, PdfiumReport, SmokeOutcome, WizardDriver};
+use super::{
+    DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
+    SmokeOutcome, WizardDriver,
+};
 
-pub struct CliWizardDriver;
+pub struct CliWizardDriver {
+    /// Mirrors `WizardOpts::non_interactive`: suppresses every prompt
+    /// this driver would otherwise issue after step 1.
+    pub non_interactive: bool,
+}
 
 #[async_trait::async_trait]
 impl WizardDriver for CliWizardDriver {
@@ -58,21 +65,52 @@ impl WizardDriver for CliWizardDriver {
         Ok(abs)
     }
 
-    /// Step 2: report the PDFium probe. Warn-only: ingest of EPUB and
-    /// TXT works without PDFium; only the PDF adapter needs it. A
-    /// missing library is reported with the exact path the loader
-    /// would look at so the operator can drop the file there.
-    async fn step_pdfium(&self, report: &PdfiumReport) -> Result<()> {
+    /// Step 2: report the PDFium search. Warn-only: ingest of EPUB and
+    /// TXT works without PDFium; only the PDF adapter needs it. A miss
+    /// lists every directory the loader would check; when a pinned
+    /// binary exists for this platform, an interactive run offers to
+    /// download it on the spot.
+    async fn step_pdfium(&self, report: &PdfiumReport) -> Result<PdfiumChoice> {
         println!("[2/5] PDFium native library");
-        if report.present {
-            println!("      Found {}", report.expected_path.display());
-        } else {
-            let filename = report.filename;
-            println!("      WARN: {} not found.", report.expected_path.display());
-            println!(
-                "            Drop {filename} there, or set BOOKRACK_PDFIUM_LIB. \
-                 PDF ingest will fail until you do; EPUB and TXT still work."
-            );
+        if let Some(path) = &report.found {
+            println!("      Found {}", path.display());
+            return Ok(PdfiumChoice::Continue);
+        }
+        let filename = report.filename;
+        println!("      WARN: {filename} not found. Searched:");
+        for dir in &report.probed {
+            println!("            {}", dir.display());
+        }
+        if report.installable && !self.non_interactive {
+            let answer = prompt_line("      Download the pinned PDFium build now? [Y/n]: ")?;
+            if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+                println!("      Downloading ...");
+                return Ok(PdfiumChoice::Install);
+            }
+        }
+        println!(
+            "            Run `bookrack doctor --install-pdfium` later, or set \
+             BOOKRACK_PDFIUM_LIB. PDF ingest will fail until the library is \
+             present; EPUB and TXT still work."
+        );
+        Ok(PdfiumChoice::Continue)
+    }
+
+    /// Step 2b: report the download outcome. Warn-only either way; a
+    /// failed install degrades PDF ingest, nothing else.
+    async fn step_pdfium_install(&self, outcome: &PdfiumInstallOutcome) -> Result<()> {
+        match outcome {
+            PdfiumInstallOutcome::Installed(path) => {
+                println!("      Installed {}", path.display());
+            }
+            PdfiumInstallOutcome::Failed(reason) => {
+                eprintln!("      WARN: PDFium install failed: {reason}");
+                eprintln!(
+                    "            Run `bookrack doctor --install-pdfium` to retry. \
+                     PDF ingest will fail until the library is present; EPUB \
+                     and TXT still work."
+                );
+            }
         }
         Ok(())
     }

@@ -8,6 +8,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- `bookrack doctor --install-pdfium`: downloads the pinned PDFium
+  build, verifies its SHA-256 against the pin, and unpacks the
+  library into a per-user managed directory that the loader searches
+  automatically. The first-run wizard offers the same download when
+  the library is missing.
+
+### Changed
+
+- The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`
+  (authoritative when set), then the executable's own directory,
+  then the per-user managed directory. A miss reports every searched
+  directory and the remedies instead of a raw dynamic-loader error.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added
