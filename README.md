@@ -162,8 +162,10 @@ window read as far slower than it really was.
 
 On every desktop platform the default idle-sleep policy will suspend
 a backgrounded shell. The natural unit to wrap is the `bookrack run`
-daemon itself: submit work with `bookrack ingest <path>`, then leave
-the daemon running while the queue worker grinds away.
+daemon itself: submit work with `bookrack ingest <path>` — or
+`queue add <path>` from `bookrack repl`, which walks a whole
+directory — then leave the daemon running while the queue worker
+grinds away.
 
 macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
@@ -323,9 +325,9 @@ library leaves the on-disk vectors orphaned. The supported swaps are:
   Fork dispatches over the running daemon's control plane; then stop
   that daemon, start one against the clone with the new model
   (`BOOKRACK_EMBED_MODEL=<model> bookrack --library <name> run`),
-  and run `bookrack vectors reset --yes` to rebuild under it. The
-  original library stays intact; throw the clone away if the new
-  model is worse.
+  and run `bookrack vectors reset` to rebuild under it (type `RESET`
+  at the prompt, or pass `--yes`). The original library stays
+  intact; throw the clone away if the new model is worse.
 - **`bookrack vectors reset`** — in place: drops the chunks table
   and re-embeds every book under the model the daemon's environment
   resolves. The old vectors are unrecoverable. Use when disk space

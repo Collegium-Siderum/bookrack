@@ -153,8 +153,8 @@ bookrack libraries fork trial --data-dir /abs/path/to/trial
 bookrack quit
 # restart against the clone, new model in the daemon's environment:
 BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack --library trial run
-# from a second shell:
-bookrack vectors reset --yes
+# from a second shell; type RESET at the prompt (--yes skips it):
+bookrack vectors reset
 # evaluate the clone, compare with the original library
 # decide:
 #   keep the new model: rm -rf <old data root>, point the registry's
@@ -175,8 +175,8 @@ For users on disk-tight hosts or fully confident in the new model.
 ```sh
 # restart the daemon with the new model in its environment:
 BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack run
-# from a second shell:
-bookrack vectors reset --yes
+# from a second shell; type RESET at the prompt (--yes skips it):
+bookrack vectors reset
 # restart the daemon once the reset completes
 ```
 
