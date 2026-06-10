@@ -2,7 +2,9 @@
 #
 # `config.local.toml` is gitignored and holds machine-specific overrides
 # (e.g. an external `target-dir`); contributors create it as needed. The
-# tracked file here only carries cross-workspace settings.
+# include is marked optional, so a checkout without the file (CI, a
+# fresh clone) loads this tracked configuration alone. The tracked file
+# only carries cross-workspace settings.
 #
 # `TS_RS_EXPORT_DIR` reroutes every `#[ts(export, export_to = "...")]`
 # in the workspace under `crates/app/web/src/generated/`, where the
@@ -10,7 +12,7 @@
 # the path against this file's directory, i.e. the workspace root, so
 # the setting works on any contributor's machine.
 
-include = ["config.local.toml"]
+include = [{ path = "config.local.toml", optional = true }]
 
 [env]
 TS_RS_EXPORT_DIR = { value = "crates/app/web/src/generated", relative = true }
