@@ -159,6 +159,67 @@ pub enum JobOutcome {
     Failed(String),
 }
 
+/// Error returned by the worker's injected runner, classified by
+/// blast radius.
+#[derive(Debug, Clone)]
+pub enum JobError {
+    /// The book itself failed; the worker records the failure and
+    /// moves on to the next pending job.
+    Book(String),
+    /// The daemon process cannot currently serve any job (e.g. its
+    /// file descriptors are exhausted); the worker records the
+    /// failure and pauses the queue instead of burning the remaining
+    /// pending jobs against a store that fails every open.
+    Process(String),
+}
+
+impl JobError {
+    fn into_message(self) -> String {
+        match self {
+            JobError::Book(msg) | JobError::Process(msg) => msg,
+        }
+    }
+}
+
+/// Classify a failed ingest into a [`JobError`]. File-descriptor
+/// exhaustion anywhere in the chain is process-level: every later job
+/// would fail the same way until the process gets descriptors back.
+pub fn classify_ingest_error(err: &anyhow::Error) -> JobError {
+    let message = format!("ingest: {err:#}");
+    if is_fd_exhaustion(err) {
+        JobError::Process(message)
+    } else {
+        JobError::Book(message)
+    }
+}
+
+fn is_fd_exhaustion(err: &anyhow::Error) -> bool {
+    let errno_hit = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::raw_os_error)
+            .is_some_and(errno_is_fd_exhaustion)
+    });
+    // LanceDB flattens some OS errors into message strings before
+    // they cross its API boundary; match the strerror text those
+    // messages carry as a fallback.
+    errno_hit
+        || err
+            .chain()
+            .any(|cause| cause.to_string().contains("Too many open files"))
+}
+
+#[cfg(unix)]
+fn errno_is_fd_exhaustion(code: i32) -> bool {
+    code == rustix::io::Errno::MFILE.raw_os_error()
+        || code == rustix::io::Errno::NFILE.raw_os_error()
+}
+
+#[cfg(not(unix))]
+fn errno_is_fd_exhaustion(_code: i32) -> bool {
+    false
+}
+
 /// Write `outcome` onto the job identified by `id`. If `id` is no
 /// longer in the queue (cancelled and trimmed by a future command),
 /// this is a silent no-op so a slow ingest does not crash the worker.
@@ -316,7 +377,7 @@ pub async fn worker_loop<R, Fut>(
 ) -> Result<()>
 where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = std::result::Result<(), String>> + Send,
+    Fut: Future<Output = std::result::Result<(), JobError>> + Send,
 {
     // Crash recovery once at startup.
     {
@@ -355,15 +416,30 @@ where
             continue;
         };
 
-        let outcome = match runner(job.clone()).await {
-            Ok(()) => JobOutcome::Done,
-            Err(msg) => JobOutcome::Failed(msg),
+        let (outcome, pause_queue) = match runner(job.clone()).await {
+            Ok(()) => (JobOutcome::Done, false),
+            Err(err) => {
+                let pause = matches!(err, JobError::Process(_));
+                let message = err.into_message();
+                if pause {
+                    tracing::error!(
+                        job = %job.id,
+                        error = %message,
+                        "process-level failure; pausing ingest queue",
+                    );
+                }
+                (JobOutcome::Failed(message), pause)
+            }
         };
 
         announce_outcome(&job, &outcome);
 
         {
             let mut guard = state.lock().expect("queue state mutex poisoned");
+            if pause_queue {
+                paused.store(true, Ordering::Release);
+                guard.paused = true;
+            }
             apply_outcome(&mut guard, &job.id, outcome);
             if let Err(err) = save_atomic(&guard, &state_path) {
                 tracing::error!(error = %err, "queue worker: persist after outcome");
@@ -737,7 +813,7 @@ mod tests {
             path,
             Arc::clone(&state),
             rx,
-            |_| async { Ok::<(), String>(()) },
+            |_| async { Ok::<(), JobError>(()) },
             EventStreamHandle::default(),
             Arc::new(AtomicBool::new(false)),
         ));
@@ -768,7 +844,7 @@ mod tests {
                 path.clone(),
                 state,
                 rx,
-                |_job| async { Ok::<(), String>(()) },
+                |_job| async { Ok::<(), JobError>(()) },
                 EventStreamHandle::default(),
                 Arc::new(AtomicBool::new(false)),
             ))
@@ -796,5 +872,100 @@ mod tests {
         assert!(snapshot.jobs[0].finished_at.is_some());
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn process_level_failure_pauses_queue_and_keeps_pending_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/a.epub"), PathBuf::from("/tmp/b.epub")],
+            "default",
+            Priority::Normal,
+            false,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            let paused = Arc::clone(&paused);
+            tokio::spawn(worker_loop(
+                path.clone(),
+                state,
+                rx,
+                |_job| async {
+                    Err(JobError::Process(
+                        "vector store error: Too many open files".to_string(),
+                    ))
+                },
+                EventStreamHandle::default(),
+                paused,
+            ))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let failed = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Failed)
+            };
+            if failed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not mark the job Failed within 3 s"
+            );
+        }
+        // Give the worker a few more ticks: were the queue not paused,
+        // it would pull and fail the second job too.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let snapshot = state.lock().unwrap().clone();
+        assert!(paused.load(Ordering::Acquire), "pause flag not set");
+        assert!(snapshot.paused, "persisted paused flag not set");
+        let failed = snapshot
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Failed)
+            .count();
+        let pending = snapshot
+            .jobs
+            .iter()
+            .filter(|j| j.state == JobState::Pending)
+            .count();
+        assert_eq!(failed, 1, "exactly one job burns: {snapshot:?}");
+        assert_eq!(pending, 1, "the second job survives: {snapshot:?}");
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    // Raw errno 24 is EMFILE on the unix platforms this test runs on;
+    // other platforms assign the code differently.
+    #[cfg(unix)]
+    #[test]
+    fn classify_marks_fd_exhaustion_errno_as_process_level() {
+        let io = std::io::Error::from_raw_os_error(24);
+        let err = anyhow::Error::new(io).context("open vector store");
+        assert!(matches!(classify_ingest_error(&err), JobError::Process(_)));
+    }
+
+    #[test]
+    fn classify_marks_fd_exhaustion_message_as_process_level() {
+        let err = anyhow::anyhow!("lance: IO error: Too many open files");
+        assert!(matches!(classify_ingest_error(&err), JobError::Process(_)));
+    }
+
+    #[test]
+    fn classify_marks_ordinary_failures_as_book_level() {
+        let err = anyhow::anyhow!("source needs OCR and cannot be ingested as text");
+        let classified = classify_ingest_error(&err);
+        assert!(matches!(classified, JobError::Book(_)));
+        let JobError::Book(message) = classified else {
+            unreachable!()
+        };
+        assert!(message.starts_with("ingest: "), "got: {message}");
     }
 }

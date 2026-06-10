@@ -395,16 +395,16 @@ impl DaemonRuntime {
                             runtime.block_on(async move {
                                 let handle = registry
                                     .get(Some(&library))
-                                    .map_err(|e| format!("registry: {e}"))?;
+                                    .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 handle
                                     .ingest_book(&job.path, &params)
                                     .await
-                                    .map_err(|e| format!("ingest: {e:#}"))?;
-                                Ok::<(), String>(())
+                                    .map_err(|e| queue::classify_ingest_error(&e))?;
+                                Ok::<(), queue::JobError>(())
                             })
                         })
                         .await
-                        .map_err(|e| format!("queue worker join: {e}"))?;
+                        .map_err(|e| queue::JobError::Book(format!("queue worker join: {e}")))?;
                         if outcome.is_ok() {
                             sink.report(Stage::Embed, None, None);
                         }
