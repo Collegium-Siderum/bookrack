@@ -135,8 +135,10 @@ where
     println!("forked '{}' at {}", new_name, target.display());
     println!("registry updated: {}", registry_path.display());
     println!();
-    println!("next step:");
-    println!("  BOOKRACK_EMBED_MODEL=<new-model> bookrack --library {new_name} vectors reset");
+    println!("next steps:");
+    println!("  bookrack quit");
+    println!("  BOOKRACK_EMBED_MODEL=<new-model> bookrack --library {new_name} run");
+    println!("  bookrack vectors reset");
     Ok(())
 }
 
