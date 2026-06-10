@@ -10,8 +10,8 @@ clients like Claude Code can search the library as a tool.
 ## Status
 
 Pre-release. The end-to-end pipeline — extract, ingest, embed, and
-cited search — runs through the `bookrack run` daemon-REPL and over
-MCP. The vector store ships with an IVF index family (flat / SQ / PQ
+cited search — runs through the `bookrack run` daemon, driven by
+one-shot subcommands, the `bookrack repl` client, and MCP. The vector store ships with an IVF index family (flat / SQ / PQ
 and the IVF-HNSW variants) selectable through `vectors rebuild`.
 Schema migrations and metadata workflows are still being hardened
 for production use.
@@ -66,38 +66,47 @@ for production use.
    pointer in your platform's config directory so subsequent
    `bookrack` invocations work from any shell.
 
-4. **Start the session and ingest a book.** `bookrack run` opens a
-   daemon-REPL: it serves MCP over streamable-HTTP at
-   `127.0.0.1:8765/mcp` and hosts a foreground prompt where the write
-   commands live. Ingest from inside it; the daemon's queue worker
-   handles long runs without blocking the prompt.
+4. **Start the daemon and ingest a book.** `bookrack run` starts a
+   foreground daemon: it serves MCP over streamable-HTTP at
+   `127.0.0.1:8765/mcp` and a local control socket where the write
+   commands arrive. From a second shell, submit work with the
+   one-shot subcommands — `bookrack ingest` streams the queue
+   worker's progress until the job lands — or open the interactive
+   `bookrack repl` client.
 
    macOS / Linux:
 
    ```
-   ./bookrack run
-   bookrack> ingest /path/to/book.epub
+   ./bookrack run                          # terminal 1: the daemon
+   ./bookrack ingest /path/to/book.epub    # terminal 2
    ```
 
    Windows (PowerShell):
 
    ```
    .\bookrack.exe run
-   bookrack> ingest path\to\book.epub
+   .\bookrack.exe ingest path\to\book.epub
    ```
 
    For a headless deployment — systemd unit, Windows service — run
-   `bookrack-mcp` instead; it serves the same MCP endpoint without a
-   REPL. The two are mutually exclusive against one library because
-   each holds the machine-wide session lock; stop one before starting
-   the other.
+   `bookrack-mcp` instead; it serves the same MCP endpoint, and takes
+   `--with-queue-worker` if it should also process ingest jobs. The
+   two are mutually exclusive against one library because each holds
+   the machine-wide session lock; stop one before starting the other.
 
 ## Connecting an MCP client
 
-**Claude Code** — one command registers the running daemon:
+**Claude Code** — one command registers the running daemon. The
+default scope is `local` — the server is visible only inside the
+project the command is run from; pass `--scope user` to register it
+once for every project on the machine:
 
 ```
-claude mcp add bookrack --transport http http://127.0.0.1:8765/mcp
+# current project only (local scope, the default)
+claude mcp add --transport http bookrack http://127.0.0.1:8765/mcp
+
+# every project on this machine (user scope)
+claude mcp add --transport http --scope user bookrack http://127.0.0.1:8765/mcp
 ```
 
 **Cursor, Claude Desktop, Cline, Continue, others** — TBD. Streamable-
@@ -153,8 +162,8 @@ window read as far slower than it really was.
 
 On every desktop platform the default idle-sleep policy will suspend
 a backgrounded shell. The natural unit to wrap is the `bookrack run`
-session itself: queue work from the REPL with `queue add <path>`,
-then leave the session open while the worker grinds away.
+daemon itself: submit work with `bookrack ingest <path>`, then leave
+the daemon running while the queue worker grinds away.
 
 macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
@@ -240,8 +249,9 @@ An upgraded binary may read older derived data exactly, or it may
 need that data rebuilt before it can serve correct results. The
 trigger is whether the upgrade bumps a behaviour-sensitive
 dependency or a stamp constant. Three commands cover every refresh
-case; all run inside the `bookrack run` REPL because they take the
-write scheduler:
+case; all dispatch over the running daemon's control plane because
+they take its write scheduler — invoke them as one-shot subcommands
+or from `bookrack repl`:
 
 - `corpus rebuild` — regenerate `corpus.db` from the v1 extraction
   envelopes. Use this after a corpus schema bump, or to recover
@@ -309,17 +319,17 @@ library leaves the on-disk vectors orphaned. The supported swaps are:
 
 - **`bookrack libraries fork <name> --data-dir <path>`** — clone
   the current library into a sibling under `<path>` (envelope store
-  hardlinked, catalog + corpus snapshotted, vector store dropped),
-  then start a `bookrack run` session against the clone
-  (`bookrack --library <name> run`) and execute `vectors reset` in
-  its REPL to rebuild under the new model. The original library
-  stays intact; throw the clone away if the new model is worse.
-  `libraries fork` is a top-level command; stop any `bookrack run`
-  session on the source library before invoking it.
-- **`vectors reset`** — REPL command, in place: drops the chunks
-  table and re-embeds every book under the env-configured model. The
-  old vectors are unrecoverable. Use when disk space is tight or the
-  swap is settled.
+  hardlinked, catalog + corpus snapshotted, vector store dropped).
+  Fork dispatches over the running daemon's control plane; then stop
+  that daemon, start one against the clone with the new model
+  (`BOOKRACK_EMBED_MODEL=<model> bookrack --library <name> run`),
+  and run `bookrack vectors reset --yes` to rebuild under it. The
+  original library stays intact; throw the clone away if the new
+  model is worse.
+- **`bookrack vectors reset`** — in place: drops the chunks table
+  and re-embeds every book under the model the daemon's environment
+  resolves. The old vectors are unrecoverable. Use when disk space
+  is tight or the swap is settled.
 
 See [docs/UPGRADE.md](docs/UPGRADE.md#switching-the-embedding-model)
 for the full procedure.

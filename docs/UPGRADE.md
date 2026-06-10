@@ -66,8 +66,9 @@ target lives on a different filesystem), and `catalog.db` /
 `corpus.db` are copied as snapshots. The `lancedb/` directory is
 **not** carried over: the new library starts with no vectors and
 no `index_meta` stamps. Follow up with `vectors reset` against the
-new library to rebuild it under whatever embedding model the env
-points at. The recommended path for trying a new embedding model.
+new library to rebuild it under whatever embedding model the
+daemon's environment points at. The recommended path for trying a
+new embedding model.
 
 `bookrack vectors reset` — drop the chunks table and the
 `vectors_meta.json` sidecar, clear the corpus `index_meta` stamps,
@@ -132,10 +133,14 @@ The chunks table is single-dim and tied to one model: stamps in
 the serve-side gate (every query) refuse anything else. A library is
 not a multi-model index.
 
-Two supported workflows, both require the daemon to be stopped (the
-session lock takes a single process at a time, and the daemon caches
-the model + dimension at startup so it must be restarted before the
-new state is observable).
+Two supported workflows. Both execute inside the running daemon —
+`vectors reset` is dispatched over its control plane — and the
+embedding model resolves from the daemon process's environment
+(`BOOKRACK_EMBED_MODEL`, then `config.toml`, then the default) at
+the moment the reset runs. Setting the variable on the client
+invocation has no effect: the daemon must be restarted with the new
+model before the reset, and restarted once more afterwards so the
+serve path picks up the new stamps.
 
 ### Side by side: `libraries fork` then `vectors reset` on the clone
 
@@ -143,9 +148,13 @@ The recommended path. The old library stays intact while a trial
 clone runs against the new model.
 
 ```sh
+# with the daemon running on the source library:
 bookrack libraries fork trial --data-dir /abs/path/to/trial
-BOOKRACK_EMBED_MODEL=qwen3-embedding:4b \
-  bookrack --library trial vectors reset
+bookrack quit
+# restart against the clone, new model in the daemon's environment:
+BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack --library trial run
+# from a second shell:
+bookrack vectors reset --yes
 # evaluate the clone, compare with the original library
 # decide:
 #   keep the new model: rm -rf <old data root>, point the registry's
@@ -164,9 +173,11 @@ filesystem; `--copy-mode copy` forces the byte copy unconditionally.
 For users on disk-tight hosts or fully confident in the new model.
 
 ```sh
-BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack vectors reset
-# type `RESET` at the prompt
-# restart the daemon
+# restart the daemon with the new model in its environment:
+BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack run
+# from a second shell:
+bookrack vectors reset --yes
+# restart the daemon once the reset completes
 ```
 
 The old vectors are dropped before the new ones land — there is no

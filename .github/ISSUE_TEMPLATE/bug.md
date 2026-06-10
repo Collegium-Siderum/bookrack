@@ -38,6 +38,6 @@ you want to verify the redaction; pass `--no-scrub` to skip it.
 
 ## Environment
 
-- `bookrack` version (`bookrack info`):
+- `bookrack` version (`bookrack --version`):
 - Operating system and version:
 - Rust toolchain (if you built from source): `rustc --version`
