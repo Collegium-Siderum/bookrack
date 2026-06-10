@@ -13,13 +13,16 @@ fail=0
 #    letter must sit at a token boundary (line start or a non-letter
 #    before it) so an escape sequence like "backtrace:\n" — a letter,
 #    colon, backslash mid-word — is not mistaken for a `C:\` path.
-if git grep -nE '(^|[^A-Za-z])[A-Za-z]:\\|/Users/|/home/[a-z]' -- '*.rs' '*.toml' '*.md'; then
+if git grep -nE '(^|[^A-Za-z])[A-Za-z]:\\|/Users/|/home/[a-z]' -- \
+  '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js'; then
   echo "LEAK: local filesystem path"
   fail=1
 fi
 
 # 2. CJK characters in code / config / docs (test fixtures excluded).
-if git grep -nP '[\x{4e00}-\x{9fff}]' -- '*.rs' '*.toml' '*.md' ':!*/tests/fixtures/*'; then
+if git grep -nP '[\x{4e00}-\x{9fff}]' -- \
+  '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' \
+  ':!*/tests/fixtures/*'; then
   echo "LEAK: CJK in code/config/docs"
   fail=1
 fi

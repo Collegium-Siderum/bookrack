@@ -39,9 +39,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: clippy
-      - name: Install protoc
+      - name: Install protoc and Tauri system libraries
         # protoc: build dependency of lancedb (lance-encoding).
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        # webkit2gtk/gtk/appindicator: link dependencies of the Tauri
+        # shell in crates/app (wry webview, gtk windowing, tray icon).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libwebkit2gtk-4.1-dev \
+            libgtk-3-dev libayatana-appindicator3-dev
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -52,8 +57,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc and Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler libwebkit2gtk-4.1-dev \
+            libgtk-3-dev libayatana-appindicator3-dev
       - name: Cache PDFium archive
         # The cache key is tied to the pinned chromium build, so a hit
         # always carries the right ABI for the pdfium_NNNN cargo feature
