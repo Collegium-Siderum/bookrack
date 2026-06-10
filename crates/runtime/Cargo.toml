@@ -41,6 +41,10 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# Soft-RLIMIT_NOFILE raise at daemon startup, mirrored by a doctor row.
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 ts-rs.workspace = true

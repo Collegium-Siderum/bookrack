@@ -108,6 +108,11 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7"] }
 # Temp directories for tests that need an on-disk store (e.g. LanceDB).
 tempfile = "3"
+# getrlimit/setrlimit for the `runtime` crate: daemon hosts raise the
+# soft RLIMIT_NOFILE at startup, because GUI-launched processes inherit
+# a default too small for a batch ingest's LanceDB fragment files.
+# Unix-only consumer; `process` is the resource-limit feature.
+rustix = { version = "1.1", features = ["process"] }
 # The audit-profile crate, pinned at the workspace level so every
 # downstream member crate (`metadata`, `extract`, `ingest`) consumes
 # the same surface. Houses the toggle and threshold set the metadata

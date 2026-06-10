@@ -4,8 +4,9 @@
 //!
 //! Each environment expectation — a resolved data root, the on-disk
 //! presence of each database store, a loadable PDFium library, a
-//! reachable Ollama daemon carrying the configured embed model —
-//! becomes one row in a fixed three-column table. A row is `OK`,
+//! sufficient file-descriptor limit, a reachable Ollama daemon
+//! carrying the configured embed model — becomes one row in a fixed
+//! three-column table. A row is `OK`,
 //! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
 //! script can branch on the result.
 //!
@@ -129,6 +130,7 @@ pub async fn gather(selection: &LibrarySelection) -> Report {
 
     let cfg = push_data_root_row(&mut rows, selection);
     push_pdfium_row(&mut rows);
+    push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
         push_catalog_row(&mut rows, cfg);
         push_corpus_row(&mut rows, cfg);
@@ -203,6 +205,42 @@ fn push_pdfium_row(rows: &mut Vec<Row>) {
                 ),
             },
         });
+    }
+}
+
+/// Report the soft `RLIMIT_NOFILE` after attempting the same raise the
+/// daemon performs at startup, so the row shows the limit a daemon
+/// launched from this environment would actually run with.
+fn push_fd_limit_row(rows: &mut Vec<Row>) {
+    let label = "fd limit".to_string();
+    match crate::rlimit::raise_nofile() {
+        Ok(None) => rows.push(Row {
+            label,
+            value: "unlimited".to_string(),
+            status: Status::Ok { note: None },
+        }),
+        Ok(Some(soft)) if soft >= crate::rlimit::NOFILE_TARGET => rows.push(Row {
+            label,
+            value: soft.to_string(),
+            status: Status::Ok { note: None },
+        }),
+        Ok(Some(soft)) => rows.push(Row {
+            label,
+            value: soft.to_string(),
+            status: Status::Warn {
+                note: format!(
+                    "below {}; a large ingest batch may hit `Too many open files`",
+                    crate::rlimit::NOFILE_TARGET
+                ),
+            },
+        }),
+        Err(e) => rows.push(Row {
+            label,
+            value: "(unknown)".to_string(),
+            status: Status::Warn {
+                note: format!("could not raise RLIMIT_NOFILE: {e}"),
+            },
+        }),
     }
 }
 

@@ -193,6 +193,11 @@ impl DaemonRuntime {
     /// on `shutdown_tx`'s last `Sender` going away, and any task
     /// already spawned receives the shutdown on its subscribed receiver.
     pub async fn start(opts: RuntimeOpts) -> Result<Self> {
+        // 0. raise the soft RLIMIT_NOFILE before anything opens a
+        //    descriptor; the outcome is logged once the tracing
+        //    subscriber is installed in step 4.
+        let nofile = crate::rlimit::raise_nofile();
+
         // 1. resolve runtime_dir; mkdir -p
         let runtime_dir = resolve_runtime_dir(opts.runtime_dir.as_deref())
             .context("resolve BOOKRACK_RUNTIME_DIR")?;
@@ -260,6 +265,18 @@ impl DaemonRuntime {
         // the same shape `run_daemon` used historically — the runtime
         // owns no graceful shutdown for the writer thread.
         std::mem::forget(_obs_guard);
+        match &nofile {
+            Ok(None) => tracing::debug!("RLIMIT_NOFILE is unlimited"),
+            Ok(Some(soft)) if *soft >= crate::rlimit::NOFILE_TARGET => {
+                tracing::debug!(soft, "RLIMIT_NOFILE soft limit");
+            }
+            Ok(Some(soft)) => tracing::warn!(
+                soft,
+                target_limit = crate::rlimit::NOFILE_TARGET,
+                "RLIMIT_NOFILE below target; a large ingest batch may exhaust file descriptors",
+            ),
+            Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
+        }
 
         // 5. EmbedConfig + OllamaEmbedClient
         let embed_cfg = EmbedConfig::from_env();
