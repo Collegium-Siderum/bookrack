@@ -44,7 +44,7 @@ use bookrack_catalog::{
     NewContributor, NewIntake, NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
-use bookrack_core::{NodeId, NodeType, PartitionIdx};
+use bookrack_core::{NodeId, NodeType, PartitionIdx, error_chain};
 use bookrack_corpus::{Corpus, Node};
 use bookrack_embed::Embedder;
 use bookrack_extract::{ExtractOutcome, Extraction};
@@ -438,7 +438,7 @@ pub async fn ingest_book<E: Embedder>(
                 "fail",
                 started,
                 None,
-                Some(&e.to_string()),
+                Some(&error_chain(&e)),
             );
             return Err(e.into());
         }
@@ -535,7 +535,7 @@ pub async fn ingest_book<E: Embedder>(
                 "fail",
                 started,
                 None,
-                Some(&e.to_string()),
+                Some(&error_chain(&e)),
             );
             return Err(e);
         }
@@ -742,13 +742,13 @@ pub async fn resume_from_chunk<E: Embedder>(
                 "fail",
                 started,
                 None,
-                Some(&e.to_string()),
+                Some(&error_chain(&e)),
             );
             set_state(
                 catalog,
                 NewBookState::new(book_root_raw, intake_id, "chunk")
                     .parsed_at(parsed_at)
-                    .last_error(e.to_string()),
+                    .last_error(error_chain(&e)),
             );
             return Err(e);
         }
@@ -786,14 +786,14 @@ pub async fn resume_from_chunk<E: Embedder>(
                     "fail",
                     started,
                     None,
-                    Some(&e.to_string()),
+                    Some(&error_chain(&e)),
                 );
                 set_state(
                     catalog,
                     NewBookState::new(book_root_raw, intake_id, "embed")
                         .parsed_at(parsed_at)
                         .embed_model(&params.embed.model)
-                        .last_error(e.to_string()),
+                        .last_error(error_chain(&e)),
                 );
                 return Err(e);
             }
@@ -931,7 +931,7 @@ pub(crate) fn run_metadata_substep(
             "fail",
             started,
             None,
-            Some(&e.to_string()),
+            Some(&error_chain(&e)),
         );
         return None;
     }
@@ -988,7 +988,7 @@ pub(crate) fn run_metadata_substep(
                 "fail",
                 started,
                 None,
-                Some(&e.to_string()),
+                Some(&error_chain(&e)),
             );
             return None;
         }

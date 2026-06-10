@@ -8,11 +8,13 @@
 //! value-type helpers needed to express its public surface (`serde`,
 //! `chrono`).
 
+mod error_chain;
 mod node_type;
 mod partition;
 pub mod queue;
 mod scope;
 
+pub use error_chain::error_chain;
 pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 pub use scope::{Scope, ScopeParseError};
