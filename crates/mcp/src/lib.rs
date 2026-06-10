@@ -169,6 +169,47 @@ pub struct BookIdArgs {
     pub library: Option<String>,
 }
 
+/// Default number of leaves on each side of the anchor when a
+/// `library.read_context` call does not specify a radius.
+pub const READ_CONTEXT_DEFAULT_RADIUS: u32 = 3;
+
+/// Arguments for the `library.read_context` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadContextArgs {
+    /// Corpus node id of the anchor leaf — take it from a search
+    /// citation's `start_node_id` or from a passage of a previous
+    /// read.
+    pub node_id: i64,
+    /// Number of leaves to include before the anchor. Defaults to 3;
+    /// clamped server-side.
+    #[serde(default)]
+    pub before: Option<u32>,
+    /// Number of leaves to include after the anchor. Defaults to 3;
+    /// clamped server-side.
+    #[serde(default)]
+    pub after: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+/// Arguments for the `library.read_span` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadSpanArgs {
+    /// Corpus node id of the organizing node (chapter, section, ...)
+    /// to read — take it from `library.show_toc`.
+    pub node_id: i64,
+    /// Resume cursor: the `next_offset` of the previous page. Omit to
+    /// read from the span's start.
+    #[serde(default)]
+    pub start_after: Option<i64>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
 /// Arguments shared by `library.list_metadata` and
 /// `library.list_pending_reviews`. Identical field set — the two tools
 /// differ only in which catalog rows they include.
@@ -608,6 +649,62 @@ impl BookrackServer {
             Ok(toc) => respond_with(&Some(toc)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Read the leaves around one anchor leaf, in document order.
+    #[tool(
+        name = "library.read_context",
+        description = "Read the passages surrounding one anchor passage, in document \
+                       order: N leaves before and N after, paragraph-precise. Pass the \
+                       node_id from a search citation's start_node_id or from a \
+                       passage of a previous read. Returns null when no such node \
+                       exists; rejects organizing nodes (read those with \
+                       library.read_span)."
+    )]
+    async fn library_read_context(
+        &self,
+        Parameters(args): Parameters<ReadContextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let before = args.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+        let after = args.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+        match reads::passages::read_context(handle.ops(), args.node_id, before, after) {
+            Ok(window) => respond_with(&Some(window)),
+            Err(OpsError::NodeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
+            }
+            Err(e @ OpsError::NotALeaf { .. }) => {
+                Err(ErrorData::invalid_params(e.to_string(), None))
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Read one page of an organizing node's span, in document order.
+    #[tool(
+        name = "library.read_span",
+        description = "Read the full text under one TOC node (chapter, section, ...) \
+                       in document order, paginated by a character budget. Pass the \
+                       node_id from library.show_toc; to continue, pass the returned \
+                       next_offset back as start_after until next_offset is null. \
+                       Returns null when no such node exists; rejects leaf nodes \
+                       (read around those with library.read_context)."
+    )]
+    async fn library_read_span(
+        &self,
+        Parameters(args): Parameters<ReadSpanArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::passages::read_span(handle.ops(), args.node_id, args.start_after) {
+            Ok(span) => respond_with(&Some(span)),
+            Err(OpsError::NodeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)
+            }
+            Err(e @ OpsError::NotOrganizing { .. }) => {
+                Err(ErrorData::invalid_params(e.to_string(), None))
             }
             Err(e) => Err(ops_error_to_internal(e)),
         }
@@ -1216,7 +1313,8 @@ pub fn list_tools() -> Vec<bookrack_runtime::control::methods::meta::McpToolInfo
 mod tests {
     use bookrack_ops::Citation;
     use bookrack_ops::dto::{
-        BookDetail, BookSummary, ContributorEntry, LibraryStats, ListBooksResult, Toc, TocNode,
+        BookDetail, BookSummary, ContextWindow, ContributorEntry, LibraryStats, ListBooksResult,
+        Passage, SpanText, Toc, TocNode,
     };
     use bookrack_query::NodeId;
 
@@ -1323,5 +1421,48 @@ mod tests {
         assert_eq!(value["intake_id"], 1);
         assert_eq!(value["nodes"][0]["node_id"], 100_000_001);
         assert_eq!(value["truncated"], false);
+    }
+
+    #[test]
+    fn context_window_serializes_with_its_anchor_and_passages() {
+        let window = ContextWindow {
+            intake_id: 1,
+            anchor_node_id: 100_000_002,
+            passages: vec![Passage {
+                node_id: 100_000_002,
+                node_type: "paragraph".to_string(),
+                toc_position: 7,
+                page_index_start: Some(3),
+                text: "the passage body".to_string(),
+            }],
+            truncated: false,
+        };
+        let value = serde_json::to_value(&window).expect("serialize");
+        assert_eq!(value["intake_id"], 1);
+        assert_eq!(value["anchor_node_id"], 100_000_002);
+        assert_eq!(value["passages"][0]["node_type"], "paragraph");
+        assert_eq!(value["passages"][0]["toc_position"], 7);
+        assert_eq!(value["passages"][0]["text"], "the passage body");
+        assert_eq!(value["truncated"], false);
+    }
+
+    #[test]
+    fn span_text_serializes_with_its_cursor() {
+        let span = SpanText {
+            intake_id: 1,
+            node_id: 100_000_001,
+            title: Some("Chapter One".to_string()),
+            toc_lo: Some(0),
+            toc_hi: Some(42),
+            passages: Vec::new(),
+            next_offset: Some(17),
+            truncated: true,
+        };
+        let value = serde_json::to_value(&span).expect("serialize");
+        assert_eq!(value["node_id"], 100_000_001);
+        assert_eq!(value["title"], "Chapter One");
+        assert_eq!(value["toc_lo"], 0);
+        assert_eq!(value["next_offset"], 17);
+        assert_eq!(value["truncated"], true);
     }
 }
