@@ -44,12 +44,17 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
     let shutdown_tx = runtime.shutdown_tx.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
+    // The spawned binary resolves its library from the environment, so
+    // both directories are pinned explicitly; otherwise the test would
+    // depend on whatever library the host machine has configured.
     let runtime_dir_for_subprocess = runtime_root.path().to_path_buf();
+    let data_dir_for_subprocess = data_root.path().to_path_buf();
     let subprocess = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
             .args(["run", "--no-mcp"])
             .env("BOOKRACK_RUNTIME_DIR", runtime_dir_for_subprocess)
+            .env("BOOKRACK_DATA_DIR", data_dir_for_subprocess)
             .output()
             .await
     });
@@ -75,6 +80,7 @@ async fn stale_lock_exits_three() -> Result<()> {
 
     use fs2::FileExt;
 
+    let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let lock_path = runtime_root.path().join("bookrack.tty.lock");
     let holder = std::fs::OpenOptions::new()
@@ -98,9 +104,13 @@ async fn stale_lock_exits_three() -> Result<()> {
     )?;
     writer.flush()?;
 
+    // A pinned data dir keeps the run from depending on the host's
+    // configured library; the stale-lock check must be what terminates
+    // the process, not library resolution.
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
         .args(["run", "--no-mcp"])
         .env("BOOKRACK_RUNTIME_DIR", runtime_root.path())
+        .env("BOOKRACK_DATA_DIR", data_root.path())
         .output()
         .await?;
     assert_eq!(
