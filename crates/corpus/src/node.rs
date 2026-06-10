@@ -522,6 +522,46 @@ impl Corpus {
         )
     }
 
+    /// Fetch one book's leaves whose document-order position falls in
+    /// `lo..=hi`, ordered by `toc_lo`. Every non-organizing node with a
+    /// document-order position qualifies — prose leaves and structural
+    /// leaves alike — so the result reproduces the reading order of
+    /// that slice of the book.
+    ///
+    /// At most `cap` rows are returned; the cap is enforced inside the
+    /// SQL with `LIMIT`. An unknown `book_root_id` or an empty range
+    /// returns an empty `Vec` rather than an error.
+    pub fn leaves_in_doc_span(
+        &self,
+        book_root_id: NodeId,
+        lo: i64,
+        hi: i64,
+        cap: usize,
+    ) -> Result<Vec<Node>> {
+        let placeholders = ORGANIZING_NODE_TYPES
+            .iter()
+            .map(|t| format!("'{}'", t.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = select_sql(&format!(
+            "WHERE book_root_id = :book_root_id \
+             AND node_type NOT IN ({placeholders}) \
+             AND toc_lo IS NOT NULL \
+             AND toc_lo BETWEEN :lo AND :hi \
+             ORDER BY toc_lo LIMIT :cap"
+        ));
+        let cap_i = i64::try_from(cap).unwrap_or(i64::MAX);
+        self.query_nodes(
+            &sql,
+            named_params! {
+                ":book_root_id": book_root_id.get(),
+                ":lo": lo,
+                ":hi": hi,
+                ":cap": cap_i,
+            },
+        )
+    }
+
     /// Set or clear a node's expression link. Returns whether a node
     /// with that id existed.
     pub fn set_expression_id(&self, node_id: NodeId, expression_id: Option<i64>) -> Result<bool> {
@@ -875,6 +915,107 @@ mod tests {
             .toc_for_book(NodeId::new(999_999_999), 100)
             .expect("toc");
         assert!(toc.is_empty());
+    }
+
+    /// Seed one book with a chapter spanning positions 0..=4: three
+    /// paragraphs, one table (a structural leaf), and one paragraph,
+    /// inserted out of document order to exercise the `ORDER BY`.
+    /// Returns the book root id and the leaf ids in document order.
+    fn seed_doc_span_book(corpus: &mut Corpus) -> (NodeId, Vec<NodeId>) {
+        let (idx, root) = seed_book(corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 6).expect("ids");
+        let chapter = ids[0];
+        corpus
+            .insert_node(
+                &NewNode::child(chapter, root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(0, 4),
+            )
+            .expect("chapter");
+        // Document positions 0..=4; the table at position 3 is a
+        // structural leaf, not a prose leaf.
+        let spec: Vec<(usize, i64, NodeType)> = vec![
+            (1, 0, NodeType::Paragraph),
+            (2, 1, NodeType::Paragraph),
+            (3, 2, NodeType::Paragraph),
+            (4, 3, NodeType::Table),
+            (5, 4, NodeType::Paragraph),
+        ];
+        // Insert in reverse so document order differs from insert order.
+        for &(slot, pos, node_type) in spec.iter().rev() {
+            corpus
+                .insert_node(
+                    &NewNode::child(ids[slot], chapter, root, pos, 2, node_type)
+                        .text(format!("passage {pos}"))
+                        .text_stats(9, 1)
+                        .toc_span(pos, pos),
+                )
+                .expect("leaf");
+        }
+        (root, spec.iter().map(|&(slot, _, _)| ids[slot]).collect())
+    }
+
+    #[test]
+    fn leaves_in_doc_span_returns_leaves_in_document_order() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (root, leaves) = seed_doc_span_book(&mut corpus);
+
+        let got = corpus.leaves_in_doc_span(root, 1, 3, 100).expect("span");
+        let got_ids: Vec<NodeId> = got.iter().map(|n| n.node_id).collect();
+        assert_eq!(got_ids, leaves[1..=3]);
+        assert_eq!(
+            got.iter().map(|n| n.toc_lo).collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3)]
+        );
+        assert!(
+            got.iter().all(|n| !n.node_type.is_organizing()),
+            "organizing nodes must be filtered out: {got:?}"
+        );
+    }
+
+    #[test]
+    fn leaves_in_doc_span_includes_structural_leaves() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (root, _leaves) = seed_doc_span_book(&mut corpus);
+
+        let got = corpus.leaves_in_doc_span(root, 3, 3, 100).expect("span");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].node_type, NodeType::Table);
+        assert_eq!(got[0].text_content.as_deref(), Some("passage 3"));
+    }
+
+    #[test]
+    fn leaves_in_doc_span_clamps_to_the_book_bounds() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (root, leaves) = seed_doc_span_book(&mut corpus);
+
+        // A window reaching past both ends returns what exists.
+        let got = corpus
+            .leaves_in_doc_span(root, -10, 100, 100)
+            .expect("span");
+        assert_eq!(got.len(), leaves.len());
+        // A window entirely outside the book is empty, not an error.
+        let got = corpus.leaves_in_doc_span(root, 50, 60, 100).expect("span");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn leaves_in_doc_span_caps_the_result_size() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (root, leaves) = seed_doc_span_book(&mut corpus);
+
+        let got = corpus.leaves_in_doc_span(root, 0, 4, 2).expect("span");
+        let got_ids: Vec<NodeId> = got.iter().map(|n| n.node_id).collect();
+        assert_eq!(got_ids, leaves[0..=1], "the cap keeps the earliest rows");
+    }
+
+    #[test]
+    fn leaves_in_doc_span_unknown_root_returns_empty() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        let got = corpus
+            .leaves_in_doc_span(NodeId::new(999_999_999), 0, 10, 100)
+            .expect("span");
+        assert!(got.is_empty());
     }
 
     #[test]
