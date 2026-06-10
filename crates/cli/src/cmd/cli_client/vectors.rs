@@ -48,7 +48,11 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
             helpers::call_with_progress(client, "vectors.reembed", params).await
         }
         WriteVectorsAction::Reset { yes, resume } => {
-            let params = json!({"yes": yes, "resume": resume});
+            if !crate::util::confirm_vectors_reset(yes, resume)? {
+                println!("aborted; no changes written");
+                return Ok(());
+            }
+            let params = json!({"yes": true, "resume": resume});
             helpers::call_with_progress(client, "vectors.reset", params).await
         }
     }

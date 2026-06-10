@@ -554,7 +554,18 @@ async fn dispatch_vectors(client: &ControlClient, action: WriteVectorsAction) ->
             call_and_print(client, "vectors.reembed", params).await
         }
         WriteVectorsAction::Reset { yes, resume } => {
-            let params = json!({"yes": yes, "resume": resume});
+            match crate::util::confirm_vectors_reset(yes, resume) {
+                Ok(true) => {}
+                Ok(false) => {
+                    println!("aborted; no changes written");
+                    return true;
+                }
+                Err(err) => {
+                    eprintln!("bookrack: {err:#}");
+                    return false;
+                }
+            }
+            let params = json!({"yes": true, "resume": resume});
             call_and_print(client, "vectors.reset", params).await
         }
     }
