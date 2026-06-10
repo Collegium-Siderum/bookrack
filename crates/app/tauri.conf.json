@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "bookrack",
+  "version": "0.0.0-dev",
+  "identifier": "rs.bookrack.app",
+  "build": {
+    "beforeDevCommand": "pnpm --dir web dev",
+    "beforeBuildCommand": "pnpm --dir web build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "bookrack",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 880,
+        "minHeight": 560,
+        "visible": true,
+        "decorations": true
+      }
+    ],
+    "macOSPrivateApi": false,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": []
+  }
+}

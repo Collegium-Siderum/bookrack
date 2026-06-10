@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Open book glyph, solid fill, two halves with a spine gap -->
+  <g fill="#1A1A1A">
+    <path d="M46.5 28 C39 20.5 26 17.5 13 17.5 L13 71 C26 71 39 74 46.5 80.5 Z"/>
+    <path d="M53.5 28 C61 20.5 74 17.5 87 17.5 L87 71 C74 71 61 74 53.5 80.5 Z"/>
+  </g>
+</svg>

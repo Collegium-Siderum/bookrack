@@ -1,10 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# `crates/app/` holds the webview's `web/src/generated/` directory only
-# until the F1 patch creates a real `Cargo.toml` there. Excluding it
-# keeps `crates/*` from tripping on the missing manifest.
-exclude = ["spikes", "crates/app"]
+exclude = ["spikes"]
 
 [workspace.package]
 version = "0.4.0-dev"
@@ -153,6 +150,18 @@ tokio-stream = { version = "0.1", default-features = false, features = ["sync"] 
 # `crates/app/web/src/generated/`. The runtime crate's release build
 # does not link it. License: MIT.
 ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
+# Desktop shell framework for the `app` crate: webview window, tray
+# icon, and event loop. Default features (wry, compression,
+# dynamic-acl, x11/dbus on Linux, common-controls-v6 on Windows) plus
+# `tray-icon` for the persistent tray entry point.
+# License: MIT OR Apache-2.0.
+tauri = { version = "2", features = ["tray-icon"] }
+# Build-script companion of `tauri`: validates `tauri.conf.json` and
+# generates the ACL schemas the macro context consumes.
+tauri-build = "2"
+# Routes a second launch of the same app into the running instance's
+# callback instead of a second event loop. License: MIT OR Apache-2.0.
+tauri-plugin-single-instance = "2"
 
 # Test binaries link the full lance / datafusion / arrow / rustls
 # dependency tree once per crate under test. Full debug info pushes the

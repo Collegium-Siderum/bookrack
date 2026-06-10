@@ -1,0 +1,36 @@
+[package]
+name = "bookrack-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "bookrack-app"
+path = "src/main.rs"
+
+[lib]
+name = "bookrack_app"
+path = "src/lib.rs"
+
+[features]
+# Embeds `web/dist` into the binary instead of loading the Vite dev
+# server URL. Enabled for standalone (non-dev) builds.
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bookrack-config = { path = "../config" }
+bookrack-control-client = { path = "../control-client" }
+bookrack-mcp = { path = "../mcp" }
+bookrack-ops = { path = "../ops" }
+bookrack-runtime = { path = "../runtime" }
+bookrack-session = { path = "../session" }
+serde_json.workspace = true
+tauri.workspace = true
+tauri-plugin-single-instance.workspace = true
+tokio.workspace = true
+tracing.workspace = true

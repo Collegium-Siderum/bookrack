@@ -245,3 +245,16 @@ second concurrent write returns `-32001 busy`.
   writes through the same trait. `bookrack init` keeps its exact
   flag set and terminal transcript; `crates/cli/src/init.rs` is a
   thin shim that pairs `CliWizardDriver` with the runner.
+- **GUI shell (first slice)** — `crates/app` ships a Tauri 2 shell
+  (`bookrack-app`) that hosts the daemon in-process: it builds a
+  `DaemonRuntime` with `LaunchMode::Gui`, so the control socket,
+  the MCP listener, and the queue worker run inside the GUI
+  process and terminal `bookrack` subcommands attach as usual.
+  The window is a logo panel; closing it hides it, the tray menu
+  (open / quit) stays resident, and tray quit routes
+  `daemon.shutdown` through `control::methods::dispatch` so
+  shutdown semantics match socket clients. A second GUI launch is
+  caught by the single-instance plugin in-process, or — when the
+  lock is held by a CLI daemon — by probe + `tray.focus` RPC
+  followed by exit 0. No webview RPC surface exists yet; no
+  control-plane methods were added or changed.
