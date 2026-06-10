@@ -173,6 +173,9 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::Corpus(_) => "corpus",
         OpsError::Vectors(_) => "vectors",
         OpsError::IntakeNotFound { .. } => "intake_not_found",
+        OpsError::NodeNotFound { .. } => "node_not_found",
+        OpsError::NotALeaf { .. } => "not_a_leaf",
+        OpsError::NotOrganizing { .. } => "not_organizing",
         OpsError::SearchUnavailable => "search_unavailable",
         OpsError::Other(_) => "other",
     }

@@ -39,6 +39,22 @@ pub const DEFAULT_LIST_LIMIT: u32 = 20;
 /// pathological inputs and reflects in [`Toc::truncated`].
 pub const MAX_TOC_NODES: usize = 2000;
 
+/// Maximum leaves on either side of the anchor a context-window read
+/// may request. Larger requests are clamped and the response carries
+/// `truncated = true`.
+pub const MAX_CONTEXT_RADIUS: u32 = 20;
+
+/// Character budget for the passage text one read response may carry.
+/// A response stops adding passages once the budget is spent; the
+/// caller pages with the returned cursor instead of receiving an
+/// unbounded body.
+pub const MAX_READ_CHARS: usize = 30_000;
+
+/// Maximum leaf rows one span read fetches from the corpus. A backstop
+/// behind [`MAX_READ_CHARS`]: the character budget normally fires
+/// first, this cap bounds the row fetch when passages are tiny.
+pub const MAX_SPAN_LEAVES: usize = 2000;
+
 /// One row of [`Catalog::list_books`] / [`Catalog::find_books`]: just
 /// enough to render a list entry without a second fetch.
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +141,65 @@ pub struct Toc {
     pub nodes: Vec<TocNode>,
     /// True when the underlying corpus had more organizing nodes than
     /// the cap.
+    pub truncated: bool,
+}
+
+/// One leaf of body text within a context-window or span read, in
+/// document order.
+#[derive(Debug, Clone, Serialize)]
+pub struct Passage {
+    /// Stable corpus node id of this leaf.
+    pub node_id: i64,
+    /// Leaf kind (`paragraph`, `heading`, `footnote`, `table`, ...).
+    /// Structural leaves are returned alongside prose so the slice
+    /// reproduces the book's reading order; callers filter by kind if
+    /// they want prose only.
+    pub node_type: String,
+    /// Document-order position of this leaf within its book.
+    pub toc_position: i64,
+    /// Source page index the leaf starts on, if known.
+    pub page_index_start: Option<i64>,
+    /// The leaf's body text.
+    pub text: String,
+}
+
+/// A window of leaves around one anchor leaf, in document order.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextWindow {
+    /// The book the anchor belongs to.
+    pub intake_id: i64,
+    /// The leaf the window is centred on; always present in
+    /// `passages`.
+    pub anchor_node_id: i64,
+    /// The window's leaves in document order, the anchor included.
+    pub passages: Vec<Passage>,
+    /// True when the requested radius was clamped or the character
+    /// budget dropped leaves the window would otherwise carry.
+    pub truncated: bool,
+}
+
+/// One page of an organizing node's body text, in document order.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpanText {
+    /// The book the node belongs to.
+    pub intake_id: i64,
+    /// The organizing node whose span is being read.
+    pub node_id: i64,
+    /// The organizing node's heading text.
+    pub title: Option<String>,
+    /// Low end of the node's document-order span; `None` when the
+    /// node has no leaves.
+    pub toc_lo: Option<i64>,
+    /// High end of the node's document-order span; `None` when the
+    /// node has no leaves.
+    pub toc_hi: Option<i64>,
+    /// This page's leaves in document order.
+    pub passages: Vec<Passage>,
+    /// Cursor for the next page: pass it back as `start_after` to
+    /// resume. `None` when this page completes the span.
+    pub next_offset: Option<i64>,
+    /// True when more of the span remains past this page —
+    /// equivalent to `next_offset.is_some()`.
     pub truncated: bool,
 }
 
@@ -226,6 +301,21 @@ impl BookDetail {
                 .into_iter()
                 .map(ContributorEntry::from_row)
                 .collect(),
+        }
+    }
+}
+
+impl Passage {
+    /// Project a corpus leaf [`Node`] into a wire-ready passage. The
+    /// caller guarantees the node carries a document-order position
+    /// (the range query only returns such rows).
+    pub fn from_node(node: &Node) -> Passage {
+        Passage {
+            node_id: node.node_id.get(),
+            node_type: node.node_type.as_str().to_string(),
+            toc_position: node.toc_lo.unwrap_or_default(),
+            page_index_start: node.page_index_start,
+            text: node.text_content.clone().unwrap_or_default(),
         }
     }
 }

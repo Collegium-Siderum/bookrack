@@ -10,6 +10,7 @@
 pub mod books;
 pub mod info;
 pub mod metadata;
+pub mod passages;
 pub mod pipeline;
 pub mod search;
 pub mod vectors;

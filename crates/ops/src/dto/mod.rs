@@ -13,6 +13,7 @@ pub mod vectors_status;
 pub mod writes;
 
 pub use bookrack_query::dto::{
-    BookDetail, BookFilter, BookSummary, ContributorEntry, DEFAULT_LIST_LIMIT, LibraryStats,
-    ListBooksResult, MAX_LIST_LIMIT, MAX_TOC_NODES, Toc, TocNode, clamp_limit,
+    BookDetail, BookFilter, BookSummary, ContextWindow, ContributorEntry, DEFAULT_LIST_LIMIT,
+    LibraryStats, ListBooksResult, MAX_CONTEXT_RADIUS, MAX_LIST_LIMIT, MAX_READ_CHARS,
+    MAX_SPAN_LEAVES, MAX_TOC_NODES, Passage, SpanText, Toc, TocNode, clamp_limit,
 };

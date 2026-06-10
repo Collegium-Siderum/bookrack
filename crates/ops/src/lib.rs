@@ -65,6 +65,29 @@ pub enum OpsError {
         intake_id: i64,
     },
 
+    /// The named corpus node does not exist.
+    #[error("no corpus node exists with id {node_id}")]
+    NodeNotFound {
+        /// The node id the caller asked for.
+        node_id: i64,
+    },
+
+    /// A context read was anchored on a node that is not a content
+    /// leaf. Organizing nodes are read with `read_span` instead.
+    #[error("node {node_id} is not a content leaf; read organizing nodes with read_span")]
+    NotALeaf {
+        /// The node id the caller asked for.
+        node_id: i64,
+    },
+
+    /// A span read targeted a node that is not an organizing node.
+    /// Content leaves are read with `read_context` instead.
+    #[error("node {node_id} is not an organizing node; read leaves with read_context")]
+    NotOrganizing {
+        /// The node id the caller asked for.
+        node_id: i64,
+    },
+
     /// A search op was issued on an [`Ops`] built without a vector store.
     #[error("search is not available on a catalog-only Ops handle")]
     SearchUnavailable,
