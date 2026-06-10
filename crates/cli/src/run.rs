@@ -84,52 +84,17 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let runtime = match DaemonRuntime::start(runtime_opts).await {
         Ok(rt) => rt,
         Err(err) => {
-            if err.chain().any(|cause| {
-                cause
-                    .to_string()
-                    .contains("bookrack session already running")
-            }) {
+            if bookrack_session::is_lock_conflict(&err) {
                 return handle_lock_conflict(err, &lock_path, LaunchMode::Cli).await;
             }
             return Err(err);
         }
     };
 
-    let mcp_handle = spawn_mcp_listener(&runtime);
+    let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
     let repl_handle = spawn_repl_if_tty(&runtime, opts.legacy_repl);
 
     runtime.run_until_shutdown(mcp_handle, repl_handle).await
-}
-
-/// Spawn the MCP listener as a session-scoped task. Returns `None` for
-/// `--no-mcp`, which Phase 0 surfaces by setting `mcp_label` to
-/// `"disabled"` inside the [`DaemonRuntime`].
-fn spawn_mcp_listener(runtime: &DaemonRuntime) -> Option<tokio::task::JoinHandle<Result<()>>> {
-    if runtime.mcp_label == "disabled" {
-        tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
-        return None;
-    }
-    let registry = Arc::clone(&runtime.registry);
-    let info_context = runtime.info_context.clone();
-    let started_at = runtime.started_at;
-    let log_stream = runtime.log_stream.clone();
-    let queue_state = Arc::clone(&runtime.queue_state);
-    let shutdown_tx = runtime.shutdown_tx.clone();
-    let addr = runtime.mcp_label.clone();
-    let rx = runtime.shutdown_tx.subscribe();
-    Some(tokio::spawn(async move {
-        bookrack_mcp::serve(
-            registry,
-            info_context,
-            started_at,
-            log_stream,
-            queue_state,
-            shutdown_tx,
-            &addr,
-            rx,
-        )
-        .await
-    }))
 }
 
 /// Spawn the foreground task. The default is a parked OS thread (the

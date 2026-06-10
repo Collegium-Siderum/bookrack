@@ -73,6 +73,20 @@ fn platform_runtime_dir() -> Result<PathBuf> {
 
 /// Drop guard for the session's tty lock.
 ///
+/// Marker prefix of the error produced when the session lock is
+/// already held. [`is_lock_conflict`] matches against it; both sides
+/// live in this crate so the text has a single source.
+const LOCK_CONFLICT_MARKER: &str = "bookrack session already running";
+
+/// Report whether `err` (or any of its causes) is the lock-conflict
+/// error produced by [`TtyLock::acquire`] when another process holds
+/// the session lock. Launchers use this to branch into their
+/// second-instance handoff instead of failing outright.
+pub fn is_lock_conflict(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains(LOCK_CONFLICT_MARKER))
+}
+
 /// The OS releases the advisory flock when [`File`] drops, so a
 /// crashed process leaves no stale lock — only stale content (the
 /// recorded pid and MCP address) that the next acquirer overwrites.
@@ -119,12 +133,12 @@ impl TtyLock {
             let detail = existing.trim();
             if detail.is_empty() {
                 anyhow!(
-                    "bookrack session already running, lock held at {}: {err}",
+                    "{LOCK_CONFLICT_MARKER}, lock held at {}: {err}",
                     path.display()
                 )
             } else {
                 anyhow!(
-                    "bookrack session already running ({}), lock held at {}: {err}",
+                    "{LOCK_CONFLICT_MARKER} ({}), lock held at {}: {err}",
                     detail.replace('\n', ", "),
                     path.display()
                 )
@@ -241,6 +255,21 @@ mod tests {
         drop(lock1);
         let _lock2 = TtyLock::acquire(&path, 9999, "127.0.0.1:8765", None)
             .expect("re-acquire after drop must succeed");
+    }
+
+    #[test]
+    fn is_lock_conflict_matches_acquire_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let _held = TtyLock::acquire(&path, 1234, "127.0.0.1:8765", None).unwrap();
+
+        let Err(err) = TtyLock::acquire(&path, 5678, "127.0.0.1:8765", None) else {
+            panic!("second acquire must fail");
+        };
+        assert!(is_lock_conflict(&err));
+
+        let unrelated = anyhow!("disk full");
+        assert!(!is_lock_conflict(&unrelated));
     }
 
     #[test]

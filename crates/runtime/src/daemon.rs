@@ -172,6 +172,11 @@ pub struct DaemonRuntime {
     /// flips it back. Mirrors `QueueState::paused` so the on-disk
     /// snapshot and the in-memory worker behaviour agree.
     pub queue_paused: Arc<AtomicBool>,
+    /// Bundle of cheap shared handles the control-plane dispatcher
+    /// runs against. A GUI host that builds the runtime in-process
+    /// clones this to route webview and tray calls through
+    /// `control::methods::dispatch` without a socket round-trip.
+    pub method_context: MethodContext,
     /// Drop-only field: holds the session-scoped flock. The
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
@@ -438,7 +443,7 @@ impl DaemonRuntime {
         });
         let control_accept_handle = tokio::spawn(run_accept_loop(
             control_listener,
-            method_ctx,
+            method_ctx.clone(),
             shutdown_tx.subscribe(),
         ));
 
@@ -462,6 +467,7 @@ impl DaemonRuntime {
             signal_triggered,
             tray_focus_signal,
             queue_paused,
+            method_context: method_ctx,
             _tty_lock: tty_lock,
             queue_worker,
             signal_handle,

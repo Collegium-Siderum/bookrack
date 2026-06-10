@@ -195,12 +195,25 @@ pub const ACTOR_DETAIL_MCP: &str = "mcp";
 /// reaching the daemon over the local JSON-RPC socket.
 pub const ACTOR_DETAIL_CONTROL_PLANE: &str = "control_plane";
 
+/// Conventional `actor_detail` value for the GUI surface.
+pub const ACTOR_DETAIL_GUI: &str = "gui";
+
 impl Caller {
     /// A CLI caller: [`ActorKind::Human`] with `actor_detail = "cli"`.
     pub fn cli() -> Caller {
         Caller {
             actor_kind: ActorKind::Human,
             actor_detail: Some(ACTOR_DETAIL_CLI.to_string()),
+            session_id: None,
+            reason: None,
+        }
+    }
+
+    /// A GUI caller: [`ActorKind::Human`] with `actor_detail = "gui"`.
+    pub fn gui() -> Caller {
+        Caller {
+            actor_kind: ActorKind::Human,
+            actor_detail: Some(ACTOR_DETAIL_GUI.to_string()),
             session_id: None,
             reason: None,
         }
