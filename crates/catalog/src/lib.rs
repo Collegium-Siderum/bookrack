@@ -44,7 +44,7 @@ pub use book_pipeline_audit::{BookPipelineAudit, NewBookPipelineAudit};
 pub use book_state::{BookState, NewBookState};
 pub use cascade::BookRemovalCounts;
 pub use db::{Catalog, SCHEMA_VERSION};
-pub use effective::EffectiveAttrs;
+pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};
 pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, Registration};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};

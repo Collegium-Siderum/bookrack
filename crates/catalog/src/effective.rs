@@ -24,6 +24,33 @@ use crate::{Catalog, Result};
 /// ISBN, and the rest — do not, and are deliberately absent here.
 const INHERITABLE_FIELDS: &[&str] = &["publisher", "series"];
 
+/// The bibliographic fields a curator may override. This is the
+/// validation set for the metadata write surface: `metadata.set`
+/// rejects any field name outside it, so a typo cannot create an
+/// override row no consumer will ever read.
+///
+/// The names match the `node_publication_attrs` columns surfaced by
+/// [`base_pairs`], minus the pipeline-owned bookkeeping columns
+/// (`source_format`, `source`, `confidence`, `audit_verdict`,
+/// `enriched_by`) — overriding those would forge provenance the audit
+/// machinery relies on. A test pins the lists together.
+pub const EDITABLE_FIELDS: &[&str] = &[
+    "title",
+    "subtitle",
+    "publisher",
+    "year",
+    "publication_date",
+    "isbn",
+    "series",
+    "series_number",
+    "edition",
+    "language",
+    "pub_place",
+    "original_title",
+    "original_language",
+    "original_year",
+];
+
 /// The effective metadata of one node: its base-layer attributes with
 /// the user's overrides applied.
 ///
@@ -135,9 +162,10 @@ impl Catalog {
     ///
     /// An override with a value replaces the base value; an override
     /// that is an explicit NULL removes the field; a field with no
-    /// override keeps its base value. An override may also carry a field
-    /// the base layer never had — the EAV table is the catch-all for
-    /// attributes `node_publication_attrs` has no column for.
+    /// override keeps its base value. A stored override row whose field
+    /// has no base column is still applied — rows that predate the
+    /// [`EDITABLE_FIELDS`] validation on the write surface remain
+    /// readable until cleared.
     ///
     /// This does *not* apply volume→set inheritance; compose
     /// [`EffectiveAttrs::inherit_from`] for that, since the parent is
@@ -188,6 +216,60 @@ mod tests {
         attrs.title = Some("Base Title".into());
         attrs.publisher = Some("Base Publisher".into());
         catalog.upsert_publication_attrs(&attrs).expect("base");
+    }
+
+    /// Bookkeeping columns the pipeline writes and the curator may not:
+    /// provenance (`source_format`, `source`, `enriched_by`) and the
+    /// audit verdict pair (`confidence`, `audit_verdict`).
+    const PIPELINE_FIELDS: &[&str] = &[
+        "source_format",
+        "source",
+        "confidence",
+        "audit_verdict",
+        "enriched_by",
+    ];
+
+    #[test]
+    fn editable_and_pipeline_fields_cover_exactly_the_base_columns() {
+        // `base_pairs` destructures `PublicationAttrs` exhaustively, so a
+        // new column fails to compile there first; this test then forces
+        // it to be classified as either curator-editable or
+        // pipeline-owned before the write surface accepts or rejects it.
+        let attrs = PublicationAttrs {
+            intake_id: 1,
+            scope: SET.to_string(),
+            title: Some("x".into()),
+            subtitle: Some("x".into()),
+            publisher: Some("x".into()),
+            year: Some("x".into()),
+            publication_date: Some("x".into()),
+            isbn: Some("x".into()),
+            series: Some("x".into()),
+            series_number: Some("x".into()),
+            edition: Some("x".into()),
+            language: Some("x".into()),
+            pub_place: Some("x".into()),
+            original_title: Some("x".into()),
+            original_language: Some("x".into()),
+            original_year: Some("x".into()),
+            source_format: Some("x".into()),
+            source: Some("x".into()),
+            confidence: Some("x".into()),
+            audit_verdict: Some("x".into()),
+            enriched_by: Some("x".into()),
+        };
+        let names: Vec<&str> = base_pairs(&attrs)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        let got: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        let expected: std::collections::BTreeSet<&str> = EDITABLE_FIELDS
+            .iter()
+            .chain(PIPELINE_FIELDS)
+            .copied()
+            .collect();
+        assert_eq!(got, expected);
+        assert_eq!(names.len(), EDITABLE_FIELDS.len() + PIPELINE_FIELDS.len());
     }
 
     #[test]

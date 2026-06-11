@@ -65,6 +65,18 @@ pub enum OpsError {
         intake_id: i64,
     },
 
+    /// The named field is not a curator-editable bibliographic
+    /// attribute. The message carries the full editable set so the
+    /// caller can self-correct without a second lookup.
+    #[error(
+        "unknown metadata field {field:?}; editable fields are: {}",
+        bookrack_catalog::EDITABLE_FIELDS.join(", ")
+    )]
+    UnknownMetadataField {
+        /// The field name the caller asked to edit.
+        field: String,
+    },
+
     /// The named corpus node does not exist.
     #[error("no corpus node exists with id {node_id}")]
     NodeNotFound {

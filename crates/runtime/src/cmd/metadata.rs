@@ -58,6 +58,9 @@ fn set(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str, value: &str) -> Res
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             anyhow::bail!("no intake registered for book {intake_id}");
         }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
+            anyhow::bail!("{e}");
+        }
         Err(e) => Err(anyhow::Error::from(e).context("set metadata field via ops")),
     }
 }
@@ -78,6 +81,9 @@ fn clear(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str) -> Result<()> {
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
             anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
+            anyhow::bail!("{e}");
         }
         Err(e) => Err(anyhow::Error::from(e).context("clear metadata field via ops")),
     }

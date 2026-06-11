@@ -341,7 +341,9 @@ pub struct SessionShutdownArgs {}
 pub struct MetadataSetArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
-    /// The field to set (`title`, `publisher`, `year`, `language`, ...).
+    /// The field to set. Must be a curator-editable bibliographic
+    /// field; an unknown name is rejected and the error carries the
+    /// full editable list.
     pub field: String,
     /// The new value.
     pub value: String,
@@ -356,7 +358,9 @@ pub struct MetadataSetArgs {
 pub struct MetadataClearArgs {
     /// Catalog intake id of the book.
     pub intake_id: i64,
-    /// The field whose override should be removed.
+    /// The field whose override should be removed. A name outside the
+    /// editable set is accepted only when an override row with that key
+    /// exists (cleanup of stale rows); otherwise it is rejected.
     pub field: String,
     /// Library short name from the registry. Write tools require an
     /// explicit selector so a misrouted call never silently lands on
@@ -983,10 +987,11 @@ impl BookrackServer {
     /// Set an override on one bibliographic field of a book.
     #[tool(
         name = "library.metadata.set",
-        description = "Set an override on one bibliographic field (`title`, \
-                       `publisher`, `year`, `language`, ...) of one book. The \
-                       extracted value is preserved; the override wins on read. \
-                       Appends one audit row tagged `actor_kind=llm`."
+        description = "Set an override on one editable bibliographic field of one \
+                       book. An unknown field name is rejected with the editable \
+                       list in the error. The extracted value is preserved; the \
+                       override wins on read. Appends one audit row tagged \
+                       `actor_kind=llm`."
     )]
     async fn library_metadata_set(
         &self,
@@ -999,7 +1004,7 @@ impl BookrackServer {
             value: args.value,
         };
         let outcome = writes::metadata::set_metadata_field(handle.ops(), req)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_edit_error)?;
         respond_with(&outcome)
     }
 
@@ -1008,9 +1013,10 @@ impl BookrackServer {
     #[tool(
         name = "library.metadata.clear",
         description = "Remove an override on one bibliographic field of one book, \
-                       reverting to the extracted value. Appends one audit row \
-                       even when there was no override to clear, so the trail \
-                       records that the operation was attempted."
+                       reverting to the extracted value. An editable field with no \
+                       override still appends an audit row recording the attempt; \
+                       an unknown field name is rejected unless a stale override \
+                       row with that key exists."
     )]
     async fn library_metadata_clear(
         &self,
@@ -1022,7 +1028,7 @@ impl BookrackServer {
             field: args.field,
         };
         let outcome = writes::metadata::clear_metadata_field(handle.ops(), req)
-            .map_err(ops_error_to_internal)?;
+            .map_err(ops_error_to_edit_error)?;
         respond_with(&outcome)
     }
 
@@ -1137,6 +1143,17 @@ fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
 /// Map a generic [`OpsError`] to an MCP internal error.
 fn ops_error_to_internal(e: OpsError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
+}
+
+/// Map an [`OpsError`] from a metadata field edit to an MCP error:
+/// a rejected field name is the caller's input problem, so it surfaces
+/// as `invalid_params` (with the editable list in the message) rather
+/// than an internal error.
+fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
+    match &e {
+        OpsError::UnknownMetadataField { .. } => ErrorData::invalid_params(e.to_string(), None),
+        _ => ops_error_to_internal(e),
+    }
 }
 
 /// Bind the streamable-HTTP server at `addr` and serve until the

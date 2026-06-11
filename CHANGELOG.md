@@ -23,6 +23,15 @@ release workflow extracts the matching section verbatim from this file.
   then the per-user managed directory. A miss reports every searched
   directory and the remedies instead of a raw dynamic-loader error.
 
+- `metadata.set` validates the field name against the curator-editable
+  bibliographic set and rejects unknown names, instead of silently
+  creating an override row no consumer ever reads; the error carries
+  the full editable list. Pipeline-owned bookkeeping columns
+  (`source`, `confidence`, `audit_verdict`, `source_format`,
+  `enriched_by`) are no longer overridable. `metadata.clear` accepts a
+  name outside the set only when a stale override row with that key
+  exists, so pre-validation rows stay removable.
+
 ### Fixed
 
 - Metadata edits arriving over MCP are attributed to `actor_kind=llm`

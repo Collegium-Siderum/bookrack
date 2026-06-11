@@ -11,8 +11,8 @@
 //! `actor_kind` / `actor_detail` in the audit trail.
 
 use bookrack_catalog::{
-    BOOK_SCOPE, Catalog, NewMetadataAudit, NewOverride, NewReview, STATUS_ACKNOWLEDGED,
-    STATUS_APPROVED, STATUS_REJECTED,
+    BOOK_SCOPE, Catalog, EDITABLE_FIELDS, NewMetadataAudit, NewOverride, NewReview,
+    STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_REJECTED,
 };
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
@@ -27,7 +27,9 @@ use crate::dto::writes::{
 use crate::recorder::record_call_sync;
 
 /// Set an override on one bibliographic field of the book root, writing
-/// the audit row that records the change.
+/// the audit row that records the change. The field must be one of
+/// [`EDITABLE_FIELDS`]; an unknown name is rejected before anything is
+/// written.
 pub fn set_metadata_field<E: Embedder>(
     ops: &Ops<E>,
     req: SetMetadataFieldRequest,
@@ -38,6 +40,7 @@ pub fn set_metadata_field<E: Embedder>(
         "value": req.value,
     });
     record_call_sync!(ops, "library.metadata.set", args, {
+        require_editable(&req.field)?;
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
@@ -72,6 +75,11 @@ pub fn set_metadata_field<E: Embedder>(
 }
 
 /// Remove an override on one field, reverting to the extracted value.
+///
+/// The field name is looser here than on [`set_metadata_field`]: a name
+/// outside [`EDITABLE_FIELDS`] is accepted when an override row with
+/// that key exists — rows that predate validation must stay removable —
+/// and rejected when there is nothing to remove.
 pub fn clear_metadata_field<E: Embedder>(
     ops: &Ops<E>,
     req: ClearMetadataFieldRequest,
@@ -88,6 +96,9 @@ pub fn clear_metadata_field<E: Embedder>(
         let old_value = effective.get(&req.field).map(str::to_string);
 
         let existed = catalog.clear_override(req.intake_id, BOOK_SCOPE, &req.field)?;
+        if !existed {
+            require_editable(&req.field)?;
+        }
 
         // Audit either way: the trail records that someone tried.
         let audit = build_audit(
@@ -230,6 +241,15 @@ pub fn reject_metadata<E: Embedder>(
 fn require_intake(catalog: &Catalog, intake_id: i64) -> Result<()> {
     if catalog.intake_by_id(intake_id)?.is_none() {
         return Err(OpsError::IntakeNotFound { intake_id });
+    }
+    Ok(())
+}
+
+fn require_editable(field: &str) -> Result<()> {
+    if !EDITABLE_FIELDS.contains(&field) {
+        return Err(OpsError::UnknownMetadataField {
+            field: field.to_string(),
+        });
     }
     Ok(())
 }

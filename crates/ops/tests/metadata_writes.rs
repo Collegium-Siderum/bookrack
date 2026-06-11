@@ -8,7 +8,9 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, NewIntake, NewPublicationAttrs, STATUS_ACKNOWLEDGED};
+use bookrack_catalog::{
+    BOOK_SCOPE, Catalog, NewIntake, NewOverride, NewPublicationAttrs, STATUS_ACKNOWLEDGED,
+};
 use bookrack_core::PartitionIdx;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::writes::{
@@ -454,4 +456,94 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
     .expect("clear outside override scope");
     assert_eq!(outside.actor_kind, "human");
     assert_eq!(outside.actor_detail.as_deref(), Some("cli"));
+}
+
+#[test]
+fn set_rejects_a_field_name_outside_the_editable_set() {
+    // A typo ("tittle") and a pipeline-owned bookkeeping column
+    // ("confidence") are both rejected before anything is written: no
+    // override row, no audit row.
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-unknown-set");
+    for field in ["tittle", "confidence"] {
+        let err = set_metadata_field(
+            &fx.ops,
+            SetMetadataFieldRequest {
+                intake_id: id,
+                field: field.to_string(),
+                value: "x".to_string(),
+            },
+        )
+        .expect_err("unknown field must be rejected");
+        assert!(matches!(
+            &err,
+            bookrack_ops::OpsError::UnknownMetadataField { field: f } if f == field
+        ));
+        assert!(
+            err.to_string().contains("title"),
+            "error lists the editable set"
+        );
+    }
+    let effective = fx
+        .catalog()
+        .effective_publication_attrs(id, BOOK_SCOPE)
+        .expect("effective");
+    assert!(effective.get("tittle").is_none());
+    let audit = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit");
+    assert!(audit.is_empty(), "a rejected set leaves no audit row");
+}
+
+#[test]
+fn clear_rejects_an_unknown_field_with_no_override_row() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-unknown-clear");
+    let err = clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "tittle".to_string(),
+        },
+    )
+    .expect_err("unknown field with nothing to clear must be rejected");
+    assert!(matches!(
+        err,
+        bookrack_ops::OpsError::UnknownMetadataField { .. }
+    ));
+}
+
+#[test]
+fn clear_removes_a_stale_override_with_an_unknown_field_name() {
+    // Override rows that predate field validation must stay removable:
+    // when a row with the unknown key exists, clear takes it out and
+    // audits the delete instead of rejecting the name.
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-stale-clear");
+    fx.catalog()
+        .set_override(&NewOverride::new(
+            id,
+            BOOK_SCOPE,
+            "tittle",
+            Some("A Typo'd Title".to_string()),
+            "human",
+        ))
+        .expect("seed stale override");
+
+    let outcome = clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "tittle".to_string(),
+        },
+    )
+    .expect("stale override must be clearable");
+    assert!(outcome.changed);
+
+    let effective = fx
+        .catalog()
+        .effective_publication_attrs(id, BOOK_SCOPE)
+        .expect("effective");
+    assert!(effective.get("tittle").is_none());
 }
