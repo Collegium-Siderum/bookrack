@@ -16,6 +16,12 @@ release workflow extracts the matching section verbatim from this file.
   automatically. The first-run wizard offers the same download when
   the library is missing.
 
+- `metadata.set` / `metadata.clear` accept a `reason` that lands on the
+  audit row, closing the gap where field edits — unlike approve / ack /
+  reject — could never record their justification. The CLI and REPL
+  expose it as an optional `--reason` flag; the MCP write tools require
+  it, so an LLM edit always carries its rationale in the audit trail.
+
 ### Changed
 
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`

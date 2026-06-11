@@ -12,19 +12,28 @@ use super::helpers;
 pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
     match action {
-        WriteMetadataAction::Set { book, field, value } => {
+        WriteMetadataAction::Set {
+            book,
+            field,
+            value,
+            reason,
+        } => {
             helpers::call_and_print(
                 &client,
                 "metadata.set",
-                json!({"book": book, "field": field, "value": value}),
+                json!({"book": book, "field": field, "value": value, "reason": reason}),
             )
             .await
         }
-        WriteMetadataAction::Clear { book, field } => {
+        WriteMetadataAction::Clear {
+            book,
+            field,
+            reason,
+        } => {
             helpers::call_and_print(
                 &client,
                 "metadata.clear",
-                json!({"book": book, "field": field}),
+                json!({"book": book, "field": field, "reason": reason}),
             )
             .await
         }

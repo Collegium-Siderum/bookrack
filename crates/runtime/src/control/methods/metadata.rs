@@ -23,6 +23,8 @@ pub struct MetadataSetParams {
     book: i64,
     field: String,
     value: String,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +33,8 @@ pub struct MetadataSetParams {
 pub struct MetadataClearParams {
     book: i64,
     field: String,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +68,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         book: parsed.book,
         field: parsed.field,
         value: parsed.value,
+        reason: parsed.reason,
     };
     run_metadata_action(ctx, action).await
 }
@@ -73,6 +78,7 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     let action = WriteMetadataAction::Clear {
         book: parsed.book,
         field: parsed.field,
+        reason: parsed.reason,
     };
     run_metadata_action(ctx, action).await
 }

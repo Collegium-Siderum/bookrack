@@ -100,6 +100,7 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
             intake_id: id,
             field: "title".to_string(),
             value: "A New Title".to_string(),
+            reason: None,
         },
     )
     .expect("set");
@@ -119,6 +120,53 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
     assert_eq!(update_row.field.as_deref(), Some("title"));
     assert_eq!(update_row.new_value.as_deref(), Some("A New Title"));
     assert!(update_row.old_value.is_none());
+    assert!(
+        update_row.reason.is_none(),
+        "no reason given, none recorded"
+    );
+}
+
+#[test]
+fn set_and_clear_record_the_reason_on_their_audit_rows() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-reason");
+    set_metadata_field(
+        &fx.ops,
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            value: "Corrected Title".to_string(),
+            reason: Some("matches the title page".to_string()),
+        },
+    )
+    .expect("set");
+    clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            reason: Some("override entered by mistake".to_string()),
+        },
+    )
+    .expect("clear");
+
+    let audit = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit");
+    let update = audit
+        .iter()
+        .find(|r| r.action == "update")
+        .expect("update row");
+    assert_eq!(update.reason.as_deref(), Some("matches the title page"));
+    let delete = audit
+        .iter()
+        .find(|r| r.action == "delete")
+        .expect("delete row");
+    assert_eq!(
+        delete.reason.as_deref(),
+        Some("override entered by mistake")
+    );
 }
 
 #[test]
@@ -131,6 +179,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
             intake_id: id,
             field: "pub_place".to_string(),
             value: "New York".to_string(),
+            reason: None,
         },
     )
     .expect("set pub_place");
@@ -140,6 +189,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
             intake_id: id,
             field: "original_year".to_string(),
             value: "1949".to_string(),
+            reason: None,
         },
     )
     .expect("set original_year");
@@ -164,6 +214,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
             intake_id: id,
             field: "title".to_string(),
             value: "Override Title".to_string(),
+            reason: None,
         },
     )
     .expect("set");
@@ -172,6 +223,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
+            reason: None,
         },
     )
     .expect("clear");
@@ -303,6 +355,7 @@ fn write_ops_reject_unknown_intake_ids() {
             intake_id: 999,
             field: "title".to_string(),
             value: "X".to_string(),
+            reason: None,
         },
     )
     .expect_err("error");
@@ -315,6 +368,7 @@ fn write_ops_reject_unknown_intake_ids() {
         ClearMetadataFieldRequest {
             intake_id: 999,
             field: "title".to_string(),
+            reason: None,
         },
     )
     .expect_err("error");
@@ -374,6 +428,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
             intake_id: id_cli,
             field: "title".to_string(),
             value: "From CLI".to_string(),
+            reason: None,
         },
     )
     .expect("cli set");
@@ -395,6 +450,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
             intake_id: id_mcp,
             field: "title".to_string(),
             value: "From MCP".to_string(),
+            reason: None,
         },
     )
     .expect("mcp set");
@@ -429,6 +485,7 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
                     intake_id: id,
                     field: "title".to_string(),
                     value: "From MCP via override".to_string(),
+                    reason: None,
                 },
             )
         }))
@@ -451,6 +508,7 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "title".to_string(),
+            reason: None,
         },
     )
     .expect("clear outside override scope");
@@ -472,6 +530,7 @@ fn set_rejects_a_field_name_outside_the_editable_set() {
                 intake_id: id,
                 field: field.to_string(),
                 value: "x".to_string(),
+                reason: None,
             },
         )
         .expect_err("unknown field must be rejected");
@@ -505,6 +564,7 @@ fn clear_rejects_an_unknown_field_with_no_override_row() {
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "tittle".to_string(),
+            reason: None,
         },
     )
     .expect_err("unknown field with nothing to clear must be rejected");
@@ -536,6 +596,7 @@ fn clear_removes_a_stale_override_with_an_unknown_field_name() {
         ClearMetadataFieldRequest {
             intake_id: id,
             field: "tittle".to_string(),
+            reason: None,
         },
     )
     .expect("stale override must be clearable");

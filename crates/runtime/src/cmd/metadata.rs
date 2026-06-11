@@ -35,8 +35,17 @@ pub async fn run_write(
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
     match action {
-        WriteMetadataAction::Set { book, field, value } => set(&ops, book, &field, &value),
-        WriteMetadataAction::Clear { book, field } => clear(&ops, book, &field),
+        WriteMetadataAction::Set {
+            book,
+            field,
+            value,
+            reason,
+        } => set(&ops, book, &field, &value, reason),
+        WriteMetadataAction::Clear {
+            book,
+            field,
+            reason,
+        } => clear(&ops, book, &field, reason),
         WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
         WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
@@ -44,11 +53,18 @@ pub async fn run_write(
     }
 }
 
-fn set(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str, value: &str) -> Result<()> {
+fn set(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    field: &str,
+    value: &str,
+    reason: Option<String>,
+) -> Result<()> {
     let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
         intake_id: book,
         field: field.to_string(),
         value: value.to_string(),
+        reason,
     };
     match bookrack_ops::writes::metadata::set_metadata_field(ops, req) {
         Ok(_) => {
@@ -65,10 +81,16 @@ fn set(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str, value: &str) -> Res
     }
 }
 
-fn clear(ops: &Ops<OllamaEmbedClient>, book: i64, field: &str) -> Result<()> {
+fn clear(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    field: &str,
+    reason: Option<String>,
+) -> Result<()> {
     let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
         intake_id: book,
         field: field.to_string(),
+        reason,
     };
     match bookrack_ops::writes::metadata::clear_metadata_field(ops, req) {
         Ok(outcome) => {

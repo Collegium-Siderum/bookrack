@@ -469,19 +469,28 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
 
 async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) -> bool {
     match action {
-        WriteMetadataAction::Set { book, field, value } => {
+        WriteMetadataAction::Set {
+            book,
+            field,
+            value,
+            reason,
+        } => {
             call_and_print(
                 client,
                 "metadata.set",
-                json!({"book": book, "field": field, "value": value}),
+                json!({"book": book, "field": field, "value": value, "reason": reason}),
             )
             .await
         }
-        WriteMetadataAction::Clear { book, field } => {
+        WriteMetadataAction::Clear {
+            book,
+            field,
+            reason,
+        } => {
             call_and_print(
                 client,
                 "metadata.clear",
-                json!({"book": book, "field": field}),
+                json!({"book": book, "field": field, "reason": reason}),
             )
             .await
         }

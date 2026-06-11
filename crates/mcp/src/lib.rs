@@ -347,6 +347,10 @@ pub struct MetadataSetArgs {
     pub field: String,
     /// The new value.
     pub value: String,
+    /// Why this value is correct (e.g. the source consulted). Recorded
+    /// on the audit row; required so an LLM edit always carries its
+    /// justification.
+    pub reason: String,
     /// Library short name from the registry. Write tools require an
     /// explicit selector so a misrouted call never silently lands on
     /// the wrong library's catalog.
@@ -362,6 +366,9 @@ pub struct MetadataClearArgs {
     /// editable set is accepted only when an override row with that key
     /// exists (cleanup of stale rows); otherwise it is rejected.
     pub field: String,
+    /// Why the override is being removed. Recorded on the audit row;
+    /// required so an LLM edit always carries its justification.
+    pub reason: String,
     /// Library short name from the registry. Write tools require an
     /// explicit selector so a misrouted call never silently lands on
     /// the wrong library's catalog.
@@ -991,7 +998,7 @@ impl BookrackServer {
                        book. An unknown field name is rejected with the editable \
                        list in the error. The extracted value is preserved; the \
                        override wins on read. Appends one audit row tagged \
-                       `actor_kind=llm`."
+                       `actor_kind=llm` carrying the required `reason`."
     )]
     async fn library_metadata_set(
         &self,
@@ -1002,6 +1009,7 @@ impl BookrackServer {
             intake_id: args.intake_id,
             field: args.field,
             value: args.value,
+            reason: Some(args.reason),
         };
         let outcome = writes::metadata::set_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_edit_error)?;
@@ -1016,7 +1024,8 @@ impl BookrackServer {
                        reverting to the extracted value. An editable field with no \
                        override still appends an audit row recording the attempt; \
                        an unknown field name is rejected unless a stale override \
-                       row with that key exists."
+                       row with that key exists. The required `reason` lands on \
+                       the audit row."
     )]
     async fn library_metadata_clear(
         &self,
@@ -1026,6 +1035,7 @@ impl BookrackServer {
         let req = bookrack_ops::dto::writes::ClearMetadataFieldRequest {
             intake_id: args.intake_id,
             field: args.field,
+            reason: Some(args.reason),
         };
         let outcome = writes::metadata::clear_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_edit_error)?;

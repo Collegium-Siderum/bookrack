@@ -18,6 +18,9 @@ pub struct SetMetadataFieldRequest {
     pub field: String,
     /// The new value.
     pub value: String,
+    /// Why this value is correct; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Request body for [`crate::writes::metadata::clear_metadata_field`].
@@ -27,6 +30,9 @@ pub struct ClearMetadataFieldRequest {
     pub intake_id: i64,
     /// The field whose override should be removed.
     pub field: String,
+    /// Why the override is being removed; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Request body for [`crate::writes::metadata::acknowledge_metadata_gap`].

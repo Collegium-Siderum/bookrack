@@ -38,6 +38,7 @@ pub fn set_metadata_field<E: Embedder>(
         "intake_id": req.intake_id,
         "field": req.field,
         "value": req.value,
+        "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.set", args, {
         require_editable(&req.field)?;
@@ -66,7 +67,7 @@ pub fn set_metadata_field<E: Embedder>(
             Some(req.field.clone()),
             old_value,
             Some(req.value.clone()),
-            None,
+            req.reason.clone(),
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
@@ -87,6 +88,7 @@ pub fn clear_metadata_field<E: Embedder>(
     let args = serde_json::json!({
         "intake_id": req.intake_id,
         "field": req.field,
+        "reason": req.reason,
     });
     record_call_sync!(ops, "library.metadata.clear", args, {
         let catalog = Catalog::open(ops.catalog_db())?;
@@ -109,7 +111,7 @@ pub fn clear_metadata_field<E: Embedder>(
             Some(req.field),
             if existed { old_value } else { None },
             None,
-            None,
+            req.reason,
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 

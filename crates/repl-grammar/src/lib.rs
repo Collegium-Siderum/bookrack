@@ -171,6 +171,10 @@ pub enum WriteMetadataAction {
         field: String,
         /// The new value.
         value: String,
+        /// Optional note on why this value is correct, recorded on the
+        /// audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Clear an override, falling back to the extracted base value.
     Clear {
@@ -178,6 +182,10 @@ pub enum WriteMetadataAction {
         book: i64,
         /// The field whose override is removed.
         field: String,
+        /// Optional note on why the override is removed, recorded on
+        /// the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Acknowledge a metadata gap and let the book through, signing
     /// the override with a reason for the audit trail.
