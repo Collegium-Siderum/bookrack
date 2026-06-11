@@ -229,6 +229,7 @@ fn derive_tick_snapshot(state: &bookrack_core::queue::QueueState) -> QueueTick {
                 if let Some(finished_at) = job.finished_at {
                     let candidate = JobOutcomeSummary {
                         job_id: job.id.clone(),
+                        kind: job.kind,
                         state: job.state,
                         error: job.error.clone(),
                         finished_at,

@@ -23,6 +23,7 @@ use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use bookrack_core::ItemKind;
 pub use bookrack_core::queue::{JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState};
 
 use crate::control::events::{Event, EventStreamHandle, JobOutcomeSummary, QueueTick};
@@ -241,12 +242,13 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
 }
 
 /// Append one job per `path` to the queue, all sharing `library`,
-/// `priority`, and `force`. Returns the ids of the appended jobs in
-/// the order they were inserted.
+/// `kind`, `priority`, and `force`. Returns the ids of the appended
+/// jobs in the order they were inserted.
 pub fn enqueue_files(
     state: &mut QueueState,
     paths: &[PathBuf],
     library: &str,
+    kind: ItemKind,
     priority: Priority,
     force: bool,
 ) -> Vec<String> {
@@ -257,6 +259,7 @@ pub fn enqueue_files(
             id: id.clone(),
             library: library.to_string(),
             path: path.clone(),
+            kind,
             priority,
             force,
             state: JobState::Pending,
@@ -488,6 +491,7 @@ pub fn derive_tick(state: &QueueState, last_finished: Option<JobOutcomeSummary>)
 fn summarize_outcome(job: &QueueJob) -> JobOutcomeSummary {
     JobOutcomeSummary {
         job_id: job.id.clone(),
+        kind: job.kind,
         state: job.state,
         error: job.error.clone(),
         finished_at: job.finished_at.unwrap_or_else(Utc::now),
@@ -524,6 +528,7 @@ mod tests {
             id: "01900000-0000-7000-8000-000000000001".to_string(),
             library: "default".to_string(),
             path: PathBuf::from("/tmp/example.epub"),
+            kind: ItemKind::Book,
             priority: Priority::Normal,
             force: false,
             state: JobState::Pending,
@@ -602,6 +607,7 @@ mod tests {
             id: id.to_string(),
             library: "default".to_string(),
             path: PathBuf::from(format!("/tmp/{id}.epub")),
+            kind: ItemKind::Book,
             priority,
             force: false,
             state,
@@ -764,7 +770,14 @@ mod tests {
             PathBuf::from("/tmp/b.pdf"),
             PathBuf::from("/tmp/c.txt"),
         ];
-        let ids = enqueue_files(&mut state, &paths, "books", Priority::High, true);
+        let ids = enqueue_files(
+            &mut state,
+            &paths,
+            "books",
+            ItemKind::Book,
+            Priority::High,
+            true,
+        );
         assert_eq!(ids.len(), 3);
         assert_eq!(state.jobs.len(), 3);
         for (i, job) in state.jobs.iter().enumerate() {
@@ -833,6 +846,7 @@ mod tests {
             &mut initial,
             &[PathBuf::from("/tmp/only.epub")],
             "default",
+            ItemKind::Book,
             Priority::Normal,
             false,
         );
@@ -883,6 +897,7 @@ mod tests {
             &mut initial,
             &[PathBuf::from("/tmp/a.epub"), PathBuf::from("/tmp/b.epub")],
             "default",
+            ItemKind::Book,
             Priority::Normal,
             false,
         );

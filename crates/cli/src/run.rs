@@ -811,7 +811,14 @@ fn queue_add(
                 return;
             }
         };
-        let ids = queue::enqueue_files(&mut guard, &paths, &library, priority, force);
+        let ids = queue::enqueue_files(
+            &mut guard,
+            &paths,
+            &library,
+            bookrack_core::ItemKind::Book,
+            priority,
+            force,
+        );
         if let Err(err) = queue::save_atomic(&guard, state_path) {
             eprintln!("bookrack: persist queue state: {err}");
             return;

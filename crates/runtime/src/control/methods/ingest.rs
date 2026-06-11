@@ -82,7 +82,14 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             .queue_state
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
-        let ids = queue::enqueue_files(&mut guard, &parsed.paths, &library, priority, parsed.force);
+        let ids = queue::enqueue_files(
+            &mut guard,
+            &parsed.paths,
+            &library,
+            bookrack_core::ItemKind::Book,
+            priority,
+            parsed.force,
+        );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;
         let tick = derive_tick(&guard, None);

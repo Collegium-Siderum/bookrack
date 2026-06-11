@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use bookrack_core::ItemKind;
 use bookrack_core::queue::JobState;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -114,6 +115,10 @@ pub enum Stage {
 #[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct JobOutcomeSummary {
     pub job_id: String,
+    /// Which pipeline produced the finished job: `"book"` for ingest,
+    /// `"paper"` for glean. Mirrored from the matching `QueueJob.kind`.
+    #[cfg_attr(test, ts(type = "\"book\" | \"paper\""))]
+    pub kind: ItemKind,
     #[cfg_attr(
         test,
         ts(type = "\"pending\" | \"running\" | \"done\" | \"failed\" | \"cancelled\"")

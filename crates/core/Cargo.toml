@@ -11,3 +11,6 @@ serde.workspace = true
 # `started_at`, `finished_at`). Round-tripped through serde as RFC 3339
 # strings.
 chrono.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
