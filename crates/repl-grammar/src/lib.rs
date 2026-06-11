@@ -200,6 +200,14 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Re-run the metadata plausibility audit from the book's cached
+    /// extraction, refreshing the stored verdict / confidence so they
+    /// reflect the current effective metadata. The review status is
+    /// untouched.
+    Reaudit {
+        /// The intake id of the book.
+        book: i64,
+    },
     /// Acknowledge a metadata gap and let the book through, signing
     /// the override with a reason for the audit trail.
     Ack {

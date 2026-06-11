@@ -392,6 +392,17 @@ pub struct MetadataVoidArgs {
     pub library: String,
 }
 
+/// Arguments for `library.metadata.reaudit`. Requires `library`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataReauditArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
+}
+
 /// Arguments for `library.metadata.ack`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataAckArgs {
@@ -1083,6 +1094,33 @@ impl BookrackServer {
         };
         let outcome = writes::metadata::void_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_edit_error)?;
+        respond_with(&outcome)
+    }
+
+    /// Re-run the metadata plausibility audit from the cached extraction.
+    #[tool(
+        name = "library.metadata.reaudit",
+        description = "Re-run the metadata plausibility audit for one book from \
+                       its cached extraction, refreshing the stored verdict and \
+                       confidence so they reflect the current effective metadata \
+                       (overrides included). Use after correcting fields so the \
+                       stored `needs_work` / `low` can catch up. Runs the default \
+                       audit profile; the review status is untouched. Returns the \
+                       previous and new verdict / confidence pair."
+    )]
+    async fn library_metadata_reaudit(
+        &self,
+        Parameters(args): Parameters<MetadataReauditArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let req = bookrack_ops::dto::writes::ReauditMetadataRequest {
+            intake_id: args.intake_id,
+        };
+        let audit_data = bookrack_ops::AuditData::default_data();
+        let audit_profile = bookrack_ops::AuditProfile::default();
+        let outcome =
+            writes::metadata::reaudit_metadata(handle.ops(), req, &audit_data, &audit_profile)
+                .map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
 

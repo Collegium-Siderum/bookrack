@@ -50,6 +50,13 @@ pub struct MetadataVoidParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(TS))]
 #[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataReauditParams {
+    book: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
@@ -100,6 +107,12 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         field: parsed.field,
         reason: parsed.reason,
     };
+    run_metadata_action(ctx, action).await
+}
+
+pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let parsed: MetadataReauditParams = parse(params, "metadata.reaudit")?;
+    let action = WriteMetadataAction::Reaudit { book: parsed.book };
     run_metadata_action(ctx, action).await
 }
 

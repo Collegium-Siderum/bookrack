@@ -34,6 +34,15 @@ release workflow extracts the matching section verbatim from this file.
   at hand — the field reads as absent until one is set. `metadata.clear`
   removes the suppression. The MCP tool requires a `reason`.
 
+- `metadata.reaudit` (CLI/REPL `bookrack metadata reaudit`, MCP
+  `library.metadata.reaudit`): re-run the metadata plausibility audit
+  from the book's cached extraction envelope — no re-extraction — so
+  the stored verdict / confidence reflect the current effective
+  metadata after field corrections instead of reporting the
+  ingest-time outcome forever. Only the rollup pair and one
+  pipeline-audit row are written; the review status is untouched.
+  Returns the previous and new verdict / confidence.
+
 ### Changed
 
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`

@@ -34,6 +34,7 @@ use bookrack_catalog::ActorKind;
 use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 
+pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
 pub use recorder::with_caller_override;

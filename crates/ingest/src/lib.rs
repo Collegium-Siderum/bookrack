@@ -19,6 +19,7 @@ mod dryrun;
 mod embed_run;
 pub mod envelope;
 pub mod ocr;
+pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
 pub mod reset;
@@ -103,7 +104,7 @@ pub struct StructureReport {
     pub toc_stats: TocStats,
 }
 
-pub use bookrack_metadata::TocStats;
+pub use bookrack_metadata::{AuditData, AuditProfile, TocStats};
 
 /// Why an `ingest` operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -156,6 +157,20 @@ pub enum IngestError {
     /// A driver was asked to operate on an intake id no row exists for.
     #[error("no intake with id {0}")]
     UnknownIntake(i64),
+
+    /// The intake has no readable intake-store envelope, so its cached
+    /// extraction cannot be loaded without re-extracting the source.
+    #[error("intake {0} has no readable intake-store envelope")]
+    MissingEnvelope(i64),
+
+    /// The intake's envelope names a different source hash than the
+    /// registry row, so its cached extraction cannot be trusted.
+    #[error("intake {0}: envelope source hash does not match the registry")]
+    EnvelopeMismatch(i64),
+
+    /// The intake-store envelope exists but could not be decoded.
+    #[error("intake-store envelope unreadable")]
+    Envelope(#[from] envelope::EnvelopeError),
 
     /// A reembed target intake is not in the `Embedded` lifecycle state,
     /// so its chunks are not on disk to reembed.

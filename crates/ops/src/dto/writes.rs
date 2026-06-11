@@ -47,6 +47,28 @@ pub struct VoidMetadataFieldRequest {
     pub reason: Option<String>,
 }
 
+/// Request body for [`crate::writes::metadata::reaudit_metadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReauditMetadataRequest {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+}
+
+/// What a re-audit computed and stored.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReauditOutcome {
+    /// The book that was re-audited.
+    pub intake_id: i64,
+    /// The stored verdict before this re-audit, if any.
+    pub previous_verdict: Option<String>,
+    /// The stored confidence before this re-audit, if any.
+    pub previous_confidence: Option<String>,
+    /// The verdict this re-audit computed and stored.
+    pub verdict: String,
+    /// The confidence this re-audit computed and stored.
+    pub confidence: String,
+}
+
 /// Request body for [`crate::writes::metadata::acknowledge_metadata_gap`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcknowledgeMetadataGapRequest {

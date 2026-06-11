@@ -51,6 +51,7 @@ pub async fn run_write(
             field,
             reason,
         } => void(&ops, book, &field, reason),
+        WriteMetadataAction::Reaudit { book } => reaudit(cfg, &ops, book, profile_name),
         WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
         WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
@@ -145,6 +146,33 @@ fn void(
             anyhow::bail!("{e}");
         }
         Err(e) => Err(anyhow::Error::from(e).context("void metadata field via ops")),
+    }
+}
+
+fn reaudit(
+    cfg: &Config,
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    profile_name: Option<&str>,
+) -> Result<()> {
+    let audit_profile = load_audit_profile(cfg, profile_name);
+    let audit_data = bookrack_ingest::AuditData::default_data();
+    let req = bookrack_ops::dto::writes::ReauditMetadataRequest { intake_id: book };
+    match bookrack_ops::writes::metadata::reaudit_metadata(ops, req, &audit_data, &audit_profile) {
+        Ok(outcome) => {
+            println!(
+                "Reaudited book {book}: verdict {} (was {}), confidence {} (was {}).",
+                outcome.verdict,
+                outcome.previous_verdict.as_deref().unwrap_or("unset"),
+                outcome.confidence,
+                outcome.previous_confidence.as_deref().unwrap_or("unset"),
+            );
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("reaudit metadata via ops")),
     }
 }
 

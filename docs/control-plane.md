@@ -71,11 +71,15 @@ and tool-scoped.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
-  `metadata.ack` / `metadata.approve` / `metadata.reject` — same
-  params as the `bookrack metadata` REPL subcommands; return
-  `{ ok: true }` on success. `metadata.void` (added post-Phase 5)
-  writes a NULL override that suppresses a field's extracted value
-  until a correct one is set; `metadata.clear` removes it.
+  `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
+  `metadata.reject` — same params as the `bookrack metadata` REPL
+  subcommands; return `{ ok: true }` on success. `metadata.void`
+  (added post-Phase 5) writes a NULL override that suppresses a
+  field's extracted value until a correct one is set;
+  `metadata.clear` removes it. `metadata.reaudit` (same vintage)
+  re-runs the plausibility audit from the book's cached extraction
+  envelope, refreshing the stored verdict / confidence; the review
+  status is untouched.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes no params.

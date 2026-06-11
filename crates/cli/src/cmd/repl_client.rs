@@ -506,6 +506,9 @@ async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) 
             )
             .await
         }
+        WriteMetadataAction::Reaudit { book } => {
+            call_and_print(client, "metadata.reaudit", json!({"book": book})).await
+        }
         WriteMetadataAction::Ack { book, reason } => {
             call_and_print(
                 client,

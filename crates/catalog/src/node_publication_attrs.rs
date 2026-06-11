@@ -256,7 +256,44 @@ impl NewPublicationAttrs {
     }
 }
 
+/// A targeted `UPDATE` of the audit rollup pair only, so a re-audit
+/// can refresh the stored outcome without rewriting (and risking
+/// clobbering) the bibliographic columns.
+const UPDATE_ROLLUP_SQL: &str = "UPDATE node_publication_attrs \
+     SET confidence = :confidence, audit_verdict = :audit_verdict \
+     WHERE intake_id = :intake_id AND scope = :scope";
+
 impl Catalog {
+    /// Overwrite only the audit rollup pair (`confidence`,
+    /// `audit_verdict`) on a node's base row, leaving every
+    /// bibliographic column untouched. Inserts a row carrying just the
+    /// pair when the node has none, so a re-audit can stamp a book
+    /// whose base layer was never seeded.
+    pub fn update_audit_rollup(
+        &self,
+        intake_id: i64,
+        scope: &str,
+        confidence: &str,
+        audit_verdict: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            UPDATE_ROLLUP_SQL,
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": scope,
+                ":confidence": confidence,
+                ":audit_verdict": audit_verdict,
+            },
+        )?;
+        if changed == 0 {
+            let mut attrs = NewPublicationAttrs::new(intake_id, scope);
+            attrs.confidence = Some(confidence.to_string());
+            attrs.audit_verdict = Some(audit_verdict.to_string());
+            self.upsert_publication_attrs(&attrs)?;
+        }
+        Ok(())
+    }
+
     /// Insert or replace a node's base-layer bibliographic attributes.
     pub fn upsert_publication_attrs(&self, new: &NewPublicationAttrs) -> Result<()> {
         self.conn.execute(

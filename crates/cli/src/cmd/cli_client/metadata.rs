@@ -49,6 +49,9 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             )
             .await
         }
+        WriteMetadataAction::Reaudit { book } => {
+            helpers::call_and_print(&client, "metadata.reaudit", json!({"book": book})).await
+        }
         WriteMetadataAction::Ack { book, reason } => {
             helpers::call_and_print(
                 &client,

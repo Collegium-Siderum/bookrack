@@ -22,7 +22,8 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::{
     AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
-    RejectMetadataRequest, SetMetadataFieldRequest, VoidMetadataFieldRequest, WriteOutcome,
+    ReauditMetadataRequest, ReauditOutcome, RejectMetadataRequest, SetMetadataFieldRequest,
+    VoidMetadataFieldRequest, WriteOutcome,
 };
 use crate::recorder::record_call_sync;
 
@@ -170,6 +171,43 @@ pub fn void_metadata_field<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         Ok(write_outcome(ops, audit_id, changed))
+    })
+}
+
+/// Re-run the metadata plausibility audit for one book from its cached
+/// extraction envelope, refreshing the stored `confidence` /
+/// `audit_verdict` rollup so it reflects the current effective
+/// metadata (overrides included). The review status is untouched: the
+/// audit is machine plausibility, review is human (or LLM)
+/// confirmation.
+pub fn reaudit_metadata<E: Embedder>(
+    ops: &Ops<E>,
+    req: ReauditMetadataRequest,
+    audit_data: &bookrack_ingest::AuditData,
+    audit_profile: &bookrack_ingest::AuditProfile,
+) -> Result<ReauditOutcome> {
+    let args = serde_json::json!({ "intake_id": req.intake_id });
+    record_call_sync!(ops, "library.metadata.reaudit", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        let outcome = bookrack_ingest::reaudit::reaudit_book(
+            &catalog,
+            req.intake_id,
+            audit_data,
+            audit_profile,
+        )
+        .map_err(|e| match e {
+            bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
+                OpsError::IntakeNotFound { intake_id }
+            }
+            other => OpsError::Other(anyhow::Error::new(other)),
+        })?;
+        Ok(ReauditOutcome {
+            intake_id: outcome.intake_id,
+            previous_verdict: outcome.previous_verdict,
+            previous_confidence: outcome.previous_confidence,
+            verdict: outcome.verdict,
+            confidence: outcome.confidence,
+        })
     })
 }
 
