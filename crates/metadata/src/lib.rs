@@ -25,7 +25,8 @@ mod signals;
 pub use bookrack_audit_profile::{AuditData, AuditProfile, DataLoadError as AuditDataLoadError};
 pub use filename::{FilenameBiblio, parse as parse_filename};
 pub use report::{
-    AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, TocStats, Verdict,
+    AuditInput, Confidence, FieldGrade, FieldOrigins, FieldReport, Flag, MetadataReport, TocStats,
+    Verdict,
 };
 pub use signals::{is_valid_isbn, looks_like_timestamp};
 

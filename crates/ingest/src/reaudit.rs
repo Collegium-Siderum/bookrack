@@ -150,6 +150,7 @@ fn report_for_intake(
     }
 
     let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
+    let origins = crate::field_origins(catalog, intake_id)?;
     let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
     let sample = body_sample(&envelope.extraction);
     let source_stem = intake
@@ -166,6 +167,7 @@ fn report_for_intake(
         total_blocks: envelope.extraction.blocks.len(),
         source_stem: source_stem.as_deref(),
         data: audit_data,
+        origins,
     };
     Ok(bookrack_metadata::audit(&input, audit_profile))
 }
@@ -370,5 +372,64 @@ mod tests {
         )
         .expect_err("no intake");
         assert!(matches!(err, IngestError::UnknownIntake(9999)));
+    }
+
+    #[test]
+    fn build_report_reads_override_origins() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let id = seed_book(&mut catalog, dir.path(), "sha-origins");
+
+        let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+        attrs.title = Some("A Plain Title".to_string());
+        attrs.year = Some("2005".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+        catalog
+            .set_override(&NewOverride::new(
+                id,
+                BOOK_SCOPE,
+                "publisher",
+                Some("A Curated Publisher".to_string()),
+                "human",
+            ))
+            .expect("override");
+        catalog
+            .set_override(&NewOverride::new(id, BOOK_SCOPE, "year", None, "human"))
+            .expect("void");
+
+        let report = build_report(
+            &catalog,
+            id,
+            &AuditData::default_data(),
+            &AuditProfile::default(),
+        )
+        .expect("report");
+
+        // The fixture extraction is txt, the weakest prior: extracted
+        // fields are downgraded, the curated publisher is not, and the
+        // voided year reads as a deliberate gap.
+        let by_name = |name: &str| {
+            report
+                .fields
+                .iter()
+                .find(|f| f.field == name)
+                .unwrap_or_else(|| panic!("{name} row"))
+        };
+        let title = by_name("title");
+        assert!(
+            title
+                .flags
+                .contains(&bookrack_metadata::Flag::SourcePriorWeak)
+        );
+        let publisher = by_name("publisher");
+        assert!(
+            !publisher
+                .flags
+                .contains(&bookrack_metadata::Flag::SourcePriorWeak)
+        );
+        assert_eq!(publisher.grade, bookrack_metadata::FieldGrade::Strong);
+        let year = by_name("year");
+        assert_eq!(year.grade, bookrack_metadata::FieldGrade::Medium);
+        assert_eq!(year.flags, vec![bookrack_metadata::Flag::Voided]);
     }
 }

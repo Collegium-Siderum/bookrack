@@ -20,7 +20,7 @@ use bookrack_extract::TextLayerQuality;
 
 use crate::publishers::{self, PublisherVerdict};
 use crate::report::{
-    AuditInput, Confidence, FieldGrade, FieldReport, Flag, MetadataReport, Verdict,
+    AuditInput, Confidence, FieldGrade, FieldOrigins, FieldReport, Flag, MetadataReport, Verdict,
 };
 
 /// How a TOC's shape audit lands on the verdict / confidence dial.
@@ -50,16 +50,46 @@ pub(crate) fn run(input: &AuditInput, profile: &AuditProfile) -> MetadataReport 
         input.provenance.text_layer_quality,
         TextLayerQuality::Doubtful
     );
+    // The source prior and the text-layer doubt judge the extractor,
+    // not the value: a field whose effective value is a curator's
+    // override is graded without them.
+    let origins = &input.origins;
+    let field_prior = |field: &str| {
+        if origins.is_overridden(field) {
+            SourcePrior::Strong
+        } else {
+            prior
+        }
+    };
+    let field_doubtful = |field: &str| doubtful && !origins.is_overridden(field);
 
-    let fields = vec![
-        audit_title(input, profile, prior, doubtful),
-        audit_language(input, profile, prior, doubtful),
-        audit_publisher(input, profile, prior, doubtful),
-        audit_year(input, profile, prior, doubtful),
-        audit_isbn(input, doubtful),
-        audit_subtitle(input, profile, prior, doubtful),
-        audit_series(input, profile, prior, doubtful),
-    ];
+    let mut fields = Vec::with_capacity(AUDITED_FIELDS.len());
+    for &field in AUDITED_FIELDS {
+        let report = if origins.is_voided(field) {
+            voided_report(field)
+        } else {
+            match field {
+                "title" => audit_title(input, profile, field_prior(field), field_doubtful(field)),
+                "language" => {
+                    audit_language(input, profile, field_prior(field), field_doubtful(field))
+                }
+                "publisher" => {
+                    audit_publisher(input, profile, field_prior(field), field_doubtful(field))
+                }
+                "year" => audit_year(input, profile, field_prior(field), field_doubtful(field)),
+                "isbn" => audit_isbn(input, field_doubtful(field)),
+                "subtitle" => {
+                    audit_subtitle(input, profile, field_prior(field), field_doubtful(field))
+                }
+                "series" => audit_series(input, profile, field_prior(field), field_doubtful(field)),
+                _ => unreachable!("AUDITED_FIELDS names a field without an audit"),
+            }
+        };
+        fields.push(report);
+    }
+    for report in &mut fields {
+        apply_confirmed(report, origins);
+    }
 
     let mut verdict = compute_verdict(&fields);
     let mut confidence = rollup_confidence(&fields);
@@ -79,6 +109,52 @@ pub(crate) fn run(input: &AuditInput, profile: &AuditProfile) -> MetadataReport 
         copyright_blocks,
         shape_flags,
     }
+}
+
+/// The audited publication fields, in the report's stable display
+/// order.
+const AUDITED_FIELDS: &[&str] = &[
+    "title",
+    "language",
+    "publisher",
+    "year",
+    "isbn",
+    "subtitle",
+    "series",
+];
+
+/// The report row for a voided field: a curator suppressed a wrong
+/// extracted value and no replacement is set. The required fields stay
+/// [`FieldGrade::Missing`] — a book without a title or language still
+/// needs work — while the rest read as a deliberate, neutral gap.
+fn voided_report(field: &str) -> FieldReport {
+    let grade = if matches!(field, "title" | "language") {
+        FieldGrade::Missing
+    } else {
+        FieldGrade::Medium
+    };
+    FieldReport {
+        field: field.to_string(),
+        grade,
+        flags: vec![Flag::Voided],
+        hint: "value voided by curator; no replacement set".to_string(),
+    }
+}
+
+/// Pin a confirmed override's grade at [`FieldGrade::Strong`]: the
+/// curator has signed the value off against the source, so the
+/// extraction-suspicion heuristics no longer weaken it. Validation
+/// flags (see [`Flag::is_validation`]) keep their effect — a confirmed
+/// value can still fail a checksum — and every flag stays on the
+/// report for observability.
+fn apply_confirmed(report: &mut FieldReport, origins: &FieldOrigins) {
+    if !origins.is_confirmed(&report.field) {
+        return;
+    }
+    if report.flags.iter().any(|flag| flag.is_validation()) {
+        return;
+    }
+    report.grade = FieldGrade::Strong;
 }
 
 /// Audit the TOC shape. Emits at most five flags in a fixed order so
@@ -466,11 +542,18 @@ fn audit_year(
                     }
                 }
             }
-            if profile.year.pdf_likely_file_date && pdf_year_unreliable(&input.provenance.adapter) {
+            // Both date heuristics suspect the *extracted* year; a
+            // curator's override is not the extractor's output.
+            let overridden = input.origins.is_overridden("year");
+            if profile.year.pdf_likely_file_date
+                && pdf_year_unreliable(&input.provenance.adapter)
+                && !overridden
+            {
                 weaken(&mut grade);
                 flags.push(Flag::PdfYearLikelyFileDate);
             }
             if profile.year.timestamp_form
+                && !overridden
                 && year_came_from_raw_biblio(input, text)
                 && let Some(raw) = input.biblio.year_raw.as_deref()
                 && looks_like_timestamp(raw)

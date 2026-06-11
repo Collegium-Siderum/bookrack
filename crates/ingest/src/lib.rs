@@ -1056,6 +1056,14 @@ pub(crate) fn run_metadata_substep(
         }
     };
 
+    let origins = match field_origins(catalog, intake_id) {
+        Ok(origins) => origins,
+        Err(e) => {
+            tracing::warn!(error = %e, "metadata: failed to read override origins");
+            bookrack_metadata::FieldOrigins::empty()
+        }
+    };
+
     let body_sample = body_sample(extraction);
     let input = bookrack_metadata::AuditInput {
         biblio: &extraction.biblio,
@@ -1066,6 +1074,7 @@ pub(crate) fn run_metadata_substep(
         total_blocks: extraction.blocks.len(),
         source_stem,
         data: audit_data,
+        origins,
     };
     let report = bookrack_metadata::audit(&input, audit_profile);
 
@@ -1426,6 +1435,24 @@ fn body_sample(extraction: &Extraction) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Per-field origin view of one book's overrides, shaped for
+/// [`bookrack_metadata::AuditInput`]: a value-bearing row marks the
+/// field overridden (and confirmed when the curator signed it off
+/// against the source), a NULL row marks it voided.
+pub(crate) fn field_origins(
+    catalog: &Catalog,
+    intake_id: i64,
+) -> Result<bookrack_metadata::FieldOrigins> {
+    let mut origins = bookrack_metadata::FieldOrigins::empty();
+    for over in catalog.overrides_for_address(intake_id, BOOK_SCOPE)? {
+        match over.value {
+            Some(_) => origins.add_override(&over.field, over.confirmed),
+            None => origins.add_voided(&over.field),
+        }
+    }
+    Ok(origins)
 }
 
 /// A short, structured summary of the audit, written into

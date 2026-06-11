@@ -9,6 +9,8 @@
 //! and grade exists as a single enum variant rather than as a free-form
 //! string.
 
+use std::collections::BTreeSet;
+
 use bookrack_catalog::EffectiveAttrs;
 use bookrack_extract::{Biblio, Provenance};
 
@@ -126,6 +128,10 @@ pub enum Flag {
     EqualsPublisher,
     /// The value is empty after trimming.
     Empty,
+    /// The field's extracted value is suppressed by a curator's void
+    /// override and no replacement is set. A deliberate, recorded gap —
+    /// not a missing extraction.
+    Voided,
     /// The value is entirely numeric where it should not be.
     PurelyNumeric,
     /// The title carries a leading or trailing bracketed segment whose
@@ -186,6 +192,7 @@ impl Flag {
             Flag::EqualsFilename => "equals_filename",
             Flag::EqualsPublisher => "equals_publisher",
             Flag::Empty => "empty",
+            Flag::Voided => "voided",
             Flag::PurelyNumeric => "purely_numeric",
             Flag::TitleSeriesParen => "title_series_paren",
             Flag::TitleMarketingBlock => "title_marketing_block",
@@ -198,6 +205,22 @@ impl Flag {
             Flag::TocHeadingBlockSkew => "toc:heading_block_skew",
             Flag::TocEmptyLargeBody => "toc:empty_large_body",
         }
+    }
+
+    /// True for flags that report an objective validation failure of
+    /// the value itself — checksum, syntax, range, emptiness, or a
+    /// declared language the body contradicts — as opposed to suspicion
+    /// about the extraction that produced the value. A confirmed
+    /// override silences extraction suspicion but never validation.
+    pub fn is_validation(self) -> bool {
+        matches!(
+            self,
+            Flag::IsbnCheckFailed
+                | Flag::NonBcp47
+                | Flag::YearOutOfRange
+                | Flag::LangMismatchesBody
+                | Flag::Empty
+        )
     }
 }
 
@@ -255,6 +278,60 @@ pub struct TocStats {
     pub heading_block_skew: bool,
 }
 
+/// Per-field provenance of the effective values the audit grades:
+/// which fields carry a curator's override instead of the extracted
+/// value, which of those overrides are confirmed, and which fields are
+/// voided (extracted value suppressed, no replacement set).
+///
+/// The audit uses this to direct its suspicion: source-format priors,
+/// text-layer doubt, and the extraction heuristics model the
+/// *extractor's* reliability and do not apply to values a curator
+/// wrote. An empty value treats every field as extracted, which is the
+/// pre-override behaviour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FieldOrigins {
+    overridden: BTreeSet<String>,
+    confirmed: BTreeSet<String>,
+    voided: BTreeSet<String>,
+}
+
+impl FieldOrigins {
+    /// Origins with every field read as extracted.
+    pub fn empty() -> FieldOrigins {
+        FieldOrigins::default()
+    }
+
+    /// Record a value-bearing override on `field`, optionally confirmed
+    /// against the source by the curator.
+    pub fn add_override(&mut self, field: &str, confirmed: bool) {
+        self.overridden.insert(field.to_string());
+        if confirmed {
+            self.confirmed.insert(field.to_string());
+        }
+    }
+
+    /// Record a voided field: the extracted value is suppressed and no
+    /// replacement is set.
+    pub fn add_voided(&mut self, field: &str) {
+        self.voided.insert(field.to_string());
+    }
+
+    /// True when the field's effective value comes from an override.
+    pub fn is_overridden(&self, field: &str) -> bool {
+        self.overridden.contains(field)
+    }
+
+    /// True when the field's override is confirmed against the source.
+    pub fn is_confirmed(&self, field: &str) -> bool {
+        self.confirmed.contains(field)
+    }
+
+    /// True when the field is voided.
+    pub fn is_voided(&self, field: &str) -> bool {
+        self.voided.contains(field)
+    }
+}
+
 /// Everything one audit run needs, gathered by the caller.
 ///
 /// The audit reads `effective` for the field values it grades (so a
@@ -288,4 +365,10 @@ pub struct AuditInput<'a> {
     /// abbreviation expansions, and volume-suffix tokens. Pass
     /// [`crate::AuditData::empty()`] to disable every list.
     pub data: &'a crate::AuditData,
+    /// Per-field provenance of the `effective` values. Overridden
+    /// fields are exempt from extraction-suspicion signals; voided
+    /// fields read as a deliberate gap rather than a missing
+    /// extraction. [`FieldOrigins::empty()`] treats every field as
+    /// extracted.
+    pub origins: FieldOrigins,
 }

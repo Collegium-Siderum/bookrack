@@ -481,6 +481,9 @@ fn run_pipeline(
             total_blocks: extraction.blocks.len(),
             source_stem: Some(stem),
             data: &params.audit_data,
+            // The dryrun catalog is freshly created in memory; no
+            // override can exist on it.
+            origins: bookrack_metadata::FieldOrigins::empty(),
         },
         &params.audit_profile,
     );

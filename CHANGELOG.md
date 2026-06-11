@@ -79,6 +79,20 @@ release workflow extracts the matching section verbatim from this file.
   name outside the set only when a stale override row with that key
   exists, so pre-validation rows stay removable.
 
+- The metadata audit now reads per-field origins and directs its
+  suspicion accordingly. A field whose effective value is a curator's
+  override is exempt from the source-format prior, the doubtful
+  text-layer downgrade, and the PDF/timestamp year heuristics — those
+  model the extractor, not the curator — so a verified PDF record can
+  finally reach `high` confidence. A confirmed override is graded
+  `strong` outright; heuristic flags stay on the report for
+  observability while objective validation (ISBN checksum, BCP-47
+  syntax, year range, language/body mismatch, emptiness) still
+  downgrades. A voided field reads as a deliberate gap (`medium`, a
+  `voided` flag) instead of a missing extraction, except `title` /
+  `language`, which keep gating the verdict. Stored rollups reflect
+  the new grading after the next ingest or `metadata.reaudit`.
+
 ### Fixed
 
 - `vectors reset` (including `--resume`) and `vectors reembed` append

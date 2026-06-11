@@ -8,8 +8,8 @@
 use bookrack_catalog::{Catalog, EffectiveAttrs, NewPublicationAttrs};
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
-    AuditData, AuditInput, AuditProfile, Confidence, FieldGrade, FieldReport, Flag, MetadataReport,
-    TocStats, Verdict, audit,
+    AuditData, AuditInput, AuditProfile, Confidence, FieldGrade, FieldOrigins, FieldReport, Flag,
+    MetadataReport, TocStats, Verdict, audit,
 };
 
 /// Shared data set the audit tests use: starts from the shipped
@@ -130,6 +130,7 @@ fn epub_with_complete_record_grades_clean_and_high() {
         total_blocks: 100,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::Clean);
@@ -179,6 +180,7 @@ fn epub_year_from_timestamp_shaped_dc_date_is_downgraded() {
         total_blocks: 100,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Medium);
@@ -221,6 +223,7 @@ fn epub_year_from_a_plain_year_string_stays_strong() {
         total_blocks: 100,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -273,6 +276,7 @@ fn user_override_year_skips_the_timestamp_shape_signal() {
         total_blocks: 100,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(field(&report, "year").grade, FieldGrade::Strong);
@@ -300,6 +304,7 @@ fn empty_record_grades_needs_work_and_low() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.verdict, Verdict::NeedsWork);
@@ -335,6 +340,7 @@ fn title_equal_to_filename_is_flagged() {
         total_blocks: 10,
         source_stem: Some("the-source-stem"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -371,6 +377,7 @@ fn placeholder_title_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -408,6 +415,7 @@ fn invalid_isbn_checksum_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -443,6 +451,7 @@ fn year_outside_range_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "year").flags.contains(&Flag::YearOutOfRange));
@@ -474,6 +483,7 @@ fn pdf_year_is_flagged_as_likely_file_date() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -509,6 +519,7 @@ fn watermark_publisher_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -553,6 +564,7 @@ fn cjk_watermark_publisher_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -592,6 +604,7 @@ fn doubtful_text_layer_downgrades_present_fields() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -633,6 +646,7 @@ fn language_disagreeing_with_body_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -670,6 +684,7 @@ fn cjk_body_agrees_with_zh_language() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(
@@ -705,6 +720,7 @@ fn non_bcp47_language_is_flagged() {
         total_blocks: 10,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(field(&report, "language").flags.contains(&Flag::NonBcp47));
@@ -736,6 +752,7 @@ fn copyright_blocks_are_the_leading_indices() {
         total_blocks: 3,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.copyright_blocks, vec![0, 1, 2]);
@@ -784,6 +801,7 @@ fn audit_toc_shape_clean_yields_no_flags() {
         total_blocks: 50,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.is_empty());
@@ -812,6 +830,7 @@ fn audit_toc_shape_severe_pulls_verdict_and_confidence_down() {
         total_blocks: 200,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert!(report.shape_flags.contains(&Flag::TocUnanchoredSome));
@@ -844,6 +863,7 @@ fn audit_toc_shape_mild_caps_confidence_at_medium() {
         total_blocks: 80,
         source_stem: Some("a-test-book"),
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &AuditProfile::default());
     assert_eq!(report.shape_flags, vec![Flag::TocSuspiciousFlat]);
@@ -873,6 +893,7 @@ fn audit_toc_shape_never_strengthens() {
             total_blocks: 10,
             source_stem: None,
             data: test_data(),
+            origins: FieldOrigins::empty(),
         };
         audit(&input, &AuditProfile::default())
     };
@@ -919,6 +940,7 @@ fn audit_toc_shape_never_strengthens() {
             total_blocks: blocks,
             source_stem: None,
             data: test_data(),
+            origins: FieldOrigins::empty(),
         };
         let report = audit(&input, &AuditProfile::default());
         assert_eq!(
@@ -956,6 +978,7 @@ fn audit_input_carries_no_review_status_field() {
         total_blocks: 0,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let AuditInput {
         biblio: _,
@@ -966,6 +989,7 @@ fn audit_input_carries_no_review_status_field() {
         total_blocks: _,
         source_stem: _,
         data: _,
+        origins: _,
     } = input;
 }
 
@@ -995,6 +1019,7 @@ fn run_with(
         total_blocks: 0,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     audit(&input, profile)
 }
@@ -1196,7 +1221,295 @@ fn toggle_off_toc_shape_suppresses_empty_large_body_flag() {
         total_blocks: 500,
         source_stem: None,
         data: test_data(),
+        origins: FieldOrigins::empty(),
     };
     let report = audit(&input, &profile);
     assert!(!report.shape_flags.contains(&Flag::TocEmptyLargeBody));
+}
+
+#[test]
+fn override_is_exempt_from_the_source_prior() {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Wrong Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "publisher",
+            Some("Verified Press".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("pdf", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("publisher", false);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    // The curated publisher escapes the weak PDF prior; the extracted
+    // title does not.
+    let publisher = field(&report, "publisher");
+    assert!(!publisher.flags.contains(&Flag::SourcePriorWeak));
+    assert_eq!(publisher.grade, FieldGrade::Strong);
+    let title = field(&report, "title");
+    assert!(title.flags.contains(&Flag::SourcePriorWeak));
+}
+
+#[test]
+fn override_is_exempt_from_the_doubtful_text_layer() {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Wrong Press"),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "publisher",
+            Some("Verified Press".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("txt", TextLayerQuality::Doubtful);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("publisher", false);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: None,
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let publisher = field(&report, "publisher");
+    assert!(!publisher.flags.contains(&Flag::DoubtfulTextLayer));
+    assert!(!publisher.flags.contains(&Flag::SourcePriorWeak));
+    let title = field(&report, "title");
+    assert!(title.flags.contains(&Flag::DoubtfulTextLayer));
+    assert!(title.flags.contains(&Flag::SourcePriorWeak));
+}
+
+#[test]
+fn confirmed_override_pins_the_grade_despite_heuristics() {
+    // The curated title happens to equal the source filename. The
+    // heuristic stays on the report for observability, but a confirmed
+    // override is graded on the curator's signature, not on suspicion.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("Wrong Title"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "title",
+            Some("My Title".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("title", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("My Title"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let title = field(&report, "title");
+    assert!(title.flags.contains(&Flag::EqualsFilename));
+    assert_eq!(title.grade, FieldGrade::Strong);
+}
+
+#[test]
+fn confirmed_override_keeps_validation_failures() {
+    // Confirmation silences extraction suspicion, not arithmetic: a
+    // confirmed ISBN with a bad checksum stays weakened and flagged.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "isbn",
+            Some("978-3-16-148410-1".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("isbn", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let isbn = field(&report, "isbn");
+    assert!(isbn.flags.contains(&Flag::IsbnCheckFailed));
+    assert_ne!(isbn.grade, FieldGrade::Strong);
+}
+
+#[test]
+fn voided_should_field_reads_as_a_neutral_gap() {
+    // A voided publisher is a deliberate, recorded gap: medium grade,
+    // a single Voided flag, and the rollup caps at Medium instead of
+    // collapsing to Low the way a missing extraction would.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Pirate Site Press"),
+        Some("2005"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            SCOPE,
+            "publisher",
+            None,
+            "human",
+        ))
+        .expect("void");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_voided("publisher");
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let publisher = field(&report, "publisher");
+    assert_eq!(publisher.grade, FieldGrade::Medium);
+    assert_eq!(publisher.flags, vec![Flag::Voided]);
+    assert_eq!(report.verdict, Verdict::Clean);
+    assert_eq!(report.confidence, Confidence::Medium);
+}
+
+#[test]
+fn voided_required_field_still_needs_work() {
+    // Voiding a required field records the judgement but cannot excuse
+    // the gap: a book without a title still needs work.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("Garbage Title"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        Some("978-3-16-148410-0"),
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE, SCOPE, "title", None, "human",
+        ))
+        .expect("void");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_voided("title");
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: None,
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let title = field(&report, "title");
+    assert_eq!(title.grade, FieldGrade::Missing);
+    assert_eq!(title.flags, vec![Flag::Voided]);
+    assert_eq!(report.verdict, Verdict::NeedsWork);
+    assert_eq!(report.confidence, Confidence::Low);
 }
