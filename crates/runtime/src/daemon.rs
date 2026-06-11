@@ -31,11 +31,12 @@ use bookrack_config::{
 };
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_glean::GleanParams;
 use bookrack_ingest::IngestParams;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
-use bookrack_ops::{Caller, Ops};
+use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
 use tokio::sync::broadcast;
@@ -293,13 +294,21 @@ impl DaemonRuntime {
         .context("build embedding client")?;
 
         // 6. Catalog preflight: reject a schema the binary cannot
-        //    serve before exposing a listener.
+        //    serve before exposing a listener. Both the book catalog
+        //    and (when it exists) the papers catalog are checked.
         if cfg.catalog_db().exists() {
             Catalog::open_read_only(&cfg.catalog_db())
                 .context("preflight catalog schema check failed")?;
         }
+        if cfg.papers_catalog_db().exists() {
+            Catalog::open_read_only(&cfg.papers_catalog_db())
+                .context("preflight papers catalog schema check failed")?;
+        }
 
-        // 7. Library::open
+        // 7. Library::open — books + papers. Each pipeline owns its
+        //    chunk-version stamp; papers warms unconditionally so the
+        //    first glean into an empty data dir lights up the read
+        //    path the same way the book side does.
         let search_cfg = SearchConfig::from_env();
         let library = Library::open(
             cfg.corpus_db(),
@@ -312,6 +321,31 @@ impl DaemonRuntime {
         )
         .await
         .context("open query library")?;
+        let papers_embedder = OllamaEmbedClient::new(
+            cfg.ollama_url(),
+            &embed_cfg.model,
+            embed_cfg.request_timeout,
+            embed_cfg.max_retries,
+            embed_cfg.backoff_base,
+        )
+        .context("build papers embedding client")?;
+        let papers_library = Library::open(
+            cfg.papers_corpus_db(),
+            cfg.papers_catalog_db(),
+            &cfg.papers_lancedb_dir(),
+            papers_embedder,
+            embed_cfg.model.clone(),
+            search_cfg.top_k,
+            bookrack_glean::CHUNK_VERSION,
+        )
+        .await
+        .context("open papers query library")?;
+        let papers_paths = PapersPaths {
+            corpus_db: cfg.papers_corpus_db(),
+            catalog_db: cfg.papers_catalog_db(),
+            lancedb_dir: cfg.papers_lancedb_dir(),
+            papers_dir: cfg.papers_dir(),
+        };
 
         // 8. Ops::with_library; LibraryRegistry::single
         let ops = Ops::with_library(
@@ -322,7 +356,8 @@ impl DaemonRuntime {
             cfg.books_dir(),
             cfg.backup_dir(),
             opts.caller,
-        );
+        )
+        .with_papers(papers_library, papers_paths);
         let library_name = cfg.library().unwrap_or("default").to_string();
         let handle = LibraryHandle::new(&library_name, ops);
         let registry = LibraryRegistry::single(handle);
@@ -353,6 +388,7 @@ impl DaemonRuntime {
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
         let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
+        let glean_params_template = build_glean_params_template(&embed_cfg);
 
         // Event stream, daemon-state flag, and control accept loop
         // come up after the queue state is loaded so the initial
@@ -371,6 +407,7 @@ impl DaemonRuntime {
             let state = Arc::clone(&queue_state);
             let state_path = queue_state_path.clone();
             let params_template = queue_params_template.clone();
+            let glean_template = glean_params_template.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
@@ -383,6 +420,7 @@ impl DaemonRuntime {
                 move |job| {
                     let registry = Arc::clone(&registry);
                     let params_template = params_template.clone();
+                    let glean_template = glean_template.clone();
                     let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
@@ -394,16 +432,31 @@ impl DaemonRuntime {
                             } else {
                                 job.library.clone()
                             };
-                            let mut params = params_template;
-                            params.force = job.force;
+                            let force = job.force;
+                            let job_kind = job.kind;
+                            let path = job.path.clone();
                             runtime.block_on(async move {
                                 let handle = registry
                                     .get(Some(&library))
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
-                                handle
-                                    .ingest_book(&job.path, &params)
-                                    .await
-                                    .map_err(|e| queue::classify_ingest_error(&e))?;
+                                match job_kind {
+                                    bookrack_core::ItemKind::Book => {
+                                        let mut params = params_template;
+                                        params.force = force;
+                                        handle
+                                            .ingest_book(&path, &params)
+                                            .await
+                                            .map_err(|e| queue::classify_ingest_error(&e))?;
+                                    }
+                                    bookrack_core::ItemKind::Paper => {
+                                        let mut params = glean_template;
+                                        params.force = force;
+                                        handle
+                                            .glean_paper(&path, &params)
+                                            .await
+                                            .map_err(|e| queue::classify_ingest_error(&e))?;
+                                    }
+                                }
                                 Ok::<(), queue::JobError>(())
                             })
                         })
@@ -577,6 +630,16 @@ fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestP
         audit_data: load_audit_data(cfg),
         audit_profile: load_audit_profile(cfg, None),
         heading_patterns: load_heading_patterns(cfg),
+        ..Default::default()
+    }
+}
+
+/// Build the [`GleanParams`] template the queue worker reuses for
+/// every paper-side job. Mirrors [`build_queue_params_template`] for
+/// the book side: only `force` is patched per-job at dispatch time.
+fn build_glean_params_template(embed_cfg: &EmbedConfig) -> GleanParams {
+    GleanParams {
+        embed: embed_cfg.clone(),
         ..Default::default()
     }
 }

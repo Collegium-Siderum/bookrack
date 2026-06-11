@@ -10,6 +10,7 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-embed = { path = "../embed" }
+bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-query = { path = "../query" }
 bookrack-search = { path = "../search" }

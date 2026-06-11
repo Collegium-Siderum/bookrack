@@ -17,6 +17,7 @@ bookrack-embed = { path = "../embed" }
 # `pdfium_install` reads the pinned-binary constants published next to
 # the PDF adapter that consumes the library.
 bookrack-extract = { path = "../extract" }
+bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-metadata = { path = "../metadata" }
 bookrack-obs = { path = "../obs" }

@@ -23,6 +23,7 @@ use anyhow::Context;
 use bookrack_catalog::Catalog;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
+use bookrack_glean::{GleanParams, GleanReport};
 use bookrack_ingest::{IngestParams, IngestReport};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -77,6 +78,7 @@ pub struct LibraryHandle<E: Embedder> {
     name: String,
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
+    glean_lock: AsyncMutex<()>,
 }
 
 impl<E: Embedder> LibraryHandle<E> {
@@ -93,6 +95,7 @@ impl<E: Embedder> LibraryHandle<E> {
             name: name.into(),
             ops,
             ingest_lock: AsyncMutex::new(()),
+            glean_lock: AsyncMutex::new(()),
         })
     }
 
@@ -165,6 +168,70 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
                 .refresh_store()
                 .await
                 .context("refresh library store after ingest")?;
+        }
+        Ok(report)
+    }
+
+    /// Glean one paper into this library through the registry-mediated
+    /// write path.
+    ///
+    /// Mirrors [`Self::ingest_book`] for the paper pipeline: holds the
+    /// per-library glean mutex for the duration of the call, opens
+    /// fresh [`Catalog`] and [`Corpus`] handles from the library's
+    /// configured paper-side paths, then forwards to
+    /// [`bookrack_glean::glean_paper`] with the paper-side warm
+    /// embedder. After a successful run the paper-side [`Library`]
+    /// rebinds its store from disk so the first paper into a previously
+    /// empty data dir lights up the read path.
+    ///
+    /// Returns an error when this handle has no papers backend attached
+    /// (`Ops::with_papers` was never called), since glean has no way to
+    /// open a corpus or run an embedder without one.
+    pub async fn glean_paper(
+        &self,
+        path: &Path,
+        params: &GleanParams,
+    ) -> anyhow::Result<GleanReport> {
+        let embedder = self
+            .ops
+            .papers_embedder()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let corpus_db = self
+            .ops
+            .papers_corpus_db()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let catalog_db = self
+            .ops
+            .papers_catalog_db()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let lancedb_dir = self
+            .ops
+            .papers_lancedb_dir()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let papers_dir = self
+            .ops
+            .papers_dir()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let _guard = self.glean_lock.lock().await;
+        let mut corpus = Corpus::open(corpus_db).context("open papers corpus for glean write")?;
+        let mut catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
+            .context("open papers catalog for glean write")?;
+        let report = bookrack_glean::glean_paper(
+            path,
+            &mut corpus,
+            &mut catalog,
+            lancedb_dir,
+            papers_dir,
+            embedder,
+            params,
+        )
+        .await
+        .context("registry-mediated glean")?;
+        if let Some(library) = self.ops.papers_library() {
+            library
+                .refresh_store()
+                .await
+                .context("refresh papers library store after glean")?;
         }
         Ok(report)
     }
@@ -336,6 +403,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use bookrack_embed::{EmbedError, Embedder};
+    use bookrack_glean::GleanParams;
     use bookrack_ingest::IngestParams;
 
     use crate::{Caller, Ops};
@@ -452,6 +520,20 @@ mod tests {
         assert!(
             msg.contains("library handle with an embedder"),
             "expected the catalog-only guard message, got: {msg}",
+        );
+    }
+
+    #[tokio::test]
+    async fn glean_paper_without_papers_backend_errors_without_running_glean() {
+        let h = handle("books");
+        let err = h
+            .glean_paper(Path::new("/does/not/exist.pdf"), &GleanParams::default())
+            .await
+            .expect_err("handle without papers backend must refuse glean");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("no papers backend"),
+            "expected the no-papers-backend guard message, got: {msg}",
         );
     }
 

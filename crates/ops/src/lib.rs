@@ -133,12 +133,30 @@ pub enum OpsError {
 /// A fallible op.
 pub type Result<T> = std::result::Result<T, OpsError>;
 
+/// Paths the paper-side stack of an [`Ops`] is configured against.
+/// Mirrors the book-side path bundle (`corpus_db`, `catalog_db`,
+/// `lancedb_dir`, `books_dir`) but for the paper pipeline.
+#[derive(Debug, Clone)]
+pub struct PapersPaths {
+    /// Path to `papers_corpus.db`.
+    pub corpus_db: PathBuf,
+    /// Path to `papers_catalog.db`.
+    pub catalog_db: PathBuf,
+    /// Directory hosting `lancedb_papers`.
+    pub lancedb_dir: PathBuf,
+    /// Opaque intake store under `<data>/papers/`.
+    pub papers_dir: PathBuf,
+}
+
 /// Warm, shareable op state.
 ///
 /// Holds the file-system paths every op needs and, optionally, a warm
 /// [`Library`] for search. The path set covers both reads (catalog,
 /// corpus, vector store) and the registry-mediated ingest write path
-/// (books staging directory, catalog backup directory).
+/// (books staging directory, catalog backup directory). The paper-side
+/// fields are populated via [`Ops::with_papers`] and remain `None` on
+/// book-only handles, so code that should never touch the paper
+/// pipeline does not pick up a paper handle by accident.
 pub struct Ops<E: Embedder> {
     library: Option<Library<E>>,
     corpus_db: PathBuf,
@@ -146,6 +164,8 @@ pub struct Ops<E: Embedder> {
     lancedb_dir: PathBuf,
     books_dir: PathBuf,
     backup_dir: PathBuf,
+    papers_library: Option<Library<E>>,
+    papers_paths: Option<PapersPaths>,
     caller: Caller,
 }
 
@@ -168,8 +188,20 @@ impl<E: Embedder> Ops<E> {
             lancedb_dir: lancedb_dir.to_path_buf(),
             books_dir,
             backup_dir,
+            papers_library: None,
+            papers_paths: None,
             caller,
         }
+    }
+
+    /// Attach a warm paper-side library and its paths to this `Ops`.
+    /// The book-side fields are unchanged; callers that should not
+    /// know about papers continue to see `papers_library() == None`
+    /// and the paper-side path getters return `None`.
+    pub fn with_papers(mut self, library: Library<E>, paths: PapersPaths) -> Self {
+        self.papers_library = Some(library);
+        self.papers_paths = Some(paths);
+        self
     }
 
     /// Build an `Ops` over the catalog and corpus only. Search ops on
@@ -192,6 +224,8 @@ impl<E: Embedder> Ops<E> {
             lancedb_dir: lancedb_dir.to_path_buf(),
             books_dir,
             backup_dir,
+            papers_library: None,
+            papers_paths: None,
             caller,
         }
     }
@@ -220,6 +254,42 @@ impl<E: Embedder> Ops<E> {
     /// was built catalog-only.
     pub(crate) fn library(&self) -> Option<&Library<E>> {
         self.library.as_ref()
+    }
+
+    /// Borrow the warm paper-side read facade, or [`None`] when no
+    /// papers backend was attached via [`Ops::with_papers`].
+    pub(crate) fn papers_library(&self) -> Option<&Library<E>> {
+        self.papers_library.as_ref()
+    }
+
+    /// Borrow the warm paper-side embedder, or [`None`] when no
+    /// papers backend was attached. The registry-level glean wrapper
+    /// pulls the embedder from here and forwards it to
+    /// [`bookrack_glean::glean_paper`].
+    pub(crate) fn papers_embedder(&self) -> Option<&E> {
+        self.papers_library.as_ref().map(Library::embedder)
+    }
+
+    /// Path to `papers_corpus.db`, when a papers backend is attached.
+    pub(crate) fn papers_corpus_db(&self) -> Option<&Path> {
+        self.papers_paths.as_ref().map(|p| p.corpus_db.as_path())
+    }
+
+    /// Path to `papers_catalog.db`, when a papers backend is attached.
+    pub(crate) fn papers_catalog_db(&self) -> Option<&Path> {
+        self.papers_paths.as_ref().map(|p| p.catalog_db.as_path())
+    }
+
+    /// Path to the `lancedb_papers` directory, when a papers backend
+    /// is attached.
+    pub(crate) fn papers_lancedb_dir(&self) -> Option<&Path> {
+        self.papers_paths.as_ref().map(|p| p.lancedb_dir.as_path())
+    }
+
+    /// Path to the opaque intake store at `<data>/papers/`, when a
+    /// papers backend is attached.
+    pub(crate) fn papers_dir(&self) -> Option<&Path> {
+        self.papers_paths.as_ref().map(|p| p.papers_dir.as_path())
     }
 
     pub(crate) fn corpus_db(&self) -> &Path {
