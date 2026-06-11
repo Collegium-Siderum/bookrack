@@ -8,20 +8,24 @@ repository.workspace = true
 [dependencies]
 bookrack-config = { path = "../config" }
 bookrack-audit-profile.workspace = true
+# `ExtractionEnvelope.captured_at` is a wall-clock RFC 3339 timestamp.
+chrono.workspace = true
 encoding_rs.workspace = true
 pdfium-render.workspace = true
 rbook.workspace = true
 scraper.workspace = true
 serde.workspace = true
+# JSON encoding for the envelope module hoisted from ingest.
+serde_json.workspace = true
+# Atomic write of the envelope file via a same-dir tempfile + rename.
+tempfile.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 # Also a normal dependency above; the TXT test re-encodes a fixture to
 # GB18030 to exercise the legacy-encoding decode path.
 encoding_rs.workspace = true
-serde_json.workspace = true
 # Hashes Cargo.lock entries for behaviour-sensitive crates in the
 # dep-hash anchor test.
 sha2.workspace = true
-tempfile.workspace = true
 zip.workspace = true

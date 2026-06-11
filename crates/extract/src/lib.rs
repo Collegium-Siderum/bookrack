@@ -12,6 +12,7 @@
 
 mod contract;
 mod detect;
+pub mod envelope;
 mod epub;
 mod headings;
 mod html;
@@ -23,6 +24,10 @@ mod quality;
 mod txt;
 
 pub use contract::*;
+pub use envelope::{
+    ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
+    envelope_filename, read_envelope, write_envelope,
+};
 
 use std::path::Path;
 

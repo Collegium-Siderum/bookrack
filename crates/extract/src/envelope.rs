@@ -16,11 +16,10 @@ use std::fs::{self, File};
 use std::io::{self, BufReader};
 use std::path::Path;
 
-use bookrack_extract::Extraction;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
-use crate::embed_run::now_rfc3339;
+use crate::Extraction;
 
 /// The current envelope schema version. v2 changed
 /// `extraction.provenance.extractor_version` from a per-adapter string
@@ -75,7 +74,7 @@ pub fn write_envelope(
         schema_version: ENVELOPE_SCHEMA_VERSION,
         intake_id,
         source_sha256: source_sha256.to_owned(),
-        captured_at: now_rfc3339(),
+        captured_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         extraction: extraction.clone(),
     };
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -103,9 +102,7 @@ pub fn read_envelope(path: &Path) -> Result<ExtractionEnvelope, EnvelopeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookrack_extract::{
-        Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc,
-    };
+    use crate::{Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc};
     use tempfile::tempdir;
 
     fn sample_extraction() -> Extraction {

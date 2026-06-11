@@ -13,7 +13,7 @@ use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc};
-use bookrack_ingest::{envelope_filename, write_envelope};
+use bookrack_extract::{envelope_filename, write_envelope};
 use bookrack_ops::reads::metadata::show_metadata_report;
 use bookrack_ops::{AuditData, AuditProfile, Caller, Ops, OpsError};
 use tempfile::TempDir;

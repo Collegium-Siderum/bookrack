@@ -24,8 +24,8 @@ use bookrack_corpus::Corpus;
 use bookrack_extract::EXTRACTOR_VERSION;
 use bookrack_vectors::ChunkStore;
 
-use crate::envelope::{self, EnvelopeError};
 use crate::{IngestError, Result, StructureParams, current_index_stamps, ingest_structure};
+use bookrack_extract::envelope::{self, EnvelopeError};
 
 /// Per-intake outcome bucket the driver fills in.
 #[derive(Debug, Clone, Default)]
@@ -207,7 +207,7 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    use crate::envelope::{envelope_filename, write_envelope};
+    use bookrack_extract::envelope::{envelope_filename, write_envelope};
 
     fn sample_extraction() -> Extraction {
         Extraction {

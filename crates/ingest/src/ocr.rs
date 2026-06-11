@@ -35,11 +35,11 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
 
-use crate::envelope;
 use crate::{
     IngestError, IngestParams, Result, ingest_structure, new_run_id, resume_from_chunk,
     run_metadata_substep, set_state, sha256_hex,
 };
+use bookrack_extract::envelope;
 
 /// Parameters that shape one [`ingest_ocr_intake`] run.
 #[derive(Debug, Clone, Default)]
@@ -412,7 +412,7 @@ fn ocr_noop_if_up_to_date(
         Some(p) => Path::new(p).to_path_buf(),
         None => return Ok(None),
     };
-    let envelope = match crate::envelope::read_envelope(&stored_path) {
+    let envelope = match bookrack_extract::envelope::read_envelope(&stored_path) {
         Ok(env) => env,
         Err(_) => return Ok(None),
     };
@@ -709,7 +709,7 @@ mod tests {
         // The envelope's body round-trips: opening it returns an
         // ExtractionEnvelope whose extraction equals the in-memory one,
         // and whose source_sha256 is the OCR markdown's hash.
-        let env = crate::envelope::read_envelope(envelope_path).expect("read envelope");
+        let env = bookrack_extract::envelope::read_envelope(envelope_path).expect("read envelope");
         assert_eq!(env.intake_id, report.ocr_intake_id);
         assert_eq!(env.source_sha256, report.source_sha_ocr);
         assert_eq!(env.extraction, report.extraction);

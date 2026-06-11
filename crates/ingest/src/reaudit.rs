@@ -23,10 +23,10 @@ use bookrack_catalog::{Catalog, Intake};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_metadata::{AuditData, AuditProfile};
 
-use crate::envelope::{self, EnvelopeError};
 use crate::{
     IngestError, Result, audit_as, audit_metric_summary, body_sample, maintenance_run_id, structure,
 };
+use bookrack_extract::envelope::{self, EnvelopeError};
 
 /// What one [`reaudit_book`] call computed and stored.
 #[derive(Debug, Clone)]
@@ -181,7 +181,7 @@ mod tests {
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc,
     };
 
-    use crate::envelope::{envelope_filename, write_envelope};
+    use bookrack_extract::envelope::{envelope_filename, write_envelope};
 
     fn sample_extraction() -> Extraction {
         Extraction {

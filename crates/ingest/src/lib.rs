@@ -17,7 +17,6 @@
 mod chunk;
 mod dryrun;
 mod embed_run;
-pub mod envelope;
 pub mod ocr;
 pub mod reaudit;
 pub mod rebuild;
@@ -33,10 +32,6 @@ pub use dryrun::{
     StructureOut, TocStatsOut, collect_files, dryrun_book, dryrun_path, summarize,
 };
 pub use embed_run::{EmbedRunReport, embed_book_chunks, now_rfc3339};
-pub use envelope::{
-    ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
-    envelope_filename, read_envelope, write_envelope,
-};
 
 use std::path::Path;
 
@@ -170,7 +165,7 @@ pub enum IngestError {
 
     /// The intake-store envelope exists but could not be decoded.
     #[error("intake-store envelope unreadable")]
-    Envelope(#[from] envelope::EnvelopeError),
+    Envelope(#[from] bookrack_extract::EnvelopeError),
 
     /// A reembed target intake is not in the `Embedded` lifecycle state,
     /// so its chunks are not on disk to reembed.
@@ -505,8 +500,8 @@ pub async fn ingest_book<E: Embedder>(
     // store and record its path in `intake.stored_path`. Failure is
     // logged but not fatal: the envelope is a rebuild cache, not the
     // source of truth.
-    let envelope_path = books_dir.join(envelope::envelope_filename(intake_id));
-    match envelope::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
+    let envelope_path = books_dir.join(bookrack_extract::envelope_filename(intake_id));
+    match bookrack_extract::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
         Ok(()) => {
             if let Err(err) =
                 catalog.set_stored_path(intake_id, envelope_path.to_string_lossy().as_ref())
@@ -1962,6 +1957,7 @@ mod book_pipeline_tests {
     use super::*;
     use bookrack_core::PartitionIdx;
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
+    use bookrack_extract::{ENVELOPE_SCHEMA_VERSION, envelope_filename, read_envelope};
     use std::future::Future;
     use std::io::Write;
 
