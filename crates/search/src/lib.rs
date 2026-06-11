@@ -74,10 +74,15 @@ pub struct Citation {
     /// The passage text to display.
     pub text: String,
     /// A `Book \u{203a} Chapter \u{203a} Section` trail of titled
-    /// ancestors; empty when no ancestor carries a title.
+    /// ancestors for a book, or `Container \u{203a} Title` for a
+    /// paper. Empty when no ancestor carries a title.
     pub breadcrumb: String,
-    /// The book the passage belongs to, by catalog intake id.
+    /// The item the passage belongs to, by catalog intake id.
     pub intake_id: i64,
+    /// Which pipeline produced the indexed source — `Book` for the
+    /// ingest pipeline, `Paper` for the glean pipeline. Surfaces as
+    /// `"book"` / `"paper"` in JSON.
+    pub kind: ItemKind,
     /// Document-order position of the passage's start leaf within its
     /// book; `None` when the leaf carries no position.
     pub toc_position: Option<i64>,
@@ -147,7 +152,7 @@ pub async fn search_with<E: Embedder>(
     top_k: usize,
 ) -> Result<Vec<Citation>> {
     let hits = retrieve_with(query, store, embedder, lancedb_dir, overrides, top_k).await?;
-    cite(corpus, catalog, hits)
+    cite(corpus, catalog, hits, ItemKind::Book)
 }
 
 /// Embed `query` and recall the `top_k` nearest passages from the vector
@@ -307,18 +312,29 @@ fn options_from_meta(store: &ChunkStore, lancedb_dir: &Path) -> Result<SearchOpt
 }
 
 /// Resolve a citation breadcrumb for each hit from `corpus` (the
-/// structural ancestors) and `catalog` (the effective book title).
-/// The synchronous half of a search: no awaits, so a caller can open
-/// short-lived corpus and catalog handles here without holding them
-/// across an await.
-pub fn cite(corpus: &Corpus, catalog: &Catalog, hits: Vec<SearchHit>) -> Result<Vec<Citation>> {
+/// structural ancestors) and `catalog` (the effective publication
+/// title). `kind` selects how the breadcrumb is built: `Book` walks
+/// the chapter/section trail; `Paper` joins the container title and
+/// the paper title in two segments. The synchronous half of a search:
+/// no awaits, so a caller can open short-lived corpus and catalog
+/// handles here without holding them across an await.
+pub fn cite(
+    corpus: &Corpus,
+    catalog: &Catalog,
+    hits: Vec<SearchHit>,
+    kind: ItemKind,
+) -> Result<Vec<Citation>> {
     let breadcrumb_started = Instant::now();
     let mut citations = Vec::with_capacity(hits.len());
     for hit in hits {
-        let context = leaf_context(corpus, catalog, hit.start_node_id)?;
+        let context = match kind {
+            ItemKind::Book => leaf_context(corpus, catalog, hit.start_node_id)?,
+            ItemKind::Paper => paper_context(corpus, catalog, hit.start_node_id)?,
+        };
         citations.push(Citation {
             breadcrumb: context.breadcrumb,
             intake_id: hit.start_node_id.partition().get(),
+            kind,
             toc_position: context.toc_position,
             enclosing_node_id: context.enclosing_node_id,
             text: hit.text,
@@ -421,6 +437,118 @@ fn leaf_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Re
     })
 }
 
+/// Build the breadcrumb for a paper hit. Papers have a flat shape — one
+/// Work root plus a single prose leaf — so the trail collapses to two
+/// segments: the container title (journal or proceedings) and the
+/// paper's own title. Both are sourced from `catalog`'s effective
+/// publication-attrs view, so a post-hoc edit reflects in the next
+/// breadcrumb. The title falls back through the intake filename stem
+/// to `paper #<intake_id>` so a citation is never indistinguishable
+/// across papers. The container segment is dropped when no container
+/// is known. The walk still yields the leaf's document-order position
+/// and its nearest organizing ancestor — the Work root.
+fn paper_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Result<LeafContext> {
+    let mut toc_position = None;
+    let mut enclosing_node_id = None;
+    let mut current = Some(start_node_id);
+    let mut intake_id = start_node_id.partition().get();
+    while let Some(id) = current {
+        let Some(node) = corpus.get_node(id)? else {
+            break;
+        };
+        if id == start_node_id {
+            toc_position = node.toc_lo;
+        }
+        if enclosing_node_id.is_none() && node.node_type.is_organizing() {
+            enclosing_node_id = Some(id);
+        }
+        if node.parent_id.is_none() {
+            intake_id = id.partition().get();
+        }
+        current = node.parent_id;
+    }
+    let effective = catalog.effective_publication_attrs(intake_id, ItemKind::Paper)?;
+    let container = effective.get("container_title").map(str::to_string);
+    let title = match effective.get("title").map(str::to_string) {
+        Some(t) => t,
+        None => filename_stem_for(catalog, intake_id)?
+            .unwrap_or_else(|| format!("paper #{intake_id}")),
+    };
+    let segments: Vec<String> = container.into_iter().chain(std::iter::once(title)).collect();
+    Ok(LeafContext {
+        breadcrumb: segments.join(BREADCRUMB_SEP),
+        toc_position,
+        enclosing_node_id,
+    })
+}
+
+/// One side of a [`search_unified`] call: the four read handles a
+/// store needs to embed-recall a hit and resolve its breadcrumb. The
+/// caller borrows from a warm [`bookrack_query::Library`] for the
+/// books side and another for the papers side.
+#[derive(Clone, Copy)]
+pub struct UnifiedSide<'a> {
+    pub corpus: &'a Corpus,
+    pub catalog: &'a Catalog,
+    pub store: &'a ChunkStore,
+    pub lancedb_dir: &'a Path,
+}
+
+/// Retrieve from both the books and papers stores and merge the top-k
+/// passages by ascending distance, resolving each hit's breadcrumb on
+/// the store it came from.
+///
+/// Each side runs an independent [`retrieve_with`] at `top_k`, so the
+/// merge sees up to `2 * top_k` candidates before truncation; the
+/// final list is `top_k` long.
+pub async fn search_unified<E: Embedder>(
+    query: &str,
+    books: UnifiedSide<'_>,
+    papers: UnifiedSide<'_>,
+    embedder: &E,
+    overrides: SearchOptions,
+    top_k: usize,
+) -> Result<Vec<Citation>> {
+    let book_hits = retrieve_with(
+        query,
+        books.store,
+        embedder,
+        books.lancedb_dir,
+        overrides.clone(),
+        top_k,
+    )
+    .await?;
+    let paper_hits = retrieve_with(
+        query,
+        papers.store,
+        embedder,
+        papers.lancedb_dir,
+        overrides,
+        top_k,
+    )
+    .await?;
+    let mut tagged: Vec<(ItemKind, SearchHit)> =
+        Vec::with_capacity(book_hits.len() + paper_hits.len());
+    tagged.extend(book_hits.into_iter().map(|h| (ItemKind::Book, h)));
+    tagged.extend(paper_hits.into_iter().map(|h| (ItemKind::Paper, h)));
+    tagged.sort_by(|a, b| {
+        a.1.distance
+            .partial_cmp(&b.1.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    tagged.truncate(top_k);
+    let mut citations = Vec::with_capacity(tagged.len());
+    for (kind, hit) in tagged {
+        let (corpus, catalog) = match kind {
+            ItemKind::Book => (books.corpus, books.catalog),
+            ItemKind::Paper => (papers.corpus, papers.catalog),
+        };
+        let mut single = cite(corpus, catalog, vec![hit], kind)?;
+        citations.append(&mut single);
+    }
+    Ok(citations)
+}
+
 /// Look up the intake's filename stem from `original_path`, returning
 /// `Ok(None)` when the column is empty or the path has no usable base
 /// component. Errors bubble through unchanged so the breadcrumb walker
@@ -514,6 +642,7 @@ mod tests {
             text: "hello".to_string(),
             breadcrumb: "Book \u{203a} Chapter".to_string(),
             intake_id: 1,
+            kind: ItemKind::Book,
             toc_position: Some(7),
             enclosing_node_id: Some(NodeId::new(100_000_000)),
             start_node_id: NodeId::new(100_000_001),
@@ -528,6 +657,7 @@ mod tests {
         assert_eq!(value["start_node_id"], serde_json::json!(100_000_001));
         assert_eq!(value["enclosing_node_id"], serde_json::json!(100_000_000));
         assert_eq!(value["intake_id"], 1);
+        assert_eq!(value["kind"], "book");
         assert_eq!(value["toc_position"], 7);
         assert_eq!(value["text"], "hello");
         assert_eq!(value["distance"], 0.25);
@@ -861,5 +991,188 @@ mod tests {
             .await
             .expect("search");
         assert_eq!(hits[0].breadcrumb, "Revised \u{203a} Chapter One");
+    }
+
+    /// Build a one-Work-root + one-Paragraph-leaf paper tree in a tempdir,
+    /// stamp the optional container / title onto its catalog row, and
+    /// append one chunk into a fresh vector store. The structural layout
+    /// matches what [`bookrack_glean::glean_paper`] writes for a paper.
+    async fn paper_fixture(
+        intake_id: i64,
+        container: Option<&str>,
+        title: Option<&str>,
+    ) -> (tempfile::TempDir, Corpus, Catalog, ChunkStore, NodeId) {
+        use bookrack_corpus::NewNode;
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let partition_idx = PartitionIdx::new(intake_id);
+        let partition = corpus
+            .allocate_partition(intake_id)
+            .expect("allocate partition");
+        let work_node_id = partition.book_root_id;
+        let leaf_id = corpus
+            .allocate_node_ids(partition_idx, 1)
+            .expect("allocate leaf id")[0];
+        let leaf_text = "Synthetic abstract body.".to_string();
+        let nodes = vec![
+            NewNode::root(work_node_id, NodeType::Work),
+            NewNode::child(
+                leaf_id,
+                work_node_id,
+                work_node_id,
+                0,
+                1,
+                NodeType::Paragraph,
+            )
+            .text(leaf_text.clone())
+            .text_stats(leaf_text.chars().count() as i64, 0)
+            .toc_span(0, 0)
+            .content_hashes(
+                format!("intake:{intake_id}:abstract"),
+                "deadbeef".to_string(),
+                "cafebabe".to_string(),
+            ),
+        ];
+        corpus.insert_nodes(&nodes).expect("insert nodes");
+
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        if container.is_some() || title.is_some() {
+            let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+            attrs.title = title.map(str::to_string);
+            attrs.container_title = container.map(str::to_string);
+            catalog
+                .upsert_publication_attrs(&attrs)
+                .expect("seed paper attrs");
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = ChunkStore::open(dir.path(), DIM).await.expect("store");
+        store
+            .append(&[ChunkRow {
+                vector: vec![1.0, 0.0, 0.0, 0.0],
+                text: leaf_text,
+                start_node_id: leaf_id,
+                start_char_offset: 0,
+                end_node_id: leaf_id,
+                end_char_offset: 24,
+                norm_chunk_sha256: "sha".to_string(),
+            }])
+            .await
+            .expect("append");
+        (dir, corpus, catalog, store, leaf_id)
+    }
+
+    #[tokio::test]
+    async fn paper_breadcrumb_combines_container_and_title() {
+        let (dir, corpus, catalog, store, leaf_id) =
+            paper_fixture(1, Some("Synthetic Journal"), Some("On Test Spaces")).await;
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = retrieve_with(
+            "anything",
+            &store,
+            &query,
+            dir.path(),
+            Default::default(),
+            5,
+        )
+        .await
+        .expect("retrieve");
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Paper).expect("cite");
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].kind, ItemKind::Paper);
+        assert_eq!(
+            citations[0].breadcrumb,
+            "Synthetic Journal \u{203a} On Test Spaces"
+        );
+        assert_eq!(citations[0].start_node_id, leaf_id);
+    }
+
+    #[tokio::test]
+    async fn paper_breadcrumb_drops_container_when_absent() {
+        let (dir, corpus, catalog, store, _) = paper_fixture(1, None, Some("On Test Spaces")).await;
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = retrieve_with(
+            "anything",
+            &store,
+            &query,
+            dir.path(),
+            Default::default(),
+            5,
+        )
+        .await
+        .expect("retrieve");
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Paper).expect("cite");
+        assert_eq!(citations[0].breadcrumb, "On Test Spaces");
+    }
+
+    #[tokio::test]
+    async fn paper_breadcrumb_falls_back_to_paper_id_when_no_title() {
+        let (dir, corpus, catalog, store, _) = paper_fixture(7, None, None).await;
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let hits = retrieve_with(
+            "anything",
+            &store,
+            &query,
+            dir.path(),
+            Default::default(),
+            5,
+        )
+        .await
+        .expect("retrieve");
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Paper).expect("cite");
+        assert_eq!(citations[0].breadcrumb, "paper #7");
+    }
+
+    #[tokio::test]
+    async fn search_unified_merges_book_and_paper_hits_with_kind() {
+        let (book_dir, book_corpus, book_catalog, book_store, _) =
+            fixture(Some("A Test Book"), true).await;
+        let (paper_dir, paper_corpus, paper_catalog, paper_store, _) =
+            paper_fixture(1, Some("Synthetic Journal"), Some("On Test Spaces")).await;
+        let query = FixedQuery {
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+        };
+        let citations = search_unified(
+            "anything",
+            UnifiedSide {
+                corpus: &book_corpus,
+                catalog: &book_catalog,
+                store: &book_store,
+                lancedb_dir: book_dir.path(),
+            },
+            UnifiedSide {
+                corpus: &paper_corpus,
+                catalog: &paper_catalog,
+                store: &paper_store,
+                lancedb_dir: paper_dir.path(),
+            },
+            &query,
+            Default::default(),
+            5,
+        )
+        .await
+        .expect("search_unified");
+        assert_eq!(citations.len(), 2, "one hit per store");
+        let kinds: Vec<ItemKind> = citations.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&ItemKind::Book));
+        assert!(kinds.contains(&ItemKind::Paper));
+        let paper = citations
+            .iter()
+            .find(|c| c.kind == ItemKind::Paper)
+            .expect("paper hit");
+        assert_eq!(
+            paper.breadcrumb,
+            "Synthetic Journal \u{203a} On Test Spaces"
+        );
+        let book = citations
+            .iter()
+            .find(|c| c.kind == ItemKind::Book)
+            .expect("book hit");
+        assert!(book.breadcrumb.contains("A Test Book"));
     }
 }

@@ -544,7 +544,7 @@ fn build_structure(
     let partition = corpus.allocate_partition(intake_id)?;
     let work_node_id = partition.book_root_id;
     let mut nodes = Vec::with_capacity(2);
-    nodes.push(NewNode::root(work_node_id, NodeType::Work).title("paper root"));
+    nodes.push(NewNode::root(work_node_id, NodeType::Work));
 
     let (leaf_node_id, leaf_text) = if let Some(text) = abstract_text {
         let trimmed = text.trim().to_string();

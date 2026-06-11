@@ -246,7 +246,7 @@ impl<E: Embedder> Library<E> {
         .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let citations = cite(&corpus, &catalog, hits)?;
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Book)?;
         Ok(citations)
     }
 
@@ -294,7 +294,7 @@ impl<E: Embedder> Library<E> {
         .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let citations = cite(&corpus, &catalog, hits)?;
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Book)?;
         Ok(citations)
     }
 

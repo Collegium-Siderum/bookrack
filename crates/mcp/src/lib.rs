@@ -1563,6 +1563,7 @@ pub fn list_tools() -> Vec<bookrack_runtime::control::methods::meta::McpToolInfo
 
 #[cfg(test)]
 mod tests {
+    use bookrack_core::ItemKind;
     use bookrack_ops::Citation;
     use bookrack_ops::dto::{
         BookDetail, BookSummary, ContextWindow, ContributorEntry, LibraryStats, ListBooksResult,
@@ -1575,6 +1576,7 @@ mod tests {
             text: "passage".to_string(),
             breadcrumb: "A Test Book \u{203a} Chapter One".to_string(),
             intake_id: NodeId::new(node).partition().get(),
+            kind: ItemKind::Book,
             toc_position: Some(0),
             enclosing_node_id: Some(NodeId::new(node).partition().root()),
             start_node_id: NodeId::new(node),
