@@ -169,6 +169,30 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "read",
     },
     MethodSignature {
+        name: "library.list_papers",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.find_papers",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_paper",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_paper_toc",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.search_in_paper",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "papers.export_csl",
+        kind: "read",
+    },
+    MethodSignature {
         name: "library.vectors_status",
         kind: "read",
     },
@@ -337,6 +361,12 @@ mod tests {
             "library.show_pipeline_trail",
             "library.search",
             "library.search_in_book",
+            "library.list_papers",
+            "library.find_papers",
+            "library.show_paper",
+            "library.show_paper_toc",
+            "library.search_in_paper",
+            "papers.export_csl",
             "library.vectors_status",
         ] {
             let entry = REGISTRY

@@ -175,3 +175,34 @@ pub fn show_paper_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Toc> 
         }
     )
 }
+
+/// Project one paper's base bibliographic row + contributors onto a
+/// CSL-JSON item. The export is committed-row only: human overrides
+/// are not merged in, because the CSL adapter operates on the
+/// catalog's `PublicationAttrs` struct.
+///
+/// Returns [`OpsError::IntakeNotFound`] when no such intake is
+/// registered on the paper catalog, or
+/// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
+/// has no papers backend.
+pub fn export_csl<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<bookrack_catalog::CslItem> {
+    record_call_sync!(
+        ops,
+        "papers.export_csl",
+        serde_json::json!({ "intake_id": intake_id }),
+        {
+            let papers_db = ops
+                .papers_catalog_db()
+                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let catalog = Catalog::open_read_only(papers_db)?;
+            if catalog.intake_by_id(intake_id)?.is_none() {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            }
+            let Some(attrs) = catalog.publication_attrs(intake_id, ItemKind::Paper)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
+            let contributors = catalog.contributors_for_address(intake_id, ItemKind::Paper)?;
+            Ok(bookrack_catalog::csl_from_catalog(&attrs, &contributors))
+        }
+    )
+}

@@ -179,6 +179,29 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "library.search_in_book" => Ok(DispatchOutcome::Result(
             reads_library::search_in_book(&req.params, ctx).await?,
         )),
+        "library.list_papers" => Ok(DispatchOutcome::Result(reads_library::list_papers(
+            &req.params,
+            ctx,
+        )?)),
+        "library.find_papers" => Ok(DispatchOutcome::Result(reads_library::find_papers(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_paper" => Ok(DispatchOutcome::Result(reads_library::show_paper(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_paper_toc" => Ok(DispatchOutcome::Result(reads_library::show_paper_toc(
+            &req.params,
+            ctx,
+        )?)),
+        "library.search_in_paper" => Ok(DispatchOutcome::Result(
+            reads_library::search_in_paper(&req.params, ctx).await?,
+        )),
+        "papers.export_csl" => Ok(DispatchOutcome::Result(reads_library::papers_export_csl(
+            &req.params,
+            ctx,
+        )?)),
         "library.vectors_status" => Ok(DispatchOutcome::Result(
             reads_library::vectors_status(&req.params, ctx).await?,
         )),

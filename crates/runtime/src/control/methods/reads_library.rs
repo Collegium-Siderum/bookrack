@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::BookFilter;
+use bookrack_ops::dto::{BookFilter, PaperFilter};
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{OpsError, SearchOptions, reads};
 use serde::Deserialize;
@@ -80,6 +80,11 @@ pub struct SearchParams {
     pub refine_factor: Option<u32>,
     #[serde(default)]
     pub library: Option<String>,
+    /// Which side of the library to search: `"book"` (the default —
+    /// existing behaviour), `"paper"` (only the paper-side store), or
+    /// `"all"` (both stores, merged by ascending distance).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 impl SearchParams {
@@ -106,6 +111,52 @@ pub struct SearchInBookParams {
     pub refine_factor: Option<u32>,
     #[serde(default)]
     pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FindPapersParams {
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    #[serde(default)]
+    pub contributor_name: Option<String>,
+    #[serde(default)]
+    pub year: Option<String>,
+    #[serde(default)]
+    pub venue_substring: Option<String>,
+    #[serde(default)]
+    pub doi: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchInPaperParams {
+    pub intake_id: i64,
+    pub query: String,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub bypass_index: bool,
+    #[serde(default)]
+    pub nprobes: Option<usize>,
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+impl SearchInPaperParams {
+    fn overrides(&self) -> SearchOptions {
+        SearchOptions {
+            bypass_index: self.bypass_index,
+            nprobes: self.nprobes,
+            refine_factor: self.refine_factor,
+        }
+    }
 }
 
 impl SearchInBookParams {
@@ -338,10 +389,27 @@ pub async fn search(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     let p: SearchParams = parse(params, "library.search")?;
     let handle = resolve(ctx, p.library.as_deref())?;
     let overrides = p.overrides();
-    let hits = reads::search::search(handle.ops(), &p.query, overrides, p.top_k)
-        .await
-        .map_err(ops_internal)?;
-    tracing::info!(hits = hits.len(), "control library.search");
+    let kind = p.kind.as_deref().unwrap_or("book");
+    let hits = match kind {
+        "book" => reads::search::search(handle.ops(), &p.query, overrides, p.top_k)
+            .await
+            .map_err(ops_internal)?,
+        "paper" => reads::search::search_paper(handle.ops(), &p.query, overrides, p.top_k)
+            .await
+            .map_err(ops_internal)?,
+        "all" => reads::search::search_unified(handle.ops(), &p.query, overrides, p.top_k)
+            .await
+            .map_err(ops_internal)?,
+        other => {
+            return Err(RpcError::new(
+                INVALID_PARAMS,
+                format!(
+                    "library.search: kind={other:?} is not one of \"book\", \"paper\", \"all\""
+                ),
+            ));
+        }
+    };
+    tracing::info!(kind = kind, hits = hits.len(), "control library.search");
     to_value(&hits)
 }
 
@@ -361,6 +429,85 @@ pub async fn search_in_book(
             let empty: Vec<bookrack_ops::Citation> = Vec::new();
             to_value(&empty)
         }
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: PageParams = parse(params, "library.list_papers")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let page =
+        reads::papers::list_papers(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
+            .map_err(ops_internal)?;
+    to_value(&page)
+}
+
+pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: FindPapersParams = parse(params, "library.find_papers")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let filter = PaperFilter {
+        title_substring: p.title_substring,
+        contributor_name: p.contributor_name,
+        year: p.year,
+        venue_substring: p.venue_substring,
+        doi: p.doi,
+    };
+    let page = reads::papers::find_papers(
+        handle.ops(),
+        filter,
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
+    to_value(&page)
+}
+
+pub fn show_paper(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "library.show_paper")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers::show_paper(handle.ops(), p.intake_id) {
+        Ok(detail) => to_value(&Some(detail)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn show_paper_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "library.show_paper_toc")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers::show_paper_toc(handle.ops(), p.intake_id) {
+        Ok(toc) => to_value(&Some(toc)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub async fn search_in_paper(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: SearchInPaperParams = parse(params, "library.search_in_paper")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let overrides = p.overrides();
+    let result =
+        reads::search::search_in_paper(handle.ops(), p.intake_id, &p.query, overrides, p.top_k)
+            .await;
+    match result {
+        Ok(hits) => to_value(&hits),
+        Err(OpsError::IntakeNotFound { .. }) => {
+            let empty: Vec<bookrack_ops::Citation> = Vec::new();
+            to_value(&empty)
+        }
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn papers_export_csl(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "papers.export_csl")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers::export_csl(handle.ops(), p.intake_id) {
+        Ok(item) => to_value(&item),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
         Err(e) => Err(ops_internal(e)),
     }
 }
@@ -431,6 +578,7 @@ mod tests {
             nprobes: Some(8),
             refine_factor: Some(3),
             library: None,
+            kind: None,
         };
         let opts = p.overrides();
         assert!(opts.bypass_index);
