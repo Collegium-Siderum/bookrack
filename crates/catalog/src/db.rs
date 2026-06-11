@@ -93,7 +93,12 @@ impl Catalog {
     /// [`CatalogError::SchemaTooNew`] if the file was written by a newer
     /// schema revision than this binary understands.
     pub fn open_with_backup(path: &Path, backup_dir: &Path) -> Result<Catalog> {
-        Catalog::from_connection(Connection::open(path)?, Some(backup_dir))
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("catalog")
+            .to_string();
+        Catalog::from_connection(Connection::open(path)?, Some((backup_dir, stem.as_str())))
     }
 
     /// Open an ephemeral, private `catalog.db` held entirely in memory.
@@ -109,7 +114,7 @@ impl Catalog {
     /// given and it already holds data) and migrated forward, and one
     /// already current opens unchanged. After migrating, the live schema
     /// is verified against the specs and the version mirror is rewritten.
-    fn from_connection(mut conn: Connection, backup_dir: Option<&Path>) -> Result<Catalog> {
+    fn from_connection(mut conn: Connection, backup: Option<(&Path, &str)>) -> Result<Catalog> {
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         match decide(current) {
             OpenDecision::Refuse { .. } => {
@@ -122,10 +127,10 @@ impl Catalog {
                 // Snapshot only a file-backed database that already holds
                 // data and is about to be migrated. A fresh or in-memory
                 // database has nothing worth saving.
-                if let Some(dir) = backup_dir
+                if let Some((dir, stem)) = backup
                     && has_user_tables(&conn)?
                 {
-                    backup_catalog(&conn, dir, current)?;
+                    backup_catalog(&conn, dir, stem, current)?;
                 }
                 // Foreign keys are toggled around the migration, not
                 // inside it: a future 12-step table rebuild needs them
@@ -290,33 +295,34 @@ fn has_user_tables(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(count > 0)
 }
 
-/// Snapshot the catalog database into `dir` with `VACUUM INTO`, naming the
-/// file with a Zulu timestamp and the version it is migrating from, then
-/// prune all but the newest [`BACKUP_KEEP`] backups.
-fn backup_catalog(conn: &Connection, dir: &Path, from_version: i64) -> Result<()> {
+/// Snapshot the catalog database into `dir` with `VACUUM INTO`, naming
+/// the file with the source database's stem, a Zulu timestamp and the
+/// version it is migrating from, then prune all but the newest
+/// [`BACKUP_KEEP`] backups in the same prefix cluster. Sharing a
+/// directory between two catalog databases (e.g. `catalog.db` and
+/// `papers_catalog.db`) is safe: each prunes only its own snapshots.
+fn backup_catalog(conn: &Connection, dir: &Path, db_stem: &str, from_version: i64) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    // Timestamp first so a lexical sort of the filenames is chronological.
-    // ':' is replaced because it is not portable in filenames.
     let ts = now_iso_from(conn)?.replace(':', "-");
-    let path = dir.join(format!("catalog-{ts}-from-v{from_version}.bak"));
-    // VACUUM INTO takes no bind parameters; escape any single quote in the
-    // path so it cannot break out of the SQL string literal.
+    let path = dir.join(format!("{db_stem}-{ts}-from-v{from_version}.bak"));
     let target = path.display().to_string().replace('\'', "''");
     conn.execute(&format!("VACUUM INTO '{target}'"), [])?;
-    prune_old_backups(dir, BACKUP_KEEP)?;
+    prune_old_backups(dir, db_stem, BACKUP_KEEP)?;
     Ok(())
 }
 
-/// Keep the `keep` newest catalog backups in `dir`, deleting the rest.
-/// Backup filenames lead with a sortable timestamp, so lexical order is
-/// chronological.
-fn prune_old_backups(dir: &Path, keep: usize) -> Result<()> {
+/// Keep the `keep` newest backups whose filename leads with
+/// `<db_stem>-` in `dir`, deleting the rest. Backup filenames embed a
+/// sortable timestamp after the stem prefix, so lexical order within
+/// one cluster is chronological.
+fn prune_old_backups(dir: &Path, db_stem: &str, keep: usize) -> Result<()> {
+    let prefix = format!("{db_stem}-");
     let mut backups: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("catalog-") && name.ends_with(".bak"))
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".bak"))
         })
         .collect();
     backups.sort();
@@ -497,7 +503,7 @@ mod tests {
             let name = format!("catalog-2026-05-31T00-00-0{i}Z-from-v0.bak");
             std::fs::write(dir.join(name), b"x").expect("write backup");
         }
-        prune_old_backups(&dir, 5).expect("prune");
+        prune_old_backups(&dir, "catalog", 5).expect("prune");
         let mut remaining: Vec<String> = std::fs::read_dir(&dir)
             .expect("read dir")
             .filter_map(|e| e.ok())
@@ -512,6 +518,60 @@ mod tests {
                 .all(|n| !n.contains("-00Z-") && !n.contains("-01Z-"))
         );
         assert!(remaining.iter().any(|n| n.contains("-06Z-")));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn pruning_only_touches_its_own_prefix_cluster() {
+        // Two catalog databases sharing a backup directory must each
+        // keep `BACKUP_KEEP` of their own snapshots without evicting
+        // the other's. The fixture seeds seven backups per prefix.
+        let dir = unique_dir("prune-cluster");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for prefix in ["catalog", "papers_catalog"] {
+            for i in 0..7 {
+                let name = format!("{prefix}-2026-05-31T00-00-0{i}Z-from-v0.bak");
+                std::fs::write(dir.join(name), b"x").expect("write backup");
+            }
+        }
+        prune_old_backups(&dir, "catalog", 5).expect("prune catalog");
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let catalog: Vec<&String> = remaining
+            .iter()
+            .filter(|n| n.starts_with("catalog-"))
+            .collect();
+        let papers: Vec<&String> = remaining
+            .iter()
+            .filter(|n| n.starts_with("papers_catalog-"))
+            .collect();
+        assert_eq!(catalog.len(), 5, "pruning catalog must keep five");
+        assert_eq!(
+            papers.len(),
+            7,
+            "the papers cluster must not be touched by pruning catalog"
+        );
+
+        prune_old_backups(&dir, "papers_catalog", 5).expect("prune papers_catalog");
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let catalog: Vec<&String> = remaining
+            .iter()
+            .filter(|n| n.starts_with("catalog-"))
+            .collect();
+        let papers: Vec<&String> = remaining
+            .iter()
+            .filter(|n| n.starts_with("papers_catalog-"))
+            .collect();
+        assert_eq!(catalog.len(), 5, "the catalog cluster must remain intact");
+        assert_eq!(papers.len(), 5, "pruning papers_catalog must keep five");
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
