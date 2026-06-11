@@ -10,7 +10,9 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::audit::AuditTrailEntry;
-use crate::dto::metadata_report::{MetadataListPage, MetadataListRow, MetadataReport};
+use crate::dto::metadata_report::{
+    MetadataAuditReport, MetadataListPage, MetadataListRow, MetadataReport,
+};
 use crate::dto::{BookDetail, clamp_limit};
 use crate::recorder::record_call_sync;
 
@@ -43,6 +45,49 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
                 stored_confidence,
                 review_status,
             })
+        }
+    )
+}
+
+/// Recompute the metadata plausibility audit for one book from its
+/// cached extraction envelope and return the full per-field report —
+/// grades, flags, and hints plus the TOC shape flags — next to the
+/// stored rollup for comparison. Pure read: nothing is written back;
+/// `metadata.reaudit` is the write path that refreshes the rollup.
+pub fn show_metadata_report<E: Embedder>(
+    ops: &Ops<E>,
+    intake_id: i64,
+    audit_data: &bookrack_ingest::AuditData,
+    audit_profile: &bookrack_ingest::AuditProfile,
+) -> Result<MetadataAuditReport> {
+    record_call_sync!(
+        ops,
+        "library.show_metadata_report",
+        serde_json::json!({ "intake_id": intake_id }),
+        {
+            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let report = bookrack_ingest::reaudit::build_report(
+                &catalog,
+                intake_id,
+                audit_data,
+                audit_profile,
+            )
+            .map_err(|e| match e {
+                bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
+                    OpsError::IntakeNotFound { intake_id }
+                }
+                other => OpsError::Other(anyhow::Error::new(other)),
+            })?;
+            let attrs = catalog.publication_attrs(intake_id, BOOK_SCOPE)?;
+            let review_status = catalog.review(intake_id, BOOK_SCOPE)?.map(|r| r.status);
+            Ok(MetadataAuditReport::build(
+                intake_id,
+                &audit_profile.name,
+                &report,
+                attrs.as_ref().and_then(|a| a.audit_verdict.clone()),
+                attrs.as_ref().and_then(|a| a.confidence.clone()),
+                review_status,
+            ))
         }
     )
 }

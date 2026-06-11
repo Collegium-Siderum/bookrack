@@ -1052,6 +1052,7 @@ dependencies = [
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-embed",
+ "bookrack-extract",
  "bookrack-ingest",
  "bookrack-query",
  "bookrack-search",

@@ -104,7 +104,7 @@ pub struct StructureReport {
     pub toc_stats: TocStats,
 }
 
-pub use bookrack_metadata::{AuditData, AuditProfile, TocStats};
+pub use bookrack_metadata::{AuditData, AuditProfile, MetadataReport, TocStats};
 
 /// Why an `ingest` operation failed.
 #[derive(Debug, thiserror::Error)]
