@@ -22,6 +22,12 @@ release workflow extracts the matching section verbatim from this file.
   expose it as an optional `--reason` flag; the MCP write tools require
   it, so an LLM edit always carries its rationale in the audit trail.
 
+- `show_book` (and the `metadata.show` report that embeds it) lists the
+  book's active overrides — which fields are curated rather than
+  extracted, by whom and when, with notes — alongside the merged
+  `effective_biblio`, so curation state is visible without replaying
+  the audit trail.
+
 ### Changed
 
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`

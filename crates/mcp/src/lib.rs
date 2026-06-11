@@ -626,8 +626,10 @@ impl BookrackServer {
     #[tool(
         name = "library.show_book",
         description = "Fetch the full bibliographic record for one book by intake id. \
-                       Returns effective biblio attributes and the contributor list, \
-                       or null when no such book is registered."
+                       Returns effective biblio attributes, the active overrides \
+                       (which fields are curated rather than extracted, by whom and \
+                       when; `value: null` marks a suppressed extracted value), and \
+                       the contributor list, or null when no such book is registered."
     )]
     async fn library_show_book(
         &self,
@@ -1398,6 +1400,7 @@ mod tests {
             format: Some("pdf".to_string()),
             status: "embedded".to_string(),
             effective_biblio: biblio,
+            overrides: Vec::new(),
             contributors: vec![ContributorEntry {
                 role: "author".to_string(),
                 ordinal: 0,

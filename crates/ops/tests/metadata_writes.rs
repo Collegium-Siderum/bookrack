@@ -17,6 +17,7 @@ use bookrack_ops::dto::writes::{
     AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
     RejectMetadataRequest, SetMetadataFieldRequest,
 };
+use bookrack_ops::reads::books::show_book;
 use bookrack_ops::writes::metadata::{
     acknowledge_metadata_gap, approve_metadata, clear_metadata_field, reject_metadata,
     set_metadata_field,
@@ -514,6 +515,56 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
     .expect("clear outside override scope");
     assert_eq!(outside.actor_kind, "human");
     assert_eq!(outside.actor_detail.as_deref(), Some("cli"));
+}
+
+#[test]
+fn show_book_lists_active_overrides_with_their_curation_trail() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-override-visibility");
+    let mut base = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    base.title = Some("Base Title".to_string());
+    fx.catalog().upsert_publication_attrs(&base).expect("base");
+
+    let detail = show_book(&fx.ops, id).expect("show before");
+    assert!(detail.overrides.is_empty());
+
+    set_metadata_field(
+        &fx.ops,
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            value: "Curated Title".to_string(),
+            reason: Some("matches the title page".to_string()),
+        },
+    )
+    .expect("set");
+
+    let detail = show_book(&fx.ops, id).expect("show after set");
+    assert_eq!(detail.overrides.len(), 1);
+    let entry = &detail.overrides[0];
+    assert_eq!(entry.field, "title");
+    assert_eq!(entry.value.as_deref(), Some("Curated Title"));
+    assert_eq!(entry.curated_by, "human");
+    assert_eq!(
+        detail.effective_biblio.get("title").map(String::as_str),
+        Some("Curated Title")
+    );
+
+    clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+            reason: None,
+        },
+    )
+    .expect("clear");
+    let detail = show_book(&fx.ops, id).expect("show after clear");
+    assert!(detail.overrides.is_empty());
+    assert_eq!(
+        detail.effective_biblio.get("title").map(String::as_str),
+        Some("Base Title")
+    );
 }
 
 #[test]

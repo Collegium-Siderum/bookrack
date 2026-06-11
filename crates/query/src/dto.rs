@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use bookrack_catalog::{EffectiveAttrs, Intake, IntakeStatus, NodeContributor};
+use bookrack_catalog::{EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride};
 use bookrack_corpus::Node;
 
 /// Server-side ceiling on a single list page. Larger requests are
@@ -90,9 +90,33 @@ pub struct BookDetail {
     /// any human override. Keys are stable strings (`title`,
     /// `publisher`, `isbn`, ...).
     pub effective_biblio: BTreeMap<String, String>,
+    /// Every active override at the book root, in field order. A field
+    /// listed here owes its effective value (or, for `value: null`, its
+    /// absence) to curation rather than extraction; fields not listed
+    /// read straight from the extracted base layer.
+    pub overrides: Vec<OverrideEntry>,
     /// Every contributor attributed at the book root, in (role,
     /// ordinal) order.
     pub contributors: Vec<ContributorEntry>,
+}
+
+/// One override entry within a [`BookDetail`].
+#[derive(Debug, Clone, Serialize)]
+pub struct OverrideEntry {
+    /// The overridden field.
+    pub field: String,
+    /// The override value. `null` is a deliberate nullify: the
+    /// extracted value is suppressed and the field has no effective
+    /// value until a correct one is set.
+    pub value: Option<String>,
+    /// Whether the user has confirmed this override.
+    pub confirmed: bool,
+    /// When the override was last curated, ISO-8601 UTC.
+    pub curated_at: String,
+    /// Who curated the override (an `actor_kind` database string).
+    pub curated_by: String,
+    /// Free-form notes.
+    pub notes: Option<String>,
 }
 
 /// One contributor entry within a [`BookDetail`].
@@ -278,12 +302,27 @@ impl ContributorEntry {
     }
 }
 
+impl OverrideEntry {
+    /// Project a [`NodeOverride`] row into a wire-ready entry.
+    pub fn from_row(row: NodeOverride) -> OverrideEntry {
+        OverrideEntry {
+            field: row.field,
+            value: row.value,
+            confirmed: row.confirmed,
+            curated_at: row.curated_at,
+            curated_by: row.curated_by,
+            notes: row.notes,
+        }
+    }
+}
+
 impl BookDetail {
-    /// Project a catalog [`Intake`] plus its effective biblio and
-    /// contributor rows into the detail DTO.
+    /// Project a catalog [`Intake`] plus its effective biblio,
+    /// override, and contributor rows into the detail DTO.
     pub fn build(
         intake: Intake,
         effective: EffectiveAttrs,
+        overrides: Vec<NodeOverride>,
         contributors: Vec<NodeContributor>,
     ) -> BookDetail {
         let mut effective_biblio = BTreeMap::new();
@@ -297,6 +336,7 @@ impl BookDetail {
             format: intake.format,
             status: intake.status.as_str().to_string(),
             effective_biblio,
+            overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
             contributors: contributors
                 .into_iter()
                 .map(ContributorEntry::from_row)

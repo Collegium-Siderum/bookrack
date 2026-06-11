@@ -27,6 +27,7 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
             let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+            let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
             let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
             let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
             let review_status = catalog
@@ -34,7 +35,7 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
                 .map(|r| r.status);
             let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
             let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-            let book = BookDetail::build(intake, effective, contributors);
+            let book = BookDetail::build(intake, effective, overrides, contributors);
             Ok(MetadataReport {
                 intake_id,
                 book,

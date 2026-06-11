@@ -385,8 +385,14 @@ impl<E: Embedder> Library<E> {
             return Ok(None);
         };
         let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+        let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
         let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
-        Ok(Some(BookDetail::build(intake, effective, contributors)))
+        Ok(Some(BookDetail::build(
+            intake,
+            effective,
+            overrides,
+            contributors,
+        )))
     }
 
     /// Project the table of contents of one book — the organizing

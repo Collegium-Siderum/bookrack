@@ -101,8 +101,14 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
             let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+            let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
             let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
-            Ok(BookDetail::build(intake, effective, contributors))
+            Ok(BookDetail::build(
+                intake,
+                effective,
+                overrides,
+                contributors,
+            ))
         }
     )
 }
