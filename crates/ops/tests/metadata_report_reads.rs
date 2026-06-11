@@ -117,6 +117,9 @@ fn report_grades_the_effective_view_and_writes_nothing() {
             "human",
         ))
         .expect("override");
+    catalog
+        .set_override(&NewOverride::new(id, BOOK_SCOPE, "year", None, "human"))
+        .expect("void");
 
     let report = show_metadata_report(
         &fx.ops,
@@ -134,6 +137,21 @@ fn report_grades_the_effective_view_and_writes_nothing() {
         .find(|f| f.field == "publisher")
         .expect("publisher row");
     assert_ne!(publisher.grade, "missing");
+    assert_eq!(publisher.origin, "override");
+    let year = report
+        .fields
+        .iter()
+        .find(|f| f.field == "year")
+        .expect("year row");
+    assert_eq!(year.origin, "voided");
+    assert_eq!(year.grade, "medium");
+    assert!(year.flags.iter().any(|f| f == "voided"));
+    let title = report
+        .fields
+        .iter()
+        .find(|f| f.field == "title")
+        .expect("title row");
+    assert_eq!(title.origin, "extracted");
     assert!(report.fields.iter().all(|f| !f.hint.is_empty()));
     assert!(matches!(report.verdict.as_str(), "clean" | "needs_work"));
     assert!(matches!(

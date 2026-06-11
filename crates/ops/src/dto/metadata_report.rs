@@ -40,6 +40,9 @@ pub struct MetadataReport {
 pub struct FieldAuditEntry {
     /// The `node_publication_attrs` column name being audited.
     pub field: String,
+    /// Where the graded value comes from: `extracted`, `override`,
+    /// `override_confirmed`, or `voided`.
+    pub origin: String,
     /// The grade token: `missing` / `weak` / `medium` / `strong`.
     pub grade: String,
     /// Tokens of every flag that fired against the field.
@@ -85,15 +88,25 @@ pub struct MetadataAuditReport {
 
 impl MetadataAuditReport {
     /// Project an in-memory audit report onto the wire shape, with the
-    /// stored rollup and review status attached for comparison.
+    /// per-field origins read off the override rows and the stored
+    /// rollup and review status attached for comparison.
     pub fn build(
         intake_id: i64,
         profile: &str,
         report: &bookrack_ingest::MetadataReport,
+        overrides: &[bookrack_catalog::NodeOverride],
         stored_verdict: Option<String>,
         stored_confidence: Option<String>,
         review_status: Option<String>,
     ) -> MetadataAuditReport {
+        let origin_of = |field: &str| -> &'static str {
+            match overrides.iter().find(|o| o.field == field) {
+                None => "extracted",
+                Some(over) if over.value.is_none() => "voided",
+                Some(over) if over.confirmed => "override_confirmed",
+                Some(_) => "override",
+            }
+        };
         MetadataAuditReport {
             intake_id,
             profile: profile.to_string(),
@@ -102,6 +115,7 @@ impl MetadataAuditReport {
                 .iter()
                 .map(|f| FieldAuditEntry {
                     field: f.field.clone(),
+                    origin: origin_of(&f.field).to_string(),
                     grade: f.grade.as_str().to_string(),
                     flags: f
                         .flags

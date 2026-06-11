@@ -78,12 +78,14 @@ pub fn show_metadata_report<E: Embedder>(
                 }
                 other => OpsError::Other(anyhow::Error::new(other)),
             })?;
+            let overrides = catalog.overrides_for_address(intake_id, BOOK_SCOPE)?;
             let attrs = catalog.publication_attrs(intake_id, BOOK_SCOPE)?;
             let review_status = catalog.review(intake_id, BOOK_SCOPE)?.map(|r| r.status);
             Ok(MetadataAuditReport::build(
                 intake_id,
                 &audit_profile.name,
                 &report,
+                &overrides,
                 attrs.as_ref().and_then(|a| a.audit_verdict.clone()),
                 attrs.as_ref().and_then(|a| a.confidence.clone()),
                 review_status,

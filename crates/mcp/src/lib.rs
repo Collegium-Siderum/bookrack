@@ -825,6 +825,7 @@ impl BookrackServer {
         name = "library.show_metadata_report",
         description = "Recompute the metadata plausibility audit for one book from \
                        its cached extraction and return the full per-field report: \
+                       origin (extracted / override / override_confirmed / voided), \
                        grade, flags, and hint per field, plus TOC shape flags and \
                        copyright-page block candidates, next to the stored verdict / \
                        confidence rollup for comparison. Use it to see why a book is \
