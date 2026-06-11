@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::Corpus;
+use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_embed::Embedder;
+use bookrack_normalize::NORMALIZE_VERSION;
 use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
 use bookrack_vectors::ChunkStore;
 pub use bookrack_vectors::SearchOptions;
@@ -81,6 +82,7 @@ pub struct Library<E: Embedder> {
     catalog_db: PathBuf,
     lancedb_dir: PathBuf,
     default_top_k: usize,
+    chunk_version: u32,
 }
 
 impl<E: Embedder> Library<E> {
@@ -94,6 +96,12 @@ impl<E: Embedder> Library<E> {
     /// version is refused here, at startup, rather than returning subtly
     /// wrong results. An empty index has no provenance to check, so it is
     /// served without complaint.
+    ///
+    /// `chunk_version` is the chunker-algorithm stamp the calling
+    /// pipeline writes alongside its embeddings. Each pipeline (`ingest`
+    /// for books, `glean` for papers) owns its own constant and threads
+    /// it through here, so a single query crate can guard either index
+    /// without taking a runtime dependency on either pipeline.
     pub async fn open(
         corpus_db: PathBuf,
         catalog_db: PathBuf,
@@ -101,6 +109,7 @@ impl<E: Embedder> Library<E> {
         embedder: E,
         embed_model: String,
         default_top_k: usize,
+        chunk_version: u32,
     ) -> Result<Library<E>> {
         let probed_dim = probe_dimension(&embedder).await?;
         let store = ChunkStore::try_open(lancedb_dir).await?;
@@ -108,9 +117,10 @@ impl<E: Embedder> Library<E> {
             && s.count_rows().await? > 0
         {
             let corpus = Corpus::open(&corpus_db)?;
-            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+            corpus.verify_index_stamps(&current_stamps(
                 &embed_model,
                 probed_dim as u32,
+                chunk_version,
             ))?;
         }
         Ok(Library {
@@ -122,6 +132,7 @@ impl<E: Embedder> Library<E> {
             catalog_db,
             lancedb_dir: lancedb_dir.to_path_buf(),
             default_top_k,
+            chunk_version,
         })
     }
 
@@ -142,9 +153,10 @@ impl<E: Embedder> Library<E> {
             && s.count_rows().await? > 0
         {
             let corpus = Corpus::open(&self.corpus_db)?;
-            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+            corpus.verify_index_stamps(&current_stamps(
                 &self.embed_model,
                 self.probed_dim as u32,
+                self.chunk_version,
             ))?;
         }
         let mut guard = self.store.write().await;
@@ -168,9 +180,10 @@ impl<E: Embedder> Library<E> {
         };
         if s.count_rows().await? > 0 {
             let corpus = Corpus::open(&self.corpus_db)?;
-            corpus.verify_index_stamps(&bookrack_ingest::current_index_stamps(
+            corpus.verify_index_stamps(&current_stamps(
                 &self.embed_model,
                 self.probed_dim as u32,
+                self.chunk_version,
             ))?;
         }
         let mut guard = self.store.write().await;
@@ -431,6 +444,20 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
         .embed_batch(&["dimension probe".to_string()])
         .await?;
     probe.first().map(Vec::len).ok_or(QueryError::EmptyProbe)
+}
+
+/// Assemble the [`IndexStamps`] this serve binary expects, given the
+/// embed model and dimension known to the warm library and the
+/// chunk-algorithm stamp the calling pipeline owns. `normalize_version`
+/// comes from the workspace `bookrack-normalize` constant, since both
+/// pipelines share it.
+fn current_stamps(embed_model: &str, vector_dim: u32, chunk_version: u32) -> IndexStamps {
+    IndexStamps {
+        embed_model: embed_model.to_string(),
+        vector_dim,
+        chunk_version,
+        normalize_version: NORMALIZE_VERSION,
+    }
 }
 
 #[cfg(test)]

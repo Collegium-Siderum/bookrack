@@ -308,6 +308,7 @@ impl DaemonRuntime {
             embedder,
             embed_cfg.model.clone(),
             search_cfg.top_k,
+            bookrack_ingest::CHUNK_VERSION,
         )
         .await
         .context("open query library")?;

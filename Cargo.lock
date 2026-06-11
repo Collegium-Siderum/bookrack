@@ -1104,6 +1104,7 @@ dependencies = [
  "bookrack-embed",
  "bookrack-extract",
  "bookrack-ingest",
+ "bookrack-normalize",
  "bookrack-search",
  "bookrack-vectors",
  "serde",

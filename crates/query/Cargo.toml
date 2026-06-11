@@ -10,9 +10,9 @@ bookrack-catalog = { path = "../catalog" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-embed = { path = "../embed" }
+bookrack-normalize = { path = "../normalize" }
 bookrack-search = { path = "../search" }
 bookrack-vectors = { path = "../vectors" }
-bookrack-ingest = { path = "../ingest" }
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
@@ -21,4 +21,5 @@ tracing.workspace = true
 [dev-dependencies]
 bookrack-extract = { path = "../extract" }
 bookrack-config = { path = "../config" }
+bookrack-ingest = { path = "../ingest" }
 tempfile.workspace = true

@@ -139,6 +139,7 @@ async fn search_returns_a_cited_passage_through_the_facade() {
         Fixed,
         MODEL.to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -206,6 +207,7 @@ async fn opening_with_a_different_model_is_refused() {
         Fixed,
         "other-model".to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await;
     assert!(matches!(
@@ -233,6 +235,7 @@ async fn an_empty_index_is_served_without_stamps() {
         Fixed,
         MODEL.to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open empty library");
@@ -284,6 +287,7 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
         Fixed,
         MODEL.to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -334,6 +338,7 @@ async fn list_books_clamps_to_max_list_limit() {
         Fixed,
         MODEL.to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .expect("open library");
@@ -404,6 +409,7 @@ async fn search_returns_a_readable_error_when_a_lance_data_file_is_missing() {
         Fixed,
         MODEL.to_string(),
         5,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     {

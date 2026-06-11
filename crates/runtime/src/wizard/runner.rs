@@ -225,6 +225,7 @@ async fn smoke_search(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<usize> {
         embedder,
         embed_cfg.model.clone(),
         1,
+        bookrack_ingest::CHUNK_VERSION,
     )
     .await
     .context("open smoke library")?;
