@@ -10,8 +10,8 @@
 //! node tree are preserved; chunking re-runs against the existing nodes
 //! via [`plan_book_chunks`](crate::plan_book_chunks).
 //!
-//! The destructive A-D steps「clear stamps, drop chunks table, demote
-//! catalog」run once on a non-`resume` call. The build phase iterates
+//! The destructive A-D steps (clear stamps, drop chunks table, demote
+//! catalog) run once on a non-`resume` call. The build phase iterates
 //! `Extracted` intakes and re-promotes them to `Embedded` per book. A
 //! failure mid-build leaves successful intakes at `Embedded` and the
 //! failing one at `Extracted`, so a follow-up
@@ -392,8 +392,8 @@ mod tests {
         );
 
         // After failure: stamps cleared, table dropped, every intake
-        // back to Extracted「the first book's embed didn't even probe
-        // a dim because the embedder failed before any commit」.
+        // back to Extracted (the first book's embed didn't even probe
+        // a dim because the embedder failed before any commit).
         assert_eq!(corpus.meta_get(EMBED_MODEL_KEY).expect("get"), None);
         assert!(
             ChunkStore::try_open(&lancedb_dir)

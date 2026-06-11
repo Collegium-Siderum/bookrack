@@ -755,11 +755,12 @@ enum BracketPosition {
 /// subtype so [`audit_title`] can route it to the right toggle and
 /// flag. Returns `None` when the title has no qualifying segment.
 ///
-/// Pairs recognised: ASCII `()` / `[]`, fullwidth `（）` / `［］`, and
-/// CJK lenticular `\u{3010}\u{3011}`. The opening at byte 0 and the
-/// closing at the last char (after trimming) are checked — a bracket
-/// in the middle of a title is left alone. Short bracketed fragments
-/// (`Foo (v2)`) are tolerated through `min_content_chars`.
+/// Pairs recognised: ASCII `()` / `[]`, fullwidth `\u{ff08}\u{ff09}` /
+/// `\u{ff3b}\u{ff3d}`, and CJK lenticular `\u{3010}\u{3011}`. The
+/// opening at byte 0 and the closing at the last char (after trimming)
+/// are checked — a bracket in the middle of a title is left alone.
+/// Short bracketed fragments (`Foo (v2)`) are tolerated through
+/// `min_content_chars`.
 fn classify_bracketed_segment(
     trimmed: &str,
     min_content_chars: usize,

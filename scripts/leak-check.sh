@@ -20,7 +20,11 @@ if git grep -nE '(^|[^A-Za-z])[A-Za-z]:\\|/Users/|/home/[a-z]' -- \
 fi
 
 # 2. CJK characters in code / config / docs (test fixtures excluded).
-if git grep -nP '[\x{4e00}-\x{9fff}]' -- \
+#    Covers the unified ideographs plus CJK punctuation, kana
+#    (U+3000-30FF), and the fullwidth/halfwidth forms (U+FF00-FFEF),
+#    so a stray corner bracket or fullwidth comma fails the same as a
+#    hanzi would.
+if git grep -nP '[\x{3000}-\x{30ff}\x{4e00}-\x{9fff}\x{ff00}-\x{ffef}]' -- \
   '*.rs' '*.toml' '*.md' '*.ts' '*.svelte' '*.json' '*.html' '*.css' '*.js' \
   ':!*/tests/fixtures/*'; then
   echo "LEAK: CJK in code/config/docs"
