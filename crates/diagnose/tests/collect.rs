@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use bookrack_catalog::{
-    ActorKind, Catalog, NewBookPipelineAudit, NewIntake, NewMcpToolCall, NewMetadataAudit,
+    ActorKind, Catalog, NewIntake, NewItemPipelineAudit, NewMcpToolCall, NewMetadataAudit,
 };
 use bookrack_config::Config;
 use bookrack_diagnose::{Options, collect};
@@ -58,7 +58,7 @@ impl Fixture {
                 .record_tool_call(&NewMcpToolCall::new("cli", "library.list_books", "ok"))
                 .unwrap();
             catalog
-                .record_pipeline_audit(&NewBookPipelineAudit::new(
+                .record_pipeline_audit(&NewItemPipelineAudit::new(
                     "structure",
                     "parse_toc",
                     "ok",

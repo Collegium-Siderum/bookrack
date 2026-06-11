@@ -17,7 +17,7 @@
 //! flows run on their next pass — `remove` does not run it inline.
 
 use anyhow::{Context, Result};
-use bookrack_catalog::{BookRemovalCounts, Catalog, Intake};
+use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
@@ -195,7 +195,7 @@ fn read_corpus_node_count(cfg: &Config, book_root_id: NodeId) -> Result<u64> {
 #[allow(clippy::too_many_arguments)]
 fn print_plan(
     intake: &Intake,
-    counts: &BookRemovalCounts,
+    counts: &ItemRemovalCounts,
     vector_rows: Option<usize>,
     corpus_nodes: u64,
     envelope_path: Option<&str>,

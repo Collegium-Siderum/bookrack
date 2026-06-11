@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `book_pipeline_audit` table — the pipeline-step log.
+//! The `item_pipeline_audit` table — the pipeline-step log, shared by book ingest and paper glean.
 //!
 //! One append-only row per pipeline sub-step: its outcome, timing, any
 //! error, and the run it belongs to. Rows outlive the books they
@@ -75,9 +75,9 @@ fn select_sql(tail: &str) -> String {
     )
 }
 
-/// One `book_pipeline_audit` row — a single recorded pipeline sub-step.
+/// One `item_pipeline_audit` row — a single recorded pipeline sub-step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BookPipelineAudit {
+pub struct ItemPipelineAudit {
     /// Surrogate key, assigned by the database.
     pub audit_id: i64,
     /// The book's root node id — a soft reference; `None` when unknown.
@@ -110,10 +110,10 @@ pub struct BookPipelineAudit {
     pub session_id: Option<String>,
 }
 
-impl BookPipelineAudit {
-    /// Build a [`BookPipelineAudit`] from a row including every column.
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<BookPipelineAudit> {
-        Ok(BookPipelineAudit {
+impl ItemPipelineAudit {
+    /// Build a [`ItemPipelineAudit`] from a row including every column.
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<ItemPipelineAudit> {
+        Ok(ItemPipelineAudit {
             audit_id: row.get("audit_id")?,
             book_root_id: row.get("book_root_id")?,
             source_sha256: row.get("source_sha256")?,
@@ -136,9 +136,9 @@ impl BookPipelineAudit {
 /// An audit row about to be written. The surrogate `audit_id` and the
 /// `ts` timestamp are assigned by the database. The row is a flat record
 /// written as a unit, so its fields are public rather than builder
-/// methods; [`NewBookPipelineAudit::new`] sets the mandatory ones.
+/// methods; [`NewItemPipelineAudit::new`] sets the mandatory ones.
 #[derive(Debug, Clone)]
-pub struct NewBookPipelineAudit {
+pub struct NewItemPipelineAudit {
     /// The book's root node id, when known.
     pub book_root_id: Option<i64>,
     /// The whole-file hash, denormalized onto the row.
@@ -167,7 +167,7 @@ pub struct NewBookPipelineAudit {
     pub session_id: Option<String>,
 }
 
-impl NewBookPipelineAudit {
+impl NewItemPipelineAudit {
     /// An audit row for one sub-step, with every optional field cleared.
     pub fn new(
         stage: impl Into<String>,
@@ -175,8 +175,8 @@ impl NewBookPipelineAudit {
         outcome: impl Into<String>,
         pipeline_run_id: impl Into<String>,
         actor_kind: ActorKind,
-    ) -> NewBookPipelineAudit {
-        NewBookPipelineAudit {
+    ) -> NewItemPipelineAudit {
+        NewItemPipelineAudit {
             book_root_id: None,
             source_sha256: None,
             stage: stage.into(),
@@ -197,7 +197,7 @@ impl NewBookPipelineAudit {
 impl Catalog {
     /// Append one row to the pipeline-step log, returning its assigned
     /// `audit_id`.
-    pub fn record_pipeline_audit(&self, new: &NewBookPipelineAudit) -> Result<i64> {
+    pub fn record_pipeline_audit(&self, new: &NewItemPipelineAudit) -> Result<i64> {
         let id = self.conn.query_row(
             INSERT_SQL,
             named_params! {
@@ -221,16 +221,16 @@ impl Catalog {
     }
 
     /// Every sub-step of one pipeline run, oldest first.
-    pub fn pipeline_audit_for_run(&self, pipeline_run_id: &str) -> Result<Vec<BookPipelineAudit>> {
+    pub fn pipeline_audit_for_run(&self, pipeline_run_id: &str) -> Result<Vec<ItemPipelineAudit>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE pipeline_run_id = :pipeline_run_id ORDER BY ts, audit_id",
         ))?;
         let rows = stmt
             .query_map(
                 named_params! { ":pipeline_run_id": pipeline_run_id },
-                BookPipelineAudit::from_row,
+                ItemPipelineAudit::from_row,
             )?
-            .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
+            .collect::<rusqlite::Result<Vec<ItemPipelineAudit>>>()?;
         Ok(rows)
     }
 
@@ -238,16 +238,16 @@ impl Catalog {
     /// before the book's root id was known (e.g. an extract that failed
     /// before structure) carry a `NULL` `book_root_id` and are not
     /// returned here; query by run id to see those.
-    pub fn pipeline_audit_for_book(&self, book_root_id: i64) -> Result<Vec<BookPipelineAudit>> {
+    pub fn pipeline_audit_for_book(&self, book_root_id: i64) -> Result<Vec<ItemPipelineAudit>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE book_root_id = :book_root_id ORDER BY ts, audit_id",
         ))?;
         let rows = stmt
             .query_map(
                 named_params! { ":book_root_id": book_root_id },
-                BookPipelineAudit::from_row,
+                ItemPipelineAudit::from_row,
             )?
-            .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
+            .collect::<rusqlite::Result<Vec<ItemPipelineAudit>>>()?;
         Ok(rows)
     }
 
@@ -258,16 +258,16 @@ impl Catalog {
         &self,
         since_ts: &str,
         limit: u32,
-    ) -> Result<Vec<BookPipelineAudit>> {
+    ) -> Result<Vec<ItemPipelineAudit>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE ts >= :since_ts ORDER BY ts DESC, audit_id DESC LIMIT :limit",
         ))?;
         let rows = stmt
             .query_map(
                 named_params! { ":since_ts": since_ts, ":limit": limit },
-                BookPipelineAudit::from_row,
+                ItemPipelineAudit::from_row,
             )?
-            .collect::<rusqlite::Result<Vec<BookPipelineAudit>>>()?;
+            .collect::<rusqlite::Result<Vec<ItemPipelineAudit>>>()?;
         Ok(rows)
     }
 }
@@ -276,11 +276,11 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A `NewBookPipelineAudit` with every optional field set, so a
+    /// A `NewItemPipelineAudit` with every optional field set, so a
     /// dropped column or unbound parameter fails an assertion.
-    fn fully_populated() -> NewBookPipelineAudit {
+    fn fully_populated() -> NewItemPipelineAudit {
         let mut audit =
-            NewBookPipelineAudit::new("structure", "parse_toc", "ok", "run-1", ActorKind::Pipeline);
+            NewItemPipelineAudit::new("structure", "parse_toc", "ok", "run-1", ActorKind::Pipeline);
         audit.book_root_id = Some(100_000_001);
         audit.source_sha256 = Some("sha-abc".into());
         audit.adapter = Some("epub".into());
@@ -325,7 +325,7 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         for sub_step in ["extract", "normalize", "embed"] {
             catalog
-                .record_pipeline_audit(&NewBookPipelineAudit::new(
+                .record_pipeline_audit(&NewItemPipelineAudit::new(
                     "ingest",
                     sub_step,
                     "ok",
@@ -336,7 +336,7 @@ mod tests {
         }
         // A sub-step of a different run must not leak into the result.
         catalog
-            .record_pipeline_audit(&NewBookPipelineAudit::new(
+            .record_pipeline_audit(&NewItemPipelineAudit::new(
                 "ingest",
                 "extract",
                 "ok",
@@ -370,7 +370,7 @@ mod tests {
     /// `now`, which would defeat a `since_ts` filter in a unit test.
     fn record_at(catalog: &Catalog, ts: &str, sub_step: &str) -> i64 {
         let id = catalog
-            .record_pipeline_audit(&NewBookPipelineAudit::new(
+            .record_pipeline_audit(&NewItemPipelineAudit::new(
                 "structure",
                 sub_step,
                 "ok",
@@ -407,7 +407,7 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         // A row before the root id is known carries a NULL book_root_id.
         catalog
-            .record_pipeline_audit(&NewBookPipelineAudit::new(
+            .record_pipeline_audit(&NewItemPipelineAudit::new(
                 "extract",
                 "extract",
                 "ok",
@@ -417,7 +417,7 @@ mod tests {
             .expect("record");
         for stage in ["structure", "embed"] {
             let mut row =
-                NewBookPipelineAudit::new(stage, stage, "ok", "run-1", ActorKind::Pipeline);
+                NewItemPipelineAudit::new(stage, stage, "ok", "run-1", ActorKind::Pipeline);
             row.book_root_id = Some(100_000_001);
             catalog.record_pipeline_audit(&row).expect("record");
         }

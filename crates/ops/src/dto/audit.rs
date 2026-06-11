@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use bookrack_catalog::{ActorKind, BookPipelineAudit, MetadataAudit};
+use bookrack_catalog::{ActorKind, ItemPipelineAudit, MetadataAudit};
 
 /// Who (or what) initiated an op, with the optional bookkeeping every
 /// write op forwards to `metadata_audit`. CLI builds this with
@@ -118,8 +118,8 @@ pub struct PipelineAuditEntry {
 }
 
 impl PipelineAuditEntry {
-    /// Project a catalog [`BookPipelineAudit`] row into a wire-ready entry.
-    pub fn from_row(row: BookPipelineAudit) -> PipelineAuditEntry {
+    /// Project a catalog [`ItemPipelineAudit`] row into a wire-ready entry.
+    pub fn from_row(row: ItemPipelineAudit) -> PipelineAuditEntry {
         PipelineAuditEntry {
             audit_id: row.audit_id,
             book_root_id: row.book_root_id,

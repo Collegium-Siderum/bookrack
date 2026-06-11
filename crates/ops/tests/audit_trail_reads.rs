@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{ActorKind, Catalog, NewBookPipelineAudit, NewIntake, NewMetadataAudit};
+use bookrack_catalog::{ActorKind, Catalog, NewIntake, NewItemPipelineAudit, NewMetadataAudit};
 use bookrack_core::PartitionIdx;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::metadata::show_audit_trail;
@@ -71,7 +71,7 @@ fn seed_audit_rows(fx: &Fixture, intake_id: i64) {
         .expect("record metadata audit");
 
     let mut pipe =
-        NewBookPipelineAudit::new("structure", "parse_toc", "ok", "run-1", ActorKind::Pipeline);
+        NewItemPipelineAudit::new("structure", "parse_toc", "ok", "run-1", ActorKind::Pipeline);
     pipe.book_root_id = Some(book_root_id);
     catalog
         .record_pipeline_audit(&pipe)

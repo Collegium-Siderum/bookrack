@@ -18,14 +18,14 @@
 //! [`Catalog`] handle.
 
 mod actor;
-mod book_pipeline_audit;
-mod book_state;
 mod cascade;
 mod catalog_meta;
 mod db;
 mod effective;
 mod expressions;
 mod intake;
+mod item_pipeline_audit;
+mod item_state;
 mod mcp_tool_calls;
 mod metadata_audit;
 mod migrate;
@@ -40,13 +40,13 @@ mod toc_edits;
 mod works;
 
 pub use actor::ActorKind;
-pub use book_pipeline_audit::{BookPipelineAudit, NewBookPipelineAudit};
-pub use book_state::{BookState, NewBookState};
-pub use cascade::BookRemovalCounts;
+pub use cascade::ItemRemovalCounts;
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};
 pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, Registration};
+pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
+pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
 pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
 pub use node_categories::{NewCategory, NodeCategory};

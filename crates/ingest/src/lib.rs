@@ -41,8 +41,8 @@ pub use envelope::{
 use std::path::Path;
 
 use bookrack_catalog::{
-    ActorKind, BOOK_SCOPE, Catalog, IntakeStatus, NewBookPipelineAudit, NewBookState,
-    NewContributor, NewIntake, NewPublicationAttrs, NewReview,
+    ActorKind, BOOK_SCOPE, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
+    NewItemState, NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{NodeId, NodeType, PartitionIdx, error_chain};
@@ -580,7 +580,7 @@ pub async fn ingest_book<E: Embedder>(
     let parsed_at = catalog.now_iso()?;
     set_state(
         catalog,
-        NewBookState::new(book_root_id, intake_id, "structure").parsed_at(&parsed_at),
+        NewItemState::new(book_root_id, intake_id, "structure").parsed_at(&parsed_at),
     );
 
     // METADATA (non-blocking): seed the publication-attrs base from the
@@ -618,7 +618,7 @@ pub async fn ingest_book<E: Embedder>(
     if params.hold_for_metadata && needs_work {
         set_state(
             catalog,
-            NewBookState::new(book_root_id, intake_id, "metadata").parsed_at(&parsed_at),
+            NewItemState::new(book_root_id, intake_id, "metadata").parsed_at(&parsed_at),
         );
         tracing::info!(
             intake_id,
@@ -761,7 +761,7 @@ pub async fn resume_from_chunk<E: Embedder>(
             );
             set_state(
                 catalog,
-                NewBookState::new(book_root_raw, intake_id, "chunk")
+                NewItemState::new(book_root_raw, intake_id, "chunk")
                     .parsed_at(parsed_at)
                     .last_error(error_chain(&e)),
             );
@@ -805,7 +805,7 @@ pub async fn resume_from_chunk<E: Embedder>(
                 );
                 set_state(
                     catalog,
-                    NewBookState::new(book_root_raw, intake_id, "embed")
+                    NewItemState::new(book_root_raw, intake_id, "embed")
                         .parsed_at(parsed_at)
                         .embed_model(&params.embed.model)
                         .last_error(error_chain(&e)),
@@ -840,7 +840,7 @@ pub async fn resume_from_chunk<E: Embedder>(
     let embedded_at = catalog.now_iso()?;
     set_state(
         catalog,
-        NewBookState::new(book_root_raw, intake_id, "embed")
+        NewItemState::new(book_root_raw, intake_id, "embed")
             .embed_model(&params.embed.model)
             .parsed_at(parsed_at)
             .embedded_at(&embedded_at),
@@ -911,7 +911,7 @@ pub(crate) fn audit_as(
     metric_summary: Option<String>,
     error_message: Option<&str>,
 ) {
-    let mut row = NewBookPipelineAudit::new(stage, sub_step, outcome, run_id, ActorKind::Pipeline);
+    let mut row = NewItemPipelineAudit::new(stage, sub_step, outcome, run_id, ActorKind::Pipeline);
     row.book_root_id = book_root_id;
     row.source_sha256 = Some(source_sha.to_string());
     row.metric_summary = metric_summary;
@@ -1489,7 +1489,7 @@ fn report_notes(report: &bookrack_metadata::MetadataReport) -> String {
 
 /// Upsert a book's pipeline state, best-effort for the same reason as
 /// [`audit`].
-pub(crate) fn set_state(catalog: &Catalog, state: NewBookState) {
+pub(crate) fn set_state(catalog: &Catalog, state: NewItemState) {
     if let Err(e) = catalog.upsert_book_state(&state) {
         tracing::warn!(error = %e, "failed to update book state");
     }

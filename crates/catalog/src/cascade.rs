@@ -30,7 +30,7 @@ use crate::{Catalog, Result, count_as_u64};
 /// Per-table row tallies produced by [`Catalog::count_book_derived`] and
 /// returned by [`Catalog::delete_book_derived`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct BookRemovalCounts {
+pub struct ItemRemovalCounts {
     /// Rows in `book_state` keyed by `intake_id`.
     pub book_state: u64,
     /// Rows in `node_publication_attrs` keyed by `intake_id`.
@@ -49,7 +49,7 @@ pub struct BookRemovalCounts {
     pub toc_edits: u64,
 }
 
-impl BookRemovalCounts {
+impl ItemRemovalCounts {
     /// Sum across every cascaded table.
     pub fn total(&self) -> u64 {
         self.book_state
@@ -92,12 +92,12 @@ const DELETE_INTAKE_SQL: &str = "DELETE FROM intake WHERE intake_id = :intake_id
 
 impl Catalog {
     /// Count, without writing, every per-book row this cascade would
-    /// delete. Reads each catalog table named in [`BookRemovalCounts`].
+    /// delete. Reads each catalog table named in [`ItemRemovalCounts`].
     pub fn count_book_derived(
         &self,
         intake_id: i64,
         book_root_id: i64,
-    ) -> Result<BookRemovalCounts> {
+    ) -> Result<ItemRemovalCounts> {
         let mut by_intake = [0u64; 7];
         for (i, table) in COUNT_BY_INTAKE_ID_TABLES.iter().enumerate() {
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE intake_id = :intake_id");
@@ -113,7 +113,7 @@ impl Catalog {
             named_params! { ":book_root_id": book_root_id },
             |row| row.get(0),
         )?;
-        Ok(BookRemovalCounts {
+        Ok(ItemRemovalCounts {
             book_state: by_intake[0],
             node_publication_attrs: by_intake[1],
             node_overrides: by_intake[2],
@@ -134,7 +134,7 @@ impl Catalog {
         &mut self,
         intake_id: i64,
         book_root_id: i64,
-    ) -> Result<BookRemovalCounts> {
+    ) -> Result<ItemRemovalCounts> {
         let tx = self.conn.transaction()?;
         let book_state = tx.execute(
             DELETE_BOOK_STATE_SQL,
@@ -169,7 +169,7 @@ impl Catalog {
             named_params! { ":book_root_id": book_root_id },
         )? as u64;
         tx.commit()?;
-        Ok(BookRemovalCounts {
+        Ok(ItemRemovalCounts {
             book_state,
             node_publication_attrs,
             node_overrides,
@@ -197,7 +197,7 @@ impl Catalog {
 mod tests {
     use super::*;
     use crate::{
-        ActorKind, BOOK_SCOPE, NewBookState, NewContributor, NewIntake, NewMetadataAudit,
+        ActorKind, BOOK_SCOPE, NewContributor, NewIntake, NewItemState, NewMetadataAudit,
         NewOverride, NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
     };
 
@@ -220,7 +220,7 @@ mod tests {
         // book_state
         catalog
             .upsert_book_state(
-                &NewBookState::new(book_root_id, intake_id, "ready")
+                &NewItemState::new(book_root_id, intake_id, "ready")
                     .parsed_at("2026-06-04T00:00:00Z"),
             )
             .expect("item_state");

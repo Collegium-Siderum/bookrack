@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeStatus, NewBookState, NewIntake};
+use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeStatus, NewIntake, NewItemState};
 use bookrack_core::{NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
@@ -301,7 +301,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     //     signal the column was reserved for.
     set_state(
         catalog,
-        NewBookState::new(book_root_raw, ocr_intake_id, "structure")
+        NewItemState::new(book_root_raw, ocr_intake_id, "structure")
             .parsed_at(&parsed_at)
             .ocr_marker_finished_at(&parsed_at),
     );

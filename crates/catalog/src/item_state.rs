@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `book_state` table — book-level pipeline state.
+//! The `item_state` table — per-item pipeline state, shared by book ingest and paper glean.
 //!
 //! One row per ingested book, tracking how far it has progressed through
 //! the pipeline. The row is keyed by the book's root node id and is
@@ -62,9 +62,9 @@ fn select_sql(tail: &str) -> String {
     format!("SELECT {} FROM item_state {tail}", SPEC.select_list())
 }
 
-/// One `book_state` row read back from `catalog.db`.
+/// One `item_state` row read back from `catalog.db`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BookState {
+pub struct ItemState {
     /// The book's root node id — a soft reference to `corpus.db`.
     pub book_root_id: i64,
     /// The intake this book was ingested from.
@@ -83,11 +83,11 @@ pub struct BookState {
     pub last_error: Option<String>,
 }
 
-impl BookState {
-    /// Build a [`BookState`] from a row that includes every column.
+impl ItemState {
+    /// Build a [`ItemState`] from a row that includes every column.
     /// Columns are read by name, so the row's column order is irrelevant.
-    fn from_row(row: &Row<'_>) -> rusqlite::Result<BookState> {
-        Ok(BookState {
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<ItemState> {
+        Ok(ItemState {
             book_root_id: row.get("book_root_id")?,
             intake_id: row.get("intake_id")?,
             current_stage: row.get("current_stage")?,
@@ -100,10 +100,10 @@ impl BookState {
     }
 }
 
-/// A `book_state` row about to be written. Start from [`NewBookState::new`]
+/// An `item_state` row about to be written. Start from [`NewItemState::new`]
 /// and attach the optional timestamps and fields with the builder methods.
 #[derive(Debug, Clone)]
-pub struct NewBookState {
+pub struct NewItemState {
     book_root_id: i64,
     intake_id: i64,
     current_stage: String,
@@ -114,14 +114,14 @@ pub struct NewBookState {
     last_error: Option<String>,
 }
 
-impl NewBookState {
+impl NewItemState {
     /// A book at `current_stage`, with every optional field cleared.
     pub fn new(
         book_root_id: i64,
         intake_id: i64,
         current_stage: impl Into<String>,
-    ) -> NewBookState {
-        NewBookState {
+    ) -> NewItemState {
+        NewItemState {
             book_root_id,
             intake_id,
             current_stage: current_stage.into(),
@@ -134,31 +134,31 @@ impl NewBookState {
     }
 
     /// Record the embedding model the book was embedded with.
-    pub fn embed_model(mut self, value: impl Into<String>) -> NewBookState {
+    pub fn embed_model(mut self, value: impl Into<String>) -> NewItemState {
         self.embed_model = Some(value.into());
         self
     }
 
     /// Record when the STRUCTURE stage completed.
-    pub fn parsed_at(mut self, value: impl Into<String>) -> NewBookState {
+    pub fn parsed_at(mut self, value: impl Into<String>) -> NewItemState {
         self.parsed_at = Some(value.into());
         self
     }
 
     /// Record when the EMBED stage completed.
-    pub fn embedded_at(mut self, value: impl Into<String>) -> NewBookState {
+    pub fn embedded_at(mut self, value: impl Into<String>) -> NewItemState {
         self.embedded_at = Some(value.into());
         self
     }
 
     /// Record when OCR-marker processing finished.
-    pub fn ocr_marker_finished_at(mut self, value: impl Into<String>) -> NewBookState {
+    pub fn ocr_marker_finished_at(mut self, value: impl Into<String>) -> NewItemState {
         self.ocr_marker_finished_at = Some(value.into());
         self
     }
 
     /// Record the last processing error.
-    pub fn last_error(mut self, value: impl Into<String>) -> NewBookState {
+    pub fn last_error(mut self, value: impl Into<String>) -> NewItemState {
         self.last_error = Some(value.into());
         self
     }
@@ -166,7 +166,7 @@ impl NewBookState {
 
 impl Catalog {
     /// Insert or replace a book's pipeline state.
-    pub fn upsert_book_state(&self, new: &NewBookState) -> Result<()> {
+    pub fn upsert_book_state(&self, new: &NewItemState) -> Result<()> {
         self.conn.execute(
             UPSERT_SQL,
             named_params! {
@@ -195,13 +195,13 @@ impl Catalog {
     }
 
     /// Fetch a book's pipeline state, or `None` if none is recorded.
-    pub fn book_state(&self, book_root_id: i64) -> Result<Option<BookState>> {
+    pub fn book_state(&self, book_root_id: i64) -> Result<Option<ItemState>> {
         let state = self
             .conn
             .query_row(
                 &select_sql("WHERE book_root_id = :book_root_id"),
                 named_params! { ":book_root_id": book_root_id },
-                BookState::from_row,
+                ItemState::from_row,
             )
             .optional()?;
         Ok(state)
@@ -217,7 +217,7 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         // Every optional field is given a distinct value, so an unbound
         // parameter or dropped column fails an assertion.
-        let written = NewBookState::new(100_000_001, 1, "embed")
+        let written = NewItemState::new(100_000_001, 1, "embed")
             .embed_model("qwen3")
             .parsed_at("2026-01-01T00:00:00Z")
             .embedded_at("2026-01-02T00:00:00Z")
@@ -252,13 +252,13 @@ mod tests {
     fn count_book_states_by_stage_groups_by_current_stage() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_book_state(&NewBookState::new(100_000_001, 1, "extract"))
+            .upsert_book_state(&NewItemState::new(100_000_001, 1, "extract"))
             .expect("write");
         catalog
-            .upsert_book_state(&NewBookState::new(100_000_002, 2, "extract"))
+            .upsert_book_state(&NewItemState::new(100_000_002, 2, "extract"))
             .expect("write");
         catalog
-            .upsert_book_state(&NewBookState::new(100_000_003, 3, "embed"))
+            .upsert_book_state(&NewItemState::new(100_000_003, 3, "embed"))
             .expect("write");
 
         assert_eq!(
@@ -285,10 +285,10 @@ mod tests {
     fn upsert_overwrites_a_books_previous_state() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_book_state(&NewBookState::new(100_000_001, 1, "extract"))
+            .upsert_book_state(&NewItemState::new(100_000_001, 1, "extract"))
             .expect("first write");
         catalog
-            .upsert_book_state(&NewBookState::new(100_000_001, 1, "embed").embed_model("qwen3"))
+            .upsert_book_state(&NewItemState::new(100_000_001, 1, "embed").embed_model("qwen3"))
             .expect("second write");
 
         let read = catalog

@@ -153,7 +153,7 @@ struct PipelineRow<'a> {
     duration_ms: Option<i64>,
 }
 
-fn pipeline_to_json(rows: &[bookrack_catalog::BookPipelineAudit]) -> serde_json::Value {
+fn pipeline_to_json(rows: &[bookrack_catalog::ItemPipelineAudit]) -> serde_json::Value {
     let projected: Vec<PipelineRow<'_>> = rows
         .iter()
         .map(|r| PipelineRow {

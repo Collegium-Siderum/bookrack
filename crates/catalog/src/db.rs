@@ -48,7 +48,7 @@ const BACKUP_KEEP: usize = 5;
 const SPECS: &[&TableSpec] = &[
     &crate::catalog_meta::SPEC,
     &crate::intake::SPEC,
-    &crate::book_state::SPEC,
+    &crate::item_state::SPEC,
     &crate::node_publication_attrs::SPEC,
     &crate::node_overrides::SPEC,
     &crate::node_contributors::SPEC,
@@ -56,7 +56,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::node_categories::SPEC,
     &crate::node_reviews::SPEC,
     &crate::metadata_audit::SPEC,
-    &crate::book_pipeline_audit::SPEC,
+    &crate::item_pipeline_audit::SPEC,
     &crate::works::SPEC,
     &crate::expressions::SPEC,
     &crate::mcp_tool_calls::SPEC,
