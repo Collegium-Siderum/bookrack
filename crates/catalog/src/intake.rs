@@ -180,9 +180,13 @@ impl IntakeStatus {
 /// status filter is wanted.
 #[derive(Debug, Default, Clone)]
 pub struct IntakeFilter<'a> {
+    /// Which item kind's scope to join on: `Book` for the ingest
+    /// pipeline (the default), `Paper` for the glean pipeline. Every
+    /// `node_*` JOIN this filter builds picks up the matching scope.
+    pub kind: ItemKind,
     /// Case-sensitive substring match against the root publication-attrs
     /// title, i.e. `node_publication_attrs.title LIKE '%' || ? || '%'`
-    /// joined on the book scope. `%` and `_` in the substring match
+    /// joined on the item scope. `%` and `_` in the substring match
     /// literally — the LIKE is escaped.
     pub title_substring: Option<&'a str>,
     /// Exact-equality match against the root contributor name in
@@ -209,6 +213,16 @@ pub struct IntakeFilter<'a> {
     /// treated as `"pending"`, so filtering on `"pending"` returns the
     /// never-reviewed books as well as the explicitly-pending ones.
     pub review_status_in: &'a [&'a str],
+    /// Exact-equality match against the root publication-attrs `year`
+    /// column. The column stores the raw year string the file or
+    /// metadata enrichment surfaced; the filter is compared as text.
+    pub year: Option<&'a str>,
+    /// Case-sensitive substring match against the root publication-attrs
+    /// `container_title` column. `%` and `_` are escaped.
+    pub venue_substring: Option<&'a str>,
+    /// Exact-equality match against the root publication-attrs `doi`
+    /// column.
+    pub doi: Option<&'a str>,
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -221,37 +235,36 @@ fn intake_columns_qualified() -> String {
         .join(", ")
 }
 
-/// Render the JOIN clauses, WHERE clause, and bind parameters for a
-/// filter. The JOIN and WHERE strings are empty when the filter is
-/// empty; `joins` always begins with a leading space when non-empty,
-/// and `where_clause` always begins with ` WHERE `, so they slot into
-/// the surrounding SELECT verbatim.
 fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box<dyn ToSql>>) {
     let mut joins = String::new();
     let mut where_parts: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn ToSql>> = Vec::new();
 
-    let need_npa = filter.title_substring.is_some() || !filter.confidence_in.is_empty();
+    let need_npa = filter.title_substring.is_some()
+        || !filter.confidence_in.is_empty()
+        || filter.year.is_some()
+        || filter.venue_substring.is_some()
+        || filter.doi.is_some();
     if need_npa {
         joins.push_str(
             " LEFT JOIN node_publication_attrs npa \
              ON npa.intake_id = i.intake_id AND npa.scope = ?",
         );
-        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
+        params.push(Box::new(filter.kind.as_scope_str().to_string()));
     }
     if filter.contributor_name.is_some() {
         joins.push_str(
             " LEFT JOIN node_contributors nc \
              ON nc.intake_id = i.intake_id AND nc.scope = ?",
         );
-        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
+        params.push(Box::new(filter.kind.as_scope_str().to_string()));
     }
     if !filter.review_status_in.is_empty() {
         joins.push_str(
             " LEFT JOIN node_reviews nr \
              ON nr.intake_id = i.intake_id AND nr.scope = ?",
         );
-        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
+        params.push(Box::new(filter.kind.as_scope_str().to_string()));
     }
 
     if let Some(needle) = filter.title_substring {
@@ -307,6 +320,18 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         for value in filter.review_status_in {
             params.push(Box::new((*value).to_string()));
         }
+    }
+    if let Some(year) = filter.year {
+        where_parts.push("npa.year = ?".to_string());
+        params.push(Box::new(year.to_string()));
+    }
+    if let Some(needle) = filter.venue_substring {
+        where_parts.push(format!("npa.container_title LIKE ? ESCAPE '{LIKE_ESCAPE}'"));
+        params.push(Box::new(format!("%{}%", like_escape(needle))));
+    }
+    if let Some(doi) = filter.doi {
+        where_parts.push("npa.doi = ?".to_string());
+        params.push(Box::new(doi.to_string()));
     }
 
     let where_clause = if where_parts.is_empty() {

@@ -298,6 +298,52 @@ impl<E: Embedder> Library<E> {
         Ok(citations)
     }
 
+    /// Search inside one paper's id partition, nearest first. Equivalent
+    /// to [`Self::search_in_book`] but cites with the paper-side
+    /// breadcrumb (container title + paper title) instead of the
+    /// book-side chapter/section trail.
+    pub async fn search_in_paper(
+        &self,
+        intake_id: i64,
+        query: &str,
+        top_k: Option<usize>,
+    ) -> Result<Vec<Citation>> {
+        self.search_in_paper_with(intake_id, query, env_overrides(), top_k)
+            .await
+    }
+
+    /// Variant of [`Self::search_in_paper`] that layers per-call
+    /// overrides on top of the persisted meta defaults.
+    pub async fn search_in_paper_with(
+        &self,
+        intake_id: i64,
+        query: &str,
+        overrides: SearchOptions,
+        top_k: Option<usize>,
+    ) -> Result<Vec<Citation>> {
+        self.ensure_store().await?;
+        let guard = self.store.read().await;
+        let Some(store) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let top_k = top_k.unwrap_or(self.default_top_k);
+        let partition = PartitionIdx::new(intake_id);
+        let hits = retrieve_with_partition(
+            query,
+            store,
+            &self.embedder,
+            &self.lancedb_dir,
+            overrides,
+            top_k,
+            partition,
+        )
+        .await?;
+        let corpus = Corpus::open(&self.corpus_db)?;
+        let catalog = Catalog::open_read_only(&self.catalog_db)?;
+        let citations = cite(&corpus, &catalog, hits, ItemKind::Paper)?;
+        Ok(citations)
+    }
+
     /// Aggregate counts across the catalog: intakes by status / format,
     /// book states by stage, retrieval issues by status. Drives the
     /// `library.stats` MCP tool.
@@ -341,6 +387,7 @@ impl<E: Embedder> Library<E> {
             intake_count_by_format,
             book_state_counts_by_stage,
             retrieval_issue_counts_by_status,
+            papers: None,
         })
     }
 

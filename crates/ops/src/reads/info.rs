@@ -19,7 +19,7 @@ use bookrack_vectors::ChunkStore;
 
 use crate::Ops;
 use crate::Result;
-use crate::dto::info::{CorpusStamps, DiskUsage, LibraryInfo};
+use crate::dto::info::{CorpusStamps, DiskUsage, LibraryInfo, PapersInfo};
 use crate::recorder::record_call_async;
 
 /// Static facts about the library being inspected. The caller fills
@@ -74,6 +74,7 @@ pub async fn show_library_info<E: Embedder>(
         let catalog_schema_version_on_disk = catalog
             .as_ref()
             .and_then(|c| c.schema_version_on_disk().ok().flatten());
+        let papers = read_papers_info(ops).await;
         Ok(LibraryInfo {
             data_dir: ctx.data_dir,
             library_name: ctx.library_name,
@@ -89,7 +90,34 @@ pub async fn show_library_info<E: Embedder>(
             intake_count,
             ready_book_count,
             disk: disk_usage(ops.catalog_db(), ops.corpus_db(), ops.lancedb_dir()),
+            papers,
         })
+    })
+}
+
+/// Read the paper-side companion section, mirroring the book-side
+/// reads above. Returns `None` when the calling `Ops` was built
+/// without a papers backend; otherwise tolerates missing files for the
+/// same reason the book-side path does (informational, not authoritative).
+async fn read_papers_info<E: Embedder>(ops: &Ops<E>) -> Option<PapersInfo> {
+    let corpus_db = ops.papers_corpus_db()?;
+    let catalog_db = ops.papers_catalog_db()?;
+    let lancedb_dir = ops.papers_lancedb_dir()?;
+    let corpus_stamps = read_corpus_stamps(corpus_db).unwrap_or_default();
+    let vectors_meta = bookrack_vectors::meta::load(lancedb_dir).ok().flatten();
+    let current_chunks = read_current_chunk_count(lancedb_dir, &corpus_stamps).await;
+    let catalog = if catalog_db.exists() {
+        Catalog::open_read_only(catalog_db).ok()
+    } else {
+        None
+    };
+    let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
+    Some(PapersInfo {
+        corpus_stamps,
+        vectors_meta,
+        current_chunks,
+        intake_count,
+        disk: disk_usage(catalog_db, corpus_db, lancedb_dir),
     })
 }
 

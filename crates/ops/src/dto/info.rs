@@ -47,6 +47,29 @@ pub struct LibraryInfo {
     pub ready_book_count: Option<u64>,
     /// Rough byte sizes of the three on-disk stores.
     pub disk: DiskUsage,
+    /// Paper-side companion section. `Some` only when the calling
+    /// `Ops` has a papers backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub papers: Option<PapersInfo>,
+}
+
+/// Paper-side companion to [`LibraryInfo`]. Reports the same shape of
+/// status (stamps, chunks, intake count, disk usage) for the paper
+/// catalog, corpus, and lancedb_papers directory.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PapersInfo {
+    /// Stamps the paper corpus carries about the index it was built
+    /// with.
+    pub corpus_stamps: CorpusStamps,
+    /// Persisted paper vector-store metadata, when present.
+    pub vectors_meta: Option<VectorsMeta>,
+    /// Live row count of the paper vector store, when readable.
+    pub current_chunks: Option<usize>,
+    /// Total paper intake rows recorded in the paper catalog, when
+    /// readable.
+    pub intake_count: Option<u64>,
+    /// Rough byte sizes of the three on-disk paper stores.
+    pub disk: DiskUsage,
 }
 
 /// Build-time stamps the corpus tracks about its index.

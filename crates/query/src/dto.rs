@@ -242,6 +242,10 @@ pub struct LibraryStats {
     pub book_state_counts_by_stage: BTreeMap<String, u64>,
     /// Number of retrieval-issue rows per triage status.
     pub retrieval_issue_counts_by_status: BTreeMap<String, u64>,
+    /// Aggregate counts for the paper-side stack, set when the
+    /// calling `Ops` has a papers backend.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub papers: Option<PapersStats>,
 }
 
 /// Result page for `library.list_books` / `library.find_books`.
@@ -393,5 +397,153 @@ pub fn clamp_limit(requested: u32) -> (u32, bool) {
         (MAX_LIST_LIMIT, true)
     } else {
         (effective, false)
+    }
+}
+
+/// One row of `library.list_papers` / `library.find_papers`. Mirrors
+/// [`BookSummary`] for the paper pipeline, with the four fields a
+/// Triage caller needs to disambiguate at a glance: DOI, arXiv id,
+/// container title, and year.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperSummary {
+    /// The catalog's surrogate key for this paper.
+    pub intake_id: i64,
+    /// Best-effort title for the paper.
+    pub title: Option<String>,
+    /// File format (`pdf`, ...).
+    pub format: Option<String>,
+    /// Coarse lifecycle status.
+    pub status: String,
+    /// First author attributed at the paper root, if any.
+    pub top_contributor: Option<String>,
+    /// DOI from the publication-attrs row, if known.
+    pub doi: Option<String>,
+    /// arXiv identifier in canonical form (no `arXiv:` prefix), if known.
+    pub arxiv_id: Option<String>,
+    /// Container title (journal, conference proceedings, ...), if known.
+    pub container_title: Option<String>,
+    /// Year string as carried by the publication-attrs row.
+    pub year: Option<String>,
+}
+
+/// One `library.show_paper` response. Mirrors [`BookDetail`] for the
+/// paper pipeline and carries the abstract text alongside the
+/// effective biblio and contributor rows. The abstract is in the
+/// detail response only — list responses stay slim.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperDetail {
+    /// The catalog's surrogate key.
+    pub intake_id: i64,
+    /// Best-effort title for the paper.
+    pub title: Option<String>,
+    /// File format, if known.
+    pub format: Option<String>,
+    /// Coarse lifecycle status.
+    pub status: String,
+    /// Effective bibliographic attributes (paper scope), merged with
+    /// any human override.
+    pub effective_biblio: BTreeMap<String, String>,
+    /// Every active override at the paper root.
+    pub overrides: Vec<OverrideEntry>,
+    /// Every contributor attributed at the paper root, in (role,
+    /// ordinal) order.
+    pub contributors: Vec<ContributorEntry>,
+    /// Abstract body, when the IDENTIFY pass found one.
+    pub abstract_text: Option<String>,
+}
+
+/// Facade-level filter for `find_papers`. Mirrors
+/// [`bookrack_catalog::IntakeFilter`] for the paper-side scope and
+/// owns its strings so the caller can build it once and pass it
+/// through a `Send` future.
+#[derive(Debug, Default, Clone)]
+pub struct PaperFilter {
+    /// Substring match against the paper title.
+    pub title_substring: Option<String>,
+    /// Exact-equality match against a contributor name.
+    pub contributor_name: Option<String>,
+    /// Exact-equality match against the year column.
+    pub year: Option<String>,
+    /// Substring match against the container title.
+    pub venue_substring: Option<String>,
+    /// Exact-equality match against the DOI.
+    pub doi: Option<String>,
+}
+
+/// Result page for `library.list_papers` / `library.find_papers`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListPapersResult {
+    /// Papers in this page.
+    pub papers: Vec<PaperSummary>,
+    /// Total number of papers matching the filter.
+    pub total: u64,
+    /// True when the page does not cover the full result set.
+    pub truncated: bool,
+}
+
+/// Paper-side aggregate counts attached to [`LibraryStats`] as an
+/// optional companion section. Set when the calling `Ops` has a
+/// papers backend; absent otherwise.
+#[derive(Debug, Clone, Serialize)]
+pub struct PapersStats {
+    /// Number of paper intake rows per coarse lifecycle status.
+    pub intake_counts_by_status: BTreeMap<String, u64>,
+}
+
+impl PaperSummary {
+    /// Project a catalog [`Intake`] row plus a few paper-specific
+    /// fields read from the effective publication-attrs view into a
+    /// list summary.
+    pub fn from_intake(
+        intake: &Intake,
+        title: Option<String>,
+        top_contributor: Option<String>,
+        doi: Option<String>,
+        arxiv_id: Option<String>,
+        container_title: Option<String>,
+        year: Option<String>,
+    ) -> PaperSummary {
+        PaperSummary {
+            intake_id: intake.intake_id,
+            title,
+            format: intake.format.clone(),
+            status: intake.status.as_str().to_string(),
+            top_contributor,
+            doi,
+            arxiv_id,
+            container_title,
+            year,
+        }
+    }
+}
+
+impl PaperDetail {
+    /// Project a catalog [`Intake`] plus its effective biblio,
+    /// override, and contributor rows into the paper detail DTO.
+    pub fn build(
+        intake: Intake,
+        effective: EffectiveAttrs,
+        overrides: Vec<NodeOverride>,
+        contributors: Vec<NodeContributor>,
+    ) -> PaperDetail {
+        let mut effective_biblio = BTreeMap::new();
+        for (name, value) in effective.iter() {
+            effective_biblio.insert(name.to_string(), value.to_string());
+        }
+        let title = effective_biblio.get("title").cloned();
+        let abstract_text = effective_biblio.get("abstract_text").cloned();
+        PaperDetail {
+            intake_id: intake.intake_id,
+            title,
+            format: intake.format,
+            status: intake.status.as_str().to_string(),
+            effective_biblio,
+            overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
+            contributors: contributors
+                .into_iter()
+                .map(ContributorEntry::from_row)
+                .collect(),
+            abstract_text,
+        }
     }
 }

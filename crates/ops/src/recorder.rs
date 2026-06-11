@@ -184,6 +184,7 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::NotALeaf { .. } => "not_a_leaf",
         OpsError::NotOrganizing { .. } => "not_organizing",
         OpsError::SearchUnavailable => "search_unavailable",
+        OpsError::PapersBackendNotConfigured => "papers_backend_not_configured",
         OpsError::Other(_) => "other",
     }
 }

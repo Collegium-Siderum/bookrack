@@ -188,11 +188,34 @@ pub fn show_stats<E: Embedder>(ops: &Ops<E>) -> Result<LibraryStats> {
                 retrieval_issue_counts_by_status.insert(status.to_string(), n);
             }
         }
+        let papers = papers_stats_if_configured(ops)?;
         Ok(LibraryStats {
             intake_counts_by_status,
             intake_count_by_format,
             book_state_counts_by_stage,
             retrieval_issue_counts_by_status,
+            papers,
         })
     })
+}
+
+/// Optional paper-side aggregate section that piggybacks on
+/// [`show_stats`]. Returns `None` when the calling `Ops` was built
+/// without a papers backend; otherwise opens the paper catalog
+/// read-only and counts intake rows per coarse lifecycle status.
+fn papers_stats_if_configured<E: Embedder>(
+    ops: &Ops<E>,
+) -> Result<Option<bookrack_query::dto::PapersStats>> {
+    let Some(papers_db) = ops.papers_catalog_db() else {
+        return Ok(None);
+    };
+    let papers = Catalog::open_read_only(papers_db)?;
+    let mut intake_counts_by_status = BTreeMap::new();
+    for status in IntakeStatus::ALL {
+        let n = papers.count_intakes_by_status(std::slice::from_ref(&status))?;
+        intake_counts_by_status.insert(status.as_str().to_string(), n);
+    }
+    Ok(Some(bookrack_query::dto::PapersStats {
+        intake_counts_by_status,
+    }))
 }

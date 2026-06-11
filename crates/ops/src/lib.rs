@@ -125,6 +125,12 @@ pub enum OpsError {
     #[error("search is not available on a catalog-only Ops handle")]
     SearchUnavailable,
 
+    /// A paper-side op was issued on an [`Ops`] built without a
+    /// papers backend (no `Ops::with_papers` call). The op was
+    /// rejected before it could open a database.
+    #[error("papers backend not configured on this Ops handle")]
+    PapersBackendNotConfigured,
+
     /// Catch-all for ad-hoc errors that have no dedicated variant.
     #[error(transparent)]
     Other(anyhow::Error),
