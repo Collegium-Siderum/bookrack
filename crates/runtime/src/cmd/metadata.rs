@@ -40,7 +40,8 @@ pub async fn run_write(
             field,
             value,
             reason,
-        } => set(&ops, book, &field, &value, reason),
+            confirmed,
+        } => set(&ops, book, &field, &value, reason, confirmed),
         WriteMetadataAction::Clear {
             book,
             field,
@@ -77,12 +78,14 @@ fn set(
     field: &str,
     value: &str,
     reason: Option<String>,
+    confirmed: bool,
 ) -> Result<()> {
     let req = bookrack_ops::dto::writes::SetMetadataFieldRequest {
         intake_id: book,
         field: field.to_string(),
         value: value.to_string(),
         reason,
+        confirmed,
     };
     match bookrack_ops::writes::metadata::set_metadata_field(ops, req) {
         Ok(_) => {

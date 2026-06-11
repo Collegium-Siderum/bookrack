@@ -25,6 +25,8 @@ pub struct MetadataSetParams {
     value: String,
     #[serde(default)]
     reason: Option<String>,
+    #[serde(default)]
+    confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         field: parsed.field,
         value: parsed.value,
         reason: parsed.reason,
+        confirmed: parsed.confirmed,
     };
     run_metadata_action(ctx, action).await
 }

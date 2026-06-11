@@ -351,6 +351,12 @@ pub struct MetadataSetArgs {
     /// on the audit row; required so an LLM edit always carries its
     /// justification.
     pub reason: String,
+    /// Set true only after checking the value against the source
+    /// itself (e.g. the copyright page via `library.read_span`), not
+    /// against an external catalog alone. The audit grades a confirmed
+    /// override strong unless a validation check fails. Defaults to
+    /// false.
+    pub confirmed: Option<bool>,
     /// Library short name from the registry. Write tools require an
     /// explicit selector so a misrouted call never silently lands on
     /// the wrong library's catalog.
@@ -1103,7 +1109,9 @@ impl BookrackServer {
                        book. An unknown field name is rejected with the editable \
                        list in the error. The extracted value is preserved; the \
                        override wins on read. Appends one audit row tagged \
-                       `actor_kind=llm` carrying the required `reason`."
+                       `actor_kind=llm` carrying the required `reason`. Pass \
+                       `confirmed: true` only after verifying the value against \
+                       the source itself; the audit then grades the field strong."
     )]
     async fn library_metadata_set(
         &self,
@@ -1115,6 +1123,7 @@ impl BookrackServer {
             field: args.field,
             value: args.value,
             reason: Some(args.reason),
+            confirmed: args.confirmed.unwrap_or(false),
         };
         let outcome = writes::metadata::set_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_edit_error)?;

@@ -17,11 +17,18 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             field,
             value,
             reason,
+            confirmed,
         } => {
             helpers::call_and_print(
                 &client,
                 "metadata.set",
-                json!({"book": book, "field": field, "value": value, "reason": reason}),
+                json!({
+                    "book": book,
+                    "field": field,
+                    "value": value,
+                    "reason": reason,
+                    "confirmed": confirmed,
+                }),
             )
             .await
         }

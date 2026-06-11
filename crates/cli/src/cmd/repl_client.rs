@@ -474,11 +474,18 @@ async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) 
             field,
             value,
             reason,
+            confirmed,
         } => {
             call_and_print(
                 client,
                 "metadata.set",
-                json!({"book": book, "field": field, "value": value, "reason": reason}),
+                json!({
+                    "book": book,
+                    "field": field,
+                    "value": value,
+                    "reason": reason,
+                    "confirmed": confirmed,
+                }),
             )
             .await
         }

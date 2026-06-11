@@ -41,6 +41,7 @@ pub fn set_metadata_field<E: Embedder>(
         "field": req.field,
         "value": req.value,
         "reason": req.reason,
+        "confirmed": req.confirmed,
     });
     record_call_sync!(ops, "library.metadata.set", args, {
         require_editable(&req.field)?;
@@ -53,13 +54,16 @@ pub fn set_metadata_field<E: Embedder>(
         let caller = ops.effective_caller();
         let curated_by = caller.actor_kind.as_str();
 
-        catalog.set_override(&NewOverride::new(
-            req.intake_id,
-            BOOK_SCOPE,
-            req.field.clone(),
-            Some(req.value.clone()),
-            curated_by,
-        ))?;
+        catalog.set_override(
+            &NewOverride::new(
+                req.intake_id,
+                BOOK_SCOPE,
+                req.field.clone(),
+                Some(req.value.clone()),
+                curated_by,
+            )
+            .confirmed(req.confirmed),
+        )?;
 
         let audit = build_audit(
             ops,

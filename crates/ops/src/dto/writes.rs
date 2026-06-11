@@ -21,6 +21,11 @@ pub struct SetMetadataFieldRequest {
     /// Why this value is correct; recorded on the audit row.
     #[serde(default)]
     pub reason: Option<String>,
+    /// True when the curator has checked the value against the source
+    /// itself. Recorded on the override row; the audit grades a
+    /// confirmed override strong unless a validation check fails.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 /// Request body for [`crate::writes::metadata::clear_metadata_field`].

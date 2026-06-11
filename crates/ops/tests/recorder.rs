@@ -133,6 +133,7 @@ fn record_call_sync_records_a_successful_write_op() {
             field: "title".to_string(),
             value: "Recorded".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("set");

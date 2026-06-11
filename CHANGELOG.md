@@ -28,6 +28,13 @@ release workflow extracts the matching section verbatim from this file.
   `effective_biblio`, so curation state is visible without replaying
   the audit trail.
 
+- `metadata.set` accepts a `confirmed` mark (CLI/REPL `--confirmed`,
+  MCP optional `confirmed: true`) recording that the curator checked
+  the value against the source itself, not an external catalog. The
+  audit grades a confirmed override strong unless a validation check
+  (ISBN checksum, BCP-47 syntax, year range, language/body mismatch)
+  fails. Rewriting the field without the mark drops it.
+
 - `metadata.void` (CLI/REPL `bookrack metadata void`, MCP
   `library.metadata.void`): suppress a field's extracted value with a
   NULL override when the value is known wrong and no correct value is

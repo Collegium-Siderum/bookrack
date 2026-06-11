@@ -103,6 +103,7 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
             field: "title".to_string(),
             value: "A New Title".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("set");
@@ -129,6 +130,53 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
 }
 
 #[test]
+fn set_metadata_field_records_the_confirmed_mark() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-set-confirmed");
+    set_metadata_field(
+        &fx.ops,
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "publisher".to_string(),
+            value: "Verified Press".to_string(),
+            reason: Some("checked the copyright page".to_string()),
+            confirmed: true,
+        },
+    )
+    .expect("set confirmed");
+    let row = fx
+        .catalog()
+        .overrides_for_address(id, BOOK_SCOPE)
+        .expect("overrides")
+        .into_iter()
+        .find(|o| o.field == "publisher")
+        .expect("publisher override");
+    assert!(row.confirmed);
+
+    // A later unconfirmed rewrite drops the mark: the new value has
+    // not been checked against the source.
+    set_metadata_field(
+        &fx.ops,
+        SetMetadataFieldRequest {
+            intake_id: id,
+            field: "publisher".to_string(),
+            value: "Another Press".to_string(),
+            reason: None,
+            confirmed: false,
+        },
+    )
+    .expect("set unconfirmed");
+    let row = fx
+        .catalog()
+        .overrides_for_address(id, BOOK_SCOPE)
+        .expect("overrides")
+        .into_iter()
+        .find(|o| o.field == "publisher")
+        .expect("publisher override");
+    assert!(!row.confirmed);
+}
+
+#[test]
 fn set_and_clear_record_the_reason_on_their_audit_rows() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-reason");
@@ -139,6 +187,7 @@ fn set_and_clear_record_the_reason_on_their_audit_rows() {
             field: "title".to_string(),
             value: "Corrected Title".to_string(),
             reason: Some("matches the title page".to_string()),
+            confirmed: false,
         },
     )
     .expect("set");
@@ -182,6 +231,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
             field: "pub_place".to_string(),
             value: "New York".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("set pub_place");
@@ -192,6 +242,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
             field: "original_year".to_string(),
             value: "1949".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("set original_year");
@@ -217,6 +268,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
             field: "title".to_string(),
             value: "Override Title".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("set");
@@ -396,6 +448,7 @@ fn write_ops_reject_unknown_intake_ids() {
             field: "title".to_string(),
             value: "X".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect_err("error");
@@ -469,6 +522,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
             field: "title".to_string(),
             value: "From CLI".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("cli set");
@@ -491,6 +545,7 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
             field: "title".to_string(),
             value: "From MCP".to_string(),
             reason: None,
+            confirmed: false,
         },
     )
     .expect("mcp set");
@@ -526,6 +581,7 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
                     field: "title".to_string(),
                     value: "From MCP via override".to_string(),
                     reason: None,
+                    confirmed: false,
                 },
             )
         }))
@@ -574,6 +630,7 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
             field: "title".to_string(),
             value: "Curated Title".to_string(),
             reason: Some("matches the title page".to_string()),
+            confirmed: false,
         },
     )
     .expect("set");
@@ -834,6 +891,7 @@ fn set_rejects_a_field_name_outside_the_editable_set() {
                 field: field.to_string(),
                 value: "x".to_string(),
                 reason: None,
+                confirmed: false,
             },
         )
         .expect_err("unknown field must be rejected");

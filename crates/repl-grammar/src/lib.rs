@@ -175,6 +175,12 @@ pub enum WriteMetadataAction {
         /// audit row.
         #[arg(long)]
         reason: Option<String>,
+        /// Mark the override confirmed: the curator has checked the
+        /// value against the source itself (e.g. the copyright page).
+        /// The audit grades a confirmed override strong unless a
+        /// validation check fails.
+        #[arg(long)]
+        confirmed: bool,
     },
     /// Clear an override, falling back to the extracted base value.
     Clear {
