@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_repl_grammar::{
-    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, RemoveArgs, ReplCli, ReplCommand,
-    StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, RemoveArgs, ReplCli,
+    ReplCommand, StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
@@ -216,6 +216,12 @@ enum Command {
     },
     /// Drop a book from every store via the daemon's control plane.
     Remove(RemoveArgs),
+    /// Paper-side surface: ingest a paper file, browse the paper
+    /// catalog, export one paper's bibliographic record as CSL-JSON.
+    Papers {
+        #[command(subcommand)]
+        action: PapersAction,
+    },
     /// Simulate an ingest without writing into the live stores.
     Dryrun(DryrunArgs),
     /// Ask the running bookrack daemon to shut down. Exits with code
@@ -490,6 +496,7 @@ async fn run() -> Result<()> {
         Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,
         Command::Stamps { action } => cmd::cli_client::stamps::run(action, None).await,
         Command::Remove(args) => cmd::cli_client::remove::run(args, None).await,
+        Command::Papers { action } => cmd::cli_client::papers::run(action, None).await,
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),

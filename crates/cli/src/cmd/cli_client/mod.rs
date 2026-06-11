@@ -17,6 +17,7 @@ pub mod helpers;
 pub mod ingest;
 pub mod libraries;
 pub mod metadata;
+pub mod papers;
 pub mod quit;
 pub mod remove;
 pub mod stamps;

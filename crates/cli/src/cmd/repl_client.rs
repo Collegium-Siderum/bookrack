@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use bookrack_repl_grammar::{
-    CorpusAction, IntakeAction, QueueAction, ReplCli, ReplCommand, StampsAction,
+    CorpusAction, IntakeAction, PapersAction, QueueAction, ReplCli, ReplCommand, StampsAction,
     WriteMetadataAction, WriteVectorsAction,
 };
 use clap::Parser;
@@ -464,6 +464,71 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
             QueueAction::Resume => call_and_print(client, "queue.resume", Value::Null).await,
             QueueAction::Clear => call_and_print(client, "queue.clear", Value::Null).await,
         },
+        ReplCommand::Papers { action } => dispatch_papers(client, action).await,
+    }
+}
+
+async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
+    match action {
+        PapersAction::Ingest(args) => {
+            if args.recursive {
+                eprintln!(
+                    "bookrack: papers ingest --recursive is not yet wired over the control plane; submit individual files",
+                );
+                return true;
+            }
+            let mut params = json!({
+                "paths": [args.path],
+                "force": args.force,
+            });
+            if let Some(level) = args.priority {
+                params["priority"] = Value::String(level);
+            }
+            call_and_print(client, "glean.submit", params).await
+        }
+        PapersAction::List(args) => {
+            let params = json!({
+                "limit": args.limit,
+                "offset": args.offset,
+            });
+            call_and_print(client, "library.list_papers", params).await
+        }
+        PapersAction::Find(args) => {
+            let params = json!({
+                "title_substring": args.title,
+                "contributor_name": args.contributor,
+                "year": args.year,
+                "venue_substring": args.venue,
+                "doi": args.doi,
+                "limit": args.limit,
+                "offset": args.offset,
+            });
+            call_and_print(client, "library.find_papers", params).await
+        }
+        PapersAction::Show { intake_id } => {
+            call_and_print(
+                client,
+                "library.show_paper",
+                json!({ "intake_id": intake_id }),
+            )
+            .await
+        }
+        PapersAction::Toc { intake_id } => {
+            call_and_print(
+                client,
+                "library.show_paper_toc",
+                json!({ "intake_id": intake_id }),
+            )
+            .await
+        }
+        PapersAction::ExportCsl { intake_id } => {
+            call_and_print(
+                client,
+                "papers.export_csl",
+                json!({ "intake_id": intake_id }),
+            )
+            .await
+        }
     }
 }
 
@@ -727,8 +792,8 @@ fn print_repl_help() {
     println!("  queue cancel <id-prefix>");
     println!();
     println!("Write commands (`ingest`, `metadata`, `vectors`, `corpus`, `stamps`,");
-    println!("`remove`, `dryrun`) are parsed against the same grammar as the embedded");
-    println!("REPL; each variant maps to the matching control-plane RPC.");
+    println!("`remove`, `dryrun`, `papers`) are parsed against the same grammar as the");
+    println!("embedded REPL; each variant maps to the matching control-plane RPC.");
     println!();
 }
 

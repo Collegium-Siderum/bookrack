@@ -62,6 +62,12 @@ pub enum ReplCommand {
         #[command(subcommand)]
         action: QueueAction,
     },
+    /// Paper-side surface: ingest a paper, browse the paper catalog,
+    /// export one paper's bibliographic record as CSL-JSON.
+    Papers {
+        #[command(subcommand)]
+        action: PapersAction,
+    },
 }
 
 /// One of three lifecycle actions on the persistent ingest queue.
@@ -393,4 +399,161 @@ pub enum StampsAction {
     /// is unstamped. Fails on a stamp mismatch — the operator can then
     /// decide whether to rebuild.
     Reconcile,
+}
+
+/// Paper-side commands. Mirrors the book-side surface against the
+/// papers backend: ingest a paper file through `glean.submit`, browse
+/// the paper catalog through the read-side control-plane methods, and
+/// export one paper's bibliographic record as CSL-JSON.
+#[derive(clap::Subcommand, Debug)]
+pub enum PapersAction {
+    /// Submit a paper file to the glean pipeline. Mirrors the book-side
+    /// `ingest` command; with `--recursive`, every supported file under
+    /// a directory is enqueued.
+    Ingest(PapersIngestArgs),
+    /// List papers in catalog order, paginated.
+    List(PapersListArgs),
+    /// Find papers by title substring, contributor, year, venue, or
+    /// DOI.
+    Find(PapersFindArgs),
+    /// Print the full bibliographic record of one paper by intake id.
+    Show {
+        /// The intake id of the paper.
+        intake_id: i64,
+    },
+    /// Print the table of contents of one paper.
+    Toc {
+        /// The intake id of the paper.
+        intake_id: i64,
+    },
+    /// Project one paper's stored bibliographic row onto CSL-JSON and
+    /// print it to stdout.
+    ExportCsl {
+        /// The intake id of the paper.
+        intake_id: i64,
+    },
+}
+
+/// Positional + flag bundle for `papers ingest`. Mirrors
+/// [`IngestArgs`] for the paper pipeline. `--priority` controls the
+/// queue priority of the resulting job.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PapersIngestArgs {
+    pub path: PathBuf,
+    #[arg(long)]
+    pub recursive: bool,
+    #[arg(long)]
+    pub force: bool,
+    /// Queue priority for the enqueued job: `low`, `normal`, or
+    /// `high`. Defaults to `normal`.
+    #[arg(long, value_name = "LEVEL")]
+    pub priority: Option<String>,
+}
+
+/// Pagination bundle for `papers list`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PapersListArgs {
+    /// Maximum number of papers in this page. Server-side cap applies.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
+/// Filter bundle for `papers find`. Each flag maps to one filter
+/// column on the paper catalog; pass any combination.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PapersFindArgs {
+    /// Substring match against the paper title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Exact-equality match against a contributor name.
+    #[arg(long)]
+    pub contributor: Option<String>,
+    /// Exact-equality match against the year column.
+    #[arg(long)]
+    pub year: Option<String>,
+    /// Substring match against the container title (journal,
+    /// proceedings, ...).
+    #[arg(long)]
+    pub venue: Option<String>,
+    /// Exact-equality match against the DOI.
+    #[arg(long)]
+    pub doi: Option<String>,
+    /// Maximum number of papers in this page.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(tokens: &[&str]) -> ReplCommand {
+        ReplCli::try_parse_from(tokens).expect("parse").command
+    }
+
+    #[test]
+    fn papers_ingest_carries_path_and_flags() {
+        let cmd = parse(&[
+            "papers",
+            "ingest",
+            "/tmp/p.pdf",
+            "--force",
+            "--priority",
+            "high",
+        ]);
+        match cmd {
+            ReplCommand::Papers {
+                action: PapersAction::Ingest(args),
+            } => {
+                assert_eq!(args.path.to_string_lossy(), "/tmp/p.pdf");
+                assert!(args.force);
+                assert_eq!(args.priority.as_deref(), Some("high"));
+                assert!(!args.recursive);
+            }
+            other => panic!("expected papers ingest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_find_collects_filters() {
+        let cmd = parse(&[
+            "papers",
+            "find",
+            "--title",
+            "attention",
+            "--year",
+            "2017",
+            "--venue",
+            "NeurIPS",
+        ]);
+        match cmd {
+            ReplCommand::Papers {
+                action: PapersAction::Find(args),
+            } => {
+                assert_eq!(args.title.as_deref(), Some("attention"));
+                assert_eq!(args.year.as_deref(), Some("2017"));
+                assert_eq!(args.venue.as_deref(), Some("NeurIPS"));
+                assert!(args.doi.is_none());
+            }
+            other => panic!("expected papers find, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_export_csl_takes_intake_id() {
+        let cmd = parse(&["papers", "export-csl", "42"]);
+        match cmd {
+            ReplCommand::Papers {
+                action: PapersAction::ExportCsl { intake_id },
+            } => assert_eq!(intake_id, 42),
+            other => panic!("expected papers export-csl, got {other:?}"),
+        }
+    }
 }

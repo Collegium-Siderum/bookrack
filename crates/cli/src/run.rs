@@ -617,6 +617,10 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             // the worker-loop pause flag and event stream stay in scope.
             unreachable!("queue subcommand is handled by handle_queue");
         }
+        ReplCommand::Papers { .. } => Err(anyhow::anyhow!(
+            "papers commands are only available over the control plane; \
+             use `bookrack repl` against a running daemon",
+        )),
     };
     if let Err(err) = result {
         eprintln!("bookrack: {err:#}");
