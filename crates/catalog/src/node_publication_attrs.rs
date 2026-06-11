@@ -44,6 +44,15 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("confidence").comment("high / medium / low"),
         ColumnSpec::text("audit_verdict").comment("clean / needs_work"),
         ColumnSpec::text("enriched_by"),
+        ColumnSpec::text("doi").comment("paper-side identifier; normalized to lowercase"),
+        ColumnSpec::text("arxiv_id")
+            .comment("paper-side identifier; new-form `NNNN.NNNNN` or old-form `cat/NNNNNNN`"),
+        ColumnSpec::text("issn"),
+        ColumnSpec::text("container_title").comment("journal / conference / book series name"),
+        ColumnSpec::text("abstract_text"),
+        ColumnSpec::text("csl_type").comment("CSL 1.0.2 item type (article-journal / book / ...)"),
+        ColumnSpec::text("extras_json")
+            .comment("CSL extras the discrete columns above do not cover; opaque JSON blob"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),
     uniques: &[],

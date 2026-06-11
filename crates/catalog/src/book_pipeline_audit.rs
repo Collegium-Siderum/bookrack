@@ -13,11 +13,13 @@ use rusqlite::{Row, named_params};
 
 use crate::{ActorKind, Catalog, Result};
 
-/// The single source of truth for the `book_pipeline_audit` table's
+/// The single source of truth for the `item_pipeline_audit` table's
 /// schema. Its DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {
-    name: "book_pipeline_audit",
-    comment: Some("The six-stage pipeline log. Audit rows outlive the books they describe."),
+    name: "item_pipeline_audit",
+    comment: Some(
+        "The pipeline-step log, shared between book ingest and paper glean. Audit rows outlive the items they describe.",
+    ),
     columns: &[
         ColumnSpec::int("audit_id").pk_autoinc(),
         ColumnSpec::int("book_root_id").comment("soft reference; NULL allowed"),
@@ -54,7 +56,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 
 /// Insert one audit row and return its surrogate id. `ts` is generated
 /// by SQLite so the whole crate shares one timestamp source.
-const INSERT_SQL: &str = "INSERT INTO book_pipeline_audit \
+const INSERT_SQL: &str = "INSERT INTO item_pipeline_audit \
      (book_root_id, source_sha256, stage, sub_step, outcome, adapter, \
       metric_summary, error_message, duration_ms, ts, pipeline_run_id, \
       actor_kind, actor_detail, session_id) \
@@ -68,7 +70,7 @@ const INSERT_SQL: &str = "INSERT INTO book_pipeline_audit \
 /// [`SPEC`].
 fn select_sql(tail: &str) -> String {
     format!(
-        "SELECT {} FROM book_pipeline_audit {tail}",
+        "SELECT {} FROM item_pipeline_audit {tail}",
         SPEC.select_list()
     )
 }
@@ -379,7 +381,7 @@ mod tests {
         catalog
             .conn
             .execute(
-                "UPDATE book_pipeline_audit SET ts = ?1 WHERE audit_id = ?2",
+                "UPDATE item_pipeline_audit SET ts = ?1 WHERE audit_id = ?2",
                 rusqlite::params![ts, id],
             )
             .expect("backdate ts");

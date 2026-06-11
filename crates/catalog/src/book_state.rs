@@ -11,11 +11,11 @@ use rusqlite::{OptionalExtension, Row, named_params};
 
 use crate::{Catalog, Result, count_as_u64};
 
-/// The single source of truth for the `book_state` table's schema. Its
+/// The single source of truth for the `item_state` table's schema. Its
 /// DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {
-    name: "book_state",
-    comment: Some("Book-level pipeline state, one row per ingested book."),
+    name: "item_state",
+    comment: Some("Item-level pipeline state, one row per ingested book or paper."),
     columns: &[
         ColumnSpec::int("book_root_id")
             .primary_key()
@@ -32,8 +32,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     uniques: &[],
     table_checks: &[],
     indexes: &[
-        IndexSpec::on("idx_book_state_stage", &["current_stage"]),
-        IndexSpec::on("idx_book_state_embed", &["embedded_at"]).partial("embedded_at IS NULL"),
+        IndexSpec::on("idx_item_state_stage", &["current_stage"]),
+        IndexSpec::on("idx_item_state_embed", &["embedded_at"]).partial("embedded_at IS NULL"),
     ],
 };
 
@@ -42,7 +42,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 /// `ocr_marker_finished_at` is an append-only audit stamp: an update
 /// that does not provide a new value keeps the existing one rather
 /// than clearing it.
-const UPSERT_SQL: &str = "INSERT INTO book_state \
+const UPSERT_SQL: &str = "INSERT INTO item_state \
      (book_root_id, intake_id, current_stage, embed_model, parsed_at, \
       embedded_at, ocr_marker_finished_at, last_error) \
      VALUES (:book_root_id, :intake_id, :current_stage, :embed_model, :parsed_at, \
@@ -59,7 +59,7 @@ const UPSERT_SQL: &str = "INSERT INTO book_state \
 /// A `SELECT` of every column with `tail` (a `WHERE` clause) appended.
 /// The column list is derived from [`SPEC`].
 fn select_sql(tail: &str) -> String {
-    format!("SELECT {} FROM book_state {tail}", SPEC.select_list())
+    format!("SELECT {} FROM item_state {tail}", SPEC.select_list())
 }
 
 /// One `book_state` row read back from `catalog.db`.
@@ -184,10 +184,10 @@ impl Catalog {
     }
 
     /// Number of book-state rows currently at `stage`. Uses
-    /// `idx_book_state_stage`.
+    /// `idx_item_state_stage`.
     pub fn count_book_states_by_stage(&self, stage: &str) -> Result<u64> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM book_state WHERE current_stage = :stage",
+            "SELECT COUNT(*) FROM item_state WHERE current_stage = :stage",
             named_params! { ":stage": stage },
             |row| row.get(0),
         )?;

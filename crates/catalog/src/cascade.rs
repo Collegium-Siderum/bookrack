@@ -64,7 +64,7 @@ impl BookRemovalCounts {
 }
 
 const COUNT_BY_INTAKE_ID_TABLES: &[&str] = &[
-    "book_state",
+    "item_state",
     "node_publication_attrs",
     "node_overrides",
     "node_contributors",
@@ -73,7 +73,7 @@ const COUNT_BY_INTAKE_ID_TABLES: &[&str] = &[
     "node_role_takeovers",
 ];
 
-const DELETE_BOOK_STATE_SQL: &str = "DELETE FROM book_state WHERE intake_id = :intake_id";
+const DELETE_BOOK_STATE_SQL: &str = "DELETE FROM item_state WHERE intake_id = :intake_id";
 const DELETE_NODE_PUBLICATION_ATTRS_SQL: &str =
     "DELETE FROM node_publication_attrs WHERE intake_id = :intake_id";
 const DELETE_NODE_OVERRIDES_SQL: &str = "DELETE FROM node_overrides WHERE intake_id = :intake_id";
@@ -223,7 +223,7 @@ mod tests {
                 &NewBookState::new(book_root_id, intake_id, "ready")
                     .parsed_at("2026-06-04T00:00:00Z"),
             )
-            .expect("book_state");
+            .expect("item_state");
 
         // publication_attrs base
         let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);

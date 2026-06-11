@@ -19,10 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-/// The `user_version` a fully-migrated `catalog.db` carries: the number of
-/// migrations defined. The `catalog_meta.schema_version` mirror is kept
-/// equal to it.
-pub(crate) const TARGET_VERSION: i64 = 7;
+pub(crate) const TARGET_VERSION: i64 = 8;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -464,6 +461,48 @@ const AUDIT_VERDICT_DDL: &str = "ALTER TABLE node_publication_attrs ADD COLUMN a
 // and leaves existing rows with NULL.
 const INTAKE_PAGE_COUNT_DDL: &str = "ALTER TABLE intake ADD COLUMN page_count INTEGER;";
 
+// `M[7]` — generalize the curation tables for both pipelines:
+//
+//   * Rename `book_state` -> `item_state` and `book_pipeline_audit` ->
+//     `item_pipeline_audit`. The composite key `book_root_id`/`scope`
+//     stays book-shaped on the wire; the rename only generalizes the
+//     containers so the glean pipeline can land paper rows alongside
+//     ingest's book rows without a parallel table.
+//   * Add the seven discrete bibliographic columns the paper pipeline
+//     needs on `node_publication_attrs` (DOI, arXiv id, ISSN, container
+//     title, abstract text, CSL type, plus an `extras_json` blob for
+//     anything CSL preserves but no discrete column captures).
+//   * Add the three contributor columns CSL-JSON consumes when carrying
+//     a structured `Name`: `family`, `given`, and `orcid`.
+//
+// All additive columns are nullable; existing rows backfill to NULL,
+// and book ingest leaves them at NULL. The index pair on the old
+// `book_state` table is dropped and re-issued under the new prefix so
+// the spec's `IndexSpec` names match what is on disk; `idx_pa_*` on
+// `item_pipeline_audit` keep their (table-agnostic) names and follow
+// the renamed table automatically.
+const ITEM_STATE_AND_PAPER_COLUMNS_DDL: &str = r#"
+ALTER TABLE book_state RENAME TO item_state;
+DROP INDEX idx_book_state_stage;
+DROP INDEX idx_book_state_embed;
+CREATE INDEX idx_item_state_stage ON item_state(current_stage);
+CREATE INDEX idx_item_state_embed ON item_state(embedded_at) WHERE embedded_at IS NULL;
+
+ALTER TABLE book_pipeline_audit RENAME TO item_pipeline_audit;
+
+ALTER TABLE node_publication_attrs ADD COLUMN doi TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN arxiv_id TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN issn TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN container_title TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN abstract_text TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN csl_type TEXT;
+ALTER TABLE node_publication_attrs ADD COLUMN extras_json TEXT;
+
+ALTER TABLE node_contributors ADD COLUMN family TEXT;
+ALTER TABLE node_contributors ADD COLUMN given TEXT;
+ALTER TABLE node_contributors ADD COLUMN orcid TEXT;
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -475,6 +514,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(INTAKE_EXTRACTOR_VERSION_DDL),
         M::up(AUDIT_VERDICT_DDL),
         M::up(INTAKE_PAGE_COUNT_DDL),
+        M::up(ITEM_STATE_AND_PAPER_COLUMNS_DDL),
     ])
 }
 
@@ -674,6 +714,128 @@ mod tests {
             )
             .expect("read legacy row");
         assert_eq!(legacy_pc, None);
+    }
+
+    #[test]
+    fn migration_m7_renames_item_tables_and_adds_paper_columns() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[7] so the pre-migration shape (old table
+        // names, no paper columns) can be seeded and then asserted to
+        // have moved correctly.
+        migrations()
+            .to_version(&mut conn, 7)
+            .expect("apply M[0..6]");
+
+        // Seed one row on each of the two soon-to-be-renamed tables and
+        // one publication_attrs row to verify backfill onto the new
+        // columns later.
+        conn.execute(
+            "INSERT INTO intake (\
+               source_sha256, original_path, format, byte_size, \
+               adapter, extractor_version, intake_at, status\
+             ) VALUES ('sha-legacy', '/tmp/book.pdf', 'pdf', 8192, \
+                       'pdf', 1, '2026-06-05T00:00:00Z', 'extracted')",
+            [],
+        )
+        .expect("seed intake row");
+        conn.execute(
+            "INSERT INTO book_state (\
+               book_root_id, intake_id, current_stage\
+             ) VALUES (10, 1, 'extracted')",
+            [],
+        )
+        .expect("seed book_state row");
+        conn.execute(
+            "INSERT INTO book_pipeline_audit (\
+               book_root_id, source_sha256, stage, sub_step, outcome, \
+               ts, pipeline_run_id, actor_kind\
+             ) VALUES (10, 'sha-legacy', 'extract', 'parse', 'ok', \
+                       '2026-06-05T00:00:00Z', 'run-1', 'pipeline')",
+            [],
+        )
+        .expect("seed book_pipeline_audit row");
+        conn.execute(
+            "INSERT INTO node_publication_attrs (\
+               intake_id, scope, title\
+             ) VALUES (1, 'book', 'Legacy Title')",
+            [],
+        )
+        .expect("seed publication_attrs row");
+
+        migrations().to_latest(&mut conn).expect("apply M[7]");
+
+        // book_state and book_pipeline_audit no longer exist by their
+        // old names; the renamed tables carry the seeded rows forward.
+        assert!(
+            columns_of(&conn, "book_state").is_empty(),
+            "book_state should be gone after the rename"
+        );
+        assert!(
+            columns_of(&conn, "book_pipeline_audit").is_empty(),
+            "book_pipeline_audit should be gone after the rename"
+        );
+        let state_stage: String = conn
+            .query_row(
+                "SELECT current_stage FROM item_state WHERE book_root_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read item_state row");
+        assert_eq!(state_stage, "extracted");
+        let audit_stage: String = conn
+            .query_row(
+                "SELECT stage FROM item_pipeline_audit WHERE book_root_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read item_pipeline_audit row");
+        assert_eq!(audit_stage, "extract");
+
+        // The paired indexes on item_state were dropped and reissued
+        // under the new prefix so the spec's IndexSpec names match the
+        // live database.
+        assert!(index_exists(&conn, "idx_item_state_stage"));
+        assert!(index_exists(&conn, "idx_item_state_embed"));
+        assert!(!index_exists(&conn, "idx_book_state_stage"));
+        assert!(!index_exists(&conn, "idx_book_state_embed"));
+
+        // Paper-side discrete columns on node_publication_attrs.
+        let attrs_cols = columns_of(&conn, "node_publication_attrs");
+        for col in [
+            "doi",
+            "arxiv_id",
+            "issn",
+            "container_title",
+            "abstract_text",
+            "csl_type",
+            "extras_json",
+        ] {
+            assert!(
+                attrs_cols.iter().any(|c| c == col),
+                "expected {col} column on node_publication_attrs, got {attrs_cols:?}"
+            );
+            assert_eq!(column_type(&conn, "node_publication_attrs", col), "TEXT");
+        }
+        // The seeded book row reads back NULL on each new column.
+        let legacy_doi: Option<String> = conn
+            .query_row(
+                "SELECT doi FROM node_publication_attrs \
+                 WHERE intake_id = 1 AND scope = 'book'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read legacy attrs row");
+        assert_eq!(legacy_doi, None);
+
+        // CSL-JSON structured-name columns on node_contributors.
+        let contrib_cols = columns_of(&conn, "node_contributors");
+        for col in ["family", "given", "orcid"] {
+            assert!(
+                contrib_cols.iter().any(|c| c == col),
+                "expected {col} column on node_contributors, got {contrib_cols:?}"
+            );
+            assert_eq!(column_type(&conn, "node_contributors", col), "TEXT");
+        }
     }
 
     #[test]
