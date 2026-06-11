@@ -269,6 +269,32 @@ impl Config {
         self.data_dir.join("lancedb")
     }
 
+    /// Opaque intake store; each gleaned paper lives under
+    /// `papers/<intake_id>/`.
+    pub fn papers_dir(&self) -> PathBuf {
+        self.data_dir.join("papers")
+    }
+
+    /// SQLite database for the papers node tree and body text
+    /// (rebuildable). Parallel to [`Config::corpus_db`], opened by the
+    /// glean pipeline rather than ingest.
+    pub fn papers_corpus_db(&self) -> PathBuf {
+        self.data_dir.join("papers_corpus.db")
+    }
+
+    /// SQLite database for paper intake, metadata and audit. Parallel
+    /// to [`Config::catalog_db`]; both files share [`Config::backup_dir`]
+    /// but are clustered separately by file stem during pruning.
+    pub fn papers_catalog_db(&self) -> PathBuf {
+        self.data_dir.join("papers_catalog.db")
+    }
+
+    /// LanceDB directory for the paper vector store. Parallel to
+    /// [`Config::lancedb_dir`]; opened with its own pipeline stamps.
+    pub fn papers_lancedb_dir(&self) -> PathBuf {
+        self.data_dir.join("lancedb_papers")
+    }
+
     /// Directory for log files and crash reports. Kept under the data
     /// root — like every other path — so diagnostics never land inside
     /// the project workspace.
@@ -1356,6 +1382,10 @@ mod tests {
         assert_eq!(cfg.corpus_db(), root.join("corpus.db"));
         assert_eq!(cfg.catalog_db(), root.join("catalog.db"));
         assert_eq!(cfg.lancedb_dir(), root.join("lancedb"));
+        assert_eq!(cfg.papers_dir(), root.join("papers"));
+        assert_eq!(cfg.papers_corpus_db(), root.join("papers_corpus.db"));
+        assert_eq!(cfg.papers_catalog_db(), root.join("papers_catalog.db"));
+        assert_eq!(cfg.papers_lancedb_dir(), root.join("lancedb_papers"));
         assert_eq!(cfg.logs_dir(), root.join("logs"));
     }
 
