@@ -46,6 +46,11 @@ pub async fn run_write(
             field,
             reason,
         } => clear(&ops, book, &field, reason),
+        WriteMetadataAction::Void {
+            book,
+            field,
+            reason,
+        } => void(&ops, book, &field, reason),
         WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
         WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
@@ -108,6 +113,38 @@ fn clear(
             anyhow::bail!("{e}");
         }
         Err(e) => Err(anyhow::Error::from(e).context("clear metadata field via ops")),
+    }
+}
+
+fn void(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    field: &str,
+    reason: Option<String>,
+) -> Result<()> {
+    let req = bookrack_ops::dto::writes::VoidMetadataFieldRequest {
+        intake_id: book,
+        field: field.to_string(),
+        reason,
+    };
+    match bookrack_ops::writes::metadata::void_metadata_field(ops, req) {
+        Ok(outcome) => {
+            if outcome.changed {
+                println!("Voided {field} on book {book}; the field now reads as absent.");
+            } else {
+                println!(
+                    "Voided {field} on book {book}; it had no effective value, the tombstone is recorded."
+                );
+            }
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
+            anyhow::bail!("{e}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("void metadata field via ops")),
     }
 }
 

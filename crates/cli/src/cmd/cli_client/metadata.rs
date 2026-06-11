@@ -37,6 +37,18 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             )
             .await
         }
+        WriteMetadataAction::Void {
+            book,
+            field,
+            reason,
+        } => {
+            helpers::call_and_print(
+                &client,
+                "metadata.void",
+                json!({"book": book, "field": field, "reason": reason}),
+            )
+            .await
+        }
         WriteMetadataAction::Ack { book, reason } => {
             helpers::call_and_print(
                 &client,

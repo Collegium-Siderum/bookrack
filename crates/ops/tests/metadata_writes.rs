@@ -15,12 +15,12 @@ use bookrack_core::PartitionIdx;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::writes::{
     AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
-    RejectMetadataRequest, SetMetadataFieldRequest,
+    RejectMetadataRequest, SetMetadataFieldRequest, VoidMetadataFieldRequest,
 };
 use bookrack_ops::reads::books::show_book;
 use bookrack_ops::writes::metadata::{
     acknowledge_metadata_gap, approve_metadata, clear_metadata_field, reject_metadata,
-    set_metadata_field,
+    set_metadata_field, void_metadata_field,
 };
 use bookrack_ops::{Caller, Ops, with_caller_override};
 use tempfile::TempDir;
@@ -565,6 +565,89 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
         detail.effective_biblio.get("title").map(String::as_str),
         Some("Base Title")
     );
+}
+
+#[test]
+fn void_suppresses_the_extracted_value_until_cleared() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-void");
+    let mut base = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    base.publisher = Some("Wrong Publisher".to_string());
+    fx.catalog().upsert_publication_attrs(&base).expect("base");
+
+    let outcome = void_metadata_field(
+        &fx.ops,
+        VoidMetadataFieldRequest {
+            intake_id: id,
+            field: "publisher".to_string(),
+            reason: Some("extracted value is not a publisher".to_string()),
+        },
+    )
+    .expect("void");
+    assert!(outcome.changed);
+
+    let effective = fx
+        .catalog()
+        .effective_publication_attrs(id, BOOK_SCOPE)
+        .expect("effective");
+    assert!(effective.get("publisher").is_none());
+
+    let detail = show_book(&fx.ops, id).expect("show");
+    let entry = detail
+        .overrides
+        .iter()
+        .find(|o| o.field == "publisher")
+        .expect("tombstone entry");
+    assert!(entry.value.is_none());
+
+    let audit = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit");
+    let row = audit.iter().find(|r| r.action == "void").expect("void row");
+    assert_eq!(row.old_value.as_deref(), Some("Wrong Publisher"));
+    assert!(row.new_value.is_none());
+    assert_eq!(
+        row.reason.as_deref(),
+        Some("extracted value is not a publisher")
+    );
+
+    let cleared = clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "publisher".to_string(),
+            reason: None,
+        },
+    )
+    .expect("clear");
+    assert!(cleared.changed);
+    let effective = fx
+        .catalog()
+        .effective_publication_attrs(id, BOOK_SCOPE)
+        .expect("effective");
+    assert_eq!(effective.get("publisher"), Some("Wrong Publisher"));
+}
+
+#[test]
+fn void_rejects_a_field_name_outside_the_editable_set() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-void-unknown");
+    for field in ["tittle", "confidence"] {
+        let err = void_metadata_field(
+            &fx.ops,
+            VoidMetadataFieldRequest {
+                intake_id: id,
+                field: field.to_string(),
+                reason: None,
+            },
+        )
+        .expect_err("unknown field must be rejected");
+        assert!(matches!(
+            err,
+            bookrack_ops::OpsError::UnknownMetadataField { .. }
+        ));
+    }
 }
 
 #[test]

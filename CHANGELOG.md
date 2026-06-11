@@ -28,6 +28,12 @@ release workflow extracts the matching section verbatim from this file.
   `effective_biblio`, so curation state is visible without replaying
   the audit trail.
 
+- `metadata.void` (CLI/REPL `bookrack metadata void`, MCP
+  `library.metadata.void`): suppress a field's extracted value with a
+  NULL override when the value is known wrong and no correct value is
+  at hand — the field reads as absent until one is set. `metadata.clear`
+  removes the suppression. The MCP tool requires a `reason`.
+
 ### Changed
 
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`

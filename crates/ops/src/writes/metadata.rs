@@ -22,7 +22,7 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::{
     AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
-    RejectMetadataRequest, SetMetadataFieldRequest, WriteOutcome,
+    RejectMetadataRequest, SetMetadataFieldRequest, VoidMetadataFieldRequest, WriteOutcome,
 };
 use crate::recorder::record_call_sync;
 
@@ -116,6 +116,60 @@ pub fn clear_metadata_field<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         Ok(write_outcome(ops, audit_id, existed))
+    })
+}
+
+/// Suppress one field's extracted value without supplying a
+/// replacement: writes a NULL override (a tombstone), so the field has
+/// no effective value until a correct one is set. For the case where
+/// the extracted value is known to be wrong and no right value is at
+/// hand. The field must be one of [`EDITABLE_FIELDS`];
+/// [`clear_metadata_field`] removes the tombstone and restores the
+/// extracted value.
+pub fn void_metadata_field<E: Embedder>(
+    ops: &Ops<E>,
+    req: VoidMetadataFieldRequest,
+) -> Result<WriteOutcome> {
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "field": req.field,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.void", args, {
+        require_editable(&req.field)?;
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
+
+        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let old_value = effective.get(&req.field).map(str::to_string);
+
+        let caller = ops.effective_caller();
+        catalog.set_override(&NewOverride::new(
+            req.intake_id,
+            BOOK_SCOPE,
+            req.field.clone(),
+            None,
+            caller.actor_kind.as_str(),
+        ))?;
+
+        // `changed` reflects the effective view: voiding a field that
+        // already had no effective value still records the tombstone
+        // (it suppresses what a future rebuild would re-extract) but
+        // changed nothing visible.
+        let changed = old_value.is_some();
+        let audit = build_audit(
+            ops,
+            "node_publication_attrs",
+            "void",
+            Some(req.intake_id),
+            Some(req.field),
+            old_value,
+            None,
+            req.reason,
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
+
+        Ok(write_outcome(ops, audit_id, changed))
     })
 }
 

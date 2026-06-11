@@ -35,6 +35,18 @@ pub struct ClearMetadataFieldRequest {
     pub reason: Option<String>,
 }
 
+/// Request body for [`crate::writes::metadata::void_metadata_field`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoidMetadataFieldRequest {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// The field whose extracted value should be suppressed.
+    pub field: String,
+    /// Why the extracted value is wrong; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// Request body for [`crate::writes::metadata::acknowledge_metadata_gap`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcknowledgeMetadataGapRequest {

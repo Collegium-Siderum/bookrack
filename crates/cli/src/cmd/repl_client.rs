@@ -494,6 +494,18 @@ async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) 
             )
             .await
         }
+        WriteMetadataAction::Void {
+            book,
+            field,
+            reason,
+        } => {
+            call_and_print(
+                client,
+                "metadata.void",
+                json!({"book": book, "field": field, "reason": reason}),
+            )
+            .await
+        }
         WriteMetadataAction::Ack { book, reason } => {
             call_and_print(
                 client,

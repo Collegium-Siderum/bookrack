@@ -375,6 +375,23 @@ pub struct MetadataClearArgs {
     pub library: String,
 }
 
+/// Arguments for `library.metadata.void`. Requires `library`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MetadataVoidArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// The field whose extracted value should be suppressed. Must be a
+    /// curator-editable bibliographic field.
+    pub field: String,
+    /// Why the extracted value is wrong. Recorded on the audit row;
+    /// required so an LLM edit always carries its justification.
+    pub reason: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
+}
+
 /// Arguments for `library.metadata.ack`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataAckArgs {
@@ -1040,6 +1057,31 @@ impl BookrackServer {
             reason: Some(args.reason),
         };
         let outcome = writes::metadata::clear_metadata_field(handle.ops(), req)
+            .map_err(ops_error_to_edit_error)?;
+        respond_with(&outcome)
+    }
+
+    /// Suppress one field's extracted value with a NULL override.
+    #[tool(
+        name = "library.metadata.void",
+        description = "Suppress one field's extracted value without supplying a \
+                       replacement: the field reads as absent until a correct \
+                       value is set. For extracted values known to be wrong when \
+                       no right value is at hand. `library.metadata.clear` \
+                       removes the suppression. Appends one audit row tagged \
+                       `actor_kind=llm` carrying the required `reason`."
+    )]
+    async fn library_metadata_void(
+        &self,
+        Parameters(args): Parameters<MetadataVoidArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let req = bookrack_ops::dto::writes::VoidMetadataFieldRequest {
+            intake_id: args.intake_id,
+            field: args.field,
+            reason: Some(args.reason),
+        };
+        let outcome = writes::metadata::void_metadata_field(handle.ops(), req)
             .map_err(ops_error_to_edit_error)?;
         respond_with(&outcome)
     }

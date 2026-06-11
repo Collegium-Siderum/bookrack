@@ -70,10 +70,12 @@ and tool-scoped.
   document; the worker picks them up on the next 200 ms tick.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
-- `metadata.set` / `metadata.clear` / `metadata.ack` /
-  `metadata.approve` / `metadata.reject` — same params as the
-  `bookrack metadata` REPL subcommands; return `{ ok: true }` on
-  success.
+- `metadata.set` / `metadata.clear` / `metadata.void` /
+  `metadata.ack` / `metadata.approve` / `metadata.reject` — same
+  params as the `bookrack metadata` REPL subcommands; return
+  `{ ok: true }` on success. `metadata.void` (added post-Phase 5)
+  writes a NULL override that suppresses a field's extracted value
+  until a correct one is set; `metadata.clear` removes it.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes no params.

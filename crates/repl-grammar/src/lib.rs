@@ -187,6 +187,19 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Suppress a field's extracted value without supplying a
+    /// replacement: the field reads as absent until a correct value is
+    /// set. `clear` removes the suppression.
+    Void {
+        /// The intake id of the book.
+        book: i64,
+        /// The field whose extracted value is suppressed.
+        field: String,
+        /// Optional note on why the extracted value is wrong, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Acknowledge a metadata gap and let the book through, signing
     /// the override with a reason for the audit trail.
     Ack {

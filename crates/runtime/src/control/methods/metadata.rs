@@ -40,6 +40,16 @@ pub struct MetadataClearParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(TS))]
 #[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataVoidParams {
+    book: i64,
+    field: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
@@ -76,6 +86,16 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataClearParams = parse(params, "metadata.clear")?;
     let action = WriteMetadataAction::Clear {
+        book: parsed.book,
+        field: parsed.field,
+        reason: parsed.reason,
+    };
+    run_metadata_action(ctx, action).await
+}
+
+pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let parsed: MetadataVoidParams = parse(params, "metadata.void")?;
+    let action = WriteMetadataAction::Void {
         book: parsed.book,
         field: parsed.field,
         reason: parsed.reason,

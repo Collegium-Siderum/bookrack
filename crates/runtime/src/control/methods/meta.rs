@@ -137,6 +137,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "metadata.void",
+        kind: "write",
+    },
+    MethodSignature {
         name: "metadata.ack",
         kind: "write",
     },

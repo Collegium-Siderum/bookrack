@@ -142,6 +142,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "metadata.clear" => Ok(DispatchOutcome::Result(
             metadata::clear(&req.params, ctx).await?,
         )),
+        "metadata.void" => Ok(DispatchOutcome::Result(
+            metadata::void(&req.params, ctx).await?,
+        )),
         "metadata.ack" => Ok(DispatchOutcome::Result(
             metadata::ack(&req.params, ctx).await?,
         )),
