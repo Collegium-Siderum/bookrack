@@ -32,6 +32,7 @@ use super::jsonrpc::{BUSY, METHOD_NOT_FOUND, Request, RpcError};
 pub mod corpus;
 pub mod diagnose;
 pub mod dryrun;
+pub mod glean;
 pub mod ingest;
 pub mod libraries;
 pub mod meta;
@@ -194,6 +195,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "ingest.cancel" => Ok(DispatchOutcome::Result(
             ingest::cancel(&req.params, ctx).await?,
         )),
+        "glean.submit" => Ok(DispatchOutcome::Result(
+            glean::submit(&req.params, ctx).await?,
+        )),
         "metadata.set" => Ok(DispatchOutcome::Result(
             metadata::set(&req.params, ctx).await?,
         )),
@@ -278,6 +282,7 @@ fn is_queue_bound_method(method: &str) -> bool {
         method,
         "ingest.submit"
             | "ingest.cancel"
+            | "glean.submit"
             | "vectors.rebuild"
             | "vectors.reembed"
             | "vectors.reset"
@@ -352,6 +357,7 @@ mod tests {
         for name in [
             "ingest.submit",
             "ingest.cancel",
+            "glean.submit",
             "vectors.rebuild",
             "vectors.reembed",
             "vectors.reset",

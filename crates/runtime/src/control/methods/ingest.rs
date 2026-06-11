@@ -48,7 +48,7 @@ pub enum PriorityRepr {
 }
 
 impl PriorityRepr {
-    fn into_priority(self) -> Priority {
+    pub(super) fn into_priority(self) -> Priority {
         match self {
             PriorityRepr::Low => Priority::Low,
             PriorityRepr::Normal => Priority::Normal,
@@ -144,7 +144,7 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     }
 }
 
-fn derive_tick(
+pub(super) fn derive_tick(
     state: &crate::queue::QueueState,
     last_finished: Option<JobOutcomeSummary>,
 ) -> QueueTick {

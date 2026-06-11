@@ -193,6 +193,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "glean.submit",
+        kind: "write",
+    },
+    MethodSignature {
         name: "metadata.set",
         kind: "write",
     },
