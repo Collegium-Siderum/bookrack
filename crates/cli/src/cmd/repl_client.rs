@@ -509,6 +509,38 @@ async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) 
         WriteMetadataAction::Reaudit { book } => {
             call_and_print(client, "metadata.reaudit", json!({"book": book})).await
         }
+        WriteMetadataAction::ContributorAdd {
+            book,
+            role,
+            name,
+            nationality,
+            reason,
+        } => {
+            call_and_print(
+                client,
+                "metadata.contributor_add",
+                json!({
+                    "book": book,
+                    "role": role,
+                    "name": name,
+                    "nationality": nationality,
+                    "reason": reason,
+                }),
+            )
+            .await
+        }
+        WriteMetadataAction::ContributorRemove {
+            book,
+            contributor_id,
+            reason,
+        } => {
+            call_and_print(
+                client,
+                "metadata.contributor_remove",
+                json!({"book": book, "contributor_id": contributor_id, "reason": reason}),
+            )
+            .await
+        }
         WriteMetadataAction::Ack { book, reason } => {
             call_and_print(
                 client,

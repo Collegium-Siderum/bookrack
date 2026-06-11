@@ -52,6 +52,18 @@ pub async fn run_write(
             reason,
         } => void(&ops, book, &field, reason),
         WriteMetadataAction::Reaudit { book } => reaudit(cfg, &ops, book, profile_name),
+        WriteMetadataAction::ContributorAdd {
+            book,
+            role,
+            name,
+            nationality,
+            reason,
+        } => contributor_add(&ops, book, role, name, nationality, reason),
+        WriteMetadataAction::ContributorRemove {
+            book,
+            contributor_id,
+            reason,
+        } => contributor_remove(&ops, book, contributor_id, reason),
         WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
         WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
         WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
@@ -173,6 +185,65 @@ fn reaudit(
             anyhow::bail!("no intake registered for book {intake_id}");
         }
         Err(e) => Err(anyhow::Error::from(e).context("reaudit metadata via ops")),
+    }
+}
+
+fn contributor_add(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    role: String,
+    name: String,
+    nationality: Option<String>,
+    reason: Option<String>,
+) -> Result<()> {
+    let req = bookrack_ops::dto::writes::AddContributorRequest {
+        intake_id: book,
+        role: role.clone(),
+        name: name.clone(),
+        nationality,
+        reason,
+    };
+    match bookrack_ops::writes::metadata::add_contributor(ops, req) {
+        Ok(outcome) => {
+            println!(
+                "Added {role} {name:?} to book {book} (contributor id {}).",
+                outcome.contributor_id
+            );
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e @ bookrack_ops::OpsError::UnknownContributorRole { .. }) => {
+            anyhow::bail!("{e}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("add contributor via ops")),
+    }
+}
+
+fn contributor_remove(
+    ops: &Ops<OllamaEmbedClient>,
+    book: i64,
+    contributor_id: i64,
+    reason: Option<String>,
+) -> Result<()> {
+    let req = bookrack_ops::dto::writes::RemoveContributorRequest {
+        intake_id: book,
+        contributor_id,
+        reason,
+    };
+    match bookrack_ops::writes::metadata::remove_contributor(ops, req) {
+        Ok(_) => {
+            println!("Removed contributor row {contributor_id} from book {book}.");
+            Ok(())
+        }
+        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            anyhow::bail!("no intake registered for book {intake_id}");
+        }
+        Err(e @ bookrack_ops::OpsError::ContributorNotFound { .. }) => {
+            anyhow::bail!("{e}");
+        }
+        Err(e) => Err(anyhow::Error::from(e).context("remove contributor via ops")),
     }
 }
 

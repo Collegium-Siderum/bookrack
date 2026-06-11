@@ -178,6 +178,8 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::Vectors(_) => "vectors",
         OpsError::IntakeNotFound { .. } => "intake_not_found",
         OpsError::UnknownMetadataField { .. } => "unknown_metadata_field",
+        OpsError::UnknownContributorRole { .. } => "unknown_contributor_role",
+        OpsError::ContributorNotFound { .. } => "contributor_not_found",
         OpsError::NodeNotFound { .. } => "node_not_found",
         OpsError::NotALeaf { .. } => "not_a_leaf",
         OpsError::NotOrganizing { .. } => "not_organizing",

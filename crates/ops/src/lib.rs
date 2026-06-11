@@ -78,6 +78,26 @@ pub enum OpsError {
         field: String,
     },
 
+    /// The named contribution role is not in the closed role set. The
+    /// message carries the full set so the caller can self-correct.
+    #[error(
+        "unknown contributor role {role:?}; roles are: {}",
+        bookrack_catalog::CONTRIBUTOR_ROLES.join(", ")
+    )]
+    UnknownContributorRole {
+        /// The role the caller asked to attribute.
+        role: String,
+    },
+
+    /// The named contributor row does not exist on the named book.
+    #[error("no contributor row {contributor_id} on book {intake_id}")]
+    ContributorNotFound {
+        /// The surrogate id the caller asked to remove.
+        contributor_id: i64,
+        /// The book the caller addressed.
+        intake_id: i64,
+    },
+
     /// The named corpus node does not exist.
     #[error("no corpus node exists with id {node_id}")]
     NodeNotFound {

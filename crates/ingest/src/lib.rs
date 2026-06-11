@@ -3031,6 +3031,24 @@ mod book_pipeline_tests {
     }
 
     #[test]
+    fn contributor_roles_const_matches_the_extractor_enum() {
+        // The write surface validates against the catalog's
+        // CONTRIBUTOR_ROLES while ingest stores the extractor enum's
+        // canonical strings; pin the two lists so a curated row and an
+        // extracted row always spell the same role the same way.
+        let from_enum: Vec<&str> = [
+            bookrack_extract::ContributorRole::Author,
+            bookrack_extract::ContributorRole::Translator,
+            bookrack_extract::ContributorRole::Editor,
+            bookrack_extract::ContributorRole::Other,
+        ]
+        .iter()
+        .map(|role| role.as_str())
+        .collect();
+        assert_eq!(from_enum, bookrack_catalog::CONTRIBUTOR_ROLES);
+    }
+
+    #[test]
     fn write_contributors_persists_biblio_contributors_with_extracted_origin() {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let intake = intake_id(&mut catalog, "biblio-sha");

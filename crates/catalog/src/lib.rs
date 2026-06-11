@@ -50,7 +50,7 @@ pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, Registration};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
 pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
 pub use node_categories::{NewCategory, NodeCategory};
-pub use node_contributors::{NewContributor, NodeContributor};
+pub use node_contributors::{CONTRIBUTOR_ROLES, NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
 pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
 pub use node_reviews::{

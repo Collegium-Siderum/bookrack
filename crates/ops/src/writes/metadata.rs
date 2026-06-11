@@ -11,8 +11,8 @@
 //! `actor_kind` / `actor_detail` in the audit trail.
 
 use bookrack_catalog::{
-    BOOK_SCOPE, Catalog, EDITABLE_FIELDS, NewMetadataAudit, NewOverride, NewReview,
-    STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_REJECTED,
+    BOOK_SCOPE, CONTRIBUTOR_ROLES, Catalog, EDITABLE_FIELDS, NewContributor, NewMetadataAudit,
+    NewOverride, NewReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_REJECTED,
 };
 use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
@@ -21,8 +21,9 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::{
-    AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
-    ReauditMetadataRequest, ReauditOutcome, RejectMetadataRequest, SetMetadataFieldRequest,
+    AcknowledgeMetadataGapRequest, AddContributorOutcome, AddContributorRequest,
+    ApproveMetadataRequest, ClearMetadataFieldRequest, ReauditMetadataRequest, ReauditOutcome,
+    RejectMetadataRequest, RemoveContributorRequest, SetMetadataFieldRequest,
     VoidMetadataFieldRequest, WriteOutcome,
 };
 use crate::recorder::record_call_sync;
@@ -171,6 +172,116 @@ pub fn void_metadata_field<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         Ok(write_outcome(ops, audit_id, changed))
+    })
+}
+
+/// Attribute a contributor to the book root with `origin = "user"`,
+/// appended after the role's existing contributors. The role must be
+/// one of [`CONTRIBUTOR_ROLES`]. User-origin rows survive a re-ingest:
+/// the pipeline's contributor refresh replaces only extracted rows.
+pub fn add_contributor<E: Embedder>(
+    ops: &Ops<E>,
+    req: AddContributorRequest,
+) -> Result<AddContributorOutcome> {
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "role": req.role,
+        "name": req.name,
+        "nationality": req.nationality,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.contributor_add", args, {
+        if !CONTRIBUTOR_ROLES.contains(&req.role.as_str()) {
+            return Err(OpsError::UnknownContributorRole { role: req.role });
+        }
+        let name = req.name.trim();
+        if name.is_empty() {
+            return Err(OpsError::Other(anyhow::anyhow!(
+                "contributor name must not be empty"
+            )));
+        }
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
+
+        let existing = catalog.contributors_for_address(req.intake_id, BOOK_SCOPE)?;
+        let ordinal = existing
+            .iter()
+            .filter(|c| c.role == req.role)
+            .map(|c| c.ordinal)
+            .max()
+            .map_or(0, |m| m + 1);
+
+        let mut new =
+            NewContributor::new(req.intake_id, BOOK_SCOPE, &req.role, ordinal, "user", name);
+        if let Some(nationality) = req.nationality.as_deref() {
+            new = new.nationality(nationality);
+        }
+        let contributor_id = catalog.add_contributor(&new)?;
+
+        let audit = build_audit(
+            ops,
+            "node_contributors",
+            "insert",
+            Some(req.intake_id),
+            Some(req.role.clone()),
+            None,
+            Some(name.to_string()),
+            req.reason,
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
+
+        Ok(AddContributorOutcome {
+            contributor_id,
+            write: write_outcome(ops, audit_id, true),
+        })
+    })
+}
+
+/// Remove one contributor row by its surrogate id, whatever its origin
+/// — removing a wrong extracted attribution (e.g. an ebook packager
+/// credited as the author) is the point. The row must belong to the
+/// named book. A forced re-ingest re-seeds extracted rows, so a
+/// removal of one may need repeating after it; user-origin rows are
+/// unaffected.
+pub fn remove_contributor<E: Embedder>(
+    ops: &Ops<E>,
+    req: RemoveContributorRequest,
+) -> Result<WriteOutcome> {
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "contributor_id": req.contributor_id,
+        "reason": req.reason,
+    });
+    record_call_sync!(ops, "library.metadata.contributor_remove", args, {
+        let catalog = Catalog::open(ops.catalog_db())?;
+        require_intake(&catalog, req.intake_id)?;
+
+        let existing = catalog.contributors_for_address(req.intake_id, BOOK_SCOPE)?;
+        let Some(row) = existing
+            .into_iter()
+            .find(|c| c.contributor_id == req.contributor_id)
+        else {
+            return Err(OpsError::ContributorNotFound {
+                contributor_id: req.contributor_id,
+                intake_id: req.intake_id,
+            });
+        };
+
+        let removed = catalog.remove_contributor(req.contributor_id)?;
+
+        let audit = build_audit(
+            ops,
+            "node_contributors",
+            "delete",
+            Some(req.intake_id),
+            Some(row.role),
+            Some(row.name),
+            None,
+            req.reason,
+        );
+        let audit_id = catalog.record_metadata_audit(&audit)?;
+
+        Ok(write_outcome(ops, audit_id, removed))
     })
 }
 

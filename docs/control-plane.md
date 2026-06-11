@@ -80,6 +80,11 @@ and tool-scoped.
   re-runs the plausibility audit from the book's cached extraction
   envelope, refreshing the stored verdict / confidence; the review
   status is untouched.
+- `metadata.contributor_add` / `metadata.contributor_remove` (same
+  vintage) — curate the contributor rows: `contributor_add` writes an
+  `origin = "user"` attribution that re-ingest preserves and
+  `find_books` matches; `contributor_remove` deletes one row by the
+  `contributor_id` that `show_book` lists, whatever its origin.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes no params.

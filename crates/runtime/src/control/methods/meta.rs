@@ -145,6 +145,14 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "metadata.contributor_add",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "metadata.contributor_remove",
+        kind: "write",
+    },
+    MethodSignature {
         name: "metadata.ack",
         kind: "write",
     },

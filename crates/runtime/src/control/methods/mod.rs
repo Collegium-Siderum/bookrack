@@ -148,6 +148,12 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "metadata.reaudit" => Ok(DispatchOutcome::Result(
             metadata::reaudit(&req.params, ctx).await?,
         )),
+        "metadata.contributor_add" => Ok(DispatchOutcome::Result(
+            metadata::contributor_add(&req.params, ctx).await?,
+        )),
+        "metadata.contributor_remove" => Ok(DispatchOutcome::Result(
+            metadata::contributor_remove(&req.params, ctx).await?,
+        )),
         "metadata.ack" => Ok(DispatchOutcome::Result(
             metadata::ack(&req.params, ctx).await?,
         )),

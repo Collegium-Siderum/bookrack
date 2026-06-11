@@ -208,6 +208,37 @@ pub enum WriteMetadataAction {
         /// The intake id of the book.
         book: i64,
     },
+    /// Attribute a contributor to the book (origin `user`), appended
+    /// after the role's existing contributors. User rows survive a
+    /// re-ingest.
+    ContributorAdd {
+        /// The intake id of the book.
+        book: i64,
+        /// Contribution role: author / translator / editor / other.
+        role: String,
+        /// The contributor's name.
+        name: String,
+        /// The contributor's nationality, when known.
+        #[arg(long)]
+        nationality: Option<String>,
+        /// Optional note on why this attribution is correct, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Remove one contributor row by its surrogate id (listed by
+    /// `show_book`), whatever its origin — the path for stripping a
+    /// wrong extracted attribution.
+    ContributorRemove {
+        /// The intake id of the book.
+        book: i64,
+        /// The contributor row's surrogate id.
+        contributor_id: i64,
+        /// Optional note on why the attribution is removed, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Acknowledge a metadata gap and let the book through, signing
     /// the override with a reason for the audit trail.
     Ack {

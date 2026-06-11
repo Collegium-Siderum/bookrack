@@ -122,6 +122,9 @@ pub struct OverrideEntry {
 /// One contributor entry within a [`BookDetail`].
 #[derive(Debug, Clone, Serialize)]
 pub struct ContributorEntry {
+    /// Surrogate id of the contributor row; the address
+    /// `contributor_remove` takes.
+    pub contributor_id: i64,
     /// Role (`author`, `translator`, `editor`, ...).
     pub role: String,
     /// Position among contributors sharing this node and role.
@@ -293,6 +296,7 @@ impl ContributorEntry {
     /// Project a [`NodeContributor`] row into a wire-ready entry.
     pub fn from_row(row: NodeContributor) -> ContributorEntry {
         ContributorEntry {
+            contributor_id: row.contributor_id,
             role: row.role,
             ordinal: row.ordinal,
             name: row.name,

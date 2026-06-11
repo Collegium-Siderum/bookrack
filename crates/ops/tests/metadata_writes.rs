@@ -14,13 +14,14 @@ use bookrack_catalog::{
 use bookrack_core::PartitionIdx;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::writes::{
-    AcknowledgeMetadataGapRequest, ApproveMetadataRequest, ClearMetadataFieldRequest,
-    RejectMetadataRequest, SetMetadataFieldRequest, VoidMetadataFieldRequest,
+    AcknowledgeMetadataGapRequest, AddContributorRequest, ApproveMetadataRequest,
+    ClearMetadataFieldRequest, RejectMetadataRequest, RemoveContributorRequest,
+    SetMetadataFieldRequest, VoidMetadataFieldRequest,
 };
-use bookrack_ops::reads::books::show_book;
+use bookrack_ops::reads::books::{find_books, show_book};
 use bookrack_ops::writes::metadata::{
-    acknowledge_metadata_gap, approve_metadata, clear_metadata_field, reject_metadata,
-    set_metadata_field, void_metadata_field,
+    acknowledge_metadata_gap, add_contributor, approve_metadata, clear_metadata_field,
+    reject_metadata, remove_contributor, set_metadata_field, void_metadata_field,
 };
 use bookrack_ops::{Caller, Ops, with_caller_override};
 use tempfile::TempDir;
@@ -565,6 +566,136 @@ fn show_book_lists_active_overrides_with_their_curation_trail() {
         detail.effective_biblio.get("title").map(String::as_str),
         Some("Base Title")
     );
+}
+
+#[test]
+fn contributor_add_makes_the_book_findable_by_name() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-contrib-add");
+
+    let outcome = add_contributor(
+        &fx.ops,
+        AddContributorRequest {
+            intake_id: id,
+            role: "author".to_string(),
+            name: "A Missing Author".to_string(),
+            nationality: None,
+            reason: Some("OPF creator element is empty".to_string()),
+        },
+    )
+    .expect("add");
+
+    let detail = show_book(&fx.ops, id).expect("show");
+    let entry = detail
+        .contributors
+        .iter()
+        .find(|c| c.name == "A Missing Author")
+        .expect("contributor listed");
+    assert_eq!(entry.contributor_id, outcome.contributor_id);
+    assert_eq!(entry.role, "author");
+    assert_eq!(entry.origin, "user");
+
+    let filter = bookrack_ops::dto::BookFilter {
+        contributor_name: Some("A Missing Author".to_string()),
+        ..Default::default()
+    };
+    let found = find_books(&fx.ops, filter, 10, 0).expect("find");
+    assert!(found.books.iter().any(|b| b.intake_id == id));
+
+    let audit = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit");
+    let row = audit
+        .iter()
+        .find(|r| r.table_name == "node_contributors" && r.action == "insert")
+        .expect("insert row");
+    assert_eq!(row.new_value.as_deref(), Some("A Missing Author"));
+    assert_eq!(row.reason.as_deref(), Some("OPF creator element is empty"));
+}
+
+#[test]
+fn contributor_add_rejects_an_unknown_role() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-contrib-role");
+    let err = add_contributor(
+        &fx.ops,
+        AddContributorRequest {
+            intake_id: id,
+            role: "narrator".to_string(),
+            name: "Somebody".to_string(),
+            nationality: None,
+            reason: None,
+        },
+    )
+    .expect_err("unknown role must be rejected");
+    assert!(matches!(
+        &err,
+        bookrack_ops::OpsError::UnknownContributorRole { role } if role == "narrator"
+    ));
+    assert!(
+        err.to_string().contains("author"),
+        "error lists the role set"
+    );
+}
+
+#[test]
+fn contributor_remove_strips_a_wrong_extracted_attribution() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-contrib-remove");
+    let wrong_id = fx
+        .catalog()
+        .add_contributor(&bookrack_catalog::NewContributor::new(
+            id,
+            BOOK_SCOPE,
+            "author",
+            0,
+            "extracted",
+            "An Ebook Packager",
+        ))
+        .expect("seed extracted contributor");
+
+    let outcome = remove_contributor(
+        &fx.ops,
+        RemoveContributorRequest {
+            intake_id: id,
+            contributor_id: wrong_id,
+            reason: Some("packager credit, not an author".to_string()),
+        },
+    )
+    .expect("remove");
+    assert!(outcome.changed);
+
+    let detail = show_book(&fx.ops, id).expect("show");
+    assert!(detail.contributors.is_empty());
+
+    let audit = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit");
+    let row = audit
+        .iter()
+        .find(|r| r.table_name == "node_contributors" && r.action == "delete")
+        .expect("delete row");
+    assert_eq!(row.old_value.as_deref(), Some("An Ebook Packager"));
+    assert_eq!(
+        row.reason.as_deref(),
+        Some("packager credit, not an author")
+    );
+
+    let err = remove_contributor(
+        &fx.ops,
+        RemoveContributorRequest {
+            intake_id: id,
+            contributor_id: wrong_id,
+            reason: None,
+        },
+    )
+    .expect_err("already removed");
+    assert!(matches!(
+        err,
+        bookrack_ops::OpsError::ContributorNotFound { .. }
+    ));
 }
 
 #[test]

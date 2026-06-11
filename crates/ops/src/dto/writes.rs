@@ -69,6 +69,46 @@ pub struct ReauditOutcome {
     pub confidence: String,
 }
 
+/// Request body for [`crate::writes::metadata::add_contributor`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddContributorRequest {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Contribution role; must be one of
+    /// [`bookrack_catalog::CONTRIBUTOR_ROLES`].
+    pub role: String,
+    /// The contributor's name.
+    pub name: String,
+    /// The contributor's nationality, when known.
+    #[serde(default)]
+    pub nationality: Option<String>,
+    /// Why this attribution is correct; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for [`crate::writes::metadata::remove_contributor`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoveContributorRequest {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Surrogate id of the contributor row, as listed by `show_book`.
+    pub contributor_id: i64,
+    /// Why the attribution is being removed; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// What [`crate::writes::metadata::add_contributor`] created.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddContributorOutcome {
+    /// Surrogate id of the new contributor row.
+    pub contributor_id: i64,
+    /// The audit identity of the write.
+    #[serde(flatten)]
+    pub write: WriteOutcome,
+}
+
 /// Request body for [`crate::writes::metadata::acknowledge_metadata_gap`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct AcknowledgeMetadataGapRequest {

@@ -392,6 +392,46 @@ pub struct MetadataVoidArgs {
     pub library: String,
 }
 
+/// Arguments for `library.metadata.contributor_add`. Requires `library`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ContributorAddArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Contribution role: `author`, `translator`, `editor`, or `other`.
+    pub role: String,
+    /// The contributor's name, exactly as it should be searchable.
+    pub name: String,
+    /// The contributor's nationality, when known.
+    #[serde(default)]
+    pub nationality: Option<String>,
+    /// Why this attribution is correct (e.g. the source consulted).
+    /// Recorded on the audit row; required so an LLM edit always
+    /// carries its justification.
+    pub reason: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
+}
+
+/// Arguments for `library.metadata.contributor_remove`. Requires
+/// `library`.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ContributorRemoveArgs {
+    /// Catalog intake id of the book.
+    pub intake_id: i64,
+    /// Surrogate id of the contributor row, as listed by
+    /// `library.show_book`.
+    pub contributor_id: i64,
+    /// Why the attribution is wrong. Recorded on the audit row;
+    /// required so an LLM edit always carries its justification.
+    pub reason: String,
+    /// Library short name from the registry. Write tools require an
+    /// explicit selector so a misrouted call never silently lands on
+    /// the wrong library's catalog.
+    pub library: String,
+}
+
 /// Arguments for `library.metadata.reaudit`. Requires `library`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataReauditArgs {
@@ -1097,6 +1137,60 @@ impl BookrackServer {
         respond_with(&outcome)
     }
 
+    /// Attribute a contributor to one book with `origin = "user"`.
+    #[tool(
+        name = "library.metadata.contributor_add",
+        description = "Attribute a contributor (role: author / translator / editor \
+                       / other) to one book. The row is written with origin `user`, \
+                       survives re-ingest, and is immediately searchable via \
+                       `library.find_books` `contributor_name`. Appends one audit \
+                       row tagged `actor_kind=llm` carrying the required `reason`. \
+                       Returns the new row's `contributor_id`."
+    )]
+    async fn library_metadata_contributor_add(
+        &self,
+        Parameters(args): Parameters<ContributorAddArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let req = bookrack_ops::dto::writes::AddContributorRequest {
+            intake_id: args.intake_id,
+            role: args.role,
+            name: args.name,
+            nationality: args.nationality,
+            reason: Some(args.reason),
+        };
+        let outcome = writes::metadata::add_contributor(handle.ops(), req)
+            .map_err(ops_error_to_edit_error)?;
+        respond_with(&outcome)
+    }
+
+    /// Remove one contributor row by its surrogate id.
+    #[tool(
+        name = "library.metadata.contributor_remove",
+        description = "Remove one contributor row from one book by the \
+                       `contributor_id` listed in `library.show_book`, whatever \
+                       its origin — the path for stripping a wrong extracted \
+                       attribution (e.g. an ebook packager credited as the \
+                       author). Appends one audit row tagged `actor_kind=llm` \
+                       carrying the required `reason`. A forced re-ingest \
+                       re-seeds extracted rows, so such a removal may need \
+                       repeating after one."
+    )]
+    async fn library_metadata_contributor_remove(
+        &self,
+        Parameters(args): Parameters<ContributorRemoveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let req = bookrack_ops::dto::writes::RemoveContributorRequest {
+            intake_id: args.intake_id,
+            contributor_id: args.contributor_id,
+            reason: Some(args.reason),
+        };
+        let outcome = writes::metadata::remove_contributor(handle.ops(), req)
+            .map_err(ops_error_to_edit_error)?;
+        respond_with(&outcome)
+    }
+
     /// Re-run the metadata plausibility audit from the cached extraction.
     #[tool(
         name = "library.metadata.reaudit",
@@ -1243,7 +1337,9 @@ fn ops_error_to_internal(e: OpsError) -> ErrorData {
 /// than an internal error.
 fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
     match &e {
-        OpsError::UnknownMetadataField { .. } => ErrorData::invalid_params(e.to_string(), None),
+        OpsError::UnknownMetadataField { .. }
+        | OpsError::UnknownContributorRole { .. }
+        | OpsError::ContributorNotFound { .. } => ErrorData::invalid_params(e.to_string(), None),
         _ => ops_error_to_internal(e),
     }
 }
@@ -1482,6 +1578,7 @@ mod tests {
             effective_biblio: biblio,
             overrides: Vec::new(),
             contributors: vec![ContributorEntry {
+                contributor_id: 1,
                 role: "author".to_string(),
                 ordinal: 0,
                 name: "An Author".to_string(),

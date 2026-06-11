@@ -57,6 +57,29 @@ pub struct MetadataReauditParams {
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(TS))]
 #[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataContributorAddParams {
+    book: i64,
+    role: String,
+    name: String,
+    #[serde(default)]
+    nationality: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataContributorRemoveParams {
+    book: i64,
+    contributor_id: i64,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAckParams {
     book: i64,
     reason: String,
@@ -113,6 +136,34 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
 pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataReauditParams = parse(params, "metadata.reaudit")?;
     let action = WriteMetadataAction::Reaudit { book: parsed.book };
+    run_metadata_action(ctx, action).await
+}
+
+pub async fn contributor_add(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let parsed: MetadataContributorAddParams = parse(params, "metadata.contributor_add")?;
+    let action = WriteMetadataAction::ContributorAdd {
+        book: parsed.book,
+        role: parsed.role,
+        name: parsed.name,
+        nationality: parsed.nationality,
+        reason: parsed.reason,
+    };
+    run_metadata_action(ctx, action).await
+}
+
+pub async fn contributor_remove(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let parsed: MetadataContributorRemoveParams = parse(params, "metadata.contributor_remove")?;
+    let action = WriteMetadataAction::ContributorRemove {
+        book: parsed.book,
+        contributor_id: parsed.contributor_id,
+        reason: parsed.reason,
+    };
     run_metadata_action(ctx, action).await
 }
 

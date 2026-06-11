@@ -43,6 +43,17 @@ release workflow extracts the matching section verbatim from this file.
   pipeline-audit row are written; the review status is untouched.
   Returns the previous and new verdict / confidence.
 
+- Contributor curation: `metadata.contributor_add` writes an
+  `origin = "user"` attribution (closed role set: `author` /
+  `translator` / `editor` / `other`) that survives re-ingest and is
+  immediately matched by `find_books` `contributor_name`;
+  `metadata.contributor_remove` deletes one row by the
+  `contributor_id` now listed in `show_book`, whatever its origin —
+  the path for stripping a wrong extracted attribution. CLI/REPL:
+  `bookrack metadata contributor-add` / `contributor-remove`; MCP:
+  `library.metadata.contributor_add` / `_remove` with a required
+  `reason`.
+
 ### Changed
 
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`
