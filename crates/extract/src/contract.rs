@@ -139,6 +139,27 @@ pub struct Biblio {
     pub series: Option<String>,
     pub language: Option<String>,
     pub contributors: Vec<Contributor>,
+    /// Digital Object Identifier of the paper, as carried by the file's
+    /// own metadata or surfaced by the glean IDENTIFY pass. Book ingest
+    /// leaves this `None`.
+    pub doi: Option<String>,
+    /// arXiv identifier, normalized to one of the two CSL-friendly
+    /// shapes — new-form `NNNN.NNNNN` or old-form `cat/NNNNNNN` —
+    /// without the surrounding `arXiv:` prefix. Paper-side only.
+    pub arxiv_id: Option<String>,
+    /// Journal or magazine ISSN, paper-side only. Kept as a string so
+    /// the dashed canonical form (`1234-5678`) round-trips verbatim.
+    pub issn: Option<String>,
+    /// Container title — journal, conference proceedings, or book series
+    /// title — the holding work that contains the paper.
+    pub container_title: Option<String>,
+    /// Abstract body in full text. Populated by the glean IDENTIFY pass;
+    /// book ingest never sets it.
+    pub abstract_text: Option<String>,
+    /// The CSL item type the paper claims. `None` for books and for
+    /// papers whose type cannot be inferred without a CrossRef /
+    /// OpenAlex enrichment.
+    pub csl_type: Option<CslType>,
 }
 
 /// One named contributor with the role the file assigned.
@@ -146,6 +167,38 @@ pub struct Biblio {
 pub struct Contributor {
     pub name: String,
     pub role: ContributorRole,
+    /// Family component of the contributor's name, separated for CSL-JSON
+    /// emission. `None` for the book pipeline (which only carries
+    /// `name`) and for paper contributors whose name was not split.
+    pub family: Option<String>,
+    /// Given component of the contributor's name. See [`Self::family`].
+    pub given: Option<String>,
+    /// ORCID iD as `0000-0002-1825-0097`, when the source carries one.
+    pub orcid: Option<String>,
+}
+
+/// CSL 1.0.2 item type, restricted to the variants the workspace
+/// actually emits. The serde representation matches the CSL string
+/// values verbatim (`"article-journal"`, `"paper-conference"`, …) so
+/// the catalog round-trips through `csl_type TEXT` without an extra
+/// mapping step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CslType {
+    /// A journal article — the most common paper shape.
+    ArticleJournal,
+    /// A conference paper carried by a `Proceedings of ...` venue.
+    PaperConference,
+    /// A book; the canonical shape for the ingest pipeline.
+    Book,
+    /// A chapter within a book.
+    Chapter,
+    /// A thesis or dissertation.
+    Thesis,
+    /// A technical or working report.
+    Report,
+    /// A web page, when neither journal nor book applies.
+    Webpage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,7 +363,11 @@ mod tests {
                 contributors: vec![Contributor {
                     name: "A. Author".into(),
                     role: ContributorRole::Author,
+                    family: None,
+                    given: None,
+                    orcid: None,
                 }],
+                ..Biblio::default()
             },
             provenance: Provenance {
                 adapter: "epub".into(),

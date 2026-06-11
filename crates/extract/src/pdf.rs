@@ -283,6 +283,9 @@ pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
         contributors.push(Contributor {
             name: author,
             role: ContributorRole::Author,
+            family: None,
+            given: None,
+            orcid: None,
         });
     }
 

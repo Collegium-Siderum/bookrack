@@ -110,6 +110,9 @@ fn build_biblio(content: &str) -> Biblio {
         contributors.push(Contributor {
             name: author,
             role: ContributorRole::Author,
+            family: None,
+            given: None,
+            orcid: None,
         });
     }
 

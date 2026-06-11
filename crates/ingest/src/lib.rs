@@ -3085,14 +3085,23 @@ mod book_pipeline_tests {
                 bookrack_extract::Contributor {
                     name: "Alice Author".to_string(),
                     role: bookrack_extract::ContributorRole::Author,
+                    family: None,
+                    given: None,
+                    orcid: None,
                 },
                 bookrack_extract::Contributor {
                     name: "Bob Author".to_string(),
                     role: bookrack_extract::ContributorRole::Author,
+                    family: None,
+                    given: None,
+                    orcid: None,
                 },
                 bookrack_extract::Contributor {
                     name: "Carol Translator".to_string(),
                     role: bookrack_extract::ContributorRole::Translator,
+                    family: None,
+                    given: None,
+                    orcid: None,
                 },
             ],
             ..Default::default()
@@ -3156,6 +3165,9 @@ mod book_pipeline_tests {
             contributors: vec![bookrack_extract::Contributor {
                 name: " Murakami Haruki ".to_string(),
                 role: bookrack_extract::ContributorRole::Author,
+                family: None,
+                given: None,
+                orcid: None,
             }],
             ..Default::default()
         };
@@ -3224,6 +3236,9 @@ mod book_pipeline_tests {
             contributors: vec![bookrack_extract::Contributor {
                 name: "First Author".to_string(),
                 role: bookrack_extract::ContributorRole::Author,
+                family: None,
+                given: None,
+                orcid: None,
             }],
             ..Default::default()
         };

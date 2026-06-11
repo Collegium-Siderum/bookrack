@@ -174,6 +174,9 @@ fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
                 ContributorRole::Author,
                 toggles,
             ),
+            family: None,
+            given: None,
+            orcid: None,
         });
     }
     for contributor in md.contributors() {
@@ -184,6 +187,9 @@ fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
                 ContributorRole::Other,
                 toggles,
             ),
+            family: None,
+            given: None,
+            orcid: None,
         });
     }
 
@@ -197,6 +203,7 @@ fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
         series,
         language,
         contributors,
+        ..Biblio::default()
     }
 }
 
