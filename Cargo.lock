@@ -964,6 +964,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-glean"
+version = "0.5.0-dev"
+dependencies = [
+ "bookrack-audit-profile",
+ "bookrack-catalog",
+ "bookrack-config",
+ "bookrack-core",
+ "bookrack-corpus",
+ "bookrack-embed",
+ "bookrack-extract",
+ "bookrack-normalize",
+ "bookrack-vectors",
+ "chrono",
+ "sha2 0.10.9",
+ "tempfile",
+ "text-splitter",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bookrack-ingest"
 version = "0.5.0-dev"
 dependencies = [
