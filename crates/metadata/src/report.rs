@@ -25,6 +25,18 @@ pub enum FieldGrade {
     Strong,
 }
 
+impl FieldGrade {
+    /// A short token for the grade, suitable for logs and JSON output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FieldGrade::Missing => "missing",
+            FieldGrade::Weak => "weak",
+            FieldGrade::Medium => "medium",
+            FieldGrade::Strong => "strong",
+        }
+    }
+}
+
 /// The audit's binary "did anything required-field fire?" summary.
 ///
 /// **This is a plausibility check, not a review status.** `Clean` means

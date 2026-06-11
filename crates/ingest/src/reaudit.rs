@@ -11,11 +11,15 @@
 //! pipeline-audit row — so after correcting fields through the metadata
 //! write surface, the stored verdict can catch up with the corrections
 //! instead of reporting the ingest-time outcome forever.
+//!
+//! [`build_report`] exposes the same computation with no write at all:
+//! it returns the full per-field report for read surfaces that need the
+//! grades, flags, and hints rather than the two-scalar rollup.
 
 use std::path::Path;
 use std::time::Instant;
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog};
+use bookrack_catalog::{BOOK_SCOPE, Catalog, Intake};
 use bookrack_core::PartitionIdx;
 use bookrack_metadata::{AuditData, AuditProfile};
 
@@ -57,18 +61,6 @@ pub fn reaudit_book(
     let intake = catalog
         .intake_by_id(intake_id)?
         .ok_or(IngestError::UnknownIntake(intake_id))?;
-    let stored_path = intake
-        .stored_path
-        .as_deref()
-        .ok_or(IngestError::MissingEnvelope(intake_id))?;
-    let envelope = match envelope::read_envelope(Path::new(stored_path)) {
-        Ok(env) => env,
-        Err(EnvelopeError::Io(_)) => return Err(IngestError::MissingEnvelope(intake_id)),
-        Err(e) => return Err(e.into()),
-    };
-    if envelope.source_sha256 != intake.source_sha256 {
-        return Err(IngestError::EnvelopeMismatch(intake_id));
-    }
 
     let book_root_id = PartitionIdx::new(intake_id).root().get();
     let started = Instant::now();
@@ -78,25 +70,7 @@ pub fn reaudit_book(
     let previous_verdict = previous.as_ref().and_then(|a| a.audit_verdict.clone());
     let previous_confidence = previous.as_ref().and_then(|a| a.confidence.clone());
 
-    let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
-    let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
-    let sample = body_sample(&envelope.extraction);
-    let source_stem = intake
-        .original_path
-        .as_deref()
-        .and_then(|p| Path::new(p).file_stem())
-        .map(|s| s.to_string_lossy().into_owned());
-    let input = bookrack_metadata::AuditInput {
-        biblio: &envelope.extraction.biblio,
-        provenance: &envelope.extraction.provenance,
-        effective: &effective,
-        toc_stats: &toc_stats,
-        body_sample: &sample,
-        total_blocks: envelope.extraction.blocks.len(),
-        source_stem: source_stem.as_deref(),
-        data: audit_data,
-    };
-    let report = bookrack_metadata::audit(&input, audit_profile);
+    let report = report_for_intake(catalog, &intake, audit_data, audit_profile)?;
 
     let confidence = report.confidence.as_str().to_string();
     let verdict = report.verdict.as_token().to_string();
@@ -127,6 +101,73 @@ pub fn reaudit_book(
         verdict,
         confidence,
     })
+}
+
+/// Rebuild the metadata audit report for one book from its cached
+/// extraction, with no write-back: the rollup, the review row, and the
+/// pipeline trail all stay as they are.
+///
+/// Grades the same *effective* metadata view as [`reaudit_book`] and
+/// returns the full [`bookrack_metadata::MetadataReport`] — per-field
+/// grades, flags, and hints plus the shape flags — instead of the
+/// two-scalar rollup. Returns [`IngestError::MissingEnvelope`] when
+/// the intake has no readable envelope and
+/// [`IngestError::EnvelopeMismatch`] when the envelope belongs to a
+/// different source file.
+pub fn build_report(
+    catalog: &Catalog,
+    intake_id: i64,
+    audit_data: &AuditData,
+    audit_profile: &AuditProfile,
+) -> Result<bookrack_metadata::MetadataReport> {
+    let intake = catalog
+        .intake_by_id(intake_id)?
+        .ok_or(IngestError::UnknownIntake(intake_id))?;
+    report_for_intake(catalog, &intake, audit_data, audit_profile)
+}
+
+/// Audit one intake's effective metadata against its cached extraction
+/// envelope: read and verify the envelope, assemble the
+/// [`bookrack_metadata::AuditInput`], and run the audit.
+fn report_for_intake(
+    catalog: &Catalog,
+    intake: &Intake,
+    audit_data: &AuditData,
+    audit_profile: &AuditProfile,
+) -> Result<bookrack_metadata::MetadataReport> {
+    let intake_id = intake.intake_id;
+    let stored_path = intake
+        .stored_path
+        .as_deref()
+        .ok_or(IngestError::MissingEnvelope(intake_id))?;
+    let envelope = match envelope::read_envelope(Path::new(stored_path)) {
+        Ok(env) => env,
+        Err(EnvelopeError::Io(_)) => return Err(IngestError::MissingEnvelope(intake_id)),
+        Err(e) => return Err(e.into()),
+    };
+    if envelope.source_sha256 != intake.source_sha256 {
+        return Err(IngestError::EnvelopeMismatch(intake_id));
+    }
+
+    let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
+    let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
+    let sample = body_sample(&envelope.extraction);
+    let source_stem = intake
+        .original_path
+        .as_deref()
+        .and_then(|p| Path::new(p).file_stem())
+        .map(|s| s.to_string_lossy().into_owned());
+    let input = bookrack_metadata::AuditInput {
+        biblio: &envelope.extraction.biblio,
+        provenance: &envelope.extraction.provenance,
+        effective: &effective,
+        toc_stats: &toc_stats,
+        body_sample: &sample,
+        total_blocks: envelope.extraction.blocks.len(),
+        source_stem: source_stem.as_deref(),
+        data: audit_data,
+    };
+    Ok(bookrack_metadata::audit(&input, audit_profile))
 }
 
 #[cfg(test)]
@@ -259,6 +300,69 @@ mod tests {
 
         let _ = &mut catalog;
         let err = reaudit_book(
+            &catalog,
+            9999,
+            &AuditData::default_data(),
+            &AuditProfile::default(),
+        )
+        .expect_err("no intake");
+        assert!(matches!(err, IngestError::UnknownIntake(9999)));
+    }
+
+    #[test]
+    fn build_report_returns_field_rows_without_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let id = seed_book(&mut catalog, dir.path(), "sha-report");
+
+        let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+        attrs.title = Some("A Plain Title".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("attrs");
+        catalog
+            .set_override(&NewOverride::new(
+                id,
+                BOOK_SCOPE,
+                "publisher",
+                Some("A Curated Publisher".to_string()),
+                "human",
+            ))
+            .expect("override");
+
+        let report = build_report(
+            &catalog,
+            id,
+            &AuditData::default_data(),
+            &AuditProfile::default(),
+        )
+        .expect("report");
+
+        // The report grades the effective view, so the curated
+        // publisher appears as a graded row; every row carries a hint.
+        let publisher = report
+            .fields
+            .iter()
+            .find(|f| f.field == "publisher")
+            .expect("publisher row");
+        assert!(!matches!(
+            publisher.grade,
+            bookrack_metadata::FieldGrade::Missing
+        ));
+        assert!(report.fields.iter().all(|f| !f.hint.is_empty()));
+
+        // No write-back: the rollup stays unset and the trail stays
+        // empty.
+        let stored = catalog
+            .publication_attrs(id, BOOK_SCOPE)
+            .expect("read attrs")
+            .expect("attrs row");
+        assert_eq!(stored.audit_verdict, None);
+        assert_eq!(stored.confidence, None);
+        let rows = catalog
+            .pipeline_audit_for_book(PartitionIdx::new(id).root().get())
+            .expect("trail");
+        assert!(rows.is_empty());
+
+        let err = build_report(
             &catalog,
             9999,
             &AuditData::default_data(),
