@@ -58,8 +58,10 @@ pub const CONTRIBUTOR_ROLES: &[&str] = &["author", "translator", "editor", "othe
 
 /// Insert one contributor and return its surrogate id.
 const INSERT_SQL: &str = "INSERT INTO node_contributors \
-     (intake_id, scope, role, ordinal, origin, name, nationality, inheritable) \
-     VALUES (:intake_id, :scope, :role, :ordinal, :origin, :name, :nationality, :inheritable) \
+     (intake_id, scope, role, ordinal, origin, name, nationality, inheritable, \
+      family, given, orcid) \
+     VALUES (:intake_id, :scope, :role, :ordinal, :origin, :name, :nationality, :inheritable, \
+             :family, :given, :orcid) \
      RETURNING contributor_id";
 
 /// A `SELECT` of every column with `tail` appended; column list from
@@ -92,6 +94,13 @@ pub struct NodeContributor {
     pub nationality: Option<String>,
     /// Whether this attribution is inherited by child nodes.
     pub inheritable: bool,
+    /// Paper-side: family component of a CSL-JSON structured name.
+    /// Book ingest leaves this `None`.
+    pub family: Option<String>,
+    /// Paper-side: given component of a CSL-JSON structured name.
+    pub given: Option<String>,
+    /// Paper-side: ORCID iD (`0000-0002-1825-0097`).
+    pub orcid: Option<String>,
 }
 
 impl NodeContributor {
@@ -107,6 +116,9 @@ impl NodeContributor {
             name: row.get("name")?,
             nationality: row.get("nationality")?,
             inheritable: row.get("inheritable")?,
+            family: row.get("family")?,
+            given: row.get("given")?,
+            orcid: row.get("orcid")?,
         })
     }
 }
@@ -123,6 +135,9 @@ pub struct NewContributor {
     name: String,
     nationality: Option<String>,
     inheritable: bool,
+    family: Option<String>,
+    given: Option<String>,
+    orcid: Option<String>,
 }
 
 impl NewContributor {
@@ -146,6 +161,9 @@ impl NewContributor {
             name: name.into(),
             nationality: None,
             inheritable: true,
+            family: None,
+            given: None,
+            orcid: None,
         }
     }
 
@@ -158,6 +176,24 @@ impl NewContributor {
     /// Set whether the attribution is inherited by child nodes.
     pub fn inheritable(mut self, inheritable: bool) -> NewContributor {
         self.inheritable = inheritable;
+        self
+    }
+
+    /// Paper-side: set the family component of a CSL-JSON structured name.
+    pub fn family(mut self, family: impl Into<String>) -> NewContributor {
+        self.family = Some(family.into());
+        self
+    }
+
+    /// Paper-side: set the given component of a CSL-JSON structured name.
+    pub fn given(mut self, given: impl Into<String>) -> NewContributor {
+        self.given = Some(given.into());
+        self
+    }
+
+    /// Paper-side: set the contributor's ORCID iD.
+    pub fn orcid(mut self, orcid: impl Into<String>) -> NewContributor {
+        self.orcid = Some(orcid.into());
         self
     }
 }
@@ -179,6 +215,9 @@ impl Catalog {
                 ":name": new.name,
                 ":nationality": new.nationality,
                 ":inheritable": new.inheritable,
+                ":family": new.family,
+                ":given": new.given,
+                ":orcid": new.orcid,
             },
             |row| row.get(0),
         )?;
@@ -244,7 +283,10 @@ mod tests {
             .add_contributor(
                 &NewContributor::new(1, KIND, "translator", 0, "user", "A Translator")
                     .nationality("fr")
-                    .inheritable(false),
+                    .inheritable(false)
+                    .family("Translator")
+                    .given("A.")
+                    .orcid("0000-0001-2345-6789"),
             )
             .expect("add");
         assert!(id > 0);
@@ -261,6 +303,9 @@ mod tests {
         assert_eq!(row.name, "A Translator");
         assert_eq!(row.nationality.as_deref(), Some("fr"));
         assert!(!row.inheritable);
+        assert_eq!(row.family.as_deref(), Some("Translator"));
+        assert_eq!(row.given.as_deref(), Some("A."));
+        assert_eq!(row.orcid.as_deref(), Some("0000-0001-2345-6789"));
     }
 
     #[test]

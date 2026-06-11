@@ -35,7 +35,12 @@ const INHERITABLE_FIELDS: &[&str] = &["publisher", "series"];
 /// [`base_pairs`], minus the pipeline-owned bookkeeping columns
 /// (`source_format`, `source`, `confidence`, `audit_verdict`,
 /// `enriched_by`) — overriding those would forge provenance the audit
-/// machinery relies on. A test pins the lists together.
+/// machinery relies on. The six paper-side discrete columns (doi,
+/// arxiv_id, issn, container_title, abstract_text, csl_type) are
+/// included so a curator can correct DOI typos and the like; the
+/// opaque `extras_json` blob is deliberately excluded — the editing
+/// surface only accepts discrete fields. A test pins the lists
+/// together.
 pub const EDITABLE_FIELDS: &[&str] = &[
     "title",
     "subtitle",
@@ -51,6 +56,12 @@ pub const EDITABLE_FIELDS: &[&str] = &[
     "original_title",
     "original_language",
     "original_year",
+    "doi",
+    "arxiv_id",
+    "issn",
+    "container_title",
+    "abstract_text",
+    "csl_type",
 ];
 
 /// The effective metadata of one node: its base-layer attributes with
@@ -131,6 +142,16 @@ fn base_pairs(attrs: &PublicationAttrs) -> Vec<(&'static str, String)> {
         confidence,
         audit_verdict,
         enriched_by,
+        doi,
+        arxiv_id,
+        issn,
+        container_title,
+        abstract_text,
+        csl_type,
+        // The paper extras blob is intentionally not surfaced through the
+        // effective view: it is an opaque JSON passthrough, not a
+        // field-level override target. See `EDITABLE_FIELDS`.
+        extras_json: _,
     } = attrs;
     [
         ("title", title),
@@ -152,6 +173,12 @@ fn base_pairs(attrs: &PublicationAttrs) -> Vec<(&'static str, String)> {
         ("confidence", confidence),
         ("audit_verdict", audit_verdict),
         ("enriched_by", enriched_by),
+        ("doi", doi),
+        ("arxiv_id", arxiv_id),
+        ("issn", issn),
+        ("container_title", container_title),
+        ("abstract_text", abstract_text),
+        ("csl_type", csl_type),
     ]
     .into_iter()
     .filter_map(|(name, value)| value.as_ref().map(|v| (name, v.clone())))
@@ -241,6 +268,9 @@ mod tests {
         // new column fails to compile there first; this test then forces
         // it to be classified as either curator-editable or
         // pipeline-owned before the write surface accepts or rejects it.
+        // `extras_json` is a documented exception: an opaque JSON blob
+        // that flows through the row but does not enter `base_pairs` or
+        // either of the two lists.
         let attrs = PublicationAttrs {
             intake_id: 1,
             scope: KIND_A.as_scope_str().to_string(),
@@ -263,6 +293,13 @@ mod tests {
             confidence: Some("x".into()),
             audit_verdict: Some("x".into()),
             enriched_by: Some("x".into()),
+            doi: Some("x".into()),
+            arxiv_id: Some("x".into()),
+            issn: Some("x".into()),
+            container_title: Some("x".into()),
+            abstract_text: Some("x".into()),
+            csl_type: Some("x".into()),
+            extras_json: Some("x".into()),
         };
         let names: Vec<&str> = base_pairs(&attrs)
             .into_iter()
@@ -276,6 +313,10 @@ mod tests {
             .collect();
         assert_eq!(got, expected);
         assert_eq!(names.len(), EDITABLE_FIELDS.len() + PIPELINE_FIELDS.len());
+        // The opaque blob deliberately stays out of both lists.
+        assert!(!EDITABLE_FIELDS.contains(&"extras_json"));
+        assert!(!PIPELINE_FIELDS.contains(&"extras_json"));
+        assert!(!got.contains("extras_json"));
     }
 
     #[test]
@@ -429,5 +470,65 @@ mod tests {
             volume.inherit_from(&set).get("publisher"),
             Some("Volume Publisher")
         );
+    }
+
+    #[test]
+    fn the_six_paper_columns_flow_through_the_view_and_accept_overrides() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut attrs = NewPublicationAttrs::new(INTAKE, KIND_A);
+        attrs.doi = Some("10.5555/synthetic.0001".into());
+        attrs.arxiv_id = Some("0000.00000".into());
+        attrs.issn = Some("0000-0000".into());
+        attrs.container_title = Some("Container Title".into());
+        attrs.abstract_text = Some("Synthetic abstract.".into());
+        attrs.csl_type = Some("article-journal".into());
+        // The blob rides along on the row but never enters the
+        // effective view (see `base_pairs` and `EDITABLE_FIELDS`).
+        attrs.extras_json = Some("{\"note\":\"ignored\"}".into());
+        catalog.upsert_publication_attrs(&attrs).expect("base");
+
+        // Each paper-side discrete column is surfaced by the effective
+        // view exactly like the original 14 bibliographic columns.
+        let view = catalog
+            .effective_publication_attrs(INTAKE, KIND_A)
+            .expect("effective");
+        assert_eq!(view.get("doi"), Some("10.5555/synthetic.0001"));
+        assert_eq!(view.get("arxiv_id"), Some("0000.00000"));
+        assert_eq!(view.get("issn"), Some("0000-0000"));
+        assert_eq!(view.get("container_title"), Some("Container Title"));
+        assert_eq!(view.get("abstract_text"), Some("Synthetic abstract."));
+        assert_eq!(view.get("csl_type"), Some("article-journal"));
+        // The opaque blob never appears under either key in the view.
+        assert_eq!(view.get("extras_json"), None);
+
+        // And each one is overridable — `metadata.set` would route to
+        // the same path. Replace each, then read back through the view.
+        for (field, value) in [
+            ("doi", "10.5555/override"),
+            ("arxiv_id", "1111.11111"),
+            ("issn", "1111-1111"),
+            ("container_title", "Overridden Container"),
+            ("abstract_text", "Overridden abstract."),
+            ("csl_type", "book"),
+        ] {
+            catalog
+                .set_override(&NewOverride::new(
+                    INTAKE,
+                    KIND_A,
+                    field,
+                    Some(value.into()),
+                    "human",
+                ))
+                .expect("override");
+        }
+        let after = catalog
+            .effective_publication_attrs(INTAKE, KIND_A)
+            .expect("effective after overrides");
+        assert_eq!(after.get("doi"), Some("10.5555/override"));
+        assert_eq!(after.get("arxiv_id"), Some("1111.11111"));
+        assert_eq!(after.get("issn"), Some("1111-1111"));
+        assert_eq!(after.get("container_title"), Some("Overridden Container"));
+        assert_eq!(after.get("abstract_text"), Some("Overridden abstract."));
+        assert_eq!(after.get("csl_type"), Some("book"));
     }
 }

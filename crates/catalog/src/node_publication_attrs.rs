@@ -66,11 +66,13 @@ pub(crate) const SPEC: TableSpec = TableSpec {
 const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
      (intake_id, scope, title, subtitle, publisher, year, publication_date, isbn, series, \
       series_number, edition, language, pub_place, original_title, original_language, \
-      original_year, source_format, source, confidence, audit_verdict, enriched_by) \
+      original_year, source_format, source, confidence, audit_verdict, enriched_by, \
+      doi, arxiv_id, issn, container_title, abstract_text, csl_type, extras_json) \
      VALUES (:intake_id, :scope, :title, :subtitle, :publisher, :year, :publication_date, \
              :isbn, :series, :series_number, :edition, :language, :pub_place, \
              :original_title, :original_language, :original_year, :source_format, :source, \
-             :confidence, :audit_verdict, :enriched_by) \
+             :confidence, :audit_verdict, :enriched_by, :doi, :arxiv_id, :issn, \
+             :container_title, :abstract_text, :csl_type, :extras_json) \
      ON CONFLICT(intake_id, scope) DO UPDATE SET \
        title = excluded.title, \
        subtitle = excluded.subtitle, \
@@ -90,7 +92,14 @@ const UPSERT_SQL: &str = "INSERT INTO node_publication_attrs \
        source = excluded.source, \
        confidence = excluded.confidence, \
        audit_verdict = excluded.audit_verdict, \
-       enriched_by = excluded.enriched_by";
+       enriched_by = excluded.enriched_by, \
+       doi = excluded.doi, \
+       arxiv_id = excluded.arxiv_id, \
+       issn = excluded.issn, \
+       container_title = excluded.container_title, \
+       abstract_text = excluded.abstract_text, \
+       csl_type = excluded.csl_type, \
+       extras_json = excluded.extras_json";
 
 /// A `SELECT` of every column with `tail` (a `WHERE` clause) appended.
 /// The column list is derived from [`SPEC`].
@@ -151,6 +160,24 @@ pub struct PublicationAttrs {
     pub audit_verdict: Option<String>,
     /// What produced the enrichment, when the row was enriched.
     pub enriched_by: Option<String>,
+    /// Paper-side: Digital Object Identifier.
+    pub doi: Option<String>,
+    /// Paper-side: arXiv identifier (`NNNN.NNNNN` or `cat/NNNNNNN`).
+    pub arxiv_id: Option<String>,
+    /// Paper-side: journal / magazine ISSN.
+    pub issn: Option<String>,
+    /// Paper-side: container title (journal name, proceedings title, …).
+    pub container_title: Option<String>,
+    /// Paper-side: abstract body, in full text.
+    pub abstract_text: Option<String>,
+    /// Paper-side: CSL 1.0.2 item type as a string (`article-journal`,
+    /// `paper-conference`, …). Carried as text at the catalog layer;
+    /// the [`bookrack_extract::CslType`] enum lives on the extract side.
+    pub csl_type: Option<String>,
+    /// Paper-side: opaque JSON blob holding CSL fields the discrete
+    /// columns above do not cover. The catalog stores it verbatim; no
+    /// JSON validation is performed here.
+    pub extras_json: Option<String>,
 }
 
 impl PublicationAttrs {
@@ -179,6 +206,13 @@ impl PublicationAttrs {
             confidence: row.get("confidence")?,
             audit_verdict: row.get("audit_verdict")?,
             enriched_by: row.get("enriched_by")?,
+            doi: row.get("doi")?,
+            arxiv_id: row.get("arxiv_id")?,
+            issn: row.get("issn")?,
+            container_title: row.get("container_title")?,
+            abstract_text: row.get("abstract_text")?,
+            csl_type: row.get("csl_type")?,
+            extras_json: row.get("extras_json")?,
         })
     }
 }
@@ -234,6 +268,22 @@ pub struct NewPublicationAttrs {
     pub audit_verdict: Option<String>,
     /// What produced the enrichment.
     pub enriched_by: Option<String>,
+    /// Paper-side: see [`PublicationAttrs::doi`].
+    pub doi: Option<String>,
+    /// Paper-side: see [`PublicationAttrs::arxiv_id`].
+    pub arxiv_id: Option<String>,
+    /// Paper-side: see [`PublicationAttrs::issn`].
+    pub issn: Option<String>,
+    /// Paper-side: see [`PublicationAttrs::container_title`].
+    pub container_title: Option<String>,
+    /// Paper-side: see [`PublicationAttrs::abstract_text`].
+    pub abstract_text: Option<String>,
+    /// Paper-side: CSL item type as a string. See
+    /// [`PublicationAttrs::csl_type`].
+    pub csl_type: Option<String>,
+    /// Paper-side: opaque JSON blob, written verbatim. See
+    /// [`PublicationAttrs::extras_json`].
+    pub extras_json: Option<String>,
 }
 
 impl NewPublicationAttrs {
@@ -262,6 +312,13 @@ impl NewPublicationAttrs {
             confidence: None,
             audit_verdict: None,
             enriched_by: None,
+            doi: None,
+            arxiv_id: None,
+            issn: None,
+            container_title: None,
+            abstract_text: None,
+            csl_type: None,
+            extras_json: None,
         }
     }
 }
@@ -330,6 +387,13 @@ impl Catalog {
                 ":confidence": new.confidence,
                 ":audit_verdict": new.audit_verdict,
                 ":enriched_by": new.enriched_by,
+                ":doi": new.doi,
+                ":arxiv_id": new.arxiv_id,
+                ":issn": new.issn,
+                ":container_title": new.container_title,
+                ":abstract_text": new.abstract_text,
+                ":csl_type": new.csl_type,
+                ":extras_json": new.extras_json,
             },
         )?;
         Ok(())
@@ -386,6 +450,13 @@ mod tests {
             confidence: Some("high".into()),
             audit_verdict: Some("clean".into()),
             enriched_by: Some("llm".into()),
+            doi: Some("10.5555/synthetic.0001".into()),
+            arxiv_id: Some("0000.00000".into()),
+            issn: Some("0000-0000".into()),
+            container_title: Some("Container Title".into()),
+            abstract_text: Some("Synthetic abstract text.".into()),
+            csl_type: Some("article-journal".into()),
+            extras_json: Some("{\"note\":\"synthetic\"}".into()),
         }
     }
 
@@ -421,6 +492,19 @@ mod tests {
         assert_eq!(read.confidence.as_deref(), Some("high"));
         assert_eq!(read.audit_verdict.as_deref(), Some("clean"));
         assert_eq!(read.enriched_by.as_deref(), Some("llm"));
+        assert_eq!(read.doi.as_deref(), Some("10.5555/synthetic.0001"));
+        assert_eq!(read.arxiv_id.as_deref(), Some("0000.00000"));
+        assert_eq!(read.issn.as_deref(), Some("0000-0000"));
+        assert_eq!(read.container_title.as_deref(), Some("Container Title"));
+        assert_eq!(
+            read.abstract_text.as_deref(),
+            Some("Synthetic abstract text.")
+        );
+        assert_eq!(read.csl_type.as_deref(), Some("article-journal"));
+        assert_eq!(
+            read.extras_json.as_deref(),
+            Some("{\"note\":\"synthetic\"}")
+        );
     }
 
     #[test]
