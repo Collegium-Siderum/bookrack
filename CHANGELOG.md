@@ -93,6 +93,11 @@ release workflow extracts the matching section verbatim from this file.
   daemon was launched with (`human`/`cli` under `bookrack run`,
   `human`/`gui` under the tray app); headless `bookrack-mcp` had the
   reverse mislabel, recording control-socket edits as `llm`/`mcp`.
+- Review status flips no longer clobber `node_reviews.notes`: the
+  ingest audit's note (verdict and flagged-field list) survives
+  `metadata.approve` / `metadata.ack` / `metadata.reject`. Approve and
+  reject previously overwrote it with the review reason — which already
+  lives on the audit row — and ack nulled it outright.
 
 ## [0.4.0] - 2026-06-11
 

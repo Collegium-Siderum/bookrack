@@ -339,13 +339,51 @@ fn reject_records_a_review_and_a_reject_audit_row() {
         .expect("review")
         .expect("present");
     assert_eq!(review.status, bookrack_catalog::STATUS_REJECTED);
-    assert_eq!(review.notes.as_deref(), Some("wrong source file"));
+    // The reason lives on the audit row; the review note is untouched.
+    assert_eq!(review.notes, None);
     let book_root_id = PartitionIdx::new(id).root().get();
     let audit = fx
         .catalog()
         .metadata_audit_for_node(book_root_id)
         .expect("audit");
     assert!(audit.iter().any(|r| r.action == "reject"));
+}
+
+#[test]
+fn status_flips_preserve_the_ingest_audit_note() {
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-preserve-notes");
+    fx.catalog()
+        .upsert_review(
+            &bookrack_catalog::NewReview::new(
+                id,
+                BOOK_SCOPE,
+                "bookrack-ingest:default",
+                bookrack_catalog::STATUS_PENDING,
+            )
+            .notes("audit verdict=needs_work, flagged: publisher, year"),
+        )
+        .expect("ingest review");
+
+    approve_metadata(
+        &fx.ops,
+        ApproveMetadataRequest {
+            intake_id: id,
+            reason: Some("verified against the source".to_string()),
+        },
+    )
+    .expect("approve");
+
+    let review = fx
+        .catalog()
+        .review(id, BOOK_SCOPE)
+        .expect("review")
+        .expect("present");
+    assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
+    assert_eq!(
+        review.notes.as_deref(),
+        Some("audit verdict=needs_work, flagged: publisher, year")
+    );
 }
 
 #[test]

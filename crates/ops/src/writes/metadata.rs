@@ -361,7 +361,8 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
 }
 
 /// Approve the record. The audit verdict is unchanged; the review row
-/// is flipped to `approved`.
+/// is flipped to `approved`. The reason lands on the audit row only:
+/// `node_reviews.notes` (the ingest audit's note) stays in place.
 pub fn approve_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: ApproveMetadataRequest,
@@ -387,23 +388,20 @@ pub fn approve_metadata<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         let caller = ops.effective_caller();
-        let mut review = NewReview::new(
+        catalog.upsert_review(&NewReview::new(
             req.intake_id,
             BOOK_SCOPE,
             caller.actor_kind.as_str(),
             STATUS_APPROVED,
-        );
-        if let Some(r) = req.reason {
-            review = review.notes(r);
-        }
-        catalog.upsert_review(&review)?;
+        ))?;
 
         Ok(write_outcome(ops, audit_id, true))
     })
 }
 
 /// Reject the book. Pipeline rows stay in place so downstream consumers
-/// can filter on `rejected`.
+/// can filter on `rejected`. The reason lands on the audit row only:
+/// `node_reviews.notes` (the ingest audit's note) stays in place.
 pub fn reject_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: RejectMetadataRequest,
@@ -429,15 +427,12 @@ pub fn reject_metadata<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         let caller = ops.effective_caller();
-        catalog.upsert_review(
-            &NewReview::new(
-                req.intake_id,
-                BOOK_SCOPE,
-                caller.actor_kind.as_str(),
-                STATUS_REJECTED,
-            )
-            .notes(req.reason),
-        )?;
+        catalog.upsert_review(&NewReview::new(
+            req.intake_id,
+            BOOK_SCOPE,
+            caller.actor_kind.as_str(),
+            STATUS_REJECTED,
+        ))?;
 
         Ok(write_outcome(ops, audit_id, true))
     })
