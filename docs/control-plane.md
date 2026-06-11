@@ -98,6 +98,34 @@ and tool-scoped.
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.
 
+## Methods (library read proxies)
+
+Operator-facing read pathway: each method below mirrors the MCP
+`library.*` read tool of the same name. The JSON params shape, the
+returned body, and the underlying `bookrack_ops::reads::*` call are
+identical, so `bookrack exec <method> '<json>'` over the control
+socket reaches the same code path agents exercise over MCP HTTP. None
+of these methods take the write mutex; they read straight from the
+catalog and corpus handles the daemon already holds.
+
+- `library.stats` — aggregate counts over the library.
+- `library.list_books` / `library.find_books` — paginated registry
+  browse and filter.
+- `library.show_book` / `library.show_toc` — per-book bibliographic
+  record and TOC; `null` when the intake id is unknown.
+- `library.read_context` / `library.read_span` — passage windows by
+  anchor leaf or organizing node.
+- `library.show_metadata_audit` / `library.show_metadata_report` —
+  stored audit verdict and the recomputed per-field plausibility
+  report.
+- `library.list_metadata` / `library.list_pending_reviews` —
+  paginated review-queue browse.
+- `library.show_audit_trail` / `library.show_pipeline_trail` —
+  per-book metadata-edit and pipeline-step audit trails.
+- `library.search` / `library.search_in_book` — cited passage search
+  across the library or a single book.
+- `library.vectors_status` — vector-store snapshot for the library.
+
 ## Events (Phase 2)
 
 - `daemon.state` — `idle` / `writing` / `degraded` / `stopping`. The
@@ -179,7 +207,15 @@ second concurrent write returns `-32001 busy`.
   rmcp client; its `info` / `tools` / `logs` subcommands route
   through the control plane only, the `BOOKRACK_EXEC_CHANNEL`
   selector is gone, and the `rmcp` / `reqwest` crates are
-  dropped from `bookrack-cli`'s dependency manifest. A new `log`
+  dropped from `bookrack-cli`'s dependency manifest. A follow-on
+  to this phase reopens an operator read pathway: every MCP
+  `library.*` read tool gains a control-plane proxy of the same
+  name (see *Methods (library read proxies)* above), and
+  `bookrack exec` accepts any control-plane method name
+  containing a `.` as a sub-command, forwarding the JSON params
+  through the control socket — so `bookrack exec
+  library.show_book '{"intake_id":N}'` reaches the same code
+  path as the MCP tool of the same name. A new `log`
   event channel forwards every tracing event captured by
   `bookrack_obs::stream::LogStreamHandle` through the control-plane
   broadcast so `events.subscribe` consumers can multiplex log

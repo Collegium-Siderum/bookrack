@@ -16,6 +16,12 @@
 //!   the client is interrupted.
 //! - `logs tail [<n>]`: print up to `n` recent log events
 //!   (defaults to 100) off the same broadcast.
+//! - `<method> [<params-json>]`: any control-plane method name
+//!   containing a `.` (e.g. `library.show_book`, `library.search`,
+//!   `library.show_metadata_audit`). The optional second argument is
+//!   the JSON params object; defaults to `null` when omitted. The
+//!   `daemon.methods` row set is the source of truth for available
+//!   method names.
 
 use std::path::Path;
 
@@ -36,12 +42,30 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
         "info" => print_info(&lock_path),
         "tools" => print_tools().await,
         "logs" => run_logs(&args[1..]).await,
+        method if method.contains('.') => call_method(method, &args[1..]).await,
         other => {
             bail!(
-                "bookrack exec: unknown subcommand `{other}`; expected `info`, `tools`, or `logs`",
+                "bookrack exec: unknown subcommand `{other}`; expected `info`, `tools`, `logs`, \
+                 or a control-plane method name (e.g. `library.show_book`). Run \
+                 `bookrack exec tools` for the full method list."
             )
         }
     }
+}
+
+async fn call_method(method: &str, params: &[String]) -> Result<()> {
+    let payload = match params.first() {
+        Some(raw) => serde_json::from_str::<Value>(raw)
+            .with_context(|| format!("parse params for `{method}` as JSON"))?,
+        None => Value::Null,
+    };
+    let client = helpers::connect_or_exit(None).await;
+    let value = client
+        .call_raw(method, payload)
+        .await
+        .with_context(|| format!("{method} rpc"))?;
+    helpers::print_value(&value);
+    Ok(())
 }
 
 fn print_info(lock_path: &Path) -> Result<()> {

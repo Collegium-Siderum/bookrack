@@ -38,6 +38,7 @@ pub mod meta;
 pub mod metadata;
 pub mod queue_writes;
 pub mod reads;
+pub mod reads_library;
 pub mod remove;
 pub mod stamps;
 pub mod tray;
@@ -122,6 +123,63 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "library.list" => Ok(DispatchOutcome::Result(reads::library_list(ctx)?)),
         "library.info" => Ok(DispatchOutcome::Result(
             reads::library_info(&req.params, ctx).await?,
+        )),
+        "library.stats" => Ok(DispatchOutcome::Result(reads_library::stats(
+            &req.params,
+            ctx,
+        )?)),
+        "library.list_books" => Ok(DispatchOutcome::Result(reads_library::list_books(
+            &req.params,
+            ctx,
+        )?)),
+        "library.find_books" => Ok(DispatchOutcome::Result(reads_library::find_books(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_book" => Ok(DispatchOutcome::Result(reads_library::show_book(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_toc" => Ok(DispatchOutcome::Result(reads_library::show_toc(
+            &req.params,
+            ctx,
+        )?)),
+        "library.read_context" => Ok(DispatchOutcome::Result(reads_library::read_context(
+            &req.params,
+            ctx,
+        )?)),
+        "library.read_span" => Ok(DispatchOutcome::Result(reads_library::read_span(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_metadata_audit" => Ok(DispatchOutcome::Result(
+            reads_library::show_metadata_audit(&req.params, ctx)?,
+        )),
+        "library.show_metadata_report" => Ok(DispatchOutcome::Result(
+            reads_library::show_metadata_report(&req.params, ctx)?,
+        )),
+        "library.list_metadata" => Ok(DispatchOutcome::Result(reads_library::list_metadata(
+            &req.params,
+            ctx,
+        )?)),
+        "library.list_pending_reviews" => Ok(DispatchOutcome::Result(
+            reads_library::list_pending_reviews(&req.params, ctx)?,
+        )),
+        "library.show_audit_trail" => Ok(DispatchOutcome::Result(reads_library::show_audit_trail(
+            &req.params,
+            ctx,
+        )?)),
+        "library.show_pipeline_trail" => Ok(DispatchOutcome::Result(
+            reads_library::show_pipeline_trail(&req.params, ctx)?,
+        )),
+        "library.search" => Ok(DispatchOutcome::Result(
+            reads_library::search(&req.params, ctx).await?,
+        )),
+        "library.search_in_book" => Ok(DispatchOutcome::Result(
+            reads_library::search_in_book(&req.params, ctx).await?,
+        )),
+        "library.vectors_status" => Ok(DispatchOutcome::Result(
+            reads_library::vectors_status(&req.params, ctx).await?,
         )),
         "events.subscribe" => Ok(DispatchOutcome::Result(
             serde_json::json!({ "subscribed": true }),

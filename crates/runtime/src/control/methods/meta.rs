@@ -109,6 +109,70 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "read",
     },
     MethodSignature {
+        name: "library.stats",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.list_books",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.find_books",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_book",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_toc",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.read_context",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.read_span",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_metadata_audit",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_metadata_report",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.list_metadata",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.list_pending_reviews",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_audit_trail",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.show_pipeline_trail",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.search",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.search_in_book",
+        kind: "read",
+    },
+    MethodSignature {
+        name: "library.vectors_status",
+        kind: "read",
+    },
+    MethodSignature {
         name: "library.fork",
         kind: "write",
     },
@@ -247,6 +311,37 @@ mod tests {
                 pair[0], pair[1],
                 "method {} appears twice in the registry",
                 pair[0]
+            );
+        }
+    }
+
+    #[test]
+    fn library_read_proxy_methods_are_registered() {
+        for name in [
+            "library.stats",
+            "library.list_books",
+            "library.find_books",
+            "library.show_book",
+            "library.show_toc",
+            "library.read_context",
+            "library.read_span",
+            "library.show_metadata_audit",
+            "library.show_metadata_report",
+            "library.list_metadata",
+            "library.list_pending_reviews",
+            "library.show_audit_trail",
+            "library.show_pipeline_trail",
+            "library.search",
+            "library.search_in_book",
+            "library.vectors_status",
+        ] {
+            let entry = REGISTRY
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("library read proxy {name} is missing from REGISTRY"));
+            assert_eq!(
+                entry.kind, "read",
+                "{name} should be classified as a read method"
             );
         }
     }
