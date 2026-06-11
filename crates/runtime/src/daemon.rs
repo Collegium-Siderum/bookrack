@@ -339,7 +339,8 @@ impl DaemonRuntime {
             bookrack_glean::CHUNK_VERSION,
         )
         .await
-        .context("open papers query library")?;
+        .context("open papers query library")?
+        .with_kind(bookrack_core::ItemKind::Paper);
         let papers_paths = PapersPaths {
             corpus_db: cfg.papers_corpus_db(),
             catalog_db: cfg.papers_catalog_db(),

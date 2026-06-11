@@ -83,6 +83,11 @@ pub struct Library<E: Embedder> {
     lancedb_dir: PathBuf,
     default_top_k: usize,
     chunk_version: u32,
+    /// Pipeline kind this library belongs to: `Book` for ingest,
+    /// `Paper` for glean. Citations resolved through this library's
+    /// search methods are tagged with this kind and use the matching
+    /// breadcrumb shape.
+    kind: ItemKind,
 }
 
 impl<E: Embedder> Library<E> {
@@ -133,7 +138,19 @@ impl<E: Embedder> Library<E> {
             lancedb_dir: lancedb_dir.to_path_buf(),
             default_top_k,
             chunk_version,
+            kind: ItemKind::Book,
         })
+    }
+
+    /// Tag this library with the pipeline kind it serves. Returns the
+    /// library so the caller can chain off [`Library::open`]:
+    ///
+    /// ```ignore
+    /// let papers_library = Library::open(...).await?.with_kind(ItemKind::Paper);
+    /// ```
+    pub fn with_kind(mut self, kind: ItemKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Drop the cached vector store and rebind it from the lance dir on
@@ -205,6 +222,12 @@ impl<E: Embedder> Library<E> {
         &self.embedder
     }
 
+    /// The `top_k` this library falls back to when a caller does not
+    /// supply one. Sourced from `SearchConfig::top_k` at construction.
+    pub fn default_top_k(&self) -> usize {
+        self.default_top_k
+    }
+
     /// Search the library for passages matching `query`, nearest first.
     /// `top_k` falls back to the configured default when `None`.
     ///
@@ -246,7 +269,7 @@ impl<E: Embedder> Library<E> {
         .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let citations = cite(&corpus, &catalog, hits, ItemKind::Book)?;
+        let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
     }
 
@@ -294,7 +317,7 @@ impl<E: Embedder> Library<E> {
         .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let citations = cite(&corpus, &catalog, hits, ItemKind::Book)?;
+        let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
     }
 
@@ -340,7 +363,7 @@ impl<E: Embedder> Library<E> {
         .await?;
         let corpus = Corpus::open(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let citations = cite(&corpus, &catalog, hits, ItemKind::Paper)?;
+        let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
     }
 

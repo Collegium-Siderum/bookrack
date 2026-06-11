@@ -18,7 +18,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::BookFilter;
+use bookrack_ops::dto::{BookFilter, PaperFilter};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
@@ -59,6 +59,11 @@ pub struct SearchArgs {
     /// session's default library.
     #[serde(default)]
     pub library: Option<String>,
+    /// Which side of the library to search: `"book"` (the default —
+    /// existing behaviour), `"paper"` (only the paper-side store),
+    /// or `"all"` (both stores, merged by ascending distance).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 /// Arguments for the `library.search_in_book` tool.
@@ -167,6 +172,100 @@ pub struct BookIdArgs {
     /// session's default library.
     #[serde(default)]
     pub library: Option<String>,
+}
+
+/// Arguments for the `library.list_papers` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListPapersArgs {
+    /// Maximum number of papers in this page. Server-side cap applies.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip.
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+/// Arguments for the `library.find_papers` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindPapersArgs {
+    /// Substring match against the paper title.
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    /// Exact-equality match against a contributor name.
+    #[serde(default)]
+    pub contributor_name: Option<String>,
+    /// Exact-equality match against the year column.
+    #[serde(default)]
+    pub year: Option<String>,
+    /// Substring match against the container title (journal,
+    /// proceedings, ...).
+    #[serde(default)]
+    pub venue_substring: Option<String>,
+    /// Exact-equality match against the DOI.
+    #[serde(default)]
+    pub doi: Option<String>,
+    /// Maximum number of papers in this page.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip.
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+/// Arguments for the `library.show_paper` and `library.show_paper_toc`
+/// tools.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PaperIdArgs {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+/// Arguments for the `library.search_in_paper` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchInPaperArgs {
+    /// Catalog intake id of the paper to confine recall to.
+    pub intake_id: i64,
+    /// The natural-language query.
+    pub query: String,
+    /// Maximum number of passages to return.
+    pub top_k: Option<usize>,
+    /// Force a brute-force scan, ignoring any ANN index.
+    #[serde(default)]
+    pub bypass_index: bool,
+    /// Override the IVF probe count for this query only.
+    #[serde(default)]
+    pub nprobes: Option<usize>,
+    /// Override the IVF-PQ refinement multiplier for this query only.
+    #[serde(default)]
+    pub refine_factor: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+impl SearchInPaperArgs {
+    /// Project the override fields onto the underlying [`SearchOptions`]
+    /// struct the ops layer consumes.
+    fn overrides(&self) -> SearchOptions {
+        SearchOptions {
+            bypass_index: self.bypass_index,
+            nprobes: self.nprobes,
+            refine_factor: self.refine_factor,
+        }
+    }
 }
 
 /// Default number of leaves on each side of the anchor when a
@@ -559,9 +658,12 @@ impl BookrackServer {
     /// Search the library and return cited passages as a JSON array.
     #[tool(
         name = "library.search",
-        description = "Search the local book library for passages relevant to a \
-                       natural-language query. Returns cited passages, nearest \
-                       first, each with a breadcrumb trail and source location."
+        description = "Search the library for passages relevant to a natural-language \
+                       query. Returns cited passages, nearest first, each with a \
+                       breadcrumb trail and source location. `kind` selects which \
+                       side: `\"book\"` (the default; existing behaviour), `\"paper\"` \
+                       (only the paper-side store), or `\"all\"` (both stores, merged \
+                       by ascending distance)."
     )]
     async fn library_search(
         &self,
@@ -569,10 +671,31 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let overrides = args.overrides();
-        let hits = reads::search::search(handle.ops(), &args.query, overrides, args.top_k)
-            .await
-            .map_err(ops_error_to_internal)?;
-        tracing::info!(hits = hits.len(), "mcp library.search");
+        let kind = args.kind.as_deref().unwrap_or("book");
+        let hits = match kind {
+            "book" => reads::search::search(handle.ops(), &args.query, overrides, args.top_k)
+                .await
+                .map_err(ops_error_to_internal)?,
+            "paper" => {
+                reads::search::search_paper(handle.ops(), &args.query, overrides, args.top_k)
+                    .await
+                    .map_err(ops_error_to_internal)?
+            }
+            "all" => {
+                reads::search::search_unified(handle.ops(), &args.query, overrides, args.top_k)
+                    .await
+                    .map_err(ops_error_to_internal)?
+            }
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "library.search: kind={other:?} is not one of \"book\", \"paper\", \"all\""
+                    ),
+                    None,
+                ));
+            }
+        };
+        tracing::info!(kind = kind, hits = hits.len(), "mcp library.search");
         respond_with(&hits)
     }
 
@@ -736,6 +859,146 @@ impl BookrackServer {
             Ok(toc) => respond_with(&Some(toc)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// List papers in the library, paginated.
+    #[tool(
+        name = "library.list_papers",
+        description = "List papers known to the library, paginated. Mirrors \
+                       library.list_books for the paper pipeline. Returns paper \
+                       summaries plus the total matching count and a truncated flag."
+    )]
+    async fn library_list_papers(
+        &self,
+        Parameters(args): Parameters<ListPapersArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers::list_papers(handle.ops(), limit, offset)
+            .map_err(ops_error_to_internal)?;
+        tracing::info!(
+            returned = page.papers.len(),
+            total = page.total,
+            "mcp library.list_papers"
+        );
+        respond_with(&page)
+    }
+
+    /// Find papers by title substring, contributor, year, venue, or DOI.
+    #[tool(
+        name = "library.find_papers",
+        description = "Search the paper registry by title substring (fuzzy), \
+                       contributor name (exact), year (exact), venue substring \
+                       (matched against container title), or DOI (exact). Mirrors \
+                       library.find_books for the paper pipeline."
+    )]
+    async fn library_find_papers(
+        &self,
+        Parameters(args): Parameters<FindPapersArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let filter = PaperFilter {
+            title_substring: args.title_substring,
+            contributor_name: args.contributor_name,
+            year: args.year,
+            venue_substring: args.venue_substring,
+            doi: args.doi,
+        };
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers::find_papers(handle.ops(), filter, limit, offset)
+            .map_err(ops_error_to_internal)?;
+        tracing::info!(
+            returned = page.papers.len(),
+            total = page.total,
+            "mcp library.find_papers"
+        );
+        respond_with(&page)
+    }
+
+    /// Fetch the full bibliographic record for one paper.
+    #[tool(
+        name = "library.show_paper",
+        description = "Fetch the full bibliographic record for one paper by intake \
+                       id. Mirrors library.show_book for the paper pipeline; the \
+                       abstract text is in the detail response, not in list \
+                       summaries. Returns null when no such paper is registered."
+    )]
+    async fn library_show_paper(
+        &self,
+        Parameters(args): Parameters<PaperIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::papers::show_paper(handle.ops(), args.intake_id) {
+            Ok(detail) => respond_with(&Some(detail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::PaperDetail>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return one paper's table of contents.
+    #[tool(
+        name = "library.show_paper_toc",
+        description = "Return the table of contents of one paper. Papers carry one \
+                       Work root plus one prose leaf, so the TOC is effectively \
+                       empty for a well-formed paper. The shape mirrors \
+                       library.show_toc for the book pipeline."
+    )]
+    async fn library_show_paper_toc(
+        &self,
+        Parameters(args): Parameters<PaperIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::papers::show_paper_toc(handle.ops(), args.intake_id) {
+            Ok(toc) => respond_with(&Some(toc)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Search within one paper only — the partition-bounded peer of
+    /// `library.search_in_book` for the paper pipeline.
+    #[tool(
+        name = "library.search_in_paper",
+        description = "Search a single paper for passages relevant to a query. Pass \
+                       the paper's intake_id (from library.list_papers / \
+                       library.show_paper). Returns cited passages, nearest first."
+    )]
+    async fn library_search_in_paper(
+        &self,
+        Parameters(args): Parameters<SearchInPaperArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let overrides = args.overrides();
+        let result = reads::search::search_in_paper(
+            handle.ops(),
+            args.intake_id,
+            &args.query,
+            overrides,
+            args.top_k,
+        )
+        .await;
+        match result {
+            Ok(hits) => {
+                tracing::info!(
+                    intake_id = args.intake_id,
+                    hits = hits.len(),
+                    "mcp library.search_in_paper"
+                );
+                respond_with(&hits)
+            }
+            // Preserve the prior wire shape: an unknown intake reads
+            // as an empty hit list on this tool, not a fault.
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Vec<bookrack_ops::Citation>>(&Vec::new())
             }
             Err(e) => Err(ops_error_to_internal(e)),
         }
@@ -1723,5 +1986,65 @@ mod tests {
         assert_eq!(value["toc_lo"], 0);
         assert_eq!(value["next_offset"], 17);
         assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn search_args_kind_defaults_to_none_for_book_side_behavior() {
+        let args: super::SearchArgs =
+            serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
+        assert!(
+            args.kind.is_none(),
+            "omitting kind must leave the field absent so the handler defaults to book",
+        );
+    }
+
+    #[test]
+    fn search_args_kind_accepts_paper_and_all() {
+        for value in ["book", "paper", "all"] {
+            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+                "query": "hello",
+                "kind": value,
+            }))
+            .expect("parse");
+            assert_eq!(args.kind.as_deref(), Some(value));
+        }
+    }
+
+    #[test]
+    fn paper_summary_serializes_paper_specific_fields() {
+        use bookrack_ops::dto::PaperSummary;
+        let summary = PaperSummary {
+            intake_id: 1,
+            title: Some("On Test Spaces".to_string()),
+            format: Some("pdf".to_string()),
+            status: "embedded".to_string(),
+            top_contributor: Some("First Author".to_string()),
+            doi: Some("10.5555/x.1".to_string()),
+            arxiv_id: Some("0000.00001".to_string()),
+            container_title: Some("Synthetic Journal".to_string()),
+            year: Some("2020".to_string()),
+        };
+        let value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(value["intake_id"], 1);
+        assert_eq!(value["doi"], "10.5555/x.1");
+        assert_eq!(value["arxiv_id"], "0000.00001");
+        assert_eq!(value["container_title"], "Synthetic Journal");
+        assert_eq!(value["year"], "2020");
+    }
+
+    #[test]
+    fn library_stats_papers_section_is_omitted_when_absent() {
+        let stats = LibraryStats {
+            intake_counts_by_status: std::collections::BTreeMap::new(),
+            intake_count_by_format: std::collections::BTreeMap::new(),
+            book_state_counts_by_stage: std::collections::BTreeMap::new(),
+            retrieval_issue_counts_by_status: std::collections::BTreeMap::new(),
+            papers: None,
+        };
+        let value = serde_json::to_value(&stats).expect("serialize");
+        assert!(
+            value.get("papers").is_none(),
+            "the papers section must be omitted when the book-only handle reports stats"
+        );
     }
 }
