@@ -813,6 +813,41 @@ impl BookrackServer {
         }
     }
 
+    /// Recompute and return the full per-field metadata audit report
+    /// for one book.
+    #[tool(
+        name = "library.show_metadata_report",
+        description = "Recompute the metadata plausibility audit for one book from \
+                       its cached extraction and return the full per-field report: \
+                       grade, flags, and hint per field, plus TOC shape flags and \
+                       copyright-page block candidates, next to the stored verdict / \
+                       confidence rollup for comparison. Use it to see why a book is \
+                       `needs_work` / `low` before editing. Runs the default audit \
+                       profile; nothing is written back — library.metadata.reaudit \
+                       is the write path that refreshes the stored rollup. Returns \
+                       null when no such book is registered."
+    )]
+    async fn library_show_metadata_report(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let audit_data = bookrack_ops::AuditData::default_data();
+        let audit_profile = bookrack_ops::AuditProfile::default();
+        match reads::metadata::show_metadata_report(
+            handle.ops(),
+            args.intake_id,
+            &audit_data,
+            &audit_profile,
+        ) {
+            Ok(report) => respond_with(&Some(report)),
+            Err(OpsError::IntakeNotFound { .. }) => respond_with::<
+                Option<bookrack_ops::dto::metadata_report::MetadataAuditReport>,
+            >(&None),
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
     /// Return every registered book with its confidence and review
     /// status, unfiltered.
     #[tool(

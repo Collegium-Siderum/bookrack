@@ -43,6 +43,15 @@ release workflow extracts the matching section verbatim from this file.
   pipeline-audit row are written; the review status is untouched.
   Returns the previous and new verdict / confidence.
 
+- `library.show_metadata_report` (MCP): recompute the metadata
+  plausibility audit from the book's cached extraction and return the
+  full per-field report — grade, flags, and hint per field, plus TOC
+  shape flags and copyright-page block candidates — next to the stored
+  rollup and review status, so a curator can see why a record reads
+  `needs_work` / `low` without re-deriving the signals. Pure read,
+  runs the default audit profile; `metadata.reaudit` remains the write
+  path that refreshes the stored rollup.
+
 - Contributor curation: `metadata.contributor_add` writes an
   `origin = "user"` attribution (closed role set: `author` /
   `translator` / `editor` / `other`) that survives re-ingest and is
