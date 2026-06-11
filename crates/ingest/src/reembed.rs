@@ -11,10 +11,11 @@
 //! handling is the same.
 
 use std::path::Path;
+use std::time::Instant;
 
-use bookrack_catalog::{Catalog, IntakeStatus};
+use bookrack_catalog::{Catalog, Intake, IntakeStatus};
 use bookrack_config::EmbedConfig;
-use bookrack_core::PartitionIdx;
+use bookrack_core::{PartitionIdx, error_chain};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::EXTRACTOR_VERSION;
@@ -22,7 +23,7 @@ use bookrack_vectors::{ChunkRow, ChunkStore};
 
 use crate::chunk::ChunkPlan;
 use crate::embed_run::{EmbedRunReport, embed_book_chunks};
-use crate::{IngestError, Result};
+use crate::{IngestError, Result, audit_as, maintenance_run_id};
 
 /// A planned per-book reembed: what would happen if [`reembed_book`]
 /// ran on this `intake_id`.
@@ -74,10 +75,11 @@ pub async fn plan_reembed(
             .map_err(IngestError::from)?
             .into_iter()
             .collect();
-        targets.retain(|id| stale.contains(id));
+        targets.retain(|intake| stale.contains(&intake.intake_id));
     }
     let mut plans = Vec::new();
-    for intake_id in targets {
+    for intake in targets {
+        let intake_id = intake.intake_id;
         let partition = PartitionIdx::new(intake_id);
         let rows = store.scan_partition(partition).await?;
         if rows.is_empty() {
@@ -139,15 +141,57 @@ pub async fn reembed_all<E: Embedder>(
             .map_err(IngestError::from)?
             .into_iter()
             .collect();
-        targets.retain(|id| stale.contains(id));
+        targets.retain(|intake| stale.contains(&intake.intake_id));
     }
+    let run_id = maintenance_run_id("reembed");
     let mut report = ReembedReport::default();
-    for intake_id in targets {
-        let embed_run = reembed_book(intake_id, embedder, corpus, lancedb_dir, cfg).await?;
+    for intake in targets {
+        let intake_id = intake.intake_id;
+        let sha = intake.source_sha256.as_str();
+        let book_root_raw = PartitionIdx::new(intake_id).root().get();
+        let started = Instant::now();
+        let embed_run = match reembed_book(intake_id, embedder, corpus, lancedb_dir, cfg).await {
+            Ok(r) => r,
+            Err(e) => {
+                audit_as(
+                    catalog,
+                    "reembed",
+                    &run_id,
+                    sha,
+                    Some(book_root_raw),
+                    "embed",
+                    "embed",
+                    "fail",
+                    started,
+                    None,
+                    Some(&error_chain(&e)),
+                );
+                return Err(e);
+            }
+        };
         if embed_run.chunks_written == 0 {
             report.skipped_empty.push(intake_id);
             continue;
         }
+        audit_as(
+            catalog,
+            "reembed",
+            &run_id,
+            sha,
+            Some(book_root_raw),
+            "embed",
+            "embed",
+            "ok",
+            started,
+            Some(format!(
+                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
+                embed_run.chunks_written,
+                embed_run.batches,
+                embed_run.shrink_events,
+                embed_run.total_chars
+            )),
+            None,
+        );
         report.intakes.push(ReembedOutcome {
             intake_id,
             embed_run,
@@ -156,7 +200,7 @@ pub async fn reembed_all<E: Embedder>(
     Ok(report)
 }
 
-fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<i64>> {
+fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<Intake>> {
     Ok(match only {
         Some(id) => {
             let intake = catalog
@@ -166,14 +210,11 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<i64>> {
             if intake.status != IntakeStatus::Embedded {
                 return Err(IngestError::IntakeNotEmbedded(id));
             }
-            vec![id]
+            vec![intake]
         }
         None => catalog
             .intakes_with_status(IntakeStatus::Embedded)
-            .map_err(IngestError::from)?
-            .into_iter()
-            .map(|i| i.intake_id)
-            .collect(),
+            .map_err(IngestError::from)?,
     })
 }
 
@@ -396,6 +437,29 @@ mod tests {
         .expect("reembed_all");
 
         assert_eq!(report.intakes.len(), 2);
+
+        // Each reembedded book gets an embed-ok trail row; the whole
+        // pass shares one run id. The chunkless intake records nothing.
+        let mut run_ids = std::collections::HashSet::new();
+        for id in [1, 2] {
+            let rows = catalog
+                .pipeline_audit_for_book(PartitionIdx::new(id).root().get())
+                .expect("trail");
+            let last = rows.last().expect("trail rows");
+            assert_eq!(last.stage, "embed");
+            assert_eq!(last.outcome, "ok");
+            assert_eq!(last.actor_detail.as_deref(), Some("reembed"));
+            assert!(last.pipeline_run_id.starts_with("reembed-"));
+            run_ids.insert(last.pipeline_run_id.clone());
+        }
+        assert_eq!(run_ids.len(), 1, "one invocation, one run id");
+        assert!(
+            catalog
+                .pipeline_audit_for_book(PartitionIdx::new(3).root().get())
+                .expect("trail")
+                .is_empty()
+        );
+
         let ids: Vec<i64> = report.intakes.iter().map(|o| o.intake_id).collect();
         assert_eq!(ids, vec![1, 2]);
         assert_eq!(report.skipped_empty, vec![3]);

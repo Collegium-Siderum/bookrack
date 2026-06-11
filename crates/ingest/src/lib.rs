@@ -845,12 +845,47 @@ pub(crate) fn new_run_id(source_sha: &str) -> String {
     format!("ingest-{}-{nanos}", &source_sha[..source_sha.len().min(8)])
 }
 
-/// Append one pipeline-audit row, best-effort: the audit trail is
-/// observability, so a failure to record it is logged and swallowed rather
-/// than failing the ingest it describes.
+/// Append one pipeline-audit row from the ingest entry point. See
+/// [`audit_as`] for the row semantics.
 #[allow(clippy::too_many_arguments)]
 fn audit(
     catalog: &Catalog,
+    run_id: &str,
+    source_sha: &str,
+    book_root_id: Option<i64>,
+    stage: &str,
+    sub_step: &str,
+    outcome: &str,
+    started: std::time::Instant,
+    metric_summary: Option<String>,
+    error_message: Option<&str>,
+) {
+    audit_as(
+        catalog,
+        "ingest",
+        run_id,
+        source_sha,
+        book_root_id,
+        stage,
+        sub_step,
+        outcome,
+        started,
+        metric_summary,
+        error_message,
+    );
+}
+
+/// Append one pipeline-audit row, best-effort: the audit trail is
+/// observability, so a failure to record it is logged and swallowed rather
+/// than failing the operation it describes.
+///
+/// `actor_detail` names the entry point that drove the stage ("ingest",
+/// "reset", "reembed"), so a trail reader can tell a first ingest from a
+/// later maintenance pass without decoding the run-id prefix.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn audit_as(
+    catalog: &Catalog,
+    actor_detail: &str,
     run_id: &str,
     source_sha: &str,
     book_root_id: Option<i64>,
@@ -867,10 +902,22 @@ fn audit(
     row.metric_summary = metric_summary;
     row.error_message = error_message.map(str::to_string);
     row.duration_ms = Some(started.elapsed().as_millis() as i64);
-    row.actor_detail = Some("ingest".to_string());
+    row.actor_detail = Some(actor_detail.to_string());
     if let Err(e) = catalog.record_pipeline_audit(&row) {
         tracing::warn!(error = %e, stage, "failed to record pipeline audit row");
     }
+}
+
+/// Build a run id for a maintenance pass that spans many books: the
+/// entry-point prefix plus a nanosecond timestamp. All books touched by
+/// one invocation share the id, so `pipeline_audit_for_run` groups the
+/// whole pass.
+pub(crate) fn maintenance_run_id(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{prefix}-{nanos}")
 }
 
 /// How many leading blocks contribute text to the audit's body sample.

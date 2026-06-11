@@ -40,6 +40,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- `vectors reset` (including `--resume`) and `vectors reembed` append
+  pipeline-audit rows for the chunk and embed stages they run, so a
+  book's trail no longer ends on a stale failure after a maintenance
+  pass re-embedded it successfully. Rows carry `actor_detail` `reset` /
+  `reembed` and share one `reset-`/`reembed-`-prefixed run id per
+  invocation.
 - Metadata edits arriving over MCP are attributed to `actor_kind=llm`
   / `actor_detail=mcp` on their audit rows and write outcomes, as the
   tool descriptions promise. They previously inherited the caller the

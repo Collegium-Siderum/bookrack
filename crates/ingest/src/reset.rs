@@ -19,17 +19,18 @@
 //! the destructive steps.
 
 use std::path::Path;
+use std::time::Instant;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::EmbedConfig;
-use bookrack_core::PartitionIdx;
+use bookrack_core::{PartitionIdx, error_chain};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
 
 use crate::chunk::ChunkParams;
 use crate::embed_run::embed_book_chunks;
-use crate::{Result, plan_book_chunks};
+use crate::{Result, audit_as, maintenance_run_id, plan_book_chunks};
 
 /// What one [`reset_and_rechunk`] call produced.
 #[derive(Debug, Clone, Default)]
@@ -87,22 +88,50 @@ pub async fn reset_and_rechunk<E: Embedder>(
     }
 
     let mut report = ResetReport::default();
-    let targets: Vec<i64> = catalog
-        .intakes_with_status(IntakeStatus::Extracted)?
-        .into_iter()
-        .map(|i| i.intake_id)
-        .collect();
+    let targets = catalog.intakes_with_status(IntakeStatus::Extracted)?;
     let chunk_params = ChunkParams::default();
+    let run_id = maintenance_run_id("reset");
 
-    for intake_id in targets {
+    for intake in targets {
+        let intake_id = intake.intake_id;
+        let sha = intake.source_sha256.as_str();
         let book_root_id = PartitionIdx::new(intake_id).root();
+        let book_root_raw = book_root_id.get();
+
+        let started = Instant::now();
         let plans = match plan_book_chunks(corpus, book_root_id, &chunk_params) {
             Ok(p) => p,
             Err(e) => {
+                audit_as(
+                    catalog,
+                    "reset",
+                    &run_id,
+                    sha,
+                    Some(book_root_raw),
+                    "chunk",
+                    "chunk",
+                    "fail",
+                    started,
+                    None,
+                    Some(&error_chain(&e)),
+                );
                 report.failed_intake = Some(intake_id);
                 return Err(e);
             }
         };
+        audit_as(
+            catalog,
+            "reset",
+            &run_id,
+            sha,
+            Some(book_root_raw),
+            "chunk",
+            "chunk",
+            "ok",
+            started,
+            Some(format!(r#"{{"chunks":{}}}"#, plans.len())),
+            None,
+        );
         if plans.is_empty() {
             // No prose leaves to chunk. Leave the intake at Extracted
             // so a future repair-then-resume can pick it up, and
@@ -110,13 +139,47 @@ pub async fn reset_and_rechunk<E: Embedder>(
             report.skipped_empty.push(intake_id);
             continue;
         }
+
+        let started = Instant::now();
         let embed_run = match embed_book_chunks(&plans, embedder, corpus, lancedb_dir, cfg).await {
             Ok(r) => r,
             Err(e) => {
+                audit_as(
+                    catalog,
+                    "reset",
+                    &run_id,
+                    sha,
+                    Some(book_root_raw),
+                    "embed",
+                    "embed",
+                    "fail",
+                    started,
+                    None,
+                    Some(&error_chain(&e)),
+                );
                 report.failed_intake = Some(intake_id);
                 return Err(e);
             }
         };
+        audit_as(
+            catalog,
+            "reset",
+            &run_id,
+            sha,
+            Some(book_root_raw),
+            "embed",
+            "embed",
+            "ok",
+            started,
+            Some(format!(
+                r#"{{"chunks":{},"batches":{},"shrink_events":{},"chars":{}}}"#,
+                embed_run.chunks_written,
+                embed_run.batches,
+                embed_run.shrink_events,
+                embed_run.total_chars
+            )),
+            None,
+        );
         catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
         report.intakes_reembedded += 1;
         report.chunks_written += embed_run.chunks_written;
@@ -346,6 +409,22 @@ mod tests {
             assert_eq!(intake.status, IntakeStatus::Extracted);
         }
 
+        // The aborted run recorded its embed failure on the trail.
+        let failed_books = intake_ids
+            .iter()
+            .filter(|id| {
+                let rows = catalog
+                    .pipeline_audit_for_book(PartitionIdx::new(**id).root().get())
+                    .expect("trail");
+                rows.last()
+                    .is_some_and(|r| r.stage == "embed" && r.outcome == "fail")
+            })
+            .count();
+        assert_eq!(
+            failed_books, 1,
+            "exactly the aborting book records a fail row"
+        );
+
         // Resume with a healthy embedder finishes the work without
         // re-doing the destructive steps.
         let report = reset_and_rechunk(
@@ -372,6 +451,17 @@ mod tests {
                 .expect("by id")
                 .expect("intake row");
             assert_eq!(intake.status, IntakeStatus::Embedded);
+
+            // The resume appended an embed-ok row, so the trail's last
+            // line agrees with the book's Embedded status.
+            let rows = catalog
+                .pipeline_audit_for_book(PartitionIdx::new(id).root().get())
+                .expect("trail");
+            let last = rows.last().expect("trail rows");
+            assert_eq!(last.stage, "embed");
+            assert_eq!(last.outcome, "ok");
+            assert_eq!(last.actor_detail.as_deref(), Some("reset"));
+            assert!(last.pipeline_run_id.starts_with("reset-"));
         }
     }
 
