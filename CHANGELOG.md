@@ -23,6 +23,15 @@ release workflow extracts the matching section verbatim from this file.
   then the per-user managed directory. A miss reports every searched
   directory and the remedies instead of a raw dynamic-loader error.
 
+### Fixed
+
+- Metadata edits arriving over MCP are attributed to `actor_kind=llm`
+  / `actor_detail=mcp` on their audit rows and write outcomes, as the
+  tool descriptions promise. They previously inherited the caller the
+  daemon was launched with (`human`/`cli` under `bookrack run`,
+  `human`/`gui` under the tray app); headless `bookrack-mcp` had the
+  reverse mislabel, recording control-socket edits as `llm`/`mcp`.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added

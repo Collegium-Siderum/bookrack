@@ -4,9 +4,11 @@
 //!
 //! Every op here opens the catalog read-write, applies its change, and
 //! appends one [`bookrack_catalog::MetadataAudit`] row stamped with the
-//! [`crate::Caller`] the [`Ops`] was built with — so a CLI edit and an
-//! MCP edit are distinguishable by `actor_kind` / `actor_detail` in the
-//! audit trail.
+//! effective [`crate::Caller`] — the task-scope override installed by
+//! [`crate::with_caller_override`] when the call arrives through a
+//! hosted surface (e.g. MCP), otherwise the caller the [`Ops`] was
+//! built with — so a CLI edit and an MCP edit are distinguishable by
+//! `actor_kind` / `actor_detail` in the audit trail.
 
 use bookrack_catalog::{
     BOOK_SCOPE, Catalog, NewMetadataAudit, NewOverride, NewReview, STATUS_ACKNOWLEDGED,
@@ -42,7 +44,7 @@ pub fn set_metadata_field<E: Embedder>(
         let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let caller = ops.caller();
+        let caller = ops.effective_caller();
         let curated_by = caller.actor_kind.as_str();
 
         catalog.set_override(&NewOverride::new(
@@ -130,7 +132,7 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        let caller = ops.caller();
+        let caller = ops.effective_caller();
         catalog.upsert_review(&NewReview::new(
             req.intake_id,
             BOOK_SCOPE,
@@ -168,7 +170,7 @@ pub fn approve_metadata<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        let caller = ops.caller();
+        let caller = ops.effective_caller();
         let mut review = NewReview::new(
             req.intake_id,
             BOOK_SCOPE,
@@ -210,7 +212,7 @@ pub fn reject_metadata<E: Embedder>(
         );
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
-        let caller = ops.caller();
+        let caller = ops.effective_caller();
         catalog.upsert_review(
             &NewReview::new(
                 req.intake_id,
@@ -243,7 +245,7 @@ fn build_audit<E: Embedder>(
     new_value: Option<String>,
     reason: Option<String>,
 ) -> NewMetadataAudit {
-    let caller = ops.caller();
+    let caller = ops.effective_caller();
     let mut audit = NewMetadataAudit::new(table_name, action, caller.actor_kind);
     audit.node_id = intake_id.map(|id| PartitionIdx::new(id).root().get());
     audit.field = field;
@@ -256,7 +258,7 @@ fn build_audit<E: Embedder>(
 }
 
 fn write_outcome<E: Embedder>(ops: &Ops<E>, audit_id: i64, changed: bool) -> WriteOutcome {
-    let caller = ops.caller();
+    let caller = ops.effective_caller();
     WriteOutcome {
         audit_id,
         actor_kind: caller.actor_kind.as_str().to_string(),

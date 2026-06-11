@@ -87,8 +87,11 @@ pub struct RuntimeOpts {
     /// [`LogConfig::from_env`]; the headless profile uses
     /// [`LogConfig::for_headless_daemon`].
     pub log_config: LogConfig,
-    /// [`Caller`] tag woven into [`Ops`] audit rows so the catalog
-    /// distinguishes daemon-REPL writes from MCP-driven writes.
+    /// [`Caller`] baked into the shared [`Ops`]: the attribution for
+    /// writes that arrive without a task-scope override, i.e. through
+    /// the control socket. Tool calls arriving over MCP are attributed
+    /// per-call to `Caller::mcp()` by the MCP server's dispatch wrap
+    /// and never read this value.
     pub caller: Caller,
     /// MCP tool surface, as published by the live `BookrackServer`.
     /// Empty for entry points that do not bring up the MCP listener;
@@ -117,7 +120,7 @@ impl RuntimeOpts {
             no_mcp: false,
             spawn_queue_worker: false,
             log_config: LogConfig::for_headless_daemon(),
-            caller: Caller::mcp(),
+            caller: Caller::cli(),
             mcp_tools: Vec::new(),
             launch_mode: LaunchMode::Cli,
         }

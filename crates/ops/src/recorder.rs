@@ -15,12 +15,13 @@
 //! logs a `tracing::warn!` and drops the row, so observability never
 //! corrupts the operation's [`Result`].
 //!
-//! A task-local override lets a host surface relabel the recorded
-//! `source` for the duration of one call without rebuilding [`Ops`]
-//! with a different [`Caller`]. The MCP server uses this to flip
-//! source from the daemon's baked-in `cli` to `mcp` for tool calls
-//! arriving over HTTP, where the underlying [`Ops`] is a single
-//! per-library handle shared by REPL, HTTP, and queue worker.
+//! A task-local override lets a host surface swap the effective
+//! [`Caller`] for the duration of one call without rebuilding [`Ops`].
+//! The MCP server uses this to attribute tool calls arriving over HTTP
+//! to `Caller::mcp()` — both the recorded `source` here and the
+//! `actor_kind` / `actor_detail` stamped on write audit rows — where
+//! the underlying [`Ops`] is a single per-library handle shared by
+//! REPL, HTTP, and queue worker.
 
 use std::future::Future;
 use std::path::Path;
@@ -29,31 +30,37 @@ use std::time::Instant;
 use bookrack_catalog::{Catalog, NewMcpToolCall};
 use bookrack_embed::Embedder;
 
-use crate::{Ops, OpsError};
+use crate::{Caller, Ops, OpsError};
 
 tokio::task_local! {
-    /// When set inside a `scope`, [`Recorder::start`] uses this string as
-    /// the recorded `source` instead of reading [`crate::Caller::actor_detail`]
-    /// off [`Ops`]. Lets a host that drives a shared `Ops` (the
-    /// `bookrack run` daemon, where REPL and HTTP route through the same
-    /// registry) relabel each call without cloning ops or threading the
-    /// caller through every entry point.
-    static SOURCE_OVERRIDE: String;
+    /// When set inside a `scope`, [`Ops::effective_caller`] returns this
+    /// [`Caller`] instead of the one baked into [`Ops`], so both the
+    /// recorded tool-call `source` and the audit-row actor columns follow
+    /// the surface that initiated the call. Lets a host that drives a
+    /// shared `Ops` (the `bookrack run` daemon, where REPL and HTTP route
+    /// through the same registry) relabel each call without cloning ops
+    /// or threading the caller through every entry point.
+    static CALLER_OVERRIDE: Caller;
 }
 
-/// Run `fut` with the tool-call `source` field relabelled to `source` for
-/// every [`Recorder::start`] that fires inside the future.
+/// Run `fut` with the effective [`Caller`] swapped to `caller` for every
+/// tool-call row and audit row that fires inside the future.
 ///
-/// Scopes nest: an inner call to [`with_source_override`] supersedes the
-/// outer label for the duration of its own future, then the outer label
+/// Scopes nest: an inner call to [`with_caller_override`] supersedes the
+/// outer caller for the duration of its own future, then the outer one
 /// resumes. Scopes do not cross [`tokio::spawn`] boundaries (the new task
 /// runs without the override); callers that fan out work must re-wrap
 /// each spawned future.
-pub fn with_source_override<F: Future>(
-    source: impl Into<String>,
+pub fn with_caller_override<F: Future>(
+    caller: Caller,
     fut: F,
-) -> tokio::task::futures::TaskLocalFuture<String, F> {
-    SOURCE_OVERRIDE.scope(source.into(), fut)
+) -> tokio::task::futures::TaskLocalFuture<Caller, F> {
+    CALLER_OVERRIDE.scope(caller, fut)
+}
+
+/// The [`Caller`] override installed for the current task scope, if any.
+pub(crate) fn caller_override() -> Option<Caller> {
+    CALLER_OVERRIDE.try_with(Caller::clone).ok()
 }
 
 /// Guard that times one op call and writes a row to `mcp_tool_calls`
@@ -84,13 +91,10 @@ impl<'a> Recorder<'a> {
         tool: &'static str,
         args: serde_json::Value,
     ) -> Recorder<'a> {
-        let source = SOURCE_OVERRIDE.try_with(String::clone).unwrap_or_else(|_| {
-            let caller = ops.caller();
-            caller
-                .actor_detail
-                .clone()
-                .unwrap_or_else(|| caller.actor_kind.as_str().to_string())
-        });
+        let caller = ops.effective_caller();
+        let source = caller
+            .actor_detail
+            .unwrap_or_else(|| caller.actor_kind.as_str().to_string());
         let args = if args.is_null() {
             None
         } else {
@@ -291,23 +295,22 @@ mod tests {
     }
 
     #[test]
-    fn source_override_visible_inside_scope_and_unset_outside() {
+    fn caller_override_visible_inside_scope_and_unset_outside() {
         // The task local is the contract by which a host surface
-        // relabels recorded `source` on a shared `Ops` — assert both
-        // that the scope sets it and that the value disappears once
-        // the future resolves, so a leaking scope cannot pollute a
+        // relabels attribution on a shared `Ops` — assert both that
+        // the scope sets it and that the value disappears once the
+        // future resolves, so a leaking scope cannot pollute a
         // sibling call recorded later on the same task.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("build runtime");
         runtime.block_on(async {
-            let inside = with_source_override("mcp", async {
-                SOURCE_OVERRIDE.try_with(String::clone).ok()
-            })
-            .await;
-            assert_eq!(inside.as_deref(), Some("mcp"));
-            let outside = SOURCE_OVERRIDE.try_with(String::clone).ok();
-            assert!(outside.is_none());
+            let inside = with_caller_override(crate::Caller::mcp(), async { caller_override() })
+                .await
+                .expect("override set inside scope");
+            assert_eq!(inside.actor_kind.as_str(), "llm");
+            assert_eq!(inside.actor_detail.as_deref(), Some("mcp"));
+            assert!(caller_override().is_none());
         });
     }
 

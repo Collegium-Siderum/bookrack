@@ -19,7 +19,7 @@ use bookrack_ops::writes::metadata::{
     acknowledge_metadata_gap, approve_metadata, clear_metadata_field, reject_metadata,
     set_metadata_field,
 };
-use bookrack_ops::{Caller, Ops};
+use bookrack_ops::{Caller, Ops, with_caller_override};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -405,4 +405,53 @@ fn cli_and_mcp_writes_are_distinguishable_by_actor_kind() {
         .expect("update row");
     assert_eq!(mcp_row.actor_kind.as_str(), "llm");
     assert_eq!(mcp_row.actor_detail.as_deref(), Some("mcp"));
+}
+
+#[test]
+fn caller_override_relabels_writes_on_a_shared_ops() {
+    // The daemon shares one `Ops` across surfaces, and the MCP server
+    // installs a task-scope `Caller::mcp()` override around each tool
+    // call. A write inside the scope must stamp `llm` / `mcp` on both
+    // the audit row and the reported outcome; a write outside the scope
+    // on the same `Ops` falls back to the baked-in caller.
+    let fx = Fixture::build();
+    let id = fx.seed_intake("sha-override");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build runtime");
+    let outcome = runtime
+        .block_on(with_caller_override(Caller::mcp(), async {
+            set_metadata_field(
+                &fx.ops,
+                SetMetadataFieldRequest {
+                    intake_id: id,
+                    field: "title".to_string(),
+                    value: "From MCP via override".to_string(),
+                },
+            )
+        }))
+        .expect("set inside override scope");
+    assert_eq!(outcome.actor_kind, "llm");
+    assert_eq!(outcome.actor_detail.as_deref(), Some("mcp"));
+
+    let row = fx
+        .catalog()
+        .metadata_audit_for_node(PartitionIdx::new(id).root().get())
+        .expect("audit")
+        .into_iter()
+        .find(|r| r.action == "update")
+        .expect("update row");
+    assert_eq!(row.actor_kind.as_str(), "llm");
+    assert_eq!(row.actor_detail.as_deref(), Some("mcp"));
+
+    let outside = clear_metadata_field(
+        &fx.ops,
+        ClearMetadataFieldRequest {
+            intake_id: id,
+            field: "title".to_string(),
+        },
+    )
+    .expect("clear outside override scope");
+    assert_eq!(outside.actor_kind, "human");
+    assert_eq!(outside.actor_detail.as_deref(), Some("cli"));
 }

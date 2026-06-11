@@ -36,7 +36,7 @@ use bookrack_query::{Library, QueryError};
 
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;
-pub use recorder::with_source_override;
+pub use recorder::with_caller_override;
 
 /// Why an op failed.
 #[derive(Debug, thiserror::Error)]
@@ -163,9 +163,18 @@ impl<E: Embedder> Ops<E> {
         }
     }
 
-    /// The caller identity stamped on every write this `Ops` records.
+    /// The caller identity this `Ops` was built with.
     pub fn caller(&self) -> &Caller {
         &self.caller
+    }
+
+    /// The caller identity to stamp on rows recorded by the current
+    /// call: the task-scope override installed by
+    /// [`with_caller_override`] when one is active (e.g. for tool calls
+    /// arriving over MCP on a shared `Ops`), otherwise the caller this
+    /// `Ops` was built with.
+    pub fn effective_caller(&self) -> Caller {
+        recorder::caller_override().unwrap_or_else(|| self.caller.clone())
     }
 
     /// The embedding dimension the vector store was opened at, if this
