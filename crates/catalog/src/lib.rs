@@ -20,6 +20,7 @@
 mod actor;
 mod cascade;
 mod catalog_meta;
+mod csl;
 mod db;
 mod effective;
 mod expressions;
@@ -41,6 +42,10 @@ mod works;
 
 pub use actor::ActorKind;
 pub use cascade::ItemRemovalCounts;
+pub use csl::{
+    CslDate, CslItem, CslName, from_catalog as csl_from_catalog,
+    split_into_catalog as csl_split_into_catalog,
+};
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};

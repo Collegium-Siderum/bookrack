@@ -10,6 +10,9 @@ bookrack-core = { path = "../core" }
 bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
+# CSL-JSON serialization + the `extras_json` blob's opaque passthrough.
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
