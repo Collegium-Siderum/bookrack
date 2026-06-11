@@ -26,11 +26,13 @@ use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps, NewNode};
 use bookrack_embed::Embedder;
 use bookrack_extract::{
-    Contributor, ContributorRole, ExtractOutcome, Extraction, envelope_filename, write_envelope,
+    Contributor, ContributorRole, ExtractOutcome, envelope_filename, write_envelope,
 };
 use bookrack_normalize::{NORMALIZE_VERSION, norm_text_sha256};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
+
+pub mod identify;
 
 /// Chunking-behaviour stamp the paper pipeline writes into the vector
 /// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
@@ -126,14 +128,19 @@ pub struct GleanReport {
     /// `true` when the caller asked for a forced re-run via
     /// `GleanParams::force`.
     pub forced: bool,
-    /// `Some` when the IDENTIFY pass surfaced a DOI. Always `None` in
-    /// this milestone — IDENTIFY is not yet wired in.
+    /// DOI carried by the file's own metadata or surfaced by the
+    /// IDENTIFY pass. `None` when no DOI was found.
     pub doi: Option<String>,
+    /// arXiv identifier in canonical form (no `arXiv:` prefix, no
+    /// version suffix). `None` when no arXiv id was found.
     pub arxiv_id: Option<String>,
+    /// Container title — journal, conference proceedings, or book
+    /// series. Populated from `Biblio::container_title` or the venue
+    /// cue scan over the footer.
     pub venue: Option<String>,
-    /// `Some` with one of `"heading" | "first_page_long_para" |
-    /// "first_long_para"` when the abstract pass found a body. Always
-    /// `None` in this milestone.
+    /// Source label of the abstract pick:
+    /// `"heading" | "first_page_long_para" | "first_long_para"`.
+    /// `None` when no body block could serve as the abstract.
     pub abstract_source: Option<String>,
 }
 
@@ -344,8 +351,38 @@ pub async fn glean_paper<E: Embedder>(
         None,
     );
 
-    // ── IDENTIFY (placeholder; A3 fills this in) ──────────────────────
+    // ── IDENTIFY ──────────────────────────────────────────────────────
     let started = Instant::now();
+    let body_text = identify::body_text(&extraction);
+    let footer_text = identify::footer_text(&extraction);
+    let mut biblio = extraction.biblio.clone();
+    if biblio.doi.is_none()
+        && let Some(d) = identify::detect_doi(&body_text)
+    {
+        biblio.doi = Some(d);
+    }
+    if biblio.arxiv_id.is_none()
+        && let Some(a) = identify::detect_arxiv_id(biblio.title.as_deref(), &footer_text)
+    {
+        biblio.arxiv_id = Some(a);
+    }
+    if biblio.container_title.is_none()
+        && let Some(v) = identify::detect_venue(&footer_text)
+    {
+        biblio.container_title = Some(v);
+    }
+    if biblio.issn.is_none()
+        && let Some(i) = identify::detect_issn(&footer_text)
+    {
+        biblio.issn = Some(i);
+    }
+    let abstract_pick = identify::extract_abstract(&extraction, params.abstract_strategy);
+    let abstract_source = abstract_pick.as_ref().map(|(_, src)| (*src).to_string());
+    if let Some((text, _)) = &abstract_pick
+        && biblio.abstract_text.is_none()
+    {
+        biblio.abstract_text = Some(text.clone());
+    }
     audit(
         catalog,
         &run_id,
@@ -353,15 +390,21 @@ pub async fn glean_paper<E: Embedder>(
         None,
         "identify",
         "identify",
-        "skipped",
+        "ok",
         started,
+        Some(format!(
+            r#"{{"doi":{},"arxiv":{},"venue":{},"abstract":{}}}"#,
+            biblio.doi.is_some(),
+            biblio.arxiv_id.is_some(),
+            biblio.container_title.is_some(),
+            abstract_pick.is_some(),
+        )),
         None,
-        Some("identify pass not yet implemented"),
     );
 
     // ── STRUCTURE ─────────────────────────────────────────────────────
     let started = Instant::now();
-    let abstract_text = pick_abstract_text(&extraction);
+    let abstract_text = abstract_pick.map(|(text, _)| text);
     let structure = build_structure(corpus, intake_id, abstract_text)?;
     audit(
         catalog,
@@ -379,7 +422,7 @@ pub async fn glean_paper<E: Embedder>(
         )),
         None,
     );
-    write_biblio(catalog, intake_id, &extraction.biblio)?;
+    write_biblio(catalog, intake_id, &biblio)?;
     let parsed_at = catalog.now_iso()?;
     catalog.upsert_book_state(
         &NewItemState::new(structure.work_node_id.get(), intake_id, "structure")
@@ -434,10 +477,10 @@ pub async fn glean_paper<E: Embedder>(
         already_registered,
         no_op: false,
         forced: params.force,
-        doi: None,
-        arxiv_id: None,
-        venue: None,
-        abstract_source: None,
+        doi: biblio.doi,
+        arxiv_id: biblio.arxiv_id,
+        venue: biblio.container_title,
+        abstract_source,
     })
 }
 
@@ -537,42 +580,6 @@ fn build_structure(
         nodes_written,
         has_leaf: leaf_node_id.is_some(),
     })
-}
-
-/// Pick the abstract body out of the extraction. Heading-first
-/// strategy: scan for a `Body` block whose text starts with the word
-/// `Abstract`; if none, take the first paragraph longer than 200
-/// characters; if none, the longest body block on the page.
-fn pick_abstract_text(extraction: &Extraction) -> Option<String> {
-    let mut bodies: Vec<&str> = extraction
-        .blocks
-        .iter()
-        .filter(|b| matches!(b.kind, bookrack_extract::BlockKind::Body))
-        .map(|b| b.text.as_str())
-        .collect();
-    if let Some(idx) = bodies
-        .iter()
-        .position(|t| t.trim_start().to_lowercase().starts_with("abstract"))
-    {
-        let body = bodies.remove(idx);
-        let stripped = body
-            .trim_start()
-            .strip_prefix("Abstract")
-            .or_else(|| body.trim_start().strip_prefix("ABSTRACT"))
-            .or_else(|| body.trim_start().strip_prefix("abstract"))
-            .unwrap_or(body);
-        let cleaned = stripped.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-        if !cleaned.is_empty() {
-            return Some(cleaned.to_string());
-        }
-    }
-    if let Some(long) = bodies.iter().find(|t| t.chars().count() >= 200) {
-        return Some((*long).to_string());
-    }
-    bodies
-        .into_iter()
-        .max_by_key(|t| t.chars().count())
-        .map(|s| s.to_string())
 }
 
 /// Write the bibliographic columns and contributor rows for a paper.

@@ -71,12 +71,49 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
         report.chunks_written
     );
 
+    // IDENTIFY pass. The synthetic fixture footer carries a DOI, an
+    // arXiv id, and a `Proceedings of …` venue line; the abstract
+    // sits under a centred `Abstract` heading.
+    assert_eq!(
+        report.doi.as_deref(),
+        Some("10.5555/synthetic.0001"),
+        "DOI from the fixture footer must round-trip into the report"
+    );
+    assert_eq!(
+        report.arxiv_id.as_deref(),
+        Some("0000.00001"),
+        "arXiv id from the fixture footer must round-trip into the report"
+    );
+    assert!(
+        report
+            .venue
+            .as_deref()
+            .is_some_and(|v| v.contains("Proceedings of the Synthetic Conference")),
+        "venue cue must capture the Proceedings line, got {:?}",
+        report.venue
+    );
+    assert_eq!(
+        report.abstract_source.as_deref(),
+        Some("heading"),
+        "the heading-anchored abstract path must win on the fixture"
+    );
+
     // The catalog row carries `scope = "paper"` and reaches `Embedded`.
     let attrs = catalog
         .publication_attrs(report.intake_id, ItemKind::Paper)
         .expect("read attrs")
         .expect("present");
     assert_eq!(attrs.scope, "paper");
+    assert_eq!(
+        attrs.doi.as_deref(),
+        Some("10.5555/synthetic.0001"),
+        "DOI must be written into the catalog row"
+    );
+    assert_eq!(attrs.arxiv_id.as_deref(), Some("0000.00001"));
+    assert!(
+        attrs.abstract_text.is_some(),
+        "abstract text must be persisted to the catalog row"
+    );
     let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
     let source_sha = hex_sha256(&bytes);
     let intake = catalog

@@ -63,6 +63,11 @@ pdfium-render = { version = "0.9", default-features = false, features = [
     "thread_safe",
 ] }
 text-splitter = "0.30"
+# Compiled regex matching for the `glean` IDENTIFY pass: DOI shapes,
+# arXiv id forms (new `NNNN.NNNNN` and old `cat/NNNNNNN`), ISSN, and
+# venue-phrase scans over the paper's body and footer. License:
+# MIT OR Apache-2.0.
+regex = "1"
 # HTTP client. The `embed` crate reaches Ollama over plain local HTTP
 # with the JSON body codec; the `runtime` crate's pinned-PDFium
 # installer downloads from GitHub releases, which needs the rustls TLS

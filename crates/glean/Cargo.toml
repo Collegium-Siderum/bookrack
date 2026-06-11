@@ -16,6 +16,7 @@ bookrack-extract = { path = "../extract" }
 bookrack-normalize = { path = "../normalize" }
 bookrack-vectors = { path = "../vectors" }
 chrono.workspace = true
+regex.workspace = true
 sha2.workspace = true
 text-splitter.workspace = true
 thiserror.workspace = true
