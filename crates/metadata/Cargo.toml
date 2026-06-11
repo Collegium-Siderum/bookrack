@@ -14,4 +14,5 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bookrack-core = { path = "../core" }
 tempfile.workspace = true

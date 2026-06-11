@@ -8,10 +8,8 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{
-    BOOK_SCOPE, Catalog, NewIntake, NewOverride, NewPublicationAttrs, STATUS_ACKNOWLEDGED,
-};
-use bookrack_core::PartitionIdx;
+use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs, STATUS_ACKNOWLEDGED};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::writes::{
     AcknowledgeMetadataGapRequest, AddContributorRequest, ApproveMetadataRequest,
@@ -110,7 +108,7 @@ fn set_metadata_field_records_the_override_and_an_update_audit_row() {
 
     let cat = fx.catalog();
     let effective = cat
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert_eq!(effective.get("title"), Some("A New Title"));
 
@@ -146,7 +144,7 @@ fn set_metadata_field_records_the_confirmed_mark() {
     .expect("set confirmed");
     let row = fx
         .catalog()
-        .overrides_for_address(id, BOOK_SCOPE)
+        .overrides_for_address(id, ItemKind::Book)
         .expect("overrides")
         .into_iter()
         .find(|o| o.field == "publisher")
@@ -168,7 +166,7 @@ fn set_metadata_field_records_the_confirmed_mark() {
     .expect("set unconfirmed");
     let row = fx
         .catalog()
-        .overrides_for_address(id, BOOK_SCOPE)
+        .overrides_for_address(id, ItemKind::Book)
         .expect("overrides")
         .into_iter()
         .find(|o| o.field == "publisher")
@@ -248,7 +246,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
     .expect("set original_year");
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert_eq!(effective.get("pub_place"), Some("New York"));
     assert_eq!(effective.get("original_year"), Some("1949"));
@@ -258,7 +256,7 @@ fn set_metadata_field_pub_place_and_original_year_flow_through_effective() {
 fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-clear");
-    let mut base = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    let mut base = NewPublicationAttrs::new(id, ItemKind::Book);
     base.title = Some("Base Title".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
     set_metadata_field(
@@ -285,7 +283,7 @@ fn clear_metadata_field_falls_back_to_base_and_records_a_delete() {
 
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert_eq!(effective.get("title"), Some("Base Title"));
 
@@ -311,7 +309,7 @@ fn acknowledge_records_a_review_and_a_gate_audit_row() {
     .expect("ack");
     let review = fx
         .catalog()
-        .review(id, BOOK_SCOPE)
+        .review(id, ItemKind::Book)
         .expect("review")
         .expect("present");
     assert_eq!(review.status, STATUS_ACKNOWLEDGED);
@@ -338,7 +336,7 @@ fn approve_records_a_review_and_an_approval_audit_row() {
     .expect("approve");
     let review = fx
         .catalog()
-        .review(id, BOOK_SCOPE)
+        .review(id, ItemKind::Book)
         .expect("review")
         .expect("present");
     assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
@@ -366,7 +364,7 @@ fn approve_without_a_reason_still_records_the_audit_row() {
     .expect("approve");
     let review = fx
         .catalog()
-        .review(id, BOOK_SCOPE)
+        .review(id, ItemKind::Book)
         .expect("review")
         .expect("present");
     assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
@@ -387,7 +385,7 @@ fn reject_records_a_review_and_a_reject_audit_row() {
     .expect("reject");
     let review = fx
         .catalog()
-        .review(id, BOOK_SCOPE)
+        .review(id, ItemKind::Book)
         .expect("review")
         .expect("present");
     assert_eq!(review.status, bookrack_catalog::STATUS_REJECTED);
@@ -409,7 +407,7 @@ fn status_flips_preserve_the_ingest_audit_note() {
         .upsert_review(
             &bookrack_catalog::NewReview::new(
                 id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "bookrack-ingest:default",
                 bookrack_catalog::STATUS_PENDING,
             )
@@ -428,7 +426,7 @@ fn status_flips_preserve_the_ingest_audit_note() {
 
     let review = fx
         .catalog()
-        .review(id, BOOK_SCOPE)
+        .review(id, ItemKind::Book)
         .expect("review")
         .expect("present");
     assert_eq!(review.status, bookrack_catalog::STATUS_APPROVED);
@@ -616,7 +614,7 @@ fn caller_override_relabels_writes_on_a_shared_ops() {
 fn show_book_lists_active_overrides_with_their_curation_trail() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-override-visibility");
-    let mut base = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    let mut base = NewPublicationAttrs::new(id, ItemKind::Book);
     base.title = Some("Base Title".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
 
@@ -742,7 +740,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
         .catalog()
         .add_contributor(&bookrack_catalog::NewContributor::new(
             id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             "author",
             0,
             "extracted",
@@ -797,7 +795,7 @@ fn contributor_remove_strips_a_wrong_extracted_attribution() {
 fn void_suppresses_the_extracted_value_until_cleared() {
     let fx = Fixture::build();
     let id = fx.seed_intake("sha-void");
-    let mut base = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    let mut base = NewPublicationAttrs::new(id, ItemKind::Book);
     base.publisher = Some("Wrong Publisher".to_string());
     fx.catalog().upsert_publication_attrs(&base).expect("base");
 
@@ -814,7 +812,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
 
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert!(effective.get("publisher").is_none());
 
@@ -850,7 +848,7 @@ fn void_suppresses_the_extracted_value_until_cleared() {
     assert!(cleared.changed);
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert_eq!(effective.get("publisher"), Some("Wrong Publisher"));
 }
@@ -906,7 +904,7 @@ fn set_rejects_a_field_name_outside_the_editable_set() {
     }
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert!(effective.get("tittle").is_none());
     let audit = fx
@@ -945,7 +943,7 @@ fn clear_removes_a_stale_override_with_an_unknown_field_name() {
     fx.catalog()
         .set_override(&NewOverride::new(
             id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             "tittle",
             Some("A Typo'd Title".to_string()),
             "human",
@@ -965,7 +963,7 @@ fn clear_removes_a_stale_override_with_an_unknown_field_name() {
 
     let effective = fx
         .catalog()
-        .effective_publication_attrs(id, BOOK_SCOPE)
+        .effective_publication_attrs(id, ItemKind::Book)
         .expect("effective");
     assert!(effective.get("tittle").is_none());
 }

@@ -13,8 +13,8 @@ pub mod dto;
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeFilter, IntakeStatus};
-use bookrack_core::PartitionIdx;
+use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
@@ -362,9 +362,11 @@ impl<E: Embedder> Library<E> {
 
         let mut books = Vec::with_capacity(intakes.len());
         for intake in intakes {
-            let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+            let effective =
+                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
             let title = effective.get("title").map(str::to_string);
-            let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
+            let contributors =
+                catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
             let top_contributor = contributors.first().map(|c| c.name.clone());
             books.push(BookSummary::from_intake(&intake, title, top_contributor));
         }
@@ -384,9 +386,9 @@ impl<E: Embedder> Library<E> {
         let Some(intake) = catalog.intake_by_id(intake_id)? else {
             return Ok(None);
         };
-        let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
-        let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
-        let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
+        let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
+        let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
+        let contributors = catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
         Ok(Some(BookDetail::build(
             intake,
             effective,

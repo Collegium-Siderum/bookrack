@@ -29,8 +29,8 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeStatus, NewIntake, NewItemState};
-use bookrack_core::{NodeId, NodeType, PartitionIdx};
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake, NewItemState};
+use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_extract::Extraction;
@@ -418,7 +418,7 @@ fn ocr_noop_if_up_to_date(
     };
     let extraction = envelope.extraction;
     let ocr_page_count = present_sheets(&extraction).last().copied().unwrap_or(0);
-    let attrs = catalog.publication_attrs(ocr_intake_id, BOOK_SCOPE)?;
+    let attrs = catalog.publication_attrs(ocr_intake_id, ItemKind::Book)?;
     let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
     let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
     Ok(Some(OcrIngestReport {
@@ -751,7 +751,7 @@ mod tests {
         );
         let attrs = p
             .catalog
-            .publication_attrs(report.ocr_intake_id, bookrack_catalog::BOOK_SCOPE)
+            .publication_attrs(report.ocr_intake_id, ItemKind::Book)
             .expect("publication_attrs lookup")
             .expect("publication_attrs row present");
         assert_eq!(attrs.source.as_deref(), Some("ocr_marker"));

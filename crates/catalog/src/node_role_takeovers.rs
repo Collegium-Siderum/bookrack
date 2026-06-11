@@ -8,6 +8,7 @@
 //! user has deliberately cleared it". A takeover row says it is the
 //! latter.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{Row, named_params};
 
@@ -100,13 +101,13 @@ impl NewRoleTakeover {
     /// until the builder says otherwise.
     pub fn new(
         intake_id: i64,
-        scope: impl Into<String>,
+        kind: ItemKind,
         role: impl Into<String>,
         curated_by: impl Into<String>,
     ) -> NewRoleTakeover {
         NewRoleTakeover {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             role: role.into(),
             curated_by: curated_by.into(),
             notes: None,
@@ -141,14 +142,14 @@ impl Catalog {
     pub fn role_takeovers_for_address(
         &self,
         intake_id: i64,
-        scope: &str,
+        kind: ItemKind,
     ) -> Result<Vec<NodeRoleTakeover>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE intake_id = :intake_id AND scope = :scope ORDER BY role",
         ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 NodeRoleTakeover::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeRoleTakeover>>>()?;
@@ -156,11 +157,15 @@ impl Catalog {
     }
 
     /// Remove a role-takeover marker. Returns whether a row existed.
-    pub fn clear_role_takeover(&self, intake_id: i64, scope: &str, role: &str) -> Result<bool> {
+    pub fn clear_role_takeover(&self, intake_id: i64, kind: ItemKind, role: &str) -> Result<bool> {
         let affected = self.conn.execute(
             "DELETE FROM node_role_takeovers \
              WHERE intake_id = :intake_id AND scope = :scope AND role = :role",
-            named_params! { ":intake_id": intake_id, ":scope": scope, ":role": role },
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": kind.as_scope_str(),
+                ":role": role,
+            },
         )?;
         Ok(affected > 0)
     }
@@ -170,24 +175,24 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A logical address used throughout these tests.
-    const SCOPE: &str = "book";
+    /// The item kind used throughout these tests.
+    const KIND: ItemKind = ItemKind::Book;
 
     #[test]
     fn a_role_takeover_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .mark_role_takeover(
-                &NewRoleTakeover::new(1, SCOPE, "translator", "human")
+                &NewRoleTakeover::new(1, KIND, "translator", "human")
                     .notes("cleared a wrong extraction"),
             )
             .expect("write");
 
-        let all = catalog.role_takeovers_for_address(1, SCOPE).expect("read");
+        let all = catalog.role_takeovers_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
         assert_eq!(row.intake_id, 1);
-        assert_eq!(row.scope, SCOPE);
+        assert_eq!(row.scope, KIND.as_scope_str());
         assert_eq!(row.role, "translator");
         assert!(!row.curated_at.is_empty());
         assert_eq!(row.curated_by, "human");
@@ -198,22 +203,22 @@ mod tests {
     fn a_takeover_can_be_marked_and_cleared() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .mark_role_takeover(&NewRoleTakeover::new(1, SCOPE, "editor", "human"))
+            .mark_role_takeover(&NewRoleTakeover::new(1, KIND, "editor", "human"))
             .expect("mark");
         assert!(
             catalog
-                .clear_role_takeover(1, SCOPE, "editor")
+                .clear_role_takeover(1, KIND, "editor")
                 .expect("clear")
         );
         assert!(
             catalog
-                .role_takeovers_for_address(1, SCOPE)
+                .role_takeovers_for_address(1, KIND)
                 .expect("read")
                 .is_empty()
         );
         assert!(
             !catalog
-                .clear_role_takeover(1, SCOPE, "editor")
+                .clear_role_takeover(1, KIND, "editor")
                 .expect("miss")
         );
     }

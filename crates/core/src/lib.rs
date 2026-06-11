@@ -9,12 +9,14 @@
 //! `chrono`).
 
 mod error_chain;
+mod item_kind;
 mod node_type;
 mod partition;
 pub mod queue;
 mod scope;
 
 pub use error_chain::error_chain;
+pub use item_kind::ItemKind;
 pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 pub use scope::{Scope, ScopeParseError};

@@ -6,6 +6,7 @@
 //! at most a few of them flagged primary; `source` records whether the
 //! tag was user-set, suggested by an LLM, or inferred.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
 use rusqlite::{Row, named_params};
 
@@ -109,14 +110,14 @@ impl NewCategory {
     /// otherwise.
     pub fn new(
         intake_id: i64,
-        scope: impl Into<String>,
+        kind: ItemKind,
         category: impl Into<String>,
         source: impl Into<String>,
         curated_by: impl Into<String>,
     ) -> NewCategory {
         NewCategory {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             category: category.into(),
             is_primary: false,
             source: source.into(),
@@ -158,13 +159,17 @@ impl Catalog {
 
     /// Every category on the node at `(intake_id, scope)`, ordered by
     /// category name.
-    pub fn categories_for_address(&self, intake_id: i64, scope: &str) -> Result<Vec<NodeCategory>> {
+    pub fn categories_for_address(
+        &self,
+        intake_id: i64,
+        kind: ItemKind,
+    ) -> Result<Vec<NodeCategory>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE intake_id = :intake_id AND scope = :scope ORDER BY category",
         ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 NodeCategory::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeCategory>>>()?;
@@ -172,11 +177,15 @@ impl Catalog {
     }
 
     /// Remove a category tag. Returns whether a row existed.
-    pub fn remove_category(&self, intake_id: i64, scope: &str, category: &str) -> Result<bool> {
+    pub fn remove_category(&self, intake_id: i64, kind: ItemKind, category: &str) -> Result<bool> {
         let affected = self.conn.execute(
             "DELETE FROM node_categories \
              WHERE intake_id = :intake_id AND scope = :scope AND category = :category",
-            named_params! { ":intake_id": intake_id, ":scope": scope, ":category": category },
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": kind.as_scope_str(),
+                ":category": category,
+            },
         )?;
         Ok(affected > 0)
     }
@@ -186,25 +195,25 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A logical address used throughout these tests.
-    const SCOPE: &str = "book";
+    /// The item kind used throughout these tests.
+    const KIND: ItemKind = ItemKind::Book;
 
     #[test]
     fn a_category_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .add_category(
-                &NewCategory::new(1, SCOPE, "philosophy", "user", "human")
+                &NewCategory::new(1, KIND, "philosophy", "user", "human")
                     .primary(true)
                     .confirmed(true),
             )
             .expect("write");
 
-        let all = catalog.categories_for_address(1, SCOPE).expect("read");
+        let all = catalog.categories_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
         assert_eq!(row.intake_id, 1);
-        assert_eq!(row.scope, SCOPE);
+        assert_eq!(row.scope, KIND.as_scope_str());
         assert_eq!(row.category, "philosophy");
         assert!(row.is_primary);
         assert_eq!(row.source, "user");
@@ -218,38 +227,31 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .add_category(&NewCategory::new(
-                1, SCOPE, "history", "inferred", "pipeline",
+                1, KIND, "history", "inferred", "pipeline",
             ))
             .expect("add");
         catalog
             .add_category(&NewCategory::new(
                 1,
-                SCOPE,
+                KIND,
                 "biography",
                 "llm_suggested",
                 "llm",
             ))
             .expect("add");
         let names: Vec<String> = catalog
-            .categories_for_address(1, SCOPE)
+            .categories_for_address(1, KIND)
             .expect("read")
             .into_iter()
             .map(|c| c.category)
             .collect();
         assert_eq!(names, ["biography", "history"]);
 
-        assert!(
-            catalog
-                .remove_category(1, SCOPE, "history")
-                .expect("remove")
-        );
+        assert!(catalog.remove_category(1, KIND, "history").expect("remove"));
         assert_eq!(
-            catalog
-                .categories_for_address(1, SCOPE)
-                .expect("read")
-                .len(),
+            catalog.categories_for_address(1, KIND).expect("read").len(),
             1
         );
-        assert!(!catalog.remove_category(1, SCOPE, "history").expect("miss"));
+        assert!(!catalog.remove_category(1, KIND, "history").expect("miss"));
     }
 }

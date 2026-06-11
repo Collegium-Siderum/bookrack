@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use bookrack_catalog::{Catalog, NewIntake, NewReview};
-use bookrack_core::NodeType;
+use bookrack_core::{ItemKind, NodeType};
 use bookrack_corpus::Corpus;
 use bookrack_extract::{Biblio, ExtractOutcome, Extraction, extract};
 use bookrack_metadata::{AuditInput, FilenameBiblio, MetadataReport, audit, parse_filename};
@@ -26,7 +26,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    BOOK_SCOPE, ChunkParams, IngestError, METADATA_BODY_SAMPLE_BLOCKS, METADATA_BODY_SAMPLE_CHARS,
+    ChunkParams, IngestError, METADATA_BODY_SAMPLE_BLOCKS, METADATA_BODY_SAMPLE_CHARS,
     StructureParams, body_sample, build_base_attrs, ingest_structure, plan_book_chunks,
 };
 
@@ -462,7 +462,7 @@ fn run_pipeline(
     record.base_attrs = Some(BaseAttrsOut::from(&attrs));
     record.base_attrs_actions = outcome.actions.iter().map(|a| a.token()).collect();
     catalog.upsert_publication_attrs(&attrs)?;
-    let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
+    let effective = catalog.effective_publication_attrs(intake_id, ItemKind::Book)?;
     record.effective = Some(EffectiveOut {
         fields: effective
             .iter()
@@ -496,7 +496,7 @@ fn run_pipeline(
     let _ = catalog.upsert_review(
         &NewReview::new(
             intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             &reviewer,
             bookrack_catalog::STATUS_PENDING,
         )

@@ -8,6 +8,7 @@
 //! `contributor_id` is a surrogate key so a later per-contributor edit
 //! can address a single row; the natural key stays `UNIQUE`.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
 use rusqlite::{Row, named_params};
 
@@ -130,7 +131,7 @@ impl NewContributor {
     /// nationality-free until the builder says otherwise.
     pub fn new(
         intake_id: i64,
-        scope: impl Into<String>,
+        kind: ItemKind,
         role: impl Into<String>,
         ordinal: i64,
         origin: impl Into<String>,
@@ -138,7 +139,7 @@ impl NewContributor {
     ) -> NewContributor {
         NewContributor {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             role: role.into(),
             ordinal,
             origin: origin.into(),
@@ -189,14 +190,14 @@ impl Catalog {
     pub fn contributors_for_address(
         &self,
         intake_id: i64,
-        scope: &str,
+        kind: ItemKind,
     ) -> Result<Vec<NodeContributor>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE intake_id = :intake_id AND scope = :scope ORDER BY role, ordinal",
         ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 NodeContributor::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeContributor>>>()?;
@@ -219,11 +220,11 @@ impl Catalog {
     /// so a re-run replaces those rows wholesale; rows curated by a
     /// human (`origin = 'user'`) are left untouched. Returns the number
     /// of rows removed.
-    pub fn clear_extracted_contributors(&self, intake_id: i64, scope: &str) -> Result<usize> {
+    pub fn clear_extracted_contributors(&self, intake_id: i64, kind: ItemKind) -> Result<usize> {
         let affected = self.conn.execute(
             "DELETE FROM node_contributors WHERE intake_id = :intake_id AND scope = :scope \
              AND origin IN ('extracted', 'extracted-filename')",
-            named_params! { ":intake_id": intake_id, ":scope": scope },
+            named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
         )?;
         Ok(affected)
     }
@@ -233,27 +234,27 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A logical address used throughout these tests.
-    const SCOPE: &str = "node:abc";
+    /// The item kind used throughout these tests.
+    const KIND: ItemKind = ItemKind::Book;
 
     #[test]
     fn a_contributor_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         let id = catalog
             .add_contributor(
-                &NewContributor::new(1, SCOPE, "translator", 0, "user", "A Translator")
+                &NewContributor::new(1, KIND, "translator", 0, "user", "A Translator")
                     .nationality("fr")
                     .inheritable(false),
             )
             .expect("add");
         assert!(id > 0);
 
-        let all = catalog.contributors_for_address(1, SCOPE).expect("read");
+        let all = catalog.contributors_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
         assert_eq!(row.contributor_id, id);
         assert_eq!(row.intake_id, 1);
-        assert_eq!(row.scope, SCOPE);
+        assert_eq!(row.scope, KIND.as_scope_str());
         assert_eq!(row.role, "translator");
         assert_eq!(row.ordinal, 0);
         assert_eq!(row.origin, "user");
@@ -269,7 +270,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 1,
-                SCOPE,
+                KIND,
                 "author",
                 1,
                 "extracted",
@@ -279,7 +280,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 1,
-                SCOPE,
+                KIND,
                 "author",
                 0,
                 "extracted",
@@ -287,7 +288,7 @@ mod tests {
             ))
             .expect("add");
         let names: Vec<String> = catalog
-            .contributors_for_address(1, SCOPE)
+            .contributors_for_address(1, KIND)
             .expect("read")
             .into_iter()
             .map(|c| c.name)
@@ -305,16 +306,16 @@ mod tests {
             ("editor", 0, "user", "Hand Curated Editor"),
         ] {
             catalog
-                .add_contributor(&NewContributor::new(1, SCOPE, role, ordinal, origin, name))
+                .add_contributor(&NewContributor::new(1, KIND, role, ordinal, origin, name))
                 .expect("seed");
         }
 
         let removed = catalog
-            .clear_extracted_contributors(1, SCOPE)
+            .clear_extracted_contributors(1, KIND)
             .expect("clear");
         assert_eq!(removed, 3);
 
-        let remaining = catalog.contributors_for_address(1, SCOPE).expect("read");
+        let remaining = catalog.contributors_for_address(1, KIND).expect("read");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].origin, "user");
         assert_eq!(remaining[0].name, "Hand Curated Editor");
@@ -324,7 +325,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 1,
-                SCOPE,
+                KIND,
                 "author",
                 0,
                 "extracted",
@@ -338,7 +339,7 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         assert_eq!(
             catalog
-                .clear_extracted_contributors(42, SCOPE)
+                .clear_extracted_contributors(42, KIND)
                 .expect("clear"),
             0,
         );
@@ -350,7 +351,7 @@ mod tests {
         let id = catalog
             .add_contributor(&NewContributor::new(
                 1,
-                SCOPE,
+                KIND,
                 "editor",
                 0,
                 "user",
@@ -360,7 +361,7 @@ mod tests {
         assert!(catalog.remove_contributor(id).expect("remove"));
         assert!(
             catalog
-                .contributors_for_address(1, SCOPE)
+                .contributors_for_address(1, KIND)
                 .expect("read")
                 .is_empty()
         );

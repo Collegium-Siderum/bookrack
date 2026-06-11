@@ -34,6 +34,7 @@
 //! - [`STATUS_REJECTED`] `rejected` — a human/LLM rejected the book
 //!   outright.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
 
@@ -147,13 +148,13 @@ impl NewReview {
     /// NULL note, and on conflict the stored note is left in place.
     pub fn new(
         intake_id: i64,
-        scope: impl Into<String>,
+        kind: ItemKind,
         reviewed_by: impl Into<String>,
         status: impl Into<String>,
     ) -> NewReview {
         NewReview {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             reviewed_by: reviewed_by.into(),
             status: status.into(),
             notes: None,
@@ -209,12 +210,12 @@ impl Catalog {
 
     /// Fetch the review of the node at `(intake_id, scope)`, or `None` if
     /// it has not been reviewed.
-    pub fn review(&self, intake_id: i64, scope: &str) -> Result<Option<NodeReview>> {
+    pub fn review(&self, intake_id: i64, kind: ItemKind) -> Result<Option<NodeReview>> {
         let review = self
             .conn
             .query_row(
                 &select_sql("WHERE intake_id = :intake_id AND scope = :scope"),
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 NodeReview::from_row,
             )
             .optional()?;
@@ -227,20 +228,20 @@ mod tests {
     use super::*;
 
     /// A logical address used throughout these tests.
-    const SCOPE: &str = "book";
+    const KIND: ItemKind = ItemKind::Book;
 
     #[test]
     fn a_review_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .upsert_review(
-                &NewReview::new(1, SCOPE, "human", STATUS_ACKNOWLEDGED).notes("check the TOC"),
+                &NewReview::new(1, KIND, "human", STATUS_ACKNOWLEDGED).notes("check the TOC"),
             )
             .expect("write");
 
-        let read = catalog.review(1, SCOPE).expect("read").expect("present");
+        let read = catalog.review(1, KIND).expect("read").expect("present");
         assert_eq!(read.intake_id, 1);
-        assert_eq!(read.scope, SCOPE);
+        assert_eq!(read.scope, KIND.as_scope_str());
         assert!(!read.reviewed_at.is_empty());
         assert_eq!(read.reviewed_by, "human");
         assert_eq!(read.status, STATUS_ACKNOWLEDGED);
@@ -250,20 +251,20 @@ mod tests {
     #[test]
     fn a_missing_review_reads_as_none() {
         let catalog = Catalog::open_in_memory().expect("open");
-        assert!(catalog.review(404, SCOPE).expect("read").is_none());
+        assert!(catalog.review(404, KIND).expect("read").is_none());
     }
 
     #[test]
     fn count_node_reviews_by_status_filters_and_sums() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_PENDING))
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_PENDING))
             .expect("write");
         catalog
-            .upsert_review(&NewReview::new(2, SCOPE, "human", STATUS_APPROVED))
+            .upsert_review(&NewReview::new(2, KIND, "human", STATUS_APPROVED))
             .expect("write");
         catalog
-            .upsert_review(&NewReview::new(3, SCOPE, "human", STATUS_REJECTED))
+            .upsert_review(&NewReview::new(3, KIND, "human", STATUS_REJECTED))
             .expect("write");
 
         assert_eq!(
@@ -291,12 +292,12 @@ mod tests {
     fn upsert_overwrites_a_previous_review() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_PENDING))
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_PENDING))
             .expect("first review");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_APPROVED))
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_APPROVED))
             .expect("second review");
-        let read = catalog.review(1, SCOPE).expect("read").expect("present");
+        let read = catalog.review(1, KIND).expect("read").expect("present");
         assert_eq!(read.status, STATUS_APPROVED);
     }
 
@@ -305,14 +306,14 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .upsert_review(
-                &NewReview::new(1, SCOPE, "bookrack-ingest:default", STATUS_PENDING)
+                &NewReview::new(1, KIND, "bookrack-ingest:default", STATUS_PENDING)
                     .notes("audit verdict=clean, all audited fields clean"),
             )
             .expect("ingest review");
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_APPROVED))
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_APPROVED))
             .expect("status flip");
-        let read = catalog.review(1, SCOPE).expect("read").expect("present");
+        let read = catalog.review(1, KIND).expect("read").expect("present");
         assert_eq!(read.status, STATUS_APPROVED);
         assert_eq!(
             read.notes.as_deref(),
@@ -320,9 +321,9 @@ mod tests {
         );
 
         catalog
-            .upsert_review(&NewReview::new(1, SCOPE, "human", STATUS_APPROVED).notes("replacement"))
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_APPROVED).notes("replacement"))
             .expect("notes replace");
-        let read = catalog.review(1, SCOPE).expect("read").expect("present");
+        let read = catalog.review(1, KIND).expect("read").expect("present");
         assert_eq!(read.notes.as_deref(), Some("replacement"));
     }
 }

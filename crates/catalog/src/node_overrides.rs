@@ -9,6 +9,7 @@
 //! nullify). The effective-metadata merge applies these on top of
 //! `node_publication_attrs`.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{Row, named_params};
 
@@ -118,14 +119,14 @@ impl NewOverride {
     /// and note-free until the builder methods say otherwise.
     pub fn new(
         intake_id: i64,
-        scope: impl Into<String>,
+        kind: ItemKind,
         field: impl Into<String>,
         value: Option<String>,
         curated_by: impl Into<String>,
     ) -> NewOverride {
         NewOverride {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             field: field.into(),
             value,
             confirmed: false,
@@ -167,13 +168,17 @@ impl Catalog {
 
     /// Every override on the node at `(intake_id, scope)`, ordered by
     /// field name.
-    pub fn overrides_for_address(&self, intake_id: i64, scope: &str) -> Result<Vec<NodeOverride>> {
+    pub fn overrides_for_address(
+        &self,
+        intake_id: i64,
+        kind: ItemKind,
+    ) -> Result<Vec<NodeOverride>> {
         let mut stmt = self.conn.prepare(&select_sql(
             "WHERE intake_id = :intake_id AND scope = :scope ORDER BY field",
         ))?;
         let rows = stmt
             .query_map(
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 NodeOverride::from_row,
             )?
             .collect::<rusqlite::Result<Vec<NodeOverride>>>()?;
@@ -182,11 +187,15 @@ impl Catalog {
 
     /// Remove an override, returning the field to its *absent* state.
     /// Returns whether a row existed.
-    pub fn clear_override(&self, intake_id: i64, scope: &str, field: &str) -> Result<bool> {
+    pub fn clear_override(&self, intake_id: i64, kind: ItemKind, field: &str) -> Result<bool> {
         let affected = self.conn.execute(
             "DELETE FROM node_overrides \
              WHERE intake_id = :intake_id AND scope = :scope AND field = :field",
-            named_params! { ":intake_id": intake_id, ":scope": scope, ":field": field },
+            named_params! {
+                ":intake_id": intake_id,
+                ":scope": kind.as_scope_str(),
+                ":field": field,
+            },
         )?;
         Ok(affected > 0)
     }
@@ -196,25 +205,25 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A logical address used throughout these tests.
-    const SCOPE: &str = "book";
+    /// The item kind used throughout these tests.
+    const KIND: ItemKind = ItemKind::Book;
 
     #[test]
     fn an_override_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
             .set_override(
-                &NewOverride::new(1, SCOPE, "title", Some("Corrected".into()), "human")
+                &NewOverride::new(1, KIND, "title", Some("Corrected".into()), "human")
                     .confirmed(true)
                     .notes("fixed a typo"),
             )
             .expect("write");
 
-        let all = catalog.overrides_for_address(1, SCOPE).expect("read");
+        let all = catalog.overrides_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1);
         let row = &all[0];
         assert_eq!(row.intake_id, 1);
-        assert_eq!(row.scope, SCOPE);
+        assert_eq!(row.scope, KIND.as_scope_str());
         assert_eq!(row.field, "title");
         assert_eq!(row.value.as_deref(), Some("Corrected"));
         assert!(row.confirmed);
@@ -228,10 +237,10 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         // A deliberate nullify: a row exists, but its value is NULL.
         catalog
-            .set_override(&NewOverride::new(1, SCOPE, "subtitle", None, "human"))
+            .set_override(&NewOverride::new(1, KIND, "subtitle", None, "human"))
             .expect("write");
 
-        let all = catalog.overrides_for_address(1, SCOPE).expect("read");
+        let all = catalog.overrides_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1, "the nullify is a real row");
         assert_eq!(all[0].value, None);
         // A field with no row at all is simply absent.
@@ -244,7 +253,7 @@ mod tests {
         catalog
             .set_override(&NewOverride::new(
                 1,
-                SCOPE,
+                KIND,
                 "title",
                 Some("First".into()),
                 "human",
@@ -253,24 +262,24 @@ mod tests {
         catalog
             .set_override(&NewOverride::new(
                 1,
-                SCOPE,
+                KIND,
                 "title",
                 Some("Second".into()),
                 "human",
             ))
             .expect("replace");
-        let all = catalog.overrides_for_address(1, SCOPE).expect("read");
+        let all = catalog.overrides_for_address(1, KIND).expect("read");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].value.as_deref(), Some("Second"));
 
-        assert!(catalog.clear_override(1, SCOPE, "title").expect("clear"));
+        assert!(catalog.clear_override(1, KIND, "title").expect("clear"));
         assert!(
             catalog
-                .overrides_for_address(1, SCOPE)
+                .overrides_for_address(1, KIND)
                 .expect("read")
                 .is_empty()
         );
         // Clearing an absent override is a harmless miss.
-        assert!(!catalog.clear_override(1, SCOPE, "title").expect("miss"));
+        assert!(!catalog.clear_override(1, KIND, "title").expect("miss"));
     }
 }

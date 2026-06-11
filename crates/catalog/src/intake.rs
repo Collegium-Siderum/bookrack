@@ -40,10 +40,11 @@
 //! `tests/fixtures/intake/v1/catalog.db`: a future binary that
 //! breaks any rule above flips that test red.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec, decode};
 use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
-use crate::{BOOK_SCOPE, Catalog, Result, STATUS_PENDING, count_as_u64};
+use crate::{Catalog, Result, STATUS_PENDING, count_as_u64};
 
 /// The single source of truth for the `intake` table's schema. Its DDL
 /// is rendered from this spec.
@@ -236,21 +237,21 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
             " LEFT JOIN node_publication_attrs npa \
              ON npa.intake_id = i.intake_id AND npa.scope = ?",
         );
-        params.push(Box::new(BOOK_SCOPE.to_string()));
+        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
     }
     if filter.contributor_name.is_some() {
         joins.push_str(
             " LEFT JOIN node_contributors nc \
              ON nc.intake_id = i.intake_id AND nc.scope = ?",
         );
-        params.push(Box::new(BOOK_SCOPE.to_string()));
+        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
     }
     if !filter.review_status_in.is_empty() {
         joins.push_str(
             " LEFT JOIN node_reviews nr \
              ON nr.intake_id = i.intake_id AND nr.scope = ?",
         );
-        params.push(Box::new(BOOK_SCOPE.to_string()));
+        params.push(Box::new(ItemKind::Book.as_scope_str().to_string()));
     }
 
     if let Some(needle) = filter.title_substring {
@@ -1159,14 +1160,14 @@ mod tests {
             .intake()
             .intake_id;
 
-        let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
         attrs.title = Some(title.to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
 
         catalog
             .add_contributor(&NewContributor::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "author",
                 0,
                 "extracted",
@@ -1256,7 +1257,7 @@ mod tests {
                     .expect("lookup")
                     .expect("present")
                     .intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "translator",
                 0,
                 "extracted",
@@ -1309,7 +1310,7 @@ mod tests {
     /// seeded book.
     fn set_confidence(catalog: &mut Catalog, intake_id: i64, confidence: &str) {
         use crate::NewPublicationAttrs;
-        let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
         attrs.title = Some(format!("Book {intake_id}"));
         attrs.confidence = Some(confidence.to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
@@ -1358,7 +1359,7 @@ mod tests {
         catalog
             .upsert_review(&NewReview::new(
                 a,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "human:test",
                 STATUS_APPROVED,
             ))
@@ -1366,7 +1367,7 @@ mod tests {
         catalog
             .upsert_review(&NewReview::new(
                 b,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "bookrack-ingest:default",
                 STATUS_PENDING,
             ))
@@ -1407,7 +1408,7 @@ mod tests {
         catalog
             .upsert_review(&NewReview::new(
                 a,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "human:test",
                 STATUS_APPROVED,
             ))
@@ -1435,7 +1436,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 a,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "editor",
                 0,
                 "extracted",

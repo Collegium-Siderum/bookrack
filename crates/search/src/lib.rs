@@ -18,7 +18,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::Catalog;
-use bookrack_core::{NodeId, PartitionIdx};
+use bookrack_core::{ItemKind, NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
 pub use bookrack_vectors::SearchOptions;
@@ -387,7 +387,7 @@ fn leaf_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> Re
             // structural titles below, so the leading segment always
             // reflects the catalog's effective view.
             let intake_id = id.partition().get();
-            let effective = catalog.effective_publication_attrs(intake_id, "book")?;
+            let effective = catalog.effective_publication_attrs(intake_id, ItemKind::Book)?;
             book_title = match effective
                 .get("title")
                 .map(str::to_string)
@@ -612,7 +612,7 @@ mod tests {
 
         let catalog = Catalog::open_in_memory().expect("catalog");
         if let Some(t) = title {
-            let mut attrs = NewPublicationAttrs::new(intake_id, "book");
+            let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
             attrs.title = Some(t.to_string());
             catalog
                 .upsert_publication_attrs(&attrs)
@@ -848,7 +848,7 @@ mod tests {
         catalog
             .set_override(&NewOverride::new(
                 1,
-                "book",
+                ItemKind::Book,
                 "title",
                 Some("Revised".to_string()),
                 "human",

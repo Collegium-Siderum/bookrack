@@ -11,10 +11,10 @@
 //! `actor_kind` / `actor_detail` in the audit trail.
 
 use bookrack_catalog::{
-    BOOK_SCOPE, CONTRIBUTOR_ROLES, Catalog, EDITABLE_FIELDS, NewContributor, NewMetadataAudit,
-    NewOverride, NewReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_REJECTED,
+    CONTRIBUTOR_ROLES, Catalog, EDITABLE_FIELDS, NewContributor, NewMetadataAudit, NewOverride,
+    NewReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_REJECTED,
 };
-use bookrack_core::PartitionIdx;
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::Embedder;
 
 use crate::Ops;
@@ -48,7 +48,7 @@ pub fn set_metadata_field<E: Embedder>(
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
-        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
         let caller = ops.effective_caller();
@@ -57,7 +57,7 @@ pub fn set_metadata_field<E: Embedder>(
         catalog.set_override(
             &NewOverride::new(
                 req.intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 req.field.clone(),
                 Some(req.value.clone()),
                 curated_by,
@@ -100,10 +100,10 @@ pub fn clear_metadata_field<E: Embedder>(
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
-        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
-        let existed = catalog.clear_override(req.intake_id, BOOK_SCOPE, &req.field)?;
+        let existed = catalog.clear_override(req.intake_id, ItemKind::Book, &req.field)?;
         if !existed {
             require_editable(&req.field)?;
         }
@@ -146,13 +146,13 @@ pub fn void_metadata_field<E: Embedder>(
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
-        let effective = catalog.effective_publication_attrs(req.intake_id, BOOK_SCOPE)?;
+        let effective = catalog.effective_publication_attrs(req.intake_id, ItemKind::Book)?;
         let old_value = effective.get(&req.field).map(str::to_string);
 
         let caller = ops.effective_caller();
         catalog.set_override(&NewOverride::new(
             req.intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             req.field.clone(),
             None,
             caller.actor_kind.as_str(),
@@ -207,7 +207,7 @@ pub fn add_contributor<E: Embedder>(
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
-        let existing = catalog.contributors_for_address(req.intake_id, BOOK_SCOPE)?;
+        let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Book)?;
         let ordinal = existing
             .iter()
             .filter(|c| c.role == req.role)
@@ -215,8 +215,14 @@ pub fn add_contributor<E: Embedder>(
             .max()
             .map_or(0, |m| m + 1);
 
-        let mut new =
-            NewContributor::new(req.intake_id, BOOK_SCOPE, &req.role, ordinal, "user", name);
+        let mut new = NewContributor::new(
+            req.intake_id,
+            ItemKind::Book,
+            &req.role,
+            ordinal,
+            "user",
+            name,
+        );
         if let Some(nationality) = req.nationality.as_deref() {
             new = new.nationality(nationality);
         }
@@ -260,7 +266,7 @@ pub fn remove_contributor<E: Embedder>(
         let catalog = Catalog::open(ops.catalog_db())?;
         require_intake(&catalog, req.intake_id)?;
 
-        let existing = catalog.contributors_for_address(req.intake_id, BOOK_SCOPE)?;
+        let existing = catalog.contributors_for_address(req.intake_id, ItemKind::Book)?;
         let Some(row) = existing
             .into_iter()
             .find(|c| c.contributor_id == req.contributor_id)
@@ -355,7 +361,7 @@ pub fn acknowledge_metadata_gap<E: Embedder>(
         let caller = ops.effective_caller();
         catalog.upsert_review(&NewReview::new(
             req.intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             caller.actor_kind.as_str(),
             STATUS_ACKNOWLEDGED,
         ))?;
@@ -394,7 +400,7 @@ pub fn approve_metadata<E: Embedder>(
         let caller = ops.effective_caller();
         catalog.upsert_review(&NewReview::new(
             req.intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             caller.actor_kind.as_str(),
             STATUS_APPROVED,
         ))?;
@@ -433,7 +439,7 @@ pub fn reject_metadata<E: Embedder>(
         let caller = ops.effective_caller();
         catalog.upsert_review(&NewReview::new(
             req.intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             caller.actor_kind.as_str(),
             STATUS_REJECTED,
         ))?;

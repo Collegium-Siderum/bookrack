@@ -243,7 +243,8 @@ async fn an_empty_index_is_served_without_stamps() {
 
 #[tokio::test]
 async fn show_book_and_show_toc_round_trip_through_the_facade() {
-    use bookrack_catalog::{BOOK_SCOPE, NewIntake, NewPublicationAttrs};
+    use bookrack_catalog::{NewIntake, NewPublicationAttrs};
+    use bookrack_core::ItemKind;
 
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");
@@ -271,7 +272,7 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
         catalog
             .register_intake(&NewIntake::new("sha-1").format("epub"))
             .expect("register");
-        let mut attrs = NewPublicationAttrs::new(1, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(1, ItemKind::Book);
         attrs.title = Some("A Test Book".to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
     }

@@ -15,6 +15,8 @@
 
 use std::collections::BTreeMap;
 
+use bookrack_core::ItemKind;
+
 use crate::node_publication_attrs::PublicationAttrs;
 use crate::{Catalog, Result};
 
@@ -173,15 +175,15 @@ impl Catalog {
     pub fn effective_publication_attrs(
         &self,
         intake_id: i64,
-        scope: &str,
+        kind: ItemKind,
     ) -> Result<EffectiveAttrs> {
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
-        if let Some(base) = self.publication_attrs(intake_id, scope)? {
+        if let Some(base) = self.publication_attrs(intake_id, kind)? {
             for (name, value) in base_pairs(&base) {
                 fields.insert(name.to_string(), value);
             }
         }
-        for over in self.overrides_for_address(intake_id, scope)? {
+        for over in self.overrides_for_address(intake_id, kind)? {
             match over.value {
                 Some(value) => {
                     fields.insert(over.field, value);
@@ -193,7 +195,7 @@ impl Catalog {
         }
         Ok(EffectiveAttrs {
             intake_id,
-            scope: scope.to_string(),
+            scope: kind.as_scope_str().to_string(),
             fields,
         })
     }
@@ -205,14 +207,18 @@ mod tests {
     use crate::node_overrides::NewOverride;
     use crate::node_publication_attrs::NewPublicationAttrs;
 
-    /// Two logical addresses in one book: a set and one of its volumes.
+    /// Two distinct logical addresses on one intake. The pre-A1.3 form
+    /// used FRBR-style `work:set` / `work:vol` strings; the tests below
+    /// exercise the scope-separation and inherit-from logic, which is
+    /// indifferent to the scope's identity — picking the two
+    /// [`ItemKind`] variants preserves that intent inside the new type.
     const INTAKE: i64 = 1;
-    const SET: &str = "work:set";
-    const VOL: &str = "work:vol";
+    const KIND_A: ItemKind = ItemKind::Book;
+    const KIND_B: ItemKind = ItemKind::Paper;
 
-    /// Write a base layer with a title and publisher for `(intake, scope)`.
-    fn seed_base(catalog: &Catalog, intake_id: i64, scope: &str) {
-        let mut attrs = NewPublicationAttrs::new(intake_id, scope);
+    /// Write a base layer with a title and publisher for `(intake, kind)`.
+    fn seed_base(catalog: &Catalog, intake_id: i64, kind: ItemKind) {
+        let mut attrs = NewPublicationAttrs::new(intake_id, kind);
         attrs.title = Some("Base Title".into());
         attrs.publisher = Some("Base Publisher".into());
         catalog.upsert_publication_attrs(&attrs).expect("base");
@@ -237,7 +243,7 @@ mod tests {
         // pipeline-owned before the write surface accepts or rejects it.
         let attrs = PublicationAttrs {
             intake_id: 1,
-            scope: SET.to_string(),
+            scope: KIND_A.as_scope_str().to_string(),
             title: Some("x".into()),
             subtitle: Some("x".into()),
             publisher: Some("x".into()),
@@ -275,10 +281,10 @@ mod tests {
     #[test]
     fn effective_is_the_base_layer_when_there_are_no_overrides() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, INTAKE, SET);
+        seed_base(&catalog, INTAKE, KIND_A);
 
         let eff = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("effective");
         assert_eq!(eff.get("title"), Some("Base Title"));
         assert_eq!(eff.get("publisher"), Some("Base Publisher"));
@@ -291,14 +297,14 @@ mod tests {
     #[test]
     fn the_pre_frbr_pub_place_and_original_year_columns_flow_through_the_view() {
         let catalog = Catalog::open_in_memory().expect("open");
-        let mut attrs = NewPublicationAttrs::new(INTAKE, SET);
+        let mut attrs = NewPublicationAttrs::new(INTAKE, KIND_A);
         attrs.title = Some("Base Title".into());
         attrs.pub_place = Some("New York".into());
         attrs.original_year = Some("1949".into());
         catalog.upsert_publication_attrs(&attrs).expect("base");
 
         let eff = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("effective");
         assert_eq!(eff.get("pub_place"), Some("New York"));
         assert_eq!(eff.get("original_year"), Some("1949"));
@@ -307,11 +313,11 @@ mod tests {
     #[test]
     fn an_override_value_replaces_the_base_value() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, INTAKE, SET);
+        seed_base(&catalog, INTAKE, KIND_A);
         catalog
             .set_override(&NewOverride::new(
                 INTAKE,
-                SET,
+                KIND_A,
                 "title",
                 Some("Override Title".into()),
                 "human",
@@ -319,7 +325,7 @@ mod tests {
             .expect("override");
 
         let eff = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("effective");
         assert_eq!(eff.get("title"), Some("Override Title"));
     }
@@ -327,13 +333,19 @@ mod tests {
     #[test]
     fn an_explicit_null_override_removes_the_field() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, INTAKE, SET);
+        seed_base(&catalog, INTAKE, KIND_A);
         catalog
-            .set_override(&NewOverride::new(INTAKE, SET, "publisher", None, "human"))
+            .set_override(&NewOverride::new(
+                INTAKE,
+                KIND_A,
+                "publisher",
+                None,
+                "human",
+            ))
             .expect("nullify");
 
         let eff = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("effective");
         assert_eq!(eff.get("publisher"), None);
         assert_eq!(eff.get("title"), Some("Base Title"));
@@ -342,13 +354,13 @@ mod tests {
     #[test]
     fn an_override_can_introduce_a_field_absent_from_the_base() {
         let catalog = Catalog::open_in_memory().expect("open");
-        seed_base(&catalog, INTAKE, SET);
+        seed_base(&catalog, INTAKE, KIND_A);
         // `imprint` is not a node_publication_attrs column; it rides the
         // EAV override table and still surfaces in the effective view.
         catalog
             .set_override(&NewOverride::new(
                 INTAKE,
-                SET,
+                KIND_A,
                 "imprint",
                 Some("An Imprint".into()),
                 "human",
@@ -356,7 +368,7 @@ mod tests {
             .expect("override");
 
         let eff = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("effective");
         assert_eq!(eff.get("imprint"), Some("An Imprint"));
     }
@@ -365,24 +377,24 @@ mod tests {
     fn a_volume_inherits_only_the_inheritable_fields_from_its_set() {
         let catalog = Catalog::open_in_memory().expect("open");
         // The set carries publisher, series, and its own title and ISBN.
-        let mut set_attrs = NewPublicationAttrs::new(INTAKE, SET);
+        let mut set_attrs = NewPublicationAttrs::new(INTAKE, KIND_A);
         set_attrs.title = Some("The Whole Set".into());
         set_attrs.publisher = Some("Set Publisher".into());
         set_attrs.series = Some("Set Series".into());
         set_attrs.isbn = Some("set-isbn".into());
         catalog.upsert_publication_attrs(&set_attrs).expect("set");
         // The volume carries only its own title.
-        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, VOL);
+        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, KIND_B);
         vol_attrs.title = Some("Volume One".into());
         catalog
             .upsert_publication_attrs(&vol_attrs)
             .expect("volume");
 
         let set = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("set effective");
         let volume = catalog
-            .effective_publication_attrs(INTAKE, VOL)
+            .effective_publication_attrs(INTAKE, KIND_B)
             .expect("volume effective");
         let merged = volume.inherit_from(&set);
 
@@ -398,20 +410,20 @@ mod tests {
     #[test]
     fn inheritance_does_not_overwrite_a_volumes_own_value() {
         let catalog = Catalog::open_in_memory().expect("open");
-        let mut set_attrs = NewPublicationAttrs::new(INTAKE, SET);
+        let mut set_attrs = NewPublicationAttrs::new(INTAKE, KIND_A);
         set_attrs.publisher = Some("Set Publisher".into());
         catalog.upsert_publication_attrs(&set_attrs).expect("set");
-        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, VOL);
+        let mut vol_attrs = NewPublicationAttrs::new(INTAKE, KIND_B);
         vol_attrs.publisher = Some("Volume Publisher".into());
         catalog
             .upsert_publication_attrs(&vol_attrs)
             .expect("volume");
 
         let set = catalog
-            .effective_publication_attrs(INTAKE, SET)
+            .effective_publication_attrs(INTAKE, KIND_A)
             .expect("set");
         let volume = catalog
-            .effective_publication_attrs(INTAKE, VOL)
+            .effective_publication_attrs(INTAKE, KIND_B)
             .expect("volume");
         assert_eq!(
             volume.inherit_from(&set).get("publisher"),

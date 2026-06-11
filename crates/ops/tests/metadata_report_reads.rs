@@ -9,7 +9,8 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, NewIntake, NewOverride, NewPublicationAttrs};
+use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs};
+use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_extract::{Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc};
 use bookrack_ingest::{envelope_filename, write_envelope};
@@ -102,7 +103,7 @@ fn report_grades_the_effective_view_and_writes_nothing() {
 
     let catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
     // Seed a stale stored rollup the report must surface untouched.
-    let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+    let mut attrs = NewPublicationAttrs::new(id, ItemKind::Book);
     attrs.title = Some("A Plain Title".to_string());
     attrs.confidence = Some("low".to_string());
     attrs.audit_verdict = Some("needs_work".to_string());
@@ -111,14 +112,14 @@ fn report_grades_the_effective_view_and_writes_nothing() {
     catalog
         .set_override(&NewOverride::new(
             id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             "publisher",
             Some("A Curated Publisher".to_string()),
             "human",
         ))
         .expect("override");
     catalog
-        .set_override(&NewOverride::new(id, BOOK_SCOPE, "year", None, "human"))
+        .set_override(&NewOverride::new(id, ItemKind::Book, "year", None, "human"))
         .expect("void");
 
     let report = show_metadata_report(
@@ -166,7 +167,7 @@ fn report_grades_the_effective_view_and_writes_nothing() {
 
     // ...and stays exactly as seeded: the read writes nothing back.
     let stored = catalog
-        .publication_attrs(id, BOOK_SCOPE)
+        .publication_attrs(id, ItemKind::Book)
         .expect("read attrs")
         .expect("attrs row");
     assert_eq!(stored.audit_verdict.as_deref(), Some("needs_work"));

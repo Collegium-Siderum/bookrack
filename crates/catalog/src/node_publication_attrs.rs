@@ -8,6 +8,7 @@
 //! merge. The row is keyed by the logical address `(intake_id, scope)`
 //! and rewritten as a unit.
 
+use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
 
@@ -238,10 +239,10 @@ pub struct NewPublicationAttrs {
 impl NewPublicationAttrs {
     /// A record for the node at `(intake_id, scope)` with every attribute
     /// absent.
-    pub fn new(intake_id: i64, scope: impl Into<String>) -> NewPublicationAttrs {
+    pub fn new(intake_id: i64, kind: ItemKind) -> NewPublicationAttrs {
         NewPublicationAttrs {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             title: None,
             subtitle: None,
             publisher: None,
@@ -281,7 +282,7 @@ impl Catalog {
     pub fn update_audit_rollup(
         &self,
         intake_id: i64,
-        scope: &str,
+        kind: ItemKind,
         confidence: &str,
         audit_verdict: &str,
     ) -> Result<()> {
@@ -289,13 +290,13 @@ impl Catalog {
             UPDATE_ROLLUP_SQL,
             named_params! {
                 ":intake_id": intake_id,
-                ":scope": scope,
+                ":scope": kind.as_scope_str(),
                 ":confidence": confidence,
                 ":audit_verdict": audit_verdict,
             },
         )?;
         if changed == 0 {
-            let mut attrs = NewPublicationAttrs::new(intake_id, scope);
+            let mut attrs = NewPublicationAttrs::new(intake_id, kind);
             attrs.confidence = Some(confidence.to_string());
             attrs.audit_verdict = Some(audit_verdict.to_string());
             self.upsert_publication_attrs(&attrs)?;
@@ -339,13 +340,13 @@ impl Catalog {
     pub fn publication_attrs(
         &self,
         intake_id: i64,
-        scope: &str,
+        kind: ItemKind,
     ) -> Result<Option<PublicationAttrs>> {
         let attrs = self
             .conn
             .query_row(
                 &select_sql("WHERE intake_id = :intake_id AND scope = :scope"),
-                named_params! { ":intake_id": intake_id, ":scope": scope },
+                named_params! { ":intake_id": intake_id, ":scope": kind.as_scope_str() },
                 PublicationAttrs::from_row,
             )
             .optional()?;
@@ -357,15 +358,15 @@ impl Catalog {
 mod tests {
     use super::*;
 
-    /// A logical address used throughout these tests.
-    const SCOPE: &str = "book";
+    /// The item kind used throughout these tests.
+    const KIND: ItemKind = ItemKind::Book;
 
     /// A `NewPublicationAttrs` with every attribute set to a distinct
     /// value, so a dropped column or unbound parameter fails a test.
-    fn fully_populated(intake_id: i64, scope: &str) -> NewPublicationAttrs {
+    fn fully_populated(intake_id: i64, kind: ItemKind) -> NewPublicationAttrs {
         NewPublicationAttrs {
             intake_id,
-            scope: scope.into(),
+            scope: kind.as_scope_str().to_string(),
             title: Some("Title".into()),
             subtitle: Some("Subtitle".into()),
             publisher: Some("Publisher".into()),
@@ -392,15 +393,15 @@ mod tests {
     fn publication_attrs_round_trip_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_publication_attrs(&fully_populated(1, SCOPE))
+            .upsert_publication_attrs(&fully_populated(1, KIND))
             .expect("write");
 
         let read = catalog
-            .publication_attrs(1, SCOPE)
+            .publication_attrs(1, KIND)
             .expect("read")
             .expect("present");
         assert_eq!(read.intake_id, 1);
-        assert_eq!(read.scope, SCOPE);
+        assert_eq!(read.scope, KIND.as_scope_str());
         assert_eq!(read.title.as_deref(), Some("Title"));
         assert_eq!(read.subtitle.as_deref(), Some("Subtitle"));
         assert_eq!(read.publisher.as_deref(), Some("Publisher"));
@@ -427,7 +428,7 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         assert!(
             catalog
-                .publication_attrs(404, SCOPE)
+                .publication_attrs(404, KIND)
                 .expect("read")
                 .is_none()
         );
@@ -437,16 +438,16 @@ mod tests {
     fn upsert_overwrites_the_previous_attributes() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog
-            .upsert_publication_attrs(&fully_populated(1, SCOPE))
+            .upsert_publication_attrs(&fully_populated(1, KIND))
             .expect("first write");
-        let mut revised = NewPublicationAttrs::new(1, SCOPE);
+        let mut revised = NewPublicationAttrs::new(1, KIND);
         revised.title = Some("Revised".into());
         catalog
             .upsert_publication_attrs(&revised)
             .expect("second write");
 
         let read = catalog
-            .publication_attrs(1, SCOPE)
+            .publication_attrs(1, KIND)
             .expect("read")
             .expect("present");
         assert_eq!(read.title.as_deref(), Some("Revised"));

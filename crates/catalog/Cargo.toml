@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true

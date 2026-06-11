@@ -196,9 +196,11 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_core::ItemKind;
+
     use crate::{
-        ActorKind, BOOK_SCOPE, NewContributor, NewIntake, NewItemState, NewMetadataAudit,
-        NewOverride, NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
+        ActorKind, NewContributor, NewIntake, NewItemState, NewMetadataAudit, NewOverride,
+        NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
     };
 
     fn book_root_id_of(intake_id: i64) -> i64 {
@@ -226,7 +228,7 @@ mod tests {
             .expect("item_state");
 
         // publication_attrs base
-        let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
         attrs.title = Some(title.to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
 
@@ -234,7 +236,7 @@ mod tests {
         catalog
             .set_override(&NewOverride::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "title",
                 Some("Curated Title".to_string()),
                 "human",
@@ -245,7 +247,7 @@ mod tests {
         catalog
             .add_contributor(&NewContributor::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "author",
                 0,
                 "extracted",
@@ -256,8 +258,14 @@ mod tests {
         // category
         catalog
             .add_category(
-                &crate::NewCategory::new(intake_id, BOOK_SCOPE, "fiction", "extracted", "human")
-                    .primary(true),
+                &crate::NewCategory::new(
+                    intake_id,
+                    ItemKind::Book,
+                    "fiction",
+                    "extracted",
+                    "human",
+                )
+                .primary(true),
             )
             .expect("category");
 
@@ -265,7 +273,7 @@ mod tests {
         catalog
             .upsert_review(&NewReview::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "human:test",
                 STATUS_APPROVED,
             ))
@@ -275,7 +283,7 @@ mod tests {
         catalog
             .mark_role_takeover(&NewRoleTakeover::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "translator",
                 "human",
             ))

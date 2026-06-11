@@ -6,6 +6,7 @@
 //! per-field grade and the flag set.
 
 use bookrack_catalog::{Catalog, EffectiveAttrs, NewPublicationAttrs};
+use bookrack_core::ItemKind;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
     AuditData, AuditInput, AuditProfile, Confidence, FieldGrade, FieldOrigins, FieldReport, Flag,
@@ -46,7 +47,7 @@ fn test_data() -> &'static AuditData {
 }
 
 const INTAKE: i64 = 1;
-const SCOPE: &str = "book";
+const KIND: ItemKind = ItemKind::Book;
 
 /// Seed a node's base attributes from the spelled-out arguments.
 #[allow(clippy::too_many_arguments)]
@@ -60,7 +61,7 @@ fn seed_base(
     series: Option<&str>,
     subtitle: Option<&str>,
 ) {
-    let mut attrs = NewPublicationAttrs::new(INTAKE, SCOPE);
+    let mut attrs = NewPublicationAttrs::new(INTAKE, KIND);
     attrs.title = title.map(str::to_string);
     attrs.publisher = publisher.map(str::to_string);
     attrs.year = year.map(str::to_string);
@@ -92,7 +93,7 @@ fn toc_stats() -> TocStats {
 
 fn effective_of(catalog: &Catalog) -> EffectiveAttrs {
     catalog
-        .effective_publication_attrs(INTAKE, SCOPE)
+        .effective_publication_attrs(INTAKE, KIND)
         .expect("effective")
 }
 
@@ -253,7 +254,7 @@ fn user_override_year_skips_the_timestamp_shape_signal() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "year",
             Some("1990".to_string()),
             "human",
@@ -1243,7 +1244,7 @@ fn override_is_exempt_from_the_source_prior() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "publisher",
             Some("Verified Press".to_string()),
             "human",
@@ -1292,7 +1293,7 @@ fn override_is_exempt_from_the_doubtful_text_layer() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "publisher",
             Some("Verified Press".to_string()),
             "human",
@@ -1343,7 +1344,7 @@ fn confirmed_override_pins_the_grade_despite_heuristics() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "title",
             Some("My Title".to_string()),
             "human",
@@ -1390,7 +1391,7 @@ fn confirmed_override_keeps_validation_failures() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "isbn",
             Some("978-3-16-148410-1".to_string()),
             "human",
@@ -1438,7 +1439,7 @@ fn voided_should_field_reads_as_a_neutral_gap() {
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
             INTAKE,
-            SCOPE,
+            KIND,
             "publisher",
             None,
             "human",
@@ -1486,7 +1487,7 @@ fn voided_required_field_still_needs_work() {
     );
     catalog
         .set_override(&bookrack_catalog::NewOverride::new(
-            INTAKE, SCOPE, "title", None, "human",
+            INTAKE, KIND, "title", None, "human",
         ))
         .expect("void");
     let effective = effective_of(&catalog);

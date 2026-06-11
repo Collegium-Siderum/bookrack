@@ -41,11 +41,11 @@ pub use envelope::{
 use std::path::Path;
 
 use bookrack_catalog::{
-    ActorKind, BOOK_SCOPE, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
+    ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
     NewItemState, NewPublicationAttrs, NewReview,
 };
 use bookrack_config::EmbedConfig;
-use bookrack_core::{NodeId, NodeType, PartitionIdx, error_chain};
+use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx, error_chain};
 use bookrack_corpus::{Corpus, Node};
 use bookrack_embed::Embedder;
 use bookrack_extract::{ExtractOutcome, Extraction};
@@ -694,7 +694,7 @@ fn noop_if_up_to_date(
     // Surface the audit outcome stored on the row at the previous
     // ingest so a noop run still tells the operator whether the book
     // landed `clean` or `needs_work`.
-    let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+    let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Book)?;
     let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
     let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
     Ok(Some(IngestReport {
@@ -1010,7 +1010,7 @@ pub(crate) fn run_metadata_substep(
         if let Err(e) = catalog.upsert_review(
             &NewReview::new(
                 intake_id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 &reviewer,
                 bookrack_catalog::STATUS_PENDING,
             )
@@ -1036,7 +1036,7 @@ pub(crate) fn run_metadata_substep(
         return None;
     }
 
-    let effective = match catalog.effective_publication_attrs(intake_id, BOOK_SCOPE) {
+    let effective = match catalog.effective_publication_attrs(intake_id, ItemKind::Book) {
         Ok(eff) => eff,
         Err(e) => {
             tracing::warn!(error = %e, "metadata: failed to read effective attrs");
@@ -1107,7 +1107,7 @@ pub(crate) fn run_metadata_substep(
     if let Err(e) = catalog.upsert_review(
         &NewReview::new(
             intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             &reviewer,
             bookrack_catalog::STATUS_PENDING,
         )
@@ -1160,7 +1160,7 @@ fn write_contributors(
     biblio: &bookrack_extract::Biblio,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
 ) {
-    if let Err(e) = catalog.clear_extracted_contributors(intake_id, BOOK_SCOPE) {
+    if let Err(e) = catalog.clear_extracted_contributors(intake_id, ItemKind::Book) {
         tracing::warn!(
             error = %e,
             "metadata: failed to clear pipeline-owned contributors before refresh",
@@ -1173,7 +1173,7 @@ fn write_contributors(
         }
         let new = NewContributor::new(
             intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             contrib.role.as_str(),
             ordinal as i64,
             "extracted",
@@ -1194,7 +1194,7 @@ fn write_contributors(
     {
         let new = NewContributor::new(
             intake_id,
-            BOOK_SCOPE,
+            ItemKind::Book,
             "author",
             0,
             "extracted-filename",
@@ -1233,7 +1233,7 @@ fn build_base_attrs(
     profile: &bookrack_metadata::AuditProfile,
 ) -> BaseAttrsOutcome {
     let biblio = &extraction.biblio;
-    let mut attrs = NewPublicationAttrs::new(intake_id, BOOK_SCOPE);
+    let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
     let mut actions: Vec<BaseAttrsAction> = Vec::new();
     attrs.title = biblio.title.clone();
     attrs.subtitle = biblio.subtitle.clone();
@@ -1446,7 +1446,7 @@ pub(crate) fn field_origins(
     intake_id: i64,
 ) -> Result<bookrack_metadata::FieldOrigins> {
     let mut origins = bookrack_metadata::FieldOrigins::empty();
-    for over in catalog.overrides_for_address(intake_id, BOOK_SCOPE)? {
+    for over in catalog.overrides_for_address(intake_id, ItemKind::Book)? {
         match over.value {
             Some(_) => origins.add_override(&over.field, over.confirmed),
             None => origins.add_voided(&over.field),
@@ -2102,7 +2102,7 @@ mod book_pipeline_tests {
         // confidence rolled back into node_publication_attrs records the
         // audit's gap; the notes column carries the verdict token.
         let review = catalog
-            .review(report.intake_id, "book")
+            .review(report.intake_id, ItemKind::Book)
             .expect("review")
             .expect("present");
         assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
@@ -2121,7 +2121,7 @@ mod book_pipeline_tests {
             .expect("present");
         assert_eq!(intake.status, bookrack_catalog::IntakeStatus::Embedded);
         let attrs = catalog
-            .publication_attrs(report.intake_id, "book")
+            .publication_attrs(report.intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.confidence.as_deref(), Some("low"));
@@ -2366,12 +2366,12 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let review = catalog
-            .review(intake_id, "book")
+            .review(intake_id, ItemKind::Book)
             .expect("review")
             .expect("present");
         assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.title.as_deref(), Some("A Complete Book"));
@@ -2434,7 +2434,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let review = catalog
-            .review(intake_id, "book")
+            .review(intake_id, ItemKind::Book)
             .expect("review")
             .expect("present");
         assert_eq!(review.status, bookrack_catalog::STATUS_PENDING);
@@ -2449,7 +2449,7 @@ mod book_pipeline_tests {
             review.notes,
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         // Base attrs are still seeded; the audit-derived confidence
@@ -2508,7 +2508,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.title.as_deref(), Some("A Sample Title"));
@@ -2572,7 +2572,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.title.as_deref(), Some("Extracted Title"));
@@ -2635,7 +2635,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.isbn.as_deref(), Some("9780306406157"));
@@ -2697,7 +2697,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.year.as_deref(), Some("2006"));
@@ -2757,7 +2757,7 @@ mod book_pipeline_tests {
             "dummy-sha",
         );
         let attrs = catalog
-            .publication_attrs(intake_id, "book")
+            .publication_attrs(intake_id, ItemKind::Book)
             .expect("attrs")
             .expect("present");
         assert_eq!(attrs.year.as_deref(), Some("2019"));
@@ -2800,7 +2800,8 @@ mod book_pipeline_tests {
         assert_ne!(intake.status, IntakeStatus::Embedded);
 
         // Now satisfy the gate (clean title + language) and resume.
-        let mut attrs = bookrack_catalog::NewPublicationAttrs::new(report.intake_id, "book");
+        let mut attrs =
+            bookrack_catalog::NewPublicationAttrs::new(report.intake_id, ItemKind::Book);
         attrs.title = Some("A Title".to_string());
         attrs.language = Some("en".to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
@@ -3098,7 +3099,7 @@ mod book_pipeline_tests {
         };
         super::write_contributors(&catalog, intake, &biblio, None);
         let rows = catalog
-            .contributors_for_address(intake, BOOK_SCOPE)
+            .contributors_for_address(intake, ItemKind::Book)
             .expect("read");
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.origin == "extracted"));
@@ -3134,7 +3135,7 @@ mod book_pipeline_tests {
             Some(&filename),
         );
         let rows = catalog
-            .contributors_for_address(intake, BOOK_SCOPE)
+            .contributors_for_address(intake, ItemKind::Book)
             .expect("read");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
@@ -3177,7 +3178,7 @@ mod book_pipeline_tests {
         );
 
         let rows = catalog
-            .contributors_for_address(intake, BOOK_SCOPE)
+            .contributors_for_address(intake, ItemKind::Book)
             .expect("read");
         assert_eq!(rows.len(), 2);
         assert!(
@@ -3194,7 +3195,7 @@ mod book_pipeline_tests {
         );
         assert!(
             catalog
-                .contributors_for_address(blank_intake, BOOK_SCOPE)
+                .contributors_for_address(blank_intake, ItemKind::Book)
                 .expect("read")
                 .is_empty(),
         );
@@ -3211,7 +3212,7 @@ mod book_pipeline_tests {
         catalog
             .add_contributor(&bookrack_catalog::NewContributor::new(
                 intake,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "editor",
                 0,
                 "user",
@@ -3234,7 +3235,7 @@ mod book_pipeline_tests {
         super::write_contributors(&catalog, intake, &biblio, Some(&filename));
 
         let rows = catalog
-            .contributors_for_address(intake, BOOK_SCOPE)
+            .contributors_for_address(intake, ItemKind::Book)
             .expect("read");
         assert_eq!(
             rows.len(),

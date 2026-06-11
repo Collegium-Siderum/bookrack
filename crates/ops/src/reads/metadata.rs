@@ -2,8 +2,8 @@
 
 //! Read ops over the metadata audit trail and the review queue.
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
-use bookrack_core::PartitionIdx;
+use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::Embedder;
 
 use crate::Ops;
@@ -28,12 +28,14 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
-            let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
-            let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
-            let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
-            let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+            let effective =
+                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
+            let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
+            let contributors =
+                catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
+            let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Book)?;
             let review_status = catalog
-                .review(intake.intake_id, BOOK_SCOPE)?
+                .review(intake.intake_id, ItemKind::Book)?
                 .map(|r| r.status);
             let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
             let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
@@ -78,9 +80,9 @@ pub fn show_metadata_report<E: Embedder>(
                 }
                 other => OpsError::Other(anyhow::Error::new(other)),
             })?;
-            let overrides = catalog.overrides_for_address(intake_id, BOOK_SCOPE)?;
-            let attrs = catalog.publication_attrs(intake_id, BOOK_SCOPE)?;
-            let review_status = catalog.review(intake_id, BOOK_SCOPE)?.map(|r| r.status);
+            let overrides = catalog.overrides_for_address(intake_id, ItemKind::Book)?;
+            let attrs = catalog.publication_attrs(intake_id, ItemKind::Book)?;
+            let review_status = catalog.review(intake_id, ItemKind::Book)?.map(|r| r.status);
             Ok(MetadataAuditReport::build(
                 intake_id,
                 &audit_profile.name,
@@ -148,12 +150,12 @@ fn list_metadata_inner<E: Embedder>(
     let total = catalog.count_find_intakes(&filter)?;
     let mut rows = Vec::with_capacity(intakes.len());
     for intake in intakes {
-        let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+        let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
         let title = effective.get("title").map(str::to_string);
-        let attrs = catalog.publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+        let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Book)?;
         let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
         let review_status = catalog
-            .review(intake.intake_id, BOOK_SCOPE)?
+            .review(intake.intake_id, ItemKind::Book)?
             .map(|r| r.status);
         rows.push(MetadataListRow {
             intake_id: intake.intake_id,

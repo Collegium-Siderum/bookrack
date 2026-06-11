@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, IntakeFilter, IntakeStatus};
-use bookrack_core::PartitionIdx;
+use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
@@ -71,9 +71,11 @@ pub fn find_books<E: Embedder>(
         let total = catalog.count_find_intakes(&catalog_filter)?;
         let mut books = Vec::with_capacity(intakes.len());
         for intake in intakes {
-            let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
+            let effective =
+                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
             let title = effective.get("title").map(str::to_string);
-            let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
+            let contributors =
+                catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
             let top_contributor = contributors.first().map(|c| c.name.clone());
             books.push(BookSummary::from_intake(&intake, title, top_contributor));
         }
@@ -100,9 +102,11 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
                 return Err(OpsError::IntakeNotFound { intake_id });
             };
-            let effective = catalog.effective_publication_attrs(intake.intake_id, BOOK_SCOPE)?;
-            let overrides = catalog.overrides_for_address(intake.intake_id, BOOK_SCOPE)?;
-            let contributors = catalog.contributors_for_address(intake.intake_id, BOOK_SCOPE)?;
+            let effective =
+                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
+            let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
+            let contributors =
+                catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
             Ok(BookDetail::build(
                 intake,
                 effective,

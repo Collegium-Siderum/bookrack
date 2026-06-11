@@ -19,8 +19,8 @@
 use std::path::Path;
 use std::time::Instant;
 
-use bookrack_catalog::{BOOK_SCOPE, Catalog, Intake};
-use bookrack_core::PartitionIdx;
+use bookrack_catalog::{Catalog, Intake};
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_metadata::{AuditData, AuditProfile};
 
 use crate::envelope::{self, EnvelopeError};
@@ -66,7 +66,7 @@ pub fn reaudit_book(
     let started = Instant::now();
     let run_id = maintenance_run_id("reaudit");
 
-    let previous = catalog.publication_attrs(intake_id, BOOK_SCOPE)?;
+    let previous = catalog.publication_attrs(intake_id, ItemKind::Book)?;
     let previous_verdict = previous.as_ref().and_then(|a| a.audit_verdict.clone());
     let previous_confidence = previous.as_ref().and_then(|a| a.confidence.clone());
 
@@ -74,7 +74,7 @@ pub fn reaudit_book(
 
     let confidence = report.confidence.as_str().to_string();
     let verdict = report.verdict.as_token().to_string();
-    catalog.update_audit_rollup(intake_id, BOOK_SCOPE, &confidence, &verdict)?;
+    catalog.update_audit_rollup(intake_id, ItemKind::Book, &confidence, &verdict)?;
 
     let outcome = match report.verdict {
         bookrack_metadata::Verdict::Clean => "ok",
@@ -149,7 +149,7 @@ fn report_for_intake(
         return Err(IngestError::EnvelopeMismatch(intake_id));
     }
 
-    let effective = catalog.effective_publication_attrs(intake_id, BOOK_SCOPE)?;
+    let effective = catalog.effective_publication_attrs(intake_id, ItemKind::Book)?;
     let origins = crate::field_origins(catalog, intake_id)?;
     let toc_stats = structure::toc_stats(&envelope.extraction, &audit_profile.toc_shape);
     let sample = body_sample(&envelope.extraction);
@@ -231,7 +231,7 @@ mod tests {
         let id = seed_book(&mut catalog, dir.path(), "sha-reaudit");
 
         // Seed a stale ingest-time rollup the re-audit must replace.
-        let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(id, ItemKind::Book);
         attrs.title = Some("A Plain Title".to_string());
         attrs.confidence = Some("low".to_string());
         attrs.audit_verdict = Some("needs_work".to_string());
@@ -240,7 +240,7 @@ mod tests {
         catalog
             .set_override(&NewOverride::new(
                 id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "publisher",
                 Some("A Curated Publisher".to_string()),
                 "human",
@@ -260,7 +260,7 @@ mod tests {
         // The stored rollup now matches what the re-audit computed, and
         // the bibliographic columns survived the targeted update.
         let stored = catalog
-            .publication_attrs(id, BOOK_SCOPE)
+            .publication_attrs(id, ItemKind::Book)
             .expect("read attrs")
             .expect("attrs row");
         assert_eq!(
@@ -317,13 +317,13 @@ mod tests {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let id = seed_book(&mut catalog, dir.path(), "sha-report");
 
-        let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(id, ItemKind::Book);
         attrs.title = Some("A Plain Title".to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
         catalog
             .set_override(&NewOverride::new(
                 id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "publisher",
                 Some("A Curated Publisher".to_string()),
                 "human",
@@ -354,7 +354,7 @@ mod tests {
         // No write-back: the rollup stays unset and the trail stays
         // empty.
         let stored = catalog
-            .publication_attrs(id, BOOK_SCOPE)
+            .publication_attrs(id, ItemKind::Book)
             .expect("read attrs")
             .expect("attrs row");
         assert_eq!(stored.audit_verdict, None);
@@ -380,21 +380,21 @@ mod tests {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let id = seed_book(&mut catalog, dir.path(), "sha-origins");
 
-        let mut attrs = NewPublicationAttrs::new(id, BOOK_SCOPE);
+        let mut attrs = NewPublicationAttrs::new(id, ItemKind::Book);
         attrs.title = Some("A Plain Title".to_string());
         attrs.year = Some("2005".to_string());
         catalog.upsert_publication_attrs(&attrs).expect("attrs");
         catalog
             .set_override(&NewOverride::new(
                 id,
-                BOOK_SCOPE,
+                ItemKind::Book,
                 "publisher",
                 Some("A Curated Publisher".to_string()),
                 "human",
             ))
             .expect("override");
         catalog
-            .set_override(&NewOverride::new(id, BOOK_SCOPE, "year", None, "human"))
+            .set_override(&NewOverride::new(id, ItemKind::Book, "year", None, "human"))
             .expect("void");
 
         let report = build_report(
