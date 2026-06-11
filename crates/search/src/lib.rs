@@ -471,10 +471,14 @@ fn paper_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> R
     let container = effective.get("container_title").map(str::to_string);
     let title = match effective.get("title").map(str::to_string) {
         Some(t) => t,
-        None => filename_stem_for(catalog, intake_id)?
-            .unwrap_or_else(|| format!("paper #{intake_id}")),
+        None => {
+            filename_stem_for(catalog, intake_id)?.unwrap_or_else(|| format!("paper #{intake_id}"))
+        }
     };
-    let segments: Vec<String> = container.into_iter().chain(std::iter::once(title)).collect();
+    let segments: Vec<String> = container
+        .into_iter()
+        .chain(std::iter::once(title))
+        .collect();
     Ok(LeafContext {
         breadcrumb: segments.join(BREADCRUMB_SEP),
         toc_position,
