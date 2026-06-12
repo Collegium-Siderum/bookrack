@@ -608,10 +608,10 @@ fn execute_repl_command(command: crate::ReplCommand, cfg: &Arc<Config>) {
             cfg_ref,
             &args.path,
             args.out.as_deref(),
-            args.stdout,
             args.no_chunk,
             None,
-        ),
+        )
+        .and_then(|outcome| bookrack_runtime::cmd::dryrun::render_outcome(&outcome, args.stdout)),
         ReplCommand::Queue { .. } => {
             // The REPL intercepts `queue` ahead of the clap grammar so
             // the worker-loop pause flag and event stream stay in scope.

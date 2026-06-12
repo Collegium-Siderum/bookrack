@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bookrack_repl_grammar::DryrunArgs;
 use serde_json::json;
 
@@ -13,8 +13,10 @@ pub async fn run(args: DryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let params = json!({
         "path": args.path,
         "out": args.out,
-        "stdout": args.stdout,
         "no_chunk": args.no_chunk,
     });
-    helpers::call_with_progress(client, "dryrun", params).await
+    let value = helpers::call_with_progress_value(client, "dryrun", params).await?;
+    let outcome: bookrack_runtime::cmd::dryrun::DryrunRunOutcome = serde_json::from_value(value)
+        .context("dryrun response did not match the expected shape")?;
+    bookrack_runtime::cmd::dryrun::render_outcome(&outcome, args.stdout)
 }

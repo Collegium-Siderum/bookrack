@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 #[cfg(test)]
 use ts_rs::TS;
 
@@ -25,8 +25,6 @@ pub struct DryrunParams {
     #[cfg_attr(test, ts(type = "string | null"))]
     out: Option<PathBuf>,
     #[serde(default)]
-    stdout: bool,
-    #[serde(default)]
     no_chunk: bool,
 }
 
@@ -38,20 +36,20 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     };
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
-        let result = tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             dryrun::run(
                 &cfg,
                 &parsed.path,
                 parsed.out.as_deref(),
-                parsed.stdout,
                 parsed.no_chunk,
                 None,
             )
         })
         .await
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun join: {e}")))?;
-        result.map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun failed: {e:#}")))?;
-        Ok(json!({ "ok": true }))
+        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun join: {e}")))?
+        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun failed: {e:#}")))?;
+        serde_json::to_value(&outcome)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun encode: {e}")))
     })
     .await
 }

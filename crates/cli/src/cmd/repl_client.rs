@@ -454,10 +454,32 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
             let params = json!({
                 "path": args.path,
                 "out": args.out,
-                "stdout": args.stdout,
                 "no_chunk": args.no_chunk,
             });
-            call_and_print(client, "dryrun", params).await
+            match client.call_raw("dryrun", params).await {
+                Ok(value) => match serde_json::from_value::<
+                    bookrack_runtime::cmd::dryrun::DryrunRunOutcome,
+                >(value)
+                {
+                    Ok(outcome) => {
+                        match bookrack_runtime::cmd::dryrun::render_outcome(&outcome, args.stdout) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                eprintln!("dryrun: {err:#}");
+                                false
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("dryrun: response did not match expected shape: {err}");
+                        false
+                    }
+                },
+                Err(err) => {
+                    eprintln!("dryrun: {err}");
+                    false
+                }
+            }
         }
         ReplCommand::Queue { action } => match action {
             QueueAction::Pause => call_and_print(client, "queue.pause", Value::Null).await,

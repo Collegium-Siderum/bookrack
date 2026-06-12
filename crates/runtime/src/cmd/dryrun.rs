@@ -25,14 +25,27 @@ use sha2::{Digest, Sha256};
 /// the two operational artifact directories age out at the same cadence.
 const DRYRUN_KEEP: usize = 5;
 
+/// What the dryrun produced. Returned from [`run`] so the caller can
+/// render its own summary line and decide what to stream where; the
+/// JSONL itself always lives on disk under
+/// `<data_root>/dryruns/...` or `out`, regardless of whether the
+/// caller is a CLI client, the legacy in-process REPL, or the
+/// control-plane handler.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DryrunRunOutcome {
+    pub jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub summary: DryrunSummary,
+    pub file_count: usize,
+}
+
 pub fn run(
     cfg: &Config,
     path: &Path,
     out: Option<&Path>,
-    stdout: bool,
     no_chunk: bool,
     profile_name: Option<&str>,
-) -> Result<()> {
+) -> Result<DryrunRunOutcome> {
     let audit_data = crate::audit_helpers::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
@@ -64,26 +77,17 @@ pub fn run(
     }
     let summary = summarize(&reports);
 
-    if stdout {
-        let stdout_handle = std::io::stdout();
-        let mut writer = BufWriter::new(stdout_handle.lock());
-        write_jsonl(&mut writer, &reports)?;
-        writer.flush()?;
-    } else {
-        let (jsonl_path, summary_path) = resolve_output_paths(cfg, path, out)?;
-        write_artifact(&jsonl_path, &summary_path, &reports, &summary)?;
-        eprintln!(
-            "wrote per-book report to {} ({} files)",
-            jsonl_path.display(),
-            reports.len()
-        );
-        eprintln!("wrote summary to {}", summary_path.display());
-        if out.is_none() {
-            prune_old_dryruns(jsonl_path.parent().expect("parent exists"))?;
-        }
+    let (jsonl_path, summary_path) = resolve_output_paths(cfg, path, out)?;
+    write_artifact(&jsonl_path, &summary_path, &reports, &summary)?;
+    if out.is_none() {
+        prune_old_dryruns(jsonl_path.parent().expect("parent exists"))?;
     }
-    print_summary_to_stderr(&summary);
-    Ok(())
+    Ok(DryrunRunOutcome {
+        jsonl_path,
+        summary_path,
+        summary,
+        file_count: reports.len(),
+    })
 }
 
 /// One book's progress line. Kept tight so even a thousand-file walk does
@@ -104,7 +108,11 @@ fn log_book(rec: &DryrunBookReport) {
     );
 }
 
-fn print_summary_to_stderr(summary: &DryrunSummary) {
+/// Render the aggregate summary to stderr. Shared by the legacy
+/// in-process REPL caller and the control-plane client, so a
+/// dryrun's tail line looks the same regardless of which path
+/// fired it.
+pub fn print_summary_to_stderr(summary: &DryrunSummary) {
     eprintln!();
     eprintln!("--- summary ---");
     eprintln!("  total files: {}", summary.n_files);
@@ -119,6 +127,36 @@ fn print_summary_to_stderr(summary: &DryrunSummary) {
     if !summary.confidence.is_empty() {
         eprintln!("  confidence:   {}", format_counts(&summary.confidence));
     }
+}
+
+/// Render a finished dryrun to its caller's standard streams: stream
+/// the JSONL artifact to stdout when `stream_jsonl_to_stdout` is set,
+/// otherwise print the persisted paths to stderr; either way, follow
+/// with the aggregate summary on stderr.
+pub fn render_outcome(outcome: &DryrunRunOutcome, stream_jsonl_to_stdout: bool) -> Result<()> {
+    if stream_jsonl_to_stdout {
+        let mut file = File::open(&outcome.jsonl_path)
+            .with_context(|| format!("open {}", outcome.jsonl_path.display()))?;
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        std::io::copy(&mut file, &mut handle).context("stream dryrun JSONL to stdout")?;
+        handle.flush().ok();
+        eprintln!(
+            "(per-book report saved to {} — {} files)",
+            outcome.jsonl_path.display(),
+            outcome.file_count
+        );
+        eprintln!("(summary saved to {})", outcome.summary_path.display());
+    } else {
+        eprintln!(
+            "wrote per-book report to {} ({} files)",
+            outcome.jsonl_path.display(),
+            outcome.file_count
+        );
+        eprintln!("wrote summary to {}", outcome.summary_path.display());
+    }
+    print_summary_to_stderr(&outcome.summary);
+    Ok(())
 }
 
 fn format_counts(counts: &std::collections::BTreeMap<String, usize>) -> String {

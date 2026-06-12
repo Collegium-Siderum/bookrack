@@ -111,6 +111,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- `bookrack dryrun` over the control plane returns the per-book JSONL
+  path, the summary sidecar path, and the aggregate summary in the
+  RPC body, instead of swallowing the per-book report and the summary
+  into the daemon's own stdout / stderr where the client process
+  never saw them. `--stdout` now streams the JSONL artifact from the
+  client side, summary lands on the client's stderr, and the artifact
+  always persists under `<data_root>/dryruns/` (or `--out`) so a long
+  walk that the operator missed live can still be inspected after the
+  fact.
+
 - `vectors reset` (including `--resume`) and `vectors reembed` append
   pipeline-audit rows for the chunk and embed stages they run, so a
   book's trail no longer ends on a stale failure after a maintenance

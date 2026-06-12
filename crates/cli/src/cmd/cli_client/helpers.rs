@@ -94,6 +94,44 @@ pub async fn call_with_progress(
     Ok(())
 }
 
+/// Variant of [`call_with_progress`] that returns the RPC result
+/// instead of printing it. Callers that want to render a structured
+/// response themselves use this.
+pub async fn call_with_progress_value(
+    client: Arc<ControlClient>,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut events = client
+        .subscribe()
+        .await
+        .context("subscribe to control-plane events")?;
+    let method_owned = method.to_string();
+    let client_for_call = Arc::clone(&client);
+    let call_future = async move {
+        client_for_call
+            .call_raw(&method_owned, params)
+            .await
+            .map_err(anyhow::Error::from)
+    };
+    tokio::pin!(call_future);
+    let value = loop {
+        tokio::select! {
+            biased;
+            res = &mut call_future => break res?,
+            ev = events.recv() => match ev {
+                Ok(event) => render_event(&event),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => {
+                    break (&mut call_future).await?;
+                }
+            },
+        }
+    };
+    finish_progress_line();
+    Ok(value)
+}
+
 /// Render one broadcast [`Event`] to stderr. Worker progress lines
 /// rewrite the same row with `\r`; the other channels are dropped to
 /// keep the one-shot output legible.

@@ -22,7 +22,7 @@ use bookrack_core::{ItemKind, NodeType};
 use bookrack_corpus::Corpus;
 use bookrack_extract::{Biblio, ExtractOutcome, Extraction, extract};
 use bookrack_metadata::{AuditInput, FilenameBiblio, MetadataReport, audit, parse_filename};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -279,7 +279,7 @@ pub struct FieldOut {
 }
 
 /// The aggregate over a set of [`DryrunBookReport`]s.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DryrunSummary {
     /// Total files considered.
     pub n_files: usize,
