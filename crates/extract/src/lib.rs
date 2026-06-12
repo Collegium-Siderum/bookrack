@@ -43,7 +43,7 @@ use bookrack_audit_profile::{AuditProfile, HeadingPatterns};
 /// changes, or whenever a behaviour-sensitive dependency is upgraded.
 /// The companion test `tests/dep_hash.rs` fails until
 /// [`FROZEN_DEPS_HASH`] is refreshed, forcing a deliberate bump.
-pub const EXTRACTOR_VERSION: u32 = 4;
+pub const EXTRACTOR_VERSION: u32 = 5;
 
 /// Monotonic version of the OCR adapter's output. Stored on the OCR
 /// intake's `intake.extractor_version`, decoupled from

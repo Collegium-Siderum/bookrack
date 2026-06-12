@@ -73,6 +73,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- The PDF text-layer quality gate now counts U+FFFD as
+  *replacement-character sites* — a `(FFFD | ' ')+` span counts as one
+  signal rather than once per glyph — so a TOC dot-leader fill backed
+  by an unmapped font glyph stops dragging an otherwise-clean PDF over
+  the 5% OCR threshold. The per-glyph share is still reported as
+  `replacement_char_ratio` for recalibration. `EXTRACTOR_VERSION` bumps
+  4 → 5; affected sources need re-ingest (see `docs/UPGRADE.md`).
+
 - The PDFium library search is now a chain: `BOOKRACK_PDFIUM_LIB`
   (authoritative when set), then the executable's own directory,
   then the per-user managed directory. A miss reports every searched

@@ -55,8 +55,18 @@ pub struct QualityReport {
     pub chars_per_page: f64,
     /// Share of pages that carry an image — a dual-layer / scan signal.
     pub image_page_ratio: f64,
-    /// Share of U+FFFD replacement characters.
+    /// Share of U+FFFD replacement *runs* among all characters: a
+    /// `(FFFD | ' ')+` span that contains at least one FFFD counts as
+    /// one instance. Collapses TOC dot-leader fills — where a single
+    /// glyph without a cmap entry repeats across half a page — onto a
+    /// single signal, so the OCR gate measures distinct corruption
+    /// sites rather than a glyph-repeat count.
     pub replacement_ratio: f64,
+    /// Share of U+FFFD replacement characters, counted glyph by glyph.
+    /// Diagnostic alongside [`Self::replacement_ratio`]; useful for
+    /// recalibrating the gate against new corpora where a single
+    /// massive run dwarfs every other signal.
+    pub replacement_char_ratio: f64,
     /// Share of Private Use Area code points (broken font cmap symptom).
     pub pua_ratio: f64,
     /// Share of control / non-printable characters (normal whitespace
@@ -89,7 +99,7 @@ pub fn assess(
 ) -> QualityReport {
     let page_count = pages.len();
     let mut total = 0usize;
-    let (mut repl, mut pua, mut control) = (0usize, 0usize, 0usize);
+    let (mut repl_chars, mut repl_runs, mut pua, mut control) = (0usize, 0usize, 0usize, 0usize);
     let (mut digit, mut cjk, mut latin) = (0usize, 0usize, 0usize);
     let mut cjk_space = 0usize;
     let mut pages_with_text = 0usize;
@@ -99,14 +109,27 @@ pub fn assess(
         if chars.len() >= 20 {
             pages_with_text += 1;
         }
+        // Whether the previous character was inside a (FFFD | ' ')+ run
+        // that has already contributed a `repl_runs` increment. Tracked
+        // per page so a page boundary always breaks a run.
+        let mut in_filler_run = false;
         for (i, &ch) in chars.iter().enumerate() {
             total += 1;
             if ch == '\u{FFFD}' {
-                repl += 1;
-            } else if is_pua(ch) {
-                pua += 1;
-            } else if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-                control += 1;
+                repl_chars += 1;
+                if !in_filler_run {
+                    repl_runs += 1;
+                    in_filler_run = true;
+                }
+            } else {
+                if ch != ' ' {
+                    in_filler_run = false;
+                }
+                if is_pua(ch) {
+                    pua += 1;
+                } else if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+                    control += 1;
+                }
             }
             if ch.is_ascii_digit() {
                 digit += 1;
@@ -146,7 +169,8 @@ pub fn assess(
         total_chars: total,
         chars_per_page,
         image_page_ratio: ratio(image_pages, page_count),
-        replacement_ratio: ratio(repl, total),
+        replacement_ratio: ratio(repl_runs, total),
+        replacement_char_ratio: ratio(repl_chars, total),
         pua_ratio: ratio(pua, total),
         control_ratio: ratio(control, total),
         cjk_space_ratio: ratio(cjk_space, cjk),
@@ -181,7 +205,7 @@ fn decide(r: &QualityReport, t: &QualityThresholds) -> QualityDecision {
     if r.replacement_ratio >= t.replacement_ocr() {
         return RouteToOcr {
             reason: format!(
-                "{:.1}% replacement characters — encoding corruption",
+                "{:.2}% replacement-character sites — encoding corruption",
                 r.replacement_ratio * 100.0
             ),
         };
@@ -253,4 +277,63 @@ pub fn is_cjk(ch: char) -> bool {
     matches!(ch as u32,
         0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
         | 0x2_0000..=0x2_A6DF | 0x2_A700..=0x2_EBEF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_thresholds() -> QualityThresholds {
+        bookrack_audit_profile::AuditProfile::default().quality
+    }
+
+    #[test]
+    fn replacement_runs_collapse_a_toc_dot_leader_into_one_signal() {
+        // Each TOC entry on this fake page ends with a dot-leader fill
+        // of ~25 spaced FFFDs — the journal pattern that previously
+        // tripped the 5% gate. With the run-collapsed metric, every
+        // single fill counts as one site, so the ratio over the page
+        // is well under the 5% OCR threshold.
+        let mut page = String::new();
+        for i in 0..6 {
+            page.push_str(&format!("entry {i}: paper title here "));
+            for _ in 0..25 {
+                page.push('\u{FFFD}');
+                page.push(' ');
+            }
+            page.push('\n');
+        }
+        let report = assess(std::slice::from_ref(&page), 0, &default_thresholds());
+        assert!(
+            matches!(report.verdict, QualityDecision::Keep { .. }),
+            "leader-fill page kept, got {:?}",
+            report.verdict
+        );
+        // 6 dot-leader fills survive as 6 distinct sites; 150 FFFD
+        // glyphs survive on `replacement_char_ratio` for diagnostics.
+        let runs = report.replacement_ratio * report.total_chars as f64;
+        let chars = report.replacement_char_ratio * report.total_chars as f64;
+        assert!(
+            (runs.round() - 6.0).abs() < 0.5,
+            "expected 6 runs, got {runs}"
+        );
+        assert!(
+            (chars.round() - 150.0).abs() < 0.5,
+            "expected 150 chars, got {chars}",
+        );
+    }
+
+    #[test]
+    fn an_in_line_replacement_per_word_still_counts_each_one() {
+        // `Hello FFFD world FFFD end` — two separate FFFDs split by
+        // real text. The run-collapse rule only fuses FFFD with
+        // adjacent spaces, so real text in between resets the run.
+        let page = "Hello \u{FFFD} world \u{FFFD} end".to_string();
+        let report = assess(std::slice::from_ref(&page), 0, &default_thresholds());
+        let runs = report.replacement_ratio * report.total_chars as f64;
+        assert!(
+            (runs.round() - 2.0).abs() < 0.5,
+            "expected 2 distinct sites, got {runs}",
+        );
+    }
 }
