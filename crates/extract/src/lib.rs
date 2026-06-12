@@ -19,6 +19,7 @@ mod html;
 mod html_parse;
 pub mod ocr;
 mod pdf;
+mod pdf_paper;
 pub mod pdfium_pin;
 mod quality;
 mod txt;
@@ -28,6 +29,7 @@ pub use envelope::{
     ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
     envelope_filename, read_envelope, write_envelope,
 };
+pub use pdf_paper::{extract_paper_abstract, reason as paper_abstract_reason};
 
 use std::path::Path;
 

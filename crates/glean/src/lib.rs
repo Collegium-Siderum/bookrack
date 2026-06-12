@@ -376,7 +376,7 @@ pub async fn glean_paper<E: Embedder>(
     {
         biblio.issn = Some(i);
     }
-    let abstract_pick = identify::extract_abstract(&extraction, params.abstract_strategy);
+    let abstract_pick = identify::extract_abstract(file, &extraction, params.abstract_strategy);
     let abstract_source = abstract_pick.as_ref().map(|(_, src)| (*src).to_string());
     if let Some((text, _)) = &abstract_pick
         && biblio.abstract_text.is_none()

@@ -955,6 +955,7 @@ dependencies = [
  "encoding_rs",
  "pdfium-render",
  "rbook",
+ "regex",
  "scraper",
  "serde",
  "serde_json",

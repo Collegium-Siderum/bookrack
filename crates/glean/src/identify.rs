@@ -6,9 +6,10 @@
 //! trailing sentence punctuation) so callers can write the result
 //! straight into the catalog.
 
+use std::path::Path;
 use std::sync::LazyLock;
 
-use bookrack_extract::{Block, BlockKind, Extraction};
+use bookrack_extract::{Block, BlockKind, Extraction, extract_paper_abstract};
 use regex::Regex;
 
 use crate::AbstractStrategy;
@@ -90,14 +91,36 @@ pub fn detect_issn(footer_text: &str) -> Option<String> {
     ISSN_RE.find(footer_text).map(|m| m.as_str().to_string())
 }
 
-/// Pick the abstract body. The current strategy applies a three-level
-/// fallback: a body block anchored to an `Abstract` keyword, then the
-/// first long paragraph on the first source unit (page or spine
-/// document zero), then the longest body paragraph overall.
+/// Pick the abstract body.
+///
+/// PDF inputs go through [`extract_paper_abstract`], which reads the
+/// source file again with PDFium and runs the validated anchor /
+/// section-marker / fallback policy on its native reading-order text.
+/// The general extract adapter's character-level paragraph
+/// reconstruction is too lossy on paper layouts — funding footnotes
+/// fragment the abstract block, two-column heading separators are
+/// merged into the body, and the per-page quality gate rejects some
+/// paper PDFs outright — so we bypass it for this single decision.
+/// A failure inside the PDF-aware path falls through to the block
+/// scan below so a corrupt PDF still records what little can be
+/// salvaged.
+///
+/// All other formats (EPUB, HTML, TXT) use the block-level fallback
+/// chain that still works well for those: anchor an `Abstract`
+/// keyword inside a body block, then the first long paragraph on the
+/// first source unit (page or spine document zero), then the longest
+/// body paragraph overall.
 pub fn extract_abstract(
+    file: &Path,
     extraction: &Extraction,
     _strategy: AbstractStrategy,
 ) -> Option<(String, &'static str)> {
+    if is_pdf_path(file)
+        && let Ok(result) = extract_paper_abstract(file)
+    {
+        return result;
+    }
+
     let bodies: Vec<&Block> = extraction
         .blocks
         .iter()
@@ -135,6 +158,12 @@ pub fn extract_abstract(
         .iter()
         .max_by_key(|b| b.text.chars().count())
         .map(|b| (b.text.clone(), "first_long_para"))
+}
+
+fn is_pdf_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
 /// Concatenate all body block texts with newlines. Used by the DOI
@@ -314,7 +343,8 @@ mod tests {
             "Abstract: this synthetic abstract body is intentionally long enough.",
             0,
         )]);
-        let (text, source) = extract_abstract(&extraction, AbstractStrategy::HeadingFirst).unwrap();
+        let (text, source) =
+            extract_abstract(NON_PDF, &extraction, AbstractStrategy::HeadingFirst).unwrap();
         assert!(text.starts_with("this synthetic abstract"));
         assert_eq!(source, "heading");
     }
@@ -329,7 +359,8 @@ mod tests {
                 0,
             ),
         ]);
-        let (text, source) = extract_abstract(&extraction, AbstractStrategy::HeadingFirst).unwrap();
+        let (text, source) =
+            extract_abstract(NON_PDF, &extraction, AbstractStrategy::HeadingFirst).unwrap();
         assert_eq!(text, "Synthetic abstract body across multiple sentences.");
         assert_eq!(source, "heading");
     }
@@ -342,7 +373,8 @@ mod tests {
             (BlockKind::Body, &long, 0),
             (BlockKind::Body, "Body on the next page.", 1),
         ]);
-        let (text, source) = extract_abstract(&extraction, AbstractStrategy::HeadingFirst).unwrap();
+        let (text, source) =
+            extract_abstract(NON_PDF, &extraction, AbstractStrategy::HeadingFirst).unwrap();
         assert_eq!(text, long);
         assert_eq!(source, "first_page_long_para");
     }
@@ -354,7 +386,8 @@ mod tests {
             (BlockKind::Body, "Body on the next page.", 1),
             (BlockKind::Body, "The longest body of the document.", 2),
         ]);
-        let (text, source) = extract_abstract(&extraction, AbstractStrategy::HeadingFirst).unwrap();
+        let (text, source) =
+            extract_abstract(NON_PDF, &extraction, AbstractStrategy::HeadingFirst).unwrap();
         assert_eq!(text, "The longest body of the document.");
         assert_eq!(source, "first_long_para");
     }
@@ -362,6 +395,19 @@ mod tests {
     #[test]
     fn extract_abstract_returns_none_on_empty_extraction() {
         let extraction = synthetic_extraction(vec![]);
-        assert!(extract_abstract(&extraction, AbstractStrategy::HeadingFirst).is_none());
+        assert!(extract_abstract(NON_PDF, &extraction, AbstractStrategy::HeadingFirst).is_none());
     }
+
+    /// Synthetic non-PDF path used by the block-level test cases above
+    /// so the PDF dispatch branch is bypassed.
+    const NON_PDF: &Path = unsafe {
+        // SAFETY: `Path` is `#[repr(transparent)]` over `OsStr`, and
+        // `OsStr` is `#[repr(transparent)]` over `[u8]` on Unix /
+        // `[u16]` on Windows. Casting from a `&'static str` to a
+        // `&'static Path` round-trips the same bytes. `std` only
+        // exposes `Path::new` (returns `&Path`), which is not const,
+        // so we shim a const equivalent for this constant. The
+        // pointer cast is the only viable path here.
+        &*(std::ptr::from_ref::<str>("synthetic.epub") as *const Path)
+    };
 }

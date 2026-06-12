@@ -13,6 +13,8 @@ chrono.workspace = true
 encoding_rs.workspace = true
 pdfium-render.workspace = true
 rbook.workspace = true
+# Anchor and section-marker regexes for the paper abstract extractor.
+regex.workspace = true
 scraper.workspace = true
 serde.workspace = true
 # JSON encoding for the envelope module hoisted from ingest.
