@@ -551,6 +551,14 @@ async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
             )
             .await
         }
+        PapersAction::Source { intake_id } => {
+            call_and_print(
+                client,
+                "papers.fetch_source",
+                json!({ "intake_id": intake_id }),
+            )
+            .await
+        }
     }
 }
 

@@ -21,6 +21,7 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::Show { intake_id } => show(intake_id, runtime_dir).await,
         PapersAction::Toc { intake_id } => toc(intake_id, runtime_dir).await,
         PapersAction::ExportCsl { intake_id } => export_csl(intake_id, runtime_dir).await,
+        PapersAction::Source { intake_id } => source(intake_id, runtime_dir).await,
     }
 }
 
@@ -90,6 +91,16 @@ async fn export_csl(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> 
     helpers::call_and_print(
         &client,
         "papers.export_csl",
+        json!({ "intake_id": intake_id }),
+    )
+    .await
+}
+
+async fn source(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    helpers::call_and_print(
+        &client,
+        "papers.fetch_source",
         json!({ "intake_id": intake_id }),
     )
     .await

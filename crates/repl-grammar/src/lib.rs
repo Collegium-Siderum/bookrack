@@ -432,6 +432,13 @@ pub enum PapersAction {
         /// The intake id of the paper.
         intake_id: i64,
     },
+    /// Print the locator of one paper's archived source PDF: its
+    /// absolute on-disk path, byte size, and SHA-256. The bytes are
+    /// not streamed — open the path with the platform's own tools.
+    Source {
+        /// The intake id of the paper.
+        intake_id: i64,
+    },
 }
 
 /// Positional + flag bundle for `papers ingest`. Mirrors

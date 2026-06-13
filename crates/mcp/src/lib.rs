@@ -957,6 +957,31 @@ impl BookrackServer {
         }
     }
 
+    /// Return the locator of one paper's archived source PDF.
+    #[tool(
+        name = "papers.fetch_source",
+        description = "Return the absolute path, byte size, and SHA-256 of one \
+                       paper's archived source PDF. The client opens the path \
+                       with its own file-system primitives — the bytes do not \
+                       flow through the control plane. Returns null when the \
+                       intake id is unknown; raises an error when the intake \
+                       exists but its source PDF was not archived (e.g. glean \
+                       ran with `keep_source_pdf = false`)."
+    )]
+    async fn papers_fetch_source(
+        &self,
+        Parameters(args): Parameters<PaperIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::papers::fetch_source(handle.ops(), args.intake_id) {
+            Ok(src) => respond_with(&Some(src)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<bookrack_ops::dto::PaperSource>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
     /// Return one paper's table of contents.
     #[tool(
         name = "library.show_paper_toc",
