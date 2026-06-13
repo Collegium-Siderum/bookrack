@@ -189,6 +189,16 @@ enum Command {
         /// library; the other formats do not.
         #[arg(long)]
         install_pdfium: bool,
+        /// Rename legacy-named envelope files under the books and
+        /// papers opaque stores to the kind-prefixed shape produced by
+        /// `envelope_filename`. Idempotent; already-prefixed files are
+        /// skipped.
+        #[arg(long)]
+        rename_envelopes: bool,
+        /// With `--rename-envelopes`, list the rename plan without
+        /// touching the disk.
+        #[arg(long, requires = "rename_envelopes")]
+        dry_run: bool,
     },
     /// Submit one or more files for ingest. Requires a running
     /// bookrack daemon; the command exits with code 2 if no daemon is
@@ -402,9 +412,19 @@ async fn run() -> Result<()> {
     if let Command::Doctor {
         json,
         install_pdfium,
+        rename_envelopes,
+        dry_run,
     } = &cli.command
     {
-        return cmd::cli_client::doctor::run(&cli.selection(), *json, *install_pdfium, None).await;
+        return cmd::cli_client::doctor::run(
+            &cli.selection(),
+            *json,
+            *install_pdfium,
+            *rename_envelopes,
+            *dry_run,
+            None,
+        )
+        .await;
     }
     if let Command::Init {
         data_dir,

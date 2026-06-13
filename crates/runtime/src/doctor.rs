@@ -143,6 +143,189 @@ pub async fn gather(selection: &LibrarySelection) -> Report {
     Report { rows }
 }
 
+/// Outcome of one envelope-rename run, surfaced verbatim through the
+/// CLI text and JSON renderers so an operator can audit what moved.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RenameReport {
+    /// `true` when no rename was actually performed; the `renamed`
+    /// list then carries the plan that a real run would have applied.
+    pub dry_run: bool,
+    /// Per-file plan or applied move, in scan order.
+    pub renamed: Vec<RenameAction>,
+    /// Number of files skipped because their basename already carried
+    /// a `book-` or `paper-` prefix.
+    pub already_prefixed: usize,
+    /// Per-file failures, in scan order. A failure on one file does
+    /// not stop the rest of the batch.
+    pub failures: Vec<RenameFailure>,
+}
+
+impl RenameReport {
+    /// `true` iff any file failed to rename.
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+}
+
+/// One envelope to move from its legacy basename to its kinded one.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenameAction {
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// One envelope that could not be moved.
+#[derive(Debug, Clone, Serialize)]
+pub struct RenameFailure {
+    pub path: String,
+    pub error: String,
+}
+
+/// Walk the books and papers opaque stores, migrate legacy-named
+/// envelopes (`{intake_id}.bookrack-extraction.v2.json`) to the
+/// kinded form produced by `envelope_filename(kind, intake_id)`.
+/// Files already carrying a `book-` or `paper-` prefix are skipped;
+/// the operation is idempotent.
+///
+/// With `dry_run = true` the plan is computed and returned without
+/// touching the disk.
+pub async fn rename_envelopes(selection: &LibrarySelection, dry_run: bool) -> Result<RenameReport> {
+    let cfg = Config::resolve(selection).context("resolve config for envelope rename")?;
+    Ok(rename_envelopes_in(
+        &cfg.books_dir(),
+        &cfg.papers_dir(),
+        dry_run,
+    ))
+}
+
+/// Pure, sync core of [`rename_envelopes`]: scans the two given
+/// directories and returns the report. Exposed for tests that drive
+/// the rename without going through config resolution.
+pub fn rename_envelopes_in(
+    books_dir: &std::path::Path,
+    papers_dir: &std::path::Path,
+    dry_run: bool,
+) -> RenameReport {
+    let mut report = RenameReport {
+        dry_run,
+        ..Default::default()
+    };
+    scan_envelopes(
+        books_dir,
+        bookrack_core::ItemKind::Book,
+        dry_run,
+        &mut report,
+    );
+    scan_envelopes(
+        papers_dir,
+        bookrack_core::ItemKind::Paper,
+        dry_run,
+        &mut report,
+    );
+    report
+}
+
+fn scan_envelopes(
+    dir: &std::path::Path,
+    kind: bookrack_core::ItemKind,
+    dry_run: bool,
+    report: &mut RenameReport,
+) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        // A missing opaque store is a non-event: nothing to migrate.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            report.failures.push(RenameFailure {
+                path: dir.display().to_string(),
+                error: format!("read dir: {e}"),
+            });
+            return;
+        }
+    };
+    let mut entries: Vec<std::path::PathBuf> = read
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(bookrack_extract::envelope::ENVELOPE_FILE_SUFFIX))
+        })
+        .collect();
+    // Deterministic order so `--dry-run` and the real run agree.
+    entries.sort();
+
+    for from in entries {
+        let basename = match from.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        if basename.starts_with("book-") || basename.starts_with("paper-") {
+            report.already_prefixed += 1;
+            continue;
+        }
+        let stem = basename
+            .strip_suffix(bookrack_extract::envelope::ENVELOPE_FILE_SUFFIX)
+            .unwrap_or(basename);
+        let intake_id: i64 = match stem.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let to_name = bookrack_extract::envelope_filename(kind, intake_id);
+        let to = from.with_file_name(&to_name);
+
+        report.renamed.push(RenameAction {
+            kind: kind.as_scope_str().to_string(),
+            from: from.display().to_string(),
+            to: to.display().to_string(),
+        });
+        if !dry_run
+            && let Err(e) = std::fs::rename(&from, &to)
+        {
+            let last = report.renamed.pop().expect("pushed above");
+            report.failures.push(RenameFailure {
+                path: last.from,
+                error: format!("rename: {e}"),
+            });
+        }
+    }
+}
+
+/// Render a [`RenameReport`] to the operator. The text view matches
+/// the style of the other doctor outputs (label, value, status); the
+/// JSON view emits the report verbatim.
+pub fn render_rename_report(report: &RenameReport, json: bool) {
+    if json {
+        let v = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+        println!("{v}");
+        return;
+    }
+    let mode = if report.dry_run { "(plan)" } else { "" };
+    println!(
+        "envelope rename {mode}: {} planned, {} already prefixed, {} failed",
+        report.renamed.len(),
+        report.already_prefixed,
+        report.failures.len(),
+    );
+    for action in &report.renamed {
+        let verb = if report.dry_run {
+            "would rename"
+        } else {
+            "renamed"
+        };
+        println!(
+            "  {verb} [{kind}] {from}  ->  {to}",
+            kind = action.kind,
+            from = action.from,
+            to = action.to,
+        );
+    }
+    for failure in &report.failures {
+        println!("  FAILED {} ({})", failure.path, failure.error);
+    }
+}
+
 fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Option<Config> {
     match Config::resolve(selection) {
         Ok(cfg) => {
@@ -527,5 +710,83 @@ mod tests {
             !serialised.contains(r#""note""#),
             "note should be elided: {serialised}"
         );
+    }
+
+    fn write_legacy_envelope(dir: &std::path::Path, intake_id: i64) -> std::path::PathBuf {
+        let path = dir.join(bookrack_extract::envelope_filename_legacy(intake_id));
+        std::fs::write(&path, b"{\"schema_version\":2}").expect("seed envelope");
+        path
+    }
+
+    #[test]
+    fn rename_envelopes_dry_run_plan_matches_a_real_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let books = tmp.path().join("books");
+        let papers = tmp.path().join("papers");
+        std::fs::create_dir_all(&books).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+        write_legacy_envelope(&books, 1);
+        write_legacy_envelope(&books, 2);
+        write_legacy_envelope(&papers, 1);
+
+        let plan = rename_envelopes_in(&books, &papers, true);
+        assert_eq!(plan.renamed.len(), 3);
+        assert!(plan.failures.is_empty());
+
+        let applied = rename_envelopes_in(&books, &papers, false);
+        let plan_pairs: Vec<_> = plan.renamed.iter().map(|a| (&a.from, &a.to)).collect();
+        let applied_pairs: Vec<_> = applied.renamed.iter().map(|a| (&a.from, &a.to)).collect();
+        assert_eq!(plan_pairs, applied_pairs);
+        assert!(applied.failures.is_empty());
+
+        assert!(
+            books
+                .join(bookrack_extract::envelope_filename(
+                    bookrack_core::ItemKind::Book,
+                    1
+                ))
+                .exists(),
+            "book-1 envelope should now exist with the kinded prefix"
+        );
+        assert!(
+            papers
+                .join(bookrack_extract::envelope_filename(
+                    bookrack_core::ItemKind::Paper,
+                    1
+                ))
+                .exists(),
+            "paper-1 envelope should now exist with the kinded prefix"
+        );
+    }
+
+    #[test]
+    fn rename_envelopes_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let books = tmp.path().join("books");
+        let papers = tmp.path().join("papers");
+        std::fs::create_dir_all(&books).unwrap();
+        std::fs::create_dir_all(&papers).unwrap();
+        write_legacy_envelope(&books, 7);
+
+        let first = rename_envelopes_in(&books, &papers, false);
+        assert_eq!(first.renamed.len(), 1);
+
+        let second = rename_envelopes_in(&books, &papers, false);
+        assert!(
+            second.renamed.is_empty(),
+            "second pass should find nothing to rename"
+        );
+        assert_eq!(second.already_prefixed, 1);
+    }
+
+    #[test]
+    fn rename_envelopes_tolerates_missing_opaque_stores() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let books = tmp.path().join("books");
+        let papers = tmp.path().join("papers");
+        // Neither directory exists.
+        let report = rename_envelopes_in(&books, &papers, false);
+        assert!(report.renamed.is_empty());
+        assert!(report.failures.is_empty());
     }
 }

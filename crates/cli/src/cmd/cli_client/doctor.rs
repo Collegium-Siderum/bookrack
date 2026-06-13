@@ -16,6 +16,8 @@ pub async fn run(
     selection: &LibrarySelection,
     json: bool,
     install_pdfium: bool,
+    rename_envelopes: bool,
+    dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<()> {
     // The install is a host-level action: it lands in the per-user
@@ -27,6 +29,17 @@ pub async fn run(
         if !json {
             println!("installed {}", path.display());
         }
+    }
+    // Envelope rename is also a host-level filesystem walk; it runs
+    // before the report path forks so the operator gets a self-
+    // contained result.
+    if rename_envelopes {
+        let report = bookrack_runtime::doctor::rename_envelopes(selection, dry_run).await?;
+        bookrack_runtime::doctor::render_rename_report(&report, json);
+        if report.has_failures() {
+            anyhow::bail!("envelope rename: {} failure(s)", report.failures.len());
+        }
+        return Ok(());
     }
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
