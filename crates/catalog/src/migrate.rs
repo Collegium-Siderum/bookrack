@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 8;
+pub(crate) const TARGET_VERSION: i64 = 9;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -503,6 +503,16 @@ ALTER TABLE node_contributors ADD COLUMN given TEXT;
 ALTER TABLE node_contributors ADD COLUMN orcid TEXT;
 "#;
 
+// `M[8]` — record the absolute path of the source PDF's byte archive on
+// the intake row. The paper pipeline copies the source file into
+// `papers_dir/paper-{intake_id}.pdf` alongside the envelope and writes
+// the canonical path here, so downstream tools (raster render, fetch,
+// forensic re-open) can locate the original bytes without scanning the
+// directory or recomputing a SHA. Existing rows backfill to NULL; the
+// `stored_path` column continues to point at the envelope, leaving the
+// two pointers orthogonal.
+const INTAKE_SOURCE_PDF_PATH_DDL: &str = "ALTER TABLE intake ADD COLUMN source_pdf_path TEXT;";
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -515,6 +525,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(AUDIT_VERDICT_DDL),
         M::up(INTAKE_PAGE_COUNT_DDL),
         M::up(ITEM_STATE_AND_PAPER_COLUMNS_DDL),
+        M::up(INTAKE_SOURCE_PDF_PATH_DDL),
     ])
 }
 
@@ -836,6 +847,44 @@ mod tests {
             );
             assert_eq!(column_type(&conn, "node_contributors", col), "TEXT");
         }
+    }
+
+    #[test]
+    fn migration_m8_adds_source_pdf_path_to_intake_as_nullable_text() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[8] and seed a pre-migration intake row so
+        // the post-migration NULL backfill can be asserted explicitly.
+        migrations()
+            .to_version(&mut conn, 8)
+            .expect("apply M[0..7]");
+        conn.execute(
+            "INSERT INTO intake (\
+               source_sha256, original_path, format, byte_size, \
+               adapter, extractor_version, intake_at, status\
+             ) VALUES ('sha-legacy', '/tmp/paper.pdf', 'pdf', 8192, \
+                       'pdf', 1, '2026-06-13T00:00:00Z', 'extracted')",
+            [],
+        )
+        .expect("seed pre-M[8] row");
+
+        migrations().to_latest(&mut conn).expect("apply M[8]");
+
+        let cols = columns_of(&conn, "intake");
+        assert!(
+            cols.iter().any(|c| c == "source_pdf_path"),
+            "expected source_pdf_path column, got {cols:?}"
+        );
+        assert_eq!(column_type(&conn, "intake", "source_pdf_path"), "TEXT");
+
+        // Pre-migration row reads back NULL on the new column.
+        let legacy_path: Option<String> = conn
+            .query_row(
+                "SELECT source_pdf_path FROM intake WHERE source_sha256 = 'sha-legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read legacy row");
+        assert_eq!(legacy_path, None);
     }
 
     #[test]

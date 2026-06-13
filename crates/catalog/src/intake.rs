@@ -85,6 +85,14 @@ pub(crate) const SPEC: TableSpec = TableSpec {
              (EPUB / HTML / TXT) carry no page count, and rows registered \
              before this column existed read back as NULL.",
         ),
+        ColumnSpec::text("source_pdf_path").comment(
+            "absolute path to the archived copy of the source PDF bytes \
+             (paper pipeline only). Orthogonal to `stored_path`, which \
+             points at the envelope. Nullable: book intakes, paper \
+             intakes gleaned before this column existed, and runs \
+             configured with `keep_source_pdf = false` all read back \
+             as NULL.",
+        ),
     ],
     composite_pk: None,
     uniques: &[],
