@@ -280,9 +280,7 @@ fn scan_envelopes(
             from: from.display().to_string(),
             to: to.display().to_string(),
         });
-        if !dry_run
-            && let Err(e) = std::fs::rename(&from, &to)
-        {
+        if !dry_run && let Err(e) = std::fs::rename(&from, &to) {
             let last = report.renamed.pop().expect("pushed above");
             report.failures.push(RenameFailure {
                 path: last.from,

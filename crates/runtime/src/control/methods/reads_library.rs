@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use bookrack_core::{KindedNodeId, NodeId};
+use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, PaperFilter};
 use bookrack_ops::registry::LibraryHandle;
@@ -173,6 +173,10 @@ impl SearchInBookParams {
 #[derive(Debug, Deserialize)]
 pub struct ReadContextParams {
     pub node_id: i64,
+    /// Pipeline kind of the anchor node. Defaults to
+    /// [`ItemKind::Book`] so existing RPC clients stay green.
+    #[serde(default)]
+    pub kind: ItemKind,
     #[serde(default)]
     pub before: Option<u32>,
     #[serde(default)]
@@ -184,6 +188,10 @@ pub struct ReadContextParams {
 #[derive(Debug, Deserialize)]
 pub struct ReadSpanParams {
     pub node_id: i64,
+    /// Pipeline kind of the target organizing node. Defaults to
+    /// [`ItemKind::Book`] so existing RPC clients stay green.
+    #[serde(default)]
+    pub kind: ItemKind,
     #[serde(default)]
     pub start_after: Option<i64>,
     #[serde(default)]
@@ -293,7 +301,10 @@ pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     let handle = resolve(ctx, p.library.as_deref())?;
     let before = p.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
     let after = p.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-    let target = KindedNodeId::book(NodeId::new(p.node_id));
+    let target = KindedNodeId {
+        kind: p.kind,
+        node_id: NodeId::new(p.node_id),
+    };
     match reads::passages::read_context(handle.ops(), target, before, after) {
         Ok(window) => to_value(&Some(window)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),
@@ -305,7 +316,10 @@ pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 pub fn read_span(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ReadSpanParams = parse(params, "library.read_span")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let target = KindedNodeId::book(NodeId::new(p.node_id));
+    let target = KindedNodeId {
+        kind: p.kind,
+        node_id: NodeId::new(p.node_id),
+    };
     match reads::passages::read_span(handle.ops(), target, p.start_after) {
         Ok(span) => to_value(&Some(span)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),

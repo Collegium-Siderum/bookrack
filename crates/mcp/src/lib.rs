@@ -16,7 +16,7 @@ use std::time::Instant;
 use anyhow::Context;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
-use bookrack_core::{KindedNodeId, NodeId};
+use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::{BookFilter, PaperFilter};
@@ -280,6 +280,13 @@ pub struct ReadContextArgs {
     /// citation's `start_node_id` or from a passage of a previous
     /// read.
     pub node_id: i64,
+    /// Which pipeline the anchor node belongs to (`book` for ingest,
+    /// `paper` for glean). Defaults to `book` via
+    /// [`ItemKind::default`] so existing callers stay green; pass
+    /// `paper` to read context from the papers corpus.
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub kind: ItemKind,
     /// Number of leaves to include before the anchor. Defaults to 3;
     /// clamped server-side.
     #[serde(default)]
@@ -289,7 +296,7 @@ pub struct ReadContextArgs {
     #[serde(default)]
     pub after: Option<u32>,
     /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// session's default library. Unrelated to `kind`.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -300,12 +307,19 @@ pub struct ReadSpanArgs {
     /// Corpus node id of the organizing node (chapter, section, ...)
     /// to read — take it from `library.show_toc`.
     pub node_id: i64,
+    /// Which pipeline the target node belongs to (`book` for ingest,
+    /// `paper` for glean). Defaults to `book` via
+    /// [`ItemKind::default`] so existing callers stay green; pass
+    /// `paper` to read from the papers corpus.
+    #[serde(default)]
+    #[schemars(with = "String")]
+    pub kind: ItemKind,
     /// Resume cursor: the `next_offset` of the previous page. Omit to
     /// read from the span's start.
     #[serde(default)]
     pub start_after: Option<i64>,
     /// Library short name from the registry. Omit to target the
-    /// session's default library.
+    /// session's default library. Unrelated to `kind`.
     #[serde(default)]
     pub library: Option<String>,
 }
@@ -1022,7 +1036,10 @@ impl BookrackServer {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let before = args.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
         let after = args.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-        let target = KindedNodeId::book(NodeId::new(args.node_id));
+        let target = KindedNodeId {
+            kind: args.kind,
+            node_id: NodeId::new(args.node_id),
+        };
         match reads::passages::read_context(handle.ops(), target, before, after) {
             Ok(window) => respond_with(&Some(window)),
             Err(OpsError::NodeNotFound { .. }) => {
@@ -1050,7 +1067,10 @@ impl BookrackServer {
         Parameters(args): Parameters<ReadSpanArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let target = KindedNodeId::book(NodeId::new(args.node_id));
+        let target = KindedNodeId {
+            kind: args.kind,
+            node_id: NodeId::new(args.node_id),
+        };
         match reads::passages::read_span(handle.ops(), target, args.start_after) {
             Ok(span) => respond_with(&Some(span)),
             Err(OpsError::NodeNotFound { .. }) => {
@@ -2049,5 +2069,26 @@ mod tests {
             value.get("papers").is_none(),
             "the papers section must be omitted when the book-only handle reports stats"
         );
+    }
+
+    #[test]
+    fn read_context_args_without_kind_default_to_book() {
+        let payload = serde_json::json!({ "node_id": 42 });
+        let args: super::ReadContextArgs = serde_json::from_value(payload).expect("deserialize");
+        assert_eq!(args.kind, ItemKind::Book);
+    }
+
+    #[test]
+    fn read_context_args_accept_an_explicit_paper_kind() {
+        let payload = serde_json::json!({ "node_id": 42, "kind": "paper" });
+        let args: super::ReadContextArgs = serde_json::from_value(payload).expect("deserialize");
+        assert_eq!(args.kind, ItemKind::Paper);
+    }
+
+    #[test]
+    fn read_span_args_without_kind_default_to_book() {
+        let payload = serde_json::json!({ "node_id": 7 });
+        let args: super::ReadSpanArgs = serde_json::from_value(payload).expect("deserialize");
+        assert_eq!(args.kind, ItemKind::Book);
     }
 }
