@@ -26,7 +26,8 @@ use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps, NewNode};
 use bookrack_embed::Embedder;
 use bookrack_extract::{
-    Contributor, ContributorRole, ExtractOutcome, envelope_filename, write_envelope,
+    Block, BlockKind, Contributor, ContributorRole, ExtractOutcome, envelope_filename,
+    write_envelope,
 };
 use bookrack_normalize::{NORMALIZE_VERSION, norm_text_sha256};
 use bookrack_vectors::{ChunkRow, ChunkStore};
@@ -409,7 +410,7 @@ pub async fn glean_paper<E: Embedder>(
     // ── STRUCTURE ─────────────────────────────────────────────────────
     let started = Instant::now();
     let abstract_text = abstract_pick.map(|(text, _)| text);
-    let structure = build_structure(corpus, intake_id, abstract_text)?;
+    let structure = build_structure(corpus, intake_id, abstract_text, &extraction.blocks)?;
     audit(
         catalog,
         &run_id,
@@ -420,9 +421,10 @@ pub async fn glean_paper<E: Embedder>(
         "ok",
         started,
         Some(format!(
-            r#"{{"nodes":{},"leaves":{}}}"#,
+            r#"{{"nodes":{},"leaves":{},"body_leaves":{}}}"#,
             structure.nodes_written,
-            if structure.has_leaf { 1 } else { 0 }
+            if structure.has_leaf { 1 } else { 0 },
+            structure.body_leaves,
         )),
         None,
     );
@@ -526,34 +528,64 @@ fn audit(
     }
 }
 
-/// Outcome of the paper STRUCTURE step — a minimal tree, much simpler
-/// than the book pipeline's.
+/// Outcome of the paper STRUCTURE step. `leaf_node_id` / `leaf_text`
+/// point at the abstract leaf — the Tier 1 vector anchor — and stay
+/// independent of the body leaf count so the downstream CHUNK + EMBED
+/// flow sees the same input as before body leaves existed.
 struct StructureResult {
     work_node_id: NodeId,
     leaf_node_id: Option<NodeId>,
     leaf_text: Option<String>,
     nodes_written: usize,
     has_leaf: bool,
+    body_leaves: usize,
 }
 
-/// Build the paper's tree: one Work root with at most one Paragraph
-/// leaf holding the abstract body.
+/// Build the paper's tree: one Work root, an optional abstract
+/// Paragraph leaf, and one Paragraph leaf per non-empty
+/// `BlockKind::Body` block in document order. Body leaves carry the
+/// raw extracted text and a per-block `pages_lo` / `pages_hi`
+/// drawn from `source_unit`; the abstract leaf stays bit-for-bit
+/// identical to the pre-Phase-1 shape so the CHUNK + EMBED stage
+/// keeps the same vector anchor.
 fn build_structure(
     corpus: &mut Corpus,
     intake_id: i64,
     abstract_text: Option<String>,
+    body_blocks: &[Block],
 ) -> Result<StructureResult> {
     let partition_idx = PartitionIdx::new(intake_id);
     corpus.drop_partition(partition_idx)?;
     let partition = corpus.allocate_partition(intake_id)?;
     let work_node_id = partition.book_root_id;
-    let mut nodes = Vec::with_capacity(2);
+
+    let abstract_trimmed = abstract_text
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    let bodies: Vec<&Block> = body_blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Body) && !b.text.trim().is_empty())
+        .collect();
+
+    let abstract_count = usize::from(abstract_trimmed.is_some());
+    let leaf_count = abstract_count + bodies.len();
+    let ids = if leaf_count > 0 {
+        corpus.allocate_node_ids(partition_idx, leaf_count as u32)?
+    } else {
+        Vec::new()
+    };
+
+    let mut nodes = Vec::with_capacity(1 + leaf_count);
     nodes.push(NewNode::root(work_node_id, NodeType::Work));
 
-    let (leaf_node_id, leaf_text) = if let Some(text) = abstract_text {
-        let trimmed = text.trim().to_string();
-        let ids = corpus.allocate_node_ids(partition_idx, 1)?;
-        let leaf_id = ids[0];
+    let mut leaf_node_id: Option<NodeId> = None;
+    let mut leaf_text: Option<String> = None;
+    let mut id_cursor = 0usize;
+    let mut ordinal: i64 = 0;
+
+    if let Some(trimmed) = abstract_trimmed {
+        let leaf_id = ids[id_cursor];
+        id_cursor += 1;
         let char_count = trimmed.chars().count() as i64;
         let text_sha = sha256_hex(trimmed.as_bytes());
         let norm_sha = norm_text_sha256(&trimmed);
@@ -562,27 +594,61 @@ fn build_structure(
                 leaf_id,
                 work_node_id,
                 work_node_id,
-                0,
+                ordinal,
                 1,
                 NodeType::Paragraph,
             )
             .text(trimmed.clone())
             .text_stats(char_count, 0)
-            .toc_span(0, 0)
+            .toc_span(ordinal, ordinal)
             .content_hashes(format!("intake:{intake_id}:abstract"), text_sha, norm_sha),
         );
-        (Some(leaf_id), Some(trimmed))
-    } else {
-        (None, None)
-    };
+        leaf_node_id = Some(leaf_id);
+        leaf_text = Some(trimmed);
+        ordinal += 1;
+    }
+
+    for (body_idx, block) in bodies.iter().enumerate() {
+        let trimmed = block.text.trim().to_string();
+        let body_id = ids[id_cursor];
+        id_cursor += 1;
+        let char_count = trimmed.chars().count() as i64;
+        let text_sha = sha256_hex(trimmed.as_bytes());
+        let norm_sha = norm_text_sha256(&trimmed);
+        let page = i64::from(block.source_unit);
+        nodes.push(
+            NewNode::child(
+                body_id,
+                work_node_id,
+                work_node_id,
+                ordinal,
+                1,
+                NodeType::Paragraph,
+            )
+            .text(trimmed)
+            .text_stats(char_count, 0)
+            .toc_span(ordinal, ordinal)
+            .pages(page, page)
+            .content_hashes(
+                format!("intake:{intake_id}:body:{body_idx}"),
+                text_sha,
+                norm_sha,
+            ),
+        );
+        ordinal += 1;
+    }
+
     let nodes_written = nodes.len();
+    let has_leaf = leaf_node_id.is_some();
+    let body_leaves = bodies.len();
     corpus.insert_nodes(&nodes)?;
     Ok(StructureResult {
         work_node_id,
         leaf_node_id,
         leaf_text,
         nodes_written,
-        has_leaf: leaf_node_id.is_some(),
+        has_leaf,
+        body_leaves,
     })
 }
 
@@ -823,4 +889,153 @@ fn new_run_id(source_sha: &str) -> String {
 /// embedded profile crate so glean stays free of the ingest crate.
 fn bookrack_audit_profile_default() -> bookrack_audit_profile::AuditProfile {
     bookrack_audit_profile::AuditProfile::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(text: &str, source_unit: u32) -> Block {
+        Block {
+            kind: BlockKind::Body,
+            text: text.to_string(),
+            source_unit,
+        }
+    }
+
+    fn other(kind: BlockKind, text: &str, source_unit: u32) -> Block {
+        Block {
+            kind,
+            text: text.to_string(),
+            source_unit,
+        }
+    }
+
+    #[test]
+    fn build_structure_emits_abstract_and_body_paragraphs_in_document_order() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 42_i64;
+        let abstract_text = Some("Synthetic abstract for testing.".to_string());
+        let blocks = vec![
+            body("First body block on page 0.", 0),
+            body("Second body block on page 0.", 0),
+            other(BlockKind::Heading { level: 1 }, "1. Introduction", 1),
+            body("Body block on page 1.", 1),
+            other(BlockKind::Caption, "Figure 1: synthetic.", 1),
+            body("Body block on page 2.", 2),
+            other(BlockKind::Footnote, "footnote text", 2),
+            other(BlockKind::Other, "unclassified text", 2),
+        ];
+
+        let result = build_structure(&mut corpus, intake_id, abstract_text, &blocks)
+            .expect("build_structure");
+
+        assert!(result.has_leaf, "abstract leaf must be present");
+        assert_eq!(result.body_leaves, 4, "only Body blocks become body leaves");
+        assert_eq!(
+            result.nodes_written, 6,
+            "1 Work root + 1 abstract leaf + 4 body leaves"
+        );
+
+        let work = result.work_node_id;
+        let leaves = corpus
+            .leaves_in_doc_span(work, 0, i64::from(i32::MAX), 1024)
+            .expect("leaves");
+        assert_eq!(leaves.len(), 5, "5 leaves total");
+
+        let abstract_leaf = &leaves[0];
+        assert_eq!(
+            abstract_leaf.stable_anchor.as_deref(),
+            Some(format!("intake:{intake_id}:abstract").as_str()),
+        );
+        assert!(
+            abstract_leaf.page_index_start.is_none() && abstract_leaf.page_index_end.is_none(),
+            "abstract leaf carries no source-page bounds"
+        );
+        assert_eq!(
+            abstract_leaf.text_content.as_deref(),
+            Some("Synthetic abstract for testing.")
+        );
+
+        let body_pages: Vec<i64> = leaves
+            .iter()
+            .skip(1)
+            .map(|n| n.page_index_start.expect("body page"))
+            .collect();
+        assert_eq!(
+            body_pages,
+            vec![0, 0, 1, 2],
+            "body leaves keep extraction order via source_unit",
+        );
+
+        for (i, leaf) in leaves.iter().skip(1).enumerate() {
+            assert_eq!(
+                leaf.stable_anchor.as_deref(),
+                Some(format!("intake:{intake_id}:body:{i}").as_str()),
+            );
+            assert_eq!(
+                leaf.page_index_start, leaf.page_index_end,
+                "pages_lo / pages_hi share source_unit",
+            );
+            let toc = leaf.toc_lo.expect("toc_lo");
+            assert_eq!(Some(toc), leaf.toc_hi, "toc_lo / toc_hi collapse on a leaf");
+            assert_eq!(
+                toc,
+                i64::try_from(i + 1).unwrap(),
+                "toc is monotone after abstract"
+            );
+        }
+    }
+
+    #[test]
+    fn build_structure_without_abstract_still_emits_body_leaves() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 7_i64;
+        let blocks = vec![body("only body", 0), body("another body", 0)];
+
+        let result = build_structure(&mut corpus, intake_id, None, &blocks).expect("structure");
+
+        assert!(!result.has_leaf, "no abstract leaf");
+        assert!(result.leaf_node_id.is_none());
+        assert!(result.leaf_text.is_none());
+        assert_eq!(result.body_leaves, 2);
+        assert_eq!(result.nodes_written, 3, "Work root + 2 body leaves");
+
+        let leaves = corpus
+            .leaves_in_doc_span(result.work_node_id, 0, i64::from(i32::MAX), 1024)
+            .expect("leaves");
+        assert_eq!(leaves.len(), 2);
+        assert_eq!(
+            leaves[0].stable_anchor.as_deref(),
+            Some(format!("intake:{intake_id}:body:0").as_str()),
+        );
+        assert_eq!(
+            leaves[0].toc_lo,
+            Some(0),
+            "without abstract, body leaves start at toc 0",
+        );
+    }
+
+    #[test]
+    fn build_structure_skips_empty_body_text() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let blocks = vec![body("", 0), body("   \n  ", 0), body("real body text", 1)];
+
+        let result = build_structure(&mut corpus, 99, None, &blocks).expect("structure");
+
+        assert_eq!(result.body_leaves, 1, "blank Body blocks are dropped");
+        assert_eq!(result.nodes_written, 2, "Work root + 1 body leaf");
+    }
+
+    #[test]
+    fn build_structure_with_empty_abstract_string_is_treated_as_absent() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let blocks = vec![body("body", 0)];
+
+        let result =
+            build_structure(&mut corpus, 1, Some("   ".to_string()), &blocks).expect("structure");
+
+        assert!(!result.has_leaf, "whitespace-only abstract is dropped");
+        assert_eq!(result.body_leaves, 1);
+    }
 }

@@ -9,7 +9,7 @@ use std::future::Future;
 use std::path::PathBuf;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
-use bookrack_core::{ItemKind, PartitionIdx};
+use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_glean::{GleanParams, glean_paper};
@@ -64,7 +64,59 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     .expect("glean must succeed");
     assert!(!report.no_op);
     assert!(!report.already_registered);
-    assert_eq!(report.nodes_written, 2, "one Work root + one abstract leaf");
+    // After Phase 1: one Work root + one abstract leaf + one Paragraph
+    // leaf per non-empty BlockKind::Body block. The exact body count
+    // depends on the extractor's segmentation, so the test reads the
+    // tree from corpus rather than locking a magic number.
+    let work_root = report.work_node_id;
+    let leaves = corpus
+        .leaves_in_doc_span(work_root, 0, i64::from(i32::MAX), 4096)
+        .expect("leaves");
+    assert!(
+        leaves.len() >= 2,
+        "abstract leaf + at least one body leaf, got {} leaves",
+        leaves.len()
+    );
+    assert!(
+        leaves
+            .iter()
+            .all(|n| matches!(n.node_type, NodeType::Paragraph)),
+        "every leaf must be a Paragraph"
+    );
+    assert_eq!(
+        report.nodes_written,
+        1 + leaves.len(),
+        "nodes_written counts the Work root plus every leaf"
+    );
+    // First leaf is the abstract; its stable_anchor namespace ends in
+    // `:abstract` and it carries no source-page bounds. Body leaves
+    // use `:body:{i}` and carry source_unit page bounds.
+    assert!(
+        leaves[0]
+            .stable_anchor
+            .as_deref()
+            .is_some_and(|a| a.ends_with(":abstract")),
+        "first leaf must be the abstract anchor, got {:?}",
+        leaves[0].stable_anchor
+    );
+    assert!(
+        leaves[0].page_index_start.is_none() && leaves[0].page_index_end.is_none(),
+        "abstract leaf carries no page bounds — pre-Phase-1 shape"
+    );
+    for (i, leaf) in leaves.iter().skip(1).enumerate() {
+        let expected = format!(":body:{i}");
+        assert!(
+            leaf.stable_anchor
+                .as_deref()
+                .is_some_and(|a| a.ends_with(&expected)),
+            "body leaf {i} anchor mismatch: {:?}",
+            leaf.stable_anchor
+        );
+        assert!(
+            leaf.page_index_start.is_some() && leaf.page_index_end.is_some(),
+            "body leaf {i} must carry source_unit page bounds"
+        );
+    }
     assert!(
         report.chunks_written >= 1,
         "the abstract must produce at least one chunk, got {}",
@@ -94,7 +146,7 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     );
     assert_eq!(
         report.abstract_source.as_deref(),
-        Some("heading"),
+        Some("heading-en"),
         "the heading-anchored abstract path must win on the fixture"
     );
 
