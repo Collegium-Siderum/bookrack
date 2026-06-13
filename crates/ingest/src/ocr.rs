@@ -423,7 +423,7 @@ fn ocr_noop_if_up_to_date(
         Some(p) => Path::new(p).to_path_buf(),
         None => return Ok(None),
     };
-    let envelope = match bookrack_extract::envelope::read_envelope(&stored_path) {
+    let envelope = match bookrack_extract::envelope::read_envelope_with_fallback(&stored_path) {
         Ok(env) => env,
         Err(_) => return Ok(None),
     };

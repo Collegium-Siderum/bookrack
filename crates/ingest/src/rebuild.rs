@@ -91,7 +91,7 @@ pub fn rebuild_from_intakes(
             report.missing_envelope.push(intake_id);
             continue;
         };
-        let envelope = match envelope::read_envelope(Path::new(stored_path)) {
+        let envelope = match envelope::read_envelope_with_fallback(Path::new(stored_path)) {
             Ok(env) => env,
             Err(EnvelopeError::Io(_)) => {
                 report.missing_envelope.push(intake_id);

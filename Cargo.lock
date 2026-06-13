@@ -952,6 +952,7 @@ version = "0.5.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-config",
+ "bookrack-core",
  "chrono",
  "encoding_rs",
  "pdfium-render",

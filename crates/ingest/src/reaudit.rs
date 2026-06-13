@@ -140,7 +140,7 @@ fn report_for_intake(
         .stored_path
         .as_deref()
         .ok_or(IngestError::MissingEnvelope(intake_id))?;
-    let envelope = match envelope::read_envelope(Path::new(stored_path)) {
+    let envelope = match envelope::read_envelope_with_fallback(Path::new(stored_path)) {
         Ok(env) => env,
         Err(EnvelopeError::Io(_)) => return Err(IngestError::MissingEnvelope(intake_id)),
         Err(e) => return Err(e.into()),

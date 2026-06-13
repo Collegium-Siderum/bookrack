@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader};
 use std::path::Path;
 
+use bookrack_core::ItemKind;
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
@@ -35,6 +36,75 @@ pub const ENVELOPE_FILE_SUFFIX: &str = ".bookrack-extraction.v2.json";
 /// Computed filename within the opaque store for one intake.
 pub fn envelope_filename(intake_id: i64) -> String {
     format!("{intake_id}{ENVELOPE_FILE_SUFFIX}")
+}
+
+/// Computed filename within the opaque store for one intake, with the
+/// pipeline kind written as an explicit prefix. The kinded form lets
+/// a cross-directory listing of the books and papers opaque stores
+/// disambiguate items that happen to share an `intake_id` between the
+/// two catalogs.
+///
+/// The previous unprefixed shape, [`envelope_filename_legacy`], stays
+/// around for one release window so existing on-disk files keep
+/// loading; production writes will switch over to this kinded form in
+/// the next change.
+pub fn envelope_filename_kinded(kind: ItemKind, intake_id: i64) -> String {
+    format!("{}-{intake_id}{ENVELOPE_FILE_SUFFIX}", kind.as_scope_str())
+}
+
+/// The historical envelope filename, kept as a fallback while writers
+/// are still on the unprefixed form and while the rename tool is
+/// migrating existing on-disk files to [`envelope_filename_kinded`].
+pub fn envelope_filename_legacy(intake_id: i64) -> String {
+    format!("{intake_id}{ENVELOPE_FILE_SUFFIX}")
+}
+
+/// Read the envelope at `path`, tolerating the filename-prefix
+/// migration. When `path` is missing, retries the read against the
+/// basename's alternative form — a kinded `book-` / `paper-` basename
+/// falls back to the unprefixed legacy form; an unprefixed basename
+/// falls back to either kinded form — so a read survives the rename
+/// transition window when the catalog's `stored_path` no longer
+/// matches the on-disk filename.
+pub fn read_envelope_with_fallback(path: &Path) -> Result<ExtractionEnvelope, EnvelopeError> {
+    match read_envelope(path) {
+        Ok(envelope) => Ok(envelope),
+        Err(EnvelopeError::Io(io_err)) if io_err.kind() == io::ErrorKind::NotFound => {
+            for alt in envelope_filename_alternatives(path) {
+                if alt.exists() {
+                    return read_envelope(&alt);
+                }
+            }
+            Err(EnvelopeError::Io(io_err))
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Sibling paths whose basenames are alternative kind-prefix forms of
+/// `primary`'s basename. Returns an empty vector when `primary` does
+/// not look like an envelope filename.
+fn envelope_filename_alternatives(primary: &Path) -> Vec<std::path::PathBuf> {
+    let Some(parent) = primary.parent() else {
+        return Vec::new();
+    };
+    let Some(basename) = primary.file_name().and_then(|s| s.to_str()) else {
+        return Vec::new();
+    };
+    let Some(stem) = basename.strip_suffix(ENVELOPE_FILE_SUFFIX) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let stripped = stem
+        .strip_prefix("book-")
+        .or_else(|| stem.strip_prefix("paper-"));
+    if let Some(rest) = stripped {
+        out.push(parent.join(format!("{rest}{ENVELOPE_FILE_SUFFIX}")));
+    } else {
+        out.push(parent.join(format!("book-{stem}{ENVELOPE_FILE_SUFFIX}")));
+        out.push(parent.join(format!("paper-{stem}{ENVELOPE_FILE_SUFFIX}")));
+    }
+    out
 }
 
 /// On-disk schema. The `extraction` payload is the value
@@ -168,6 +238,49 @@ mod tests {
             Err(EnvelopeError::SchemaMismatch { expected, found }) => {
                 assert_eq!(expected, ENVELOPE_SCHEMA_VERSION);
                 assert_eq!(found, 99);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_envelope_with_fallback_finds_a_legacy_file_when_the_kinded_path_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let legacy_path = dir.path().join(envelope_filename_legacy(42));
+        write_envelope(&legacy_path, &sample_extraction(), 42, "deadbeef").expect("write");
+
+        // The caller still believes the file lives at the kinded path
+        // (after a future rename) but the legacy file is what is on
+        // disk. The fallback resolves it.
+        let kinded_path = dir
+            .path()
+            .join(envelope_filename_kinded(ItemKind::Book, 42));
+        let parsed = read_envelope_with_fallback(&kinded_path).expect("read with fallback");
+        assert_eq!(parsed.intake_id, 42);
+    }
+
+    #[test]
+    fn read_envelope_with_fallback_finds_a_kinded_file_when_the_legacy_path_is_missing() {
+        let dir = tempdir().expect("tempdir");
+        let kinded_path = dir
+            .path()
+            .join(envelope_filename_kinded(ItemKind::Paper, 7));
+        write_envelope(&kinded_path, &sample_extraction(), 7, "cafe").expect("write");
+
+        // The caller addresses the file by its legacy (unprefixed)
+        // path; the fallback walks both `book-` and `paper-` siblings.
+        let legacy_path = dir.path().join(envelope_filename_legacy(7));
+        let parsed = read_envelope_with_fallback(&legacy_path).expect("read with fallback");
+        assert_eq!(parsed.intake_id, 7);
+    }
+
+    #[test]
+    fn read_envelope_with_fallback_returns_not_found_when_nothing_on_disk_matches() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(envelope_filename_legacy(99));
+        match read_envelope_with_fallback(&path) {
+            Err(EnvelopeError::Io(io_err)) => {
+                assert_eq!(io_err.kind(), io::ErrorKind::NotFound);
             }
             other => panic!("unexpected: {other:?}"),
         }
