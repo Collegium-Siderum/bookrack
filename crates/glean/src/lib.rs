@@ -576,7 +576,11 @@ fn build_structure(
     };
 
     let mut nodes = Vec::with_capacity(1 + leaf_count);
-    nodes.push(NewNode::root(work_node_id, NodeType::Work));
+    let mut root = NewNode::root(work_node_id, NodeType::Work);
+    if leaf_count > 0 {
+        root = root.toc_span(0, leaf_count as i64 - 1);
+    }
+    nodes.push(root);
 
     let mut leaf_node_id: Option<NodeId> = None;
     let mut leaf_text: Option<String> = None;
@@ -1025,6 +1029,41 @@ mod tests {
 
         assert_eq!(result.body_leaves, 1, "blank Body blocks are dropped");
         assert_eq!(result.nodes_written, 2, "Work root + 1 body leaf");
+    }
+
+    #[test]
+    fn build_structure_sets_root_toc_span_to_cover_every_leaf() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 3_i64;
+        let abstract_text = Some("Abstract.".to_string());
+        let blocks = vec![body("a", 0), body("b", 1), body("c", 1)];
+
+        let result =
+            build_structure(&mut corpus, intake_id, abstract_text, &blocks).expect("structure");
+
+        let root = corpus
+            .get_node(result.work_node_id)
+            .expect("root row")
+            .expect("root present");
+        assert_eq!(root.toc_lo, Some(0));
+        assert_eq!(
+            root.toc_hi,
+            Some(3),
+            "root span covers abstract (0) plus three body leaves (1..3)",
+        );
+    }
+
+    #[test]
+    fn build_structure_leaves_root_toc_span_null_when_no_leaves() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let result = build_structure(&mut corpus, 4, None, &[]).expect("structure");
+
+        let root = corpus
+            .get_node(result.work_node_id)
+            .expect("root row")
+            .expect("root present");
+        assert_eq!(root.toc_lo, None);
+        assert_eq!(root.toc_hi, None);
     }
 
     #[test]
