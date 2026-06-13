@@ -101,7 +101,7 @@ pub enum Enrichment {
 }
 
 /// Parameters that shape one [`glean_paper`] run.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GleanParams {
     pub abstract_strategy: AbstractStrategy,
     pub embed_strategy: EmbedStrategy,
@@ -111,6 +111,26 @@ pub struct GleanParams {
     /// Re-glean even when the source is already on file and at status
     /// `Embedded` with current stamps.
     pub force: bool,
+    /// Copy the source PDF's bytes into `papers_dir` alongside the
+    /// envelope and record the absolute path in
+    /// `intake.source_pdf_path`. Defaults to `true`; setting `false`
+    /// skips the byte archive and leaves `papers.fetch_source`
+    /// returning [`OpsError::SourceNotArchived`] for this intake.
+    pub keep_source_pdf: bool,
+}
+
+impl Default for GleanParams {
+    fn default() -> Self {
+        Self {
+            abstract_strategy: AbstractStrategy::default(),
+            embed_strategy: EmbedStrategy::default(),
+            enrichment: Enrichment::default(),
+            chunk: ChunkParams::default(),
+            embed: EmbedConfig::default(),
+            force: false,
+            keep_source_pdf: true,
+        }
+    }
 }
 
 /// Outcome of one [`glean_paper`] run.
@@ -343,6 +363,45 @@ pub async fn glean_paper<E: Embedder>(
             );
         }
     }
+
+    // Archive the source PDF bytes alongside the envelope so downstream
+    // tools (raster render, forensic re-open, external viewer) can
+    // locate the original file by intake id. Failures here degrade to
+    // a `warn` — the envelope remains the authoritative replay record.
+    let source_pdf_archived = if params.keep_source_pdf {
+        let pdf_path = papers_dir.join(format!("paper-{intake_id}.pdf"));
+        match std::fs::copy(file, &pdf_path) {
+            Ok(_) => {
+                let abs = pdf_path.canonicalize().unwrap_or_else(|_| pdf_path.clone());
+                match catalog.set_source_pdf_path(
+                    ItemKind::Paper,
+                    intake_id,
+                    abs.to_string_lossy().as_ref(),
+                ) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        tracing::warn!(
+                            intake_id,
+                            error = %err,
+                            "failed to record source_pdf_path; fetch_source unavailable for this intake"
+                        );
+                        false
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    intake_id,
+                    error = %err,
+                    "failed to copy source PDF bytes; fetch_source unavailable for this intake"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     audit(
         catalog,
         &run_id,
@@ -352,7 +411,7 @@ pub async fn glean_paper<E: Embedder>(
         "register",
         "ok",
         started,
-        None,
+        Some(format!(r#"{{"pdf_archived":{source_pdf_archived}}}"#)),
         None,
     );
 

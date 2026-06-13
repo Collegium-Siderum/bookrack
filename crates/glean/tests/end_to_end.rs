@@ -183,6 +183,29 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
         "envelope file must exist on disk: {stored}"
     );
 
+    // Phase 0: the source PDF's bytes are archived alongside the
+    // envelope with `paper-<id>.pdf` as the file name, and
+    // `intake.source_pdf_path` carries the canonical absolute path.
+    let archive_path = papers_dir.join(format!("paper-{}.pdf", report.intake_id));
+    assert!(
+        archive_path.exists(),
+        "source PDF copy must land at {archive_path:?}"
+    );
+    let archived_bytes = std::fs::read(&archive_path).expect("read archived PDF");
+    assert_eq!(
+        hex_sha256(&archived_bytes),
+        source_sha,
+        "archived bytes must hash to the source SHA-256",
+    );
+    let expected_archive_path = archive_path
+        .canonicalize()
+        .expect("canonicalize archive path");
+    assert_eq!(
+        intake.source_pdf_path.as_deref().map(std::path::Path::new),
+        Some(expected_archive_path.as_path()),
+        "intake.source_pdf_path must point at the archived bytes"
+    );
+
     // The vector store has at least one row for this intake.
     let store = ChunkStore::try_open(&lancedb_dir)
         .await
@@ -235,6 +258,56 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     assert!(forced.forced);
     assert!(!forced.no_op);
     assert_eq!(forced.intake_id, report.intake_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn glean_paper_skips_source_pdf_archive_when_disabled() {
+    if !pdfium_available() {
+        eprintln!("pdfium binary not available; skipping glean keep-disabled test");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let papers_dir = dir.path().join("papers");
+    let lancedb_dir = dir.path().join("lancedb_papers");
+    let mut corpus = Corpus::open_in_memory().expect("corpus");
+    let mut catalog = Catalog::open_in_memory().expect("catalog");
+    let embedder = Fake { dim: 8 };
+
+    let params = GleanParams {
+        keep_source_pdf: false,
+        ..GleanParams::default()
+    };
+    let report = glean_paper(
+        &fixture_path(),
+        &mut corpus,
+        &mut catalog,
+        &lancedb_dir,
+        &papers_dir,
+        &embedder,
+        &params,
+    )
+    .await
+    .expect("glean must succeed with keep_source_pdf = false");
+
+    // The archive file is not created and the column stays NULL —
+    // `fetch_source` returning `SourceNotArchived` is the contract.
+    let archive_path = papers_dir.join(format!("paper-{}.pdf", report.intake_id));
+    assert!(
+        !archive_path.exists(),
+        "source PDF must not be archived when the param is disabled"
+    );
+    let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
+    let source_sha = hex_sha256(&bytes);
+    let intake = catalog
+        .intake_by_sha(&source_sha)
+        .expect("read intake")
+        .expect("present");
+    assert_eq!(intake.source_pdf_path, None);
+
+    // The rest of the REGISTER -> EMBED progression is unchanged: the
+    // envelope still lands and the intake still reaches `Embedded`.
+    assert!(intake.stored_path.is_some());
+    assert_eq!(intake.status, IntakeStatus::Embedded);
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
