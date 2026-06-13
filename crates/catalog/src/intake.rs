@@ -398,6 +398,13 @@ pub struct Intake {
     /// TIFF, image folders, OCR products). `None` for reflow formats
     /// and for rows registered before the column was added.
     pub page_count: Option<i64>,
+    /// Absolute path to the archived copy of the source PDF's bytes,
+    /// written by the paper pipeline at REGISTER alongside the
+    /// envelope. Orthogonal to [`Self::stored_path`], which points at
+    /// the envelope. `None` for book intakes, paper intakes gleaned
+    /// before this column existed, and runs configured with
+    /// `keep_source_pdf = false`.
+    pub source_pdf_path: Option<String>,
 }
 
 impl Intake {
@@ -419,6 +426,7 @@ impl Intake {
             expression_id: row.get("expression_id")?,
             notes: row.get("notes")?,
             page_count: row.get("page_count")?,
+            source_pdf_path: row.get("source_pdf_path")?,
         })
     }
 }
@@ -815,6 +823,28 @@ impl Catalog {
         Ok(affected > 0)
     }
 
+    /// Record the absolute path of an intake's archived source PDF
+    /// bytes, written alongside the envelope. The `kind` parameter is a
+    /// signature-layer safety belt; see [`Self::register_intake`] for
+    /// the rationale. Returns whether a row with that id existed.
+    pub fn set_source_pdf_path(
+        &self,
+        kind: ItemKind,
+        intake_id: i64,
+        source_pdf_path: &str,
+    ) -> Result<bool> {
+        let _ = kind;
+        let affected = self.conn.execute(
+            "UPDATE intake SET source_pdf_path = :source_pdf_path \
+             WHERE intake_id = :intake_id",
+            named_params! {
+                ":source_pdf_path": source_pdf_path,
+                ":intake_id": intake_id,
+            },
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Record the physical sheet count for a paginated intake. The
     /// `kind` parameter is a signature-layer safety belt; see
     /// [`Self::register_intake`] for the rationale. Returns whether a
@@ -968,6 +998,39 @@ mod tests {
         // fill either today.
         assert_eq!(read.expression_id, None);
         assert_eq!(read.notes, None);
+        // `source_pdf_path` is paper-only; the book round trip leaves it
+        // NULL.
+        assert_eq!(read.source_pdf_path, None);
+    }
+
+    #[test]
+    fn set_source_pdf_path_round_trips_and_reports_existence() {
+        let mut catalog = catalog();
+        let id = catalog
+            .register_intake(ItemKind::Paper, &NewIntake::new("sha-pdf"))
+            .expect("register")
+            .into_intake()
+            .intake_id;
+        // Freshly registered paper rows have no archived source PDF.
+        let before = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(before.source_pdf_path, None);
+
+        let written = catalog
+            .set_source_pdf_path(ItemKind::Paper, id, "/abs/papers/paper-1.pdf")
+            .expect("set");
+        assert!(written, "the row exists, so the update affects one row");
+        let after = catalog.intake_by_id(id).expect("lookup").expect("present");
+        assert_eq!(
+            after.source_pdf_path.as_deref(),
+            Some("/abs/papers/paper-1.pdf")
+        );
+
+        // A missing intake id reports no row was affected, mirroring
+        // every other `set_*` setter.
+        let missing = catalog
+            .set_source_pdf_path(ItemKind::Paper, i64::MAX, "/whatever")
+            .expect("set");
+        assert!(!missing);
     }
 
     #[test]
