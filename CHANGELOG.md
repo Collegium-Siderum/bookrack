@@ -106,6 +106,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- `extract_paper_structured` is now precision-first: it returns an
+  empty TOC rather than guess. The pass runs in two cooperating
+  stages — outline-guided heading promotion and a strict numbered
+  heuristic with sequence validation — both gated so a noise line
+  cannot survive: a candidate must carry a numbered prefix
+  (`N`, `N.M`, `N.M.P`, Roman, or `Appendix`), be single-line, fit
+  under 80 characters, have no math / arrow / geometric-shape
+  Unicode, no `@`, no boilerplate prefix (`we`, `the`, `vol.`,
+  `https://`, …). The sequence check accepts only candidates that
+  advance the ascending series at their level, and the outline pass
+  matches anchored entries against block text by label prefix (with
+  numeric / Roman stripping) instead of trusting the page anchor
+  blindly. Outline anchors that resolve to a sub-body-sized font or
+  a multi-line block are rejected. The heuristic absorbs outline-
+  promoted blocks into its sequence state, so an outline that skips
+  past a section still lets the heuristic recognise the next number.
+
 - The PDF adapter now attaches a `BlockStyle` geometry summary to every
   paragraph it reconstructs — font-size median and 90th-percentile, a
   bold-majority flag aggregated from per-character font weights, line

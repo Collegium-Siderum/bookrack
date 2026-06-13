@@ -57,7 +57,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::contract::{Block, BlockKind, BlockStyle, ExtractError, SourceOfStructure, Toc};
+use crate::contract::{Block, BlockKind, ExtractError, SourceOfStructure, Toc, TocEntry};
 use crate::pdf::{EXTRACTION_LOCK, pdfium};
 
 /// Maximum bytes of the head scanned for an anchor in the first pass.
@@ -214,116 +214,89 @@ pub fn extract_paper_abstract(path: &Path) -> Result<Option<(String, &'static st
 
 /// Color one paper's block stream with heading and caption classifications.
 ///
-/// The pass is purely additive: it walks `blocks` in document order,
-/// promotes [`BlockKind::Body`] blocks to [`BlockKind::Heading`] or
-/// [`BlockKind::Caption`] based on (1) the PDF outline that
-/// [`crate::pdf::build_toc`] already attached to `toc`, and (2) a
-/// text-pattern + geometry heuristic over [`Block::style`]. Blocks
-/// outside [`BlockKind::Body`] are left untouched, so a second pass
-/// over the same input is a no-op.
+/// The pass is precision-first: it would rather miss a real heading
+/// than admit a noise line that looks "heading-shaped." Two modes,
+/// chosen by whether the PDF outline is usable:
 ///
-/// The returned [`SourceOfStructure`] records which signal contributed
-/// — `Outline` when only the outline path produced hits, `Heuristic`
-/// when only the rule set did, `Mixed` when both did, and `None` when
-/// no heading was identified at all (the paper appears flat).
+/// 1. **Outline-trust mode.** When the PDF's `/Outline` carries three
+///    or more anchored entries at depth ≥ 1 after the figure /
+///    table-caption labels are filtered out, the outline is the only
+///    signal. Each surviving entry's anchor block is promoted to
+///    `BlockKind::Heading { level }` (depth 0 → level 1, depth ≥ 1 →
+///    level 2). The heuristic does not run.
+/// 2. **Strict-numbered heuristic.** Used only when the outline is
+///    absent or too thin to trust. The heuristic accepts a candidate
+///    only when every rule below is satisfied, and then runs a
+///    sequence check (1, 2, 3, … or I, II, III, …) over the surviving
+///    set, dropping any candidate that does not fit the ascending
+///    series.
+///
+/// In either mode a separate caption pass colors strict `Figure N.` /
+/// `Table N.` / Chinese `\u{56fe}` / `\u{8868}` lines as
+/// [`BlockKind::Caption`].
+///
+/// The returned [`SourceOfStructure`] records which signal contributed:
+/// `Outline`, `Heuristic`, `Mixed` when both did, and `None` when the
+/// paper produced no surviving headings at all — that is an explicit,
+/// safe-to-display answer, not a failure.
 pub fn extract_paper_structured(blocks: &mut [Block], toc: &Toc) -> SourceOfStructure {
-    let mut outline_hits = 0usize;
-    let mut heuristic_hits = 0usize;
+    // 1. Caption coloring. Strict head pattern: must have the
+    //    introducer word + a number + a separator (period, colon,
+    //    hyphen, or whitespace before non-space text). Runs first so
+    //    a captioned line never enters the heading candidate pool.
+    for block in blocks.iter_mut() {
+        if !matches!(block.kind, BlockKind::Body) {
+            continue;
+        }
+        if STRICT_CAPTION_HEAD.is_match(block.text.trim_start()) {
+            block.kind = BlockKind::Caption;
+        }
+    }
 
-    // 1. Outline path. A `/Outline` that resolves at least two block
-    // anchors and reports depth ≥ 1 (i.e. holds a non-flat tree once a
-    // root entry is excluded) is treated as authoritative for those
-    // anchored blocks; everything else falls through to the heuristic.
-    let outline_usable = toc
-        .entries
-        .iter()
-        .filter(|e| e.start_block.is_some())
-        .count()
-        >= 2
-        && toc.entries.iter().map(|e| e.depth).max().unwrap_or(0) >= 1;
-    if outline_usable {
-        for entry in &toc.entries {
-            let Some(idx) = entry.start_block else {
+    // 2. Outline-guided heading promotion. The PDF outline anchors a
+    //    label to a page, and `crate::pdf::build_toc` resolves that to
+    //    the first block on (or after) the target page. That anchor
+    //    block is rarely the heading text itself — it is whatever
+    //    block sat at the top of the page (a running header, an
+    //    affiliation line, a continued paragraph). So instead of
+    //    coloring the anchor directly, we walk a small window forward
+    //    from it looking for a block that both passes the strict
+    //    heading gate and matches the outline label. If we find one,
+    //    that block is the heading.
+    let mut outline_hits = 0usize;
+    if !toc.entries.is_empty() {
+        let entries: Vec<&TocEntry> = toc
+            .entries
+            .iter()
+            .filter(|e| e.start_block.is_some())
+            .filter(|e| !FIGURE_CAPTION_LABEL.is_match(e.label.trim_start()))
+            .collect();
+        for entry in entries {
+            let Some(anchor) = entry.start_block else {
                 continue;
             };
-            let Some(block) = blocks.get_mut(idx) else {
-                continue;
-            };
-            if matches!(block.kind, BlockKind::Body) {
+            if let Some(target) = locate_outline_heading(blocks, anchor, &entry.label) {
                 let level = if entry.depth == 0 { 1 } else { 2 };
-                block.kind = BlockKind::Heading { level };
+                blocks[target].kind = BlockKind::Heading { level };
                 outline_hits += 1;
             }
         }
     }
 
-    // 2. Caption coloring. A short body block whose head matches the
-    // figure / table introducer regex switches to Caption. Runs before
-    // the heading heuristic so a captioned line never enters the
-    // candidate pool.
-    for block in blocks.iter_mut() {
-        if !matches!(block.kind, BlockKind::Body) {
-            continue;
-        }
-        if CAPTION_HEAD.is_match(block.text.trim_start()) {
-            block.kind = BlockKind::Caption;
-        }
-    }
-
-    // 3. Heuristic heading scoring. Per-page font-size median anchors
-    // the "larger than body" signal; blocks with no `style` (older
-    // envelopes, OCR, non-PDF adapters) skip the pass entirely and stay
-    // Body — the outline path is the only way they can be colored.
-    let page_median = page_font_medians(blocks);
-    let mut candidates: Vec<(usize, u8)> = Vec::new();
-    for (i, block) in blocks.iter().enumerate() {
-        if !matches!(block.kind, BlockKind::Body) {
-            continue;
-        }
-        let Some(style) = block.style.as_ref() else {
-            continue;
-        };
-        let page_med = page_median
-            .iter()
-            .find(|(page, _)| *page == block.source_unit)
-            .map(|(_, m)| *m)
-            .unwrap_or(0.0);
-        if let Some(level) = score_as_heading(&block.text, style, page_med) {
-            candidates.push((i, level));
-        }
-    }
-
-    // 4. Cross-page running-header dedup. Candidates whose
-    // case-folded, whitespace-collapsed text recurs on three or more
-    // distinct pages are dropped wholesale — these are the running
-    // headers / journal mastheads `build_blocks` cannot filter (they
-    // sit above the 80-char short-paragraph cap or carry per-page
-    // tail noise that breaks exact-text dedup).
-    let mut buckets: Vec<(String, Vec<(usize, u32)>)> = Vec::new();
-    for &(i, _) in &candidates {
-        let key = dedup_key(&blocks[i].text);
-        if let Some(bucket) = buckets.iter_mut().find(|(k, _)| k == &key) {
-            bucket.1.push((i, blocks[i].source_unit));
-        } else {
-            buckets.push((key, vec![(i, blocks[i].source_unit)]));
-        }
-    }
-    let mut dropped: Vec<usize> = Vec::new();
-    for (_, entries) in &buckets {
-        let mut pages: Vec<u32> = entries.iter().map(|(_, p)| *p).collect();
-        pages.sort_unstable();
-        pages.dedup();
-        if pages.len() >= 3 {
-            dropped.extend(entries.iter().map(|(i, _)| *i));
-        }
-    }
-
-    for (i, level) in candidates {
-        if dropped.contains(&i) {
-            continue;
-        }
-        if matches!(blocks[i].kind, BlockKind::Body) {
-            blocks[i].kind = BlockKind::Heading { level };
+    // 3. Strict-numbered heuristic over any block the outline pass
+    //    left untouched. Sequence validation drops any candidate
+    //    whose number does not advance the ascending series at its
+    //    level. The validation walks every block in order — including
+    //    the ones the outline pass already promoted — so an
+    //    outline-anchored "2 Background" lets the heuristic recognise
+    //    "3 Model Architecture" as the next L1 even though the outline
+    //    skipped over it.
+    let candidates = collect_strict_candidates(blocks);
+    let accepted = validate_sequence(blocks, &candidates);
+    let mut heuristic_hits = 0usize;
+    for cand in accepted {
+        if matches!(blocks[cand.block_idx].kind, BlockKind::Body) {
+            blocks[cand.block_idx].kind = BlockKind::Heading { level: cand.level };
             heuristic_hits += 1;
         }
     }
@@ -336,131 +309,415 @@ pub fn extract_paper_structured(blocks: &mut [Block], toc: &Toc) -> SourceOfStru
     }
 }
 
-/// Per-page median of `style.font_size_median` over the blocks the
-/// score function reads as body candidates. Page entries are returned
-/// in first-encounter order; the small linear lookup at the call site
-/// is faster than building a hash map for the handful of pages a paper
-/// holds.
-fn page_font_medians(blocks: &[Block]) -> Vec<(u32, f32)> {
-    let mut by_page: Vec<(u32, Vec<f32>)> = Vec::new();
-    for block in blocks {
-        let Some(style) = block.style.as_ref() else {
-            continue;
-        };
-        if let Some((_, v)) = by_page.iter_mut().find(|(p, _)| *p == block.source_unit) {
-            v.push(style.font_size_median);
-        } else {
-            by_page.push((block.source_unit, vec![style.font_size_median]));
+/// Walk forward from `anchor` searching for the body block whose
+/// trimmed text matches the outline label after the leading numeric
+/// prefix is stripped from both sides. Search ends once we leave the
+/// anchor's page family — outline anchors that miss by more than one
+/// page typically point at a removed section and produce noise when
+/// matched too greedily.
+fn locate_outline_heading(blocks: &[Block], anchor: usize, label: &str) -> Option<usize> {
+    let label_key = normalize_label(label);
+    if label_key.is_empty() {
+        return None;
+    }
+    let anchor_page = blocks.get(anchor).map(|b| b.source_unit).unwrap_or(0);
+    for idx in anchor..blocks.len() {
+        let block = &blocks[idx];
+        // Stay within the anchor's own page and the page after — the
+        // outline is page-accurate within one page in practice.
+        if block.source_unit > anchor_page + 1 {
+            break;
         }
-    }
-    by_page
-        .into_iter()
-        .map(|(page, mut sizes)| {
-            sizes.sort_by(f32::total_cmp);
-            let median = if sizes.is_empty() {
-                0.0
-            } else {
-                sizes[sizes.len() / 2]
-            };
-            (page, median)
-        })
-        .collect()
-}
-
-/// Score one body block against the pdffigures2 SectionTitleExtractor
-/// rule set and return the heading level if it survives.
-///
-/// Rejections come first (a block that fails any one is not a heading
-/// no matter how the rest score); additive signals follow and produce
-/// a heading when at least two coincide. The level comes from the
-/// numbered-prefix matcher when present, otherwise defaults to 1.
-fn score_as_heading(text: &str, style: &BlockStyle, page_font_median: f32) -> Option<u8> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if style.line_count > 3 {
-        return None;
-    }
-    let first = trimmed.chars().next()?;
-    if first.is_ascii_lowercase() {
-        return None;
-    }
-    let lower = ascii_lower(trimmed);
-    if HEADING_BLACKLIST_PREFIXES
-        .iter()
-        .any(|p| lower.starts_with(p))
-    {
-        return None;
-    }
-    if TEMPLATE_HEAD.is_match(trimmed) {
-        return None;
-    }
-    if math_unicode_ratio(trimmed) > 0.4 {
-        return None;
-    }
-
-    let mut score: u8 = 0;
-    let mut level: u8 = 1;
-
-    if page_font_median > 0.1 && style.font_size_median > page_font_median + 0.5 {
-        score += 1;
-    }
-    if style.is_bold_majority {
-        score += 1;
-    }
-    if style.above_gap_ratio > 1.2 {
-        score += 1;
-    }
-    if let Some(numbered_level) = numbered_level(trimmed) {
-        score += 1;
-        level = numbered_level;
-    }
-
-    if score >= 2 { Some(level) } else { None }
-}
-
-/// Map a numbered prefix to a heading depth. Supported families:
-///
-/// - Arabic `1.` / `1.1` / `1.1.1` → depth = number of dot-separated
-///   components, capped at 3.
-/// - Arabic `1` followed by a space and non-digit text → depth 1.
-/// - Upper-case Roman numerals `IV.` / `XII` → depth 1.
-/// - ASCII `A.` / `B.` (single letter + period) → depth 2.
-/// - `Appendix` (case-insensitive) → depth 1.
-/// - CJK ordinal headings `\u{7b2c}{count}\u{7ae0}` / `\u{7b2c}{count}\u{8282}`
-///   ("Chapter / Section N") → depth 1 / 2.
-fn numbered_level(text: &str) -> Option<u8> {
-    if APPENDIX_RE.is_match(text) {
-        return Some(1);
-    }
-    if let Some(caps) = ARABIC_NUMBERED_RE.captures(text) {
-        let prefix = caps.get(1)?.as_str();
-        let depth = prefix.split('.').count() as u8;
-        return Some(depth.min(3));
-    }
-    if ARABIC_BARE_RE.is_match(text) {
-        return Some(1);
-    }
-    if ROMAN_RE.is_match(text) {
-        return Some(1);
-    }
-    if LETTER_RE.is_match(text) {
-        return Some(2);
-    }
-    // \u{7b2c}\u{4e00}\u{7ae0} / \u{7b2c}1\u{7ae0} / \u{7b2c} 1 \u{7ae0}
-    if CJK_CHAPTER_RE.is_match(text) {
-        return Some(1);
-    }
-    if CJK_SECTION_RE.is_match(text) {
-        return Some(2);
+        if !matches!(block.kind, BlockKind::Body) {
+            continue;
+        }
+        let trimmed = block.text.trim();
+        let block_chars = trimmed.chars().count();
+        // A real heading block stays close to its label in length —
+        // 80 characters is the same cap the heuristic uses. Anything
+        // longer is body text that swallowed the heading; matching it
+        // produces "References [1] Hasan Abu-Rasheed…" style noise.
+        if !(3..=80).contains(&block_chars) {
+            continue;
+        }
+        // Block geometry must not be smaller than body text — a
+        // sub-body font is a subscript / footnote marker, not a
+        // heading. And a real heading is a single physical line: a
+        // multi-line block has body text merged in, which produces
+        // "Competing interests The authors declare …" noise on
+        // tightly-set journal layouts.
+        if let Some(style) = block.style.as_ref() {
+            if style.line_count != 1 {
+                continue;
+            }
+            let page_med = page_font_median(blocks, block.source_unit);
+            if page_med > 0.1 && style.font_size_median < page_med * 0.95 {
+                continue;
+            }
+        }
+        let block_key = normalize_label(trimmed);
+        if block_key.is_empty() {
+            continue;
+        }
+        if block_key.starts_with(&label_key) || label_key.starts_with(&block_key) {
+            return Some(idx);
+        }
     }
     None
 }
 
-/// A non-allocating ASCII-only lower-case for the blacklist check. The
-/// non-ASCII bytes are passed through verbatim; the blacklist itself is
-/// ASCII so the comparison stays correct on mixed-script headings.
+/// Lower-case the ASCII portion, strip any leading numeric / Roman
+/// prefix, collapse runs of whitespace, and trim. The result is used
+/// purely as a prefix-comparison key — never displayed to a user.
+fn normalize_label(s: &str) -> String {
+    let mut start = 0;
+    let bytes = s.as_bytes();
+    // Skip any leading "N.M.P " / "1." / "I." / "Appendix " sort of
+    // numeric prefix so the comparison falls on the title words.
+    while start < bytes.len() {
+        let c = bytes[start];
+        if c.is_ascii_digit() || matches!(c, b'.' | b' ' | b'\t' | b'I' | b'V' | b'X') {
+            start += 1;
+            continue;
+        }
+        break;
+    }
+    let tail = &s[start..];
+    let mut out = String::with_capacity(tail.len());
+    let mut last_space = true;
+    for c in tail.chars() {
+        if c.is_whitespace() {
+            if !last_space {
+                out.push(' ');
+                last_space = true;
+            }
+            continue;
+        }
+        if c.is_ascii_uppercase() {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+        last_space = false;
+    }
+    out.trim().to_string()
+}
+
+/// One block that survived every strict filter and is a candidate for
+/// promotion to `BlockKind::Heading`. Sequence validation later
+/// rejects any candidate whose numeric prefix does not advance the
+/// ascending series at its level.
+struct StrictCandidate {
+    block_idx: usize,
+    level: u8,
+    numbers: Vec<u32>,
+    is_roman: bool,
+    is_appendix: bool,
+}
+
+/// Walk every Body block and yield those that pass the strict heading
+/// gate: numbered prefix, single line, short text, no math operators,
+/// no boilerplate prefix, geometry consistent with a heading. The
+/// caller still has to validate the sequence — this pass is the
+/// per-block filter, not the global decision.
+fn collect_strict_candidates(blocks: &[Block]) -> Vec<StrictCandidate> {
+    let mut out: Vec<StrictCandidate> = Vec::new();
+    for (i, block) in blocks.iter().enumerate() {
+        if !matches!(block.kind, BlockKind::Body) {
+            continue;
+        }
+        let Some(style) = block.style.as_ref() else {
+            continue;
+        };
+        if style.line_count != 1 {
+            continue;
+        }
+        let trimmed = block.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let char_count = trimmed.chars().count();
+        if !(2..=80).contains(&char_count) {
+            continue;
+        }
+        if contains_math_or_symbol(trimmed) {
+            continue;
+        }
+        if trimmed.contains('@') {
+            continue;
+        }
+        let lower = ascii_lower(trimmed);
+        if BLACKLIST_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+            continue;
+        }
+        if TEMPLATE_HEAD.is_match(trimmed) {
+            continue;
+        }
+        let Some((level, numbers, is_roman, is_appendix)) = parse_numbered_prefix(trimmed) else {
+            continue;
+        };
+        // For Arabic-numbered candidates, require a corroborating
+        // geometry signal — a bold majority OR a font noticeably
+        // larger than the page median. A bare numbered line at body
+        // weight is almost always a list item. Roman and Appendix
+        // markers carry their own rarity: they almost never appear
+        // mid-body and don't need a geometry signal to clear the gate.
+        if !is_roman && !is_appendix {
+            let page_med = page_font_median(blocks, block.source_unit);
+            let geometry_ok = style.is_bold_majority
+                || (page_med > 0.1 && style.font_size_median > page_med * 1.1);
+            if !geometry_ok {
+                continue;
+            }
+        }
+        out.push(StrictCandidate {
+            block_idx: i,
+            level,
+            numbers,
+            is_roman,
+            is_appendix,
+        });
+    }
+    out
+}
+
+/// Walk every block in order and decide which candidates fit the
+/// ascending section sequence. The walk interleaves two things:
+///
+/// 1. Any block that the outline pass already promoted to a
+///    [`BlockKind::Heading`] is *absorbed* into the sequence state.
+///    Its decoded number simply advances the state to that point —
+///    accepted regardless of whether it would have matched
+///    "expected next" from the previous state. This lets the outline
+///    skip past a heading the heuristic would otherwise demand in
+///    order.
+/// 2. Strict candidates (still-Body blocks that passed
+///    [`collect_strict_candidates`]) accept only when they match the
+///    state's "expected next". The sequence model is precision-first:
+///    a numbered jump (1 → 47) or a skipped level (1 then 1.1.1 with
+///    no intermediate 1.1) drops the candidate.
+///
+/// `candidates` is the output of [`collect_strict_candidates`], in
+/// block-index order.
+fn validate_sequence<'a>(
+    blocks: &[Block],
+    candidates: &'a [StrictCandidate],
+) -> Vec<&'a StrictCandidate> {
+    let mut accepted: Vec<&StrictCandidate> = Vec::new();
+    let mut l1: u32 = 0;
+    let mut l2: u32 = 0;
+    let mut l3: u32 = 0;
+    let mut roman_l1: u32 = 0;
+    let mut appendix_seen = false;
+    let mut cand_iter = candidates.iter().peekable();
+
+    for (idx, block) in blocks.iter().enumerate() {
+        // First: absorb outline-promoted Headings into the state by
+        // re-decoding their numbered prefix. The outline guarantees
+        // the block is a real heading; we just need to know where it
+        // sits in the sequence.
+        if matches!(block.kind, BlockKind::Heading { .. }) {
+            if let Some((level, numbers, is_roman, is_appendix)) =
+                parse_numbered_prefix(block.text.trim())
+            {
+                if is_appendix {
+                    appendix_seen = true;
+                } else if is_roman {
+                    if let Some(n) = numbers.first().copied() {
+                        roman_l1 = n;
+                    }
+                } else {
+                    match level {
+                        1 => {
+                            if let Some(n) = numbers.first().copied() {
+                                l1 = n;
+                                l2 = 0;
+                                l3 = 0;
+                            }
+                        }
+                        2 => {
+                            if let (Some(a), Some(b)) =
+                                (numbers.first().copied(), numbers.get(1).copied())
+                            {
+                                l1 = a;
+                                l2 = b;
+                                l3 = 0;
+                            }
+                        }
+                        3 => {
+                            if let (Some(a), Some(b), Some(c)) = (
+                                numbers.first().copied(),
+                                numbers.get(1).copied(),
+                                numbers.get(2).copied(),
+                            ) {
+                                l1 = a;
+                                l2 = b;
+                                l3 = c;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+        // Otherwise: if this block is a candidate at the current
+        // index, check whether it advances the sequence.
+        let Some(cand) = cand_iter.peek().filter(|c| c.block_idx == idx).copied() else {
+            continue;
+        };
+        cand_iter.next();
+        if cand.is_appendix {
+            if !appendix_seen {
+                appendix_seen = true;
+                accepted.push(cand);
+            }
+            continue;
+        }
+        if cand.is_roman {
+            let expected = roman_l1 + 1;
+            if cand.numbers.first().copied() == Some(expected) {
+                roman_l1 = expected;
+                accepted.push(cand);
+            }
+            continue;
+        }
+        match cand.level {
+            1 if cand.numbers.first().copied() == Some(l1 + 1) => {
+                l1 += 1;
+                l2 = 0;
+                l3 = 0;
+                accepted.push(cand);
+            }
+            2 if cand.numbers.first().copied() == Some(l1)
+                && cand.numbers.get(1).copied() == Some(l2 + 1) =>
+            {
+                l2 += 1;
+                l3 = 0;
+                accepted.push(cand);
+            }
+            3 if cand.numbers.first().copied() == Some(l1)
+                && cand.numbers.get(1).copied() == Some(l2)
+                && cand.numbers.get(2).copied() == Some(l3 + 1) =>
+            {
+                l3 += 1;
+                accepted.push(cand);
+            }
+            _ => {}
+        }
+    }
+    accepted
+}
+
+/// Median of `style.font_size_median` over the Body blocks on the
+/// requested page. Used as the "body baseline" against which the
+/// heading heuristic asks whether a candidate is noticeably larger.
+fn page_font_median(blocks: &[Block], page: u32) -> f32 {
+    let mut sizes: Vec<f32> = blocks
+        .iter()
+        .filter(|b| b.source_unit == page && matches!(b.kind, BlockKind::Body))
+        .filter_map(|b| b.style.as_ref().map(|s| s.font_size_median))
+        .collect();
+    if sizes.is_empty() {
+        return 0.0;
+    }
+    sizes.sort_by(f32::total_cmp);
+    sizes[sizes.len() / 2]
+}
+
+/// Parse the leading numbered prefix of a heading candidate. Returns
+/// the heading level, the decoded numeric components, and the
+/// Roman / Appendix flags that drive sequence validation.
+///
+/// Patterns, tried in order of specificity:
+/// - `N.M.P` followed by a Latin or CJK letter — level 3.
+/// - `N.M` followed by a Latin or CJK letter — level 2.
+/// - `N.` or `N` followed by a Latin or CJK letter — level 1.
+/// - `I.` / `IV.` Roman + Latin/CJK letter — level 1 Roman.
+/// - `Appendix` — level 1 Appendix.
+///
+/// In every Arabic pattern the character following the number must be
+/// a letter, not another digit. This single rule kills table-row
+/// noise ("1 512 512 5.29") that previously sneaked through.
+fn parse_numbered_prefix(trimmed: &str) -> Option<(u8, Vec<u32>, bool, bool)> {
+    if APPENDIX_RE.is_match(trimmed) {
+        return Some((1, Vec::new(), false, true));
+    }
+    if let Some(caps) = ARABIC_TRIPLE_RE.captures(trimmed) {
+        let a: u32 = caps[1].parse().ok()?;
+        let b: u32 = caps[2].parse().ok()?;
+        let c: u32 = caps[3].parse().ok()?;
+        return Some((3, vec![a, b, c], false, false));
+    }
+    if let Some(caps) = ARABIC_DOUBLE_RE.captures(trimmed) {
+        let a: u32 = caps[1].parse().ok()?;
+        let b: u32 = caps[2].parse().ok()?;
+        return Some((2, vec![a, b], false, false));
+    }
+    if let Some(caps) = ARABIC_SINGLE_RE.captures(trimmed) {
+        let a: u32 = caps[1].parse().ok()?;
+        return Some((1, vec![a], false, false));
+    }
+    if let Some(caps) = ROMAN_RE.captures(trimmed) {
+        let n = roman_value(&caps[1])?;
+        return Some((1, vec![n], true, false));
+    }
+    None
+}
+
+/// Decode a 1..=30 Roman numeral. Returns `None` for syntactically
+/// valid but out-of-range inputs so a stray `XL` token does not anchor
+/// a fake sequence.
+fn roman_value(s: &str) -> Option<u32> {
+    let mut total: i64 = 0;
+    let mut prev: i64 = 0;
+    for c in s.chars().rev() {
+        let v: i64 = match c {
+            'I' => 1,
+            'V' => 5,
+            'X' => 10,
+            _ => return None,
+        };
+        if v < prev {
+            total -= v;
+        } else {
+            total += v;
+        }
+        prev = v;
+    }
+    if (1..=30).contains(&total) {
+        Some(total as u32)
+    } else {
+        None
+    }
+}
+
+/// Reject a block whose text contains any Unicode math operator,
+/// arrow, technical symbol, or geometric shape. The strict heading
+/// gate uses this to kill equation lines outright — recall on
+/// equation-headed propositions like "1.2. Proposition. F = …" is
+/// sacrificed deliberately.
+fn contains_math_or_symbol(text: &str) -> bool {
+    for c in text.chars() {
+        let v = c as u32;
+        if (0x2190..=0x21FF).contains(&v)    // Arrows
+            || (0x2200..=0x22FF).contains(&v) // Mathematical Operators
+            || (0x2300..=0x23FF).contains(&v) // Miscellaneous Technical
+            || (0x25A0..=0x25FF).contains(&v) // Geometric Shapes (covers \u{25b3})
+            || (0x27C0..=0x27EF).contains(&v) // Miscellaneous Mathematical Symbols-A
+            || (0x2980..=0x29FF).contains(&v) // Miscellaneous Mathematical Symbols-B
+            || (0x2A00..=0x2AFF).contains(&v)
+        // Supplemental Mathematical Operators
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// ASCII-only lower-casing for the boilerplate-prefix blacklist. CJK
+/// and other non-ASCII characters pass through unchanged because they
+/// are not part of any blacklist entry.
 fn ascii_lower(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -473,67 +730,10 @@ fn ascii_lower(s: &str) -> String {
     out
 }
 
-/// Share of characters in `text` that fall in the Unicode mathematical
-/// operator / symbol / supplemental-operator blocks. Above 40 % the
-/// block is treated as an equation, not a heading.
-fn math_unicode_ratio(text: &str) -> f32 {
-    let mut math = 0usize;
-    let mut total = 0usize;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            continue;
-        }
-        total += 1;
-        let v = c as u32;
-        // U+2200..U+22FF Mathematical Operators;
-        // U+27C0..U+27EF Miscellaneous Mathematical Symbols-A;
-        // U+2980..U+29FF Miscellaneous Mathematical Symbols-B;
-        // U+2A00..U+2AFF Supplemental Mathematical Operators.
-        if (0x2200..=0x22FF).contains(&v)
-            || (0x27C0..=0x27EF).contains(&v)
-            || (0x2980..=0x29FF).contains(&v)
-            || (0x2A00..=0x2AFF).contains(&v)
-        {
-            math += 1;
-        }
-    }
-    if total == 0 {
-        0.0
-    } else {
-        math as f32 / total as f32
-    }
-}
-
-/// Case-folded, whitespace-collapsed key for cross-page heading dedup.
-/// Two running-header candidates that differ only in surrounding white
-/// space or letter case land in the same bucket.
-fn dedup_key(text: &str) -> String {
-    let mut buf = String::with_capacity(text.len());
-    let mut last_space = true;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if !last_space {
-                buf.push(' ');
-                last_space = true;
-            }
-            continue;
-        }
-        if c.is_ascii_uppercase() {
-            buf.push(c.to_ascii_lowercase());
-        } else {
-            buf.push(c);
-        }
-        last_space = false;
-    }
-    buf.trim().to_string()
-}
-
-/// Heading prefixes the scoring stage rejects outright. Each entry is
+/// Heading prefixes the strict gate rejects outright. Each entry is
 /// matched against the ASCII-lower-cased candidate; non-ASCII tail
-/// passes through untouched. Drawn from pdffigures2 plus the
-/// boilerplate phrases the Phase 3 spike flagged as common false
-/// positives over the validation set.
-const HEADING_BLACKLIST_PREFIXES: &[&str] = &[
+/// passes through untouched.
+const BLACKLIST_PREFIXES: &[&str] = &[
     "we ",
     "the ",
     "in ",
@@ -544,18 +744,22 @@ const HEADING_BLACKLIST_PREFIXES: &[&str] = &[
     "doi:",
     "https://",
     "http://",
+    "vol.",
+    "volume ",
+    "issn ",
+    "issn:",
+    "received ",
+    "accepted ",
+    "published ",
 ];
 
-static CAPTION_HEAD: LazyLock<Regex> = LazyLock::new(|| {
-    // English "Figure 1.", "Fig 1:", "Table 2-3.", plus the Chinese
-    // counterparts "\u{56fe} 1" and "\u{8868} 2". Anchored at the start
-    // of the trimmed block text.
+static STRICT_CAPTION_HEAD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"^(?:Figure|Fig\.?|Table|",
         "\u{56fe}|\u{8868}",
         r")\s*\d+(?:[.:\-]|\s+\S)",
     ))
-    .expect("caption head regex")
+    .expect("strict caption head regex")
 });
 
 static TEMPLATE_HEAD: LazyLock<Regex> = LazyLock::new(|| {
@@ -564,39 +768,32 @@ static TEMPLATE_HEAD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static APPENDIX_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?i)Appendix(\s|\.|:)").expect("appendix regex"));
+    LazyLock::new(|| Regex::new(r"^(?i)Appendix\b").expect("appendix regex"));
 
-static ARABIC_NUMBERED_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Captures the dotted prefix so the caller can count depth.
-    Regex::new(r"^([1-9][0-9]*(?:\.[0-9]+){0,2})\.?\s+\S").expect("arabic numbered regex")
+static ARABIC_TRIPLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([1-9][0-9]?)\.([1-9][0-9]?)\.([1-9][0-9]?)\.?\s+[A-Za-z\u{4e00}-\u{9fff}]")
+        .expect("arabic triple regex")
 });
 
-static ARABIC_BARE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[1-9][0-9]*\s+[A-Za-z\u{4e00}-\u{9fff}]").expect("arabic bare regex")
+static ARABIC_DOUBLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([1-9][0-9]?)\.([1-9][0-9]?)\.?\s+[A-Za-z\u{4e00}-\u{9fff}]")
+        .expect("arabic double regex")
+});
+
+static ARABIC_SINGLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([1-9][0-9]?)\.?\s+[A-Za-z\u{4e00}-\u{9fff}]").expect("arabic single regex")
 });
 
 static ROMAN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[IVX]+\.\s+\S").expect("roman regex"));
+    LazyLock::new(|| Regex::new(r"^([IVX]+)\.\s+[A-Za-z\u{4e00}-\u{9fff}]").expect("roman regex"));
 
-static LETTER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Z]\.\s+\S").expect("letter regex"));
-
-static CJK_CHAPTER_RE: LazyLock<Regex> = LazyLock::new(|| {
+static FIGURE_CAPTION_LABEL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        "^\u{7b2c}",
-        r"\s*[\u{4e00}-\u{9fff}0-9]+\s*",
-        "\u{7ae0}",
+        r"^(?i)(?:Figure|Fig\.?|Table|",
+        "\u{56fe}|\u{8868}",
+        r"|Equation|Eq\.?|Algorithm)\s*\d",
     ))
-    .expect("cjk chapter regex")
-});
-
-static CJK_SECTION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(
-        "^\u{7b2c}",
-        r"\s*[\u{4e00}-\u{9fff}0-9]+\s*",
-        "\u{8282}",
-    ))
-    .expect("cjk section regex")
+    .expect("figure caption label regex")
 });
 
 /// Round `idx` down to the nearest UTF-8 character boundary in `s`,
@@ -710,6 +907,8 @@ mod tests {
         assert!(normalized.contains(".\n\u{5173}\u{952E}\u{8BCD}"));
     }
 
+    use crate::contract::{BlockStyle, TocEntry};
+
     fn body_block(text: &str, page: u32, style: Option<BlockStyle>) -> Block {
         Block {
             kind: BlockKind::Body,
@@ -731,25 +930,34 @@ mod tests {
     }
 
     #[test]
-    fn outline_path_promotes_anchored_blocks() {
+    fn outline_trusted_mode_colors_only_outline_entries() {
+        // Outline anchors three real sections; the heuristic does not
+        // run on top.
         let mut blocks = vec![
-            body_block("Title page text.", 0, Some(style(10.0, false, 0.0))),
-            body_block("1. Introduction", 1, Some(style(10.0, false, 0.0))),
-            body_block("Body of intro.", 1, Some(style(10.0, false, 0.0))),
-            body_block("1.1 Motivation", 1, Some(style(10.0, false, 0.0))),
-            body_block("Body of motivation.", 1, Some(style(10.0, false, 0.0))),
+            body_block("Title page text.", 0, Some(style(14.0, true, 0.0))),
+            body_block("1. Introduction", 1, Some(style(12.0, true, 1.5))),
+            body_block("Body of intro.", 1, Some(style(10.0, false, 0.5))),
+            body_block("1.1 Motivation", 1, Some(style(11.0, true, 1.2))),
+            body_block("Body of motivation.", 1, Some(style(10.0, false, 0.5))),
+            body_block("2. Related Work", 2, Some(style(12.0, true, 1.5))),
+            body_block("Body of related.", 2, Some(style(10.0, false, 0.5))),
         ];
         let toc = Toc {
             entries: vec![
-                crate::contract::TocEntry {
+                TocEntry {
                     label: "Introduction".into(),
                     depth: 0,
                     start_block: Some(1),
                 },
-                crate::contract::TocEntry {
+                TocEntry {
                     label: "Motivation".into(),
                     depth: 1,
                     start_block: Some(3),
+                },
+                TocEntry {
+                    label: "Related Work".into(),
+                    depth: 0,
+                    start_block: Some(5),
                 },
             ],
         };
@@ -757,51 +965,186 @@ mod tests {
         assert_eq!(sos, SourceOfStructure::Outline);
         assert_eq!(blocks[1].kind, BlockKind::Heading { level: 1 });
         assert_eq!(blocks[3].kind, BlockKind::Heading { level: 2 });
-        assert_eq!(blocks[0].kind, BlockKind::Body);
-        assert_eq!(blocks[2].kind, BlockKind::Body);
-    }
-
-    #[test]
-    fn heuristic_path_picks_numbered_bold_lines() {
-        // Body baseline at 10 pt; headings at 13 pt, bold, with extra
-        // space above. No outline.
-        let body_style = || Some(style(10.0, false, 0.5));
-        let heading_style = || Some(style(13.0, true, 1.5));
-        let mut blocks = vec![
-            body_block("Some opening text.", 1, body_style()),
-            body_block("1. Introduction", 2, heading_style()),
-            body_block("The introduction body runs here.", 2, body_style()),
-            body_block("2. Related Work", 3, heading_style()),
-            body_block("Related work body.", 3, body_style()),
-        ];
-        let sos = extract_paper_structured(&mut blocks, &Toc::default());
-        assert_eq!(sos, SourceOfStructure::Heuristic);
-        assert_eq!(blocks[1].kind, BlockKind::Heading { level: 1 });
-        assert_eq!(blocks[3].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[5].kind, BlockKind::Heading { level: 1 });
+        // Page-0 title and every body block stay Body.
         assert_eq!(blocks[0].kind, BlockKind::Body);
         assert_eq!(blocks[2].kind, BlockKind::Body);
         assert_eq!(blocks[4].kind, BlockKind::Body);
+        assert_eq!(blocks[6].kind, BlockKind::Body);
     }
 
     #[test]
-    fn heuristic_dedups_running_header_across_three_pages() {
-        let heading_style = || Some(style(13.0, true, 1.5));
-        // The same running-header text appears on three pages: it
-        // would otherwise score as a heading on each page, but the
-        // cross-page dedup drops every instance.
+    fn outline_with_only_figure_entries_falls_back_to_heuristic() {
+        // The outline contains only figure / table anchors; after the
+        // FIGURE_CAPTION_LABEL filter, the trust threshold of three
+        // section-shaped anchors is not met.
         let mut blocks = vec![
-            body_block("Body line one.", 0, Some(style(10.0, false, 0.5))),
-            body_block("Sample Journal Vol. 7", 0, heading_style()),
-            body_block("Body line two.", 1, Some(style(10.0, false, 0.5))),
-            body_block("Sample Journal Vol. 7", 1, heading_style()),
-            body_block("Body line three.", 2, Some(style(10.0, false, 0.5))),
-            body_block("Sample Journal Vol. 7", 2, heading_style()),
+            body_block("Caption 1.", 0, Some(style(10.0, false, 0.5))),
+            body_block("Caption 2.", 1, Some(style(10.0, false, 0.5))),
+            body_block("Caption 3.", 2, Some(style(10.0, false, 0.5))),
+        ];
+        let toc = Toc {
+            entries: vec![
+                TocEntry {
+                    label: "Figure 1: a".into(),
+                    depth: 0,
+                    start_block: Some(0),
+                },
+                TocEntry {
+                    label: "Figure 2: b".into(),
+                    depth: 0,
+                    start_block: Some(1),
+                },
+                TocEntry {
+                    label: "Table 1: c".into(),
+                    depth: 0,
+                    start_block: Some(2),
+                },
+            ],
+        };
+        let sos = extract_paper_structured(&mut blocks, &toc);
+        assert_eq!(
+            sos,
+            SourceOfStructure::None,
+            "no usable outline → no heuristic input either"
+        );
+        assert!(blocks.iter().all(|b| matches!(b.kind, BlockKind::Body)));
+    }
+
+    #[test]
+    fn strict_heuristic_accepts_ascending_arabic_sequence() {
+        let heading = || Some(style(13.0, true, 1.5));
+        let body = || Some(style(10.0, false, 0.5));
+        let mut blocks = vec![
+            // Page 0 noise — skipped wholesale.
+            body_block("Some Big Title", 0, heading()),
+            body_block("First Author Second Author", 0, heading()),
+            // Real sections start page 1.
+            body_block("1 Introduction", 1, heading()),
+            body_block("Body of introduction.", 1, body()),
+            body_block("2 Related Work", 2, heading()),
+            body_block("3 Method", 3, heading()),
+            body_block("3.1 Architecture", 3, heading()),
+            body_block("3.2 Training", 3, heading()),
+            body_block("4 Results", 4, heading()),
+        ];
+        let sos = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(sos, SourceOfStructure::Heuristic);
+        // Page-0 blocks stay Body.
+        assert_eq!(blocks[0].kind, BlockKind::Body);
+        assert_eq!(blocks[1].kind, BlockKind::Body);
+        // Real sections promoted.
+        assert_eq!(blocks[2].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[4].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[5].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[6].kind, BlockKind::Heading { level: 2 });
+        assert_eq!(blocks[7].kind, BlockKind::Heading { level: 2 });
+        assert_eq!(blocks[8].kind, BlockKind::Heading { level: 1 });
+    }
+
+    #[test]
+    fn sequence_check_rejects_table_row_starting_with_digit() {
+        // "1 Introduction" passes, but "1 512 512 5.29" is a table row
+        // — after the leading number comes another digit, so the
+        // regex won't match it. Even if it did, the geometry of a
+        // table row wouldn't pass the bold-or-larger filter.
+        let heading = || Some(style(13.0, true, 1.5));
+        let body = || Some(style(10.0, false, 0.5));
+        let mut blocks = vec![
+            body_block("1 Introduction", 1, heading()),
+            body_block("Body line.", 1, body()),
+            body_block("1 512 512 5.29 24.9", 1, body()),
+            body_block("2 Related Work", 2, heading()),
+        ];
+        let _ = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(blocks[0].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[2].kind, BlockKind::Body, "table row stays Body");
+        assert_eq!(blocks[3].kind, BlockKind::Heading { level: 1 });
+    }
+
+    #[test]
+    fn sequence_check_rejects_out_of_order_numbered_block() {
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![
+            body_block("1 Introduction", 1, heading()),
+            body_block("47 Random Number", 2, heading()),
+            body_block("2 Background", 3, heading()),
+        ];
+        let _ = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(blocks[0].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(
+            blocks[1].kind,
+            BlockKind::Body,
+            "47 is not the next L1 after 1, drop it"
+        );
+        assert_eq!(blocks[2].kind, BlockKind::Heading { level: 1 });
+    }
+
+    #[test]
+    fn sequence_check_rejects_orphan_subsection_under_wrong_parent() {
+        // Without a matching L1, an L2 candidate has no parent.
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![
+            body_block("1 Introduction", 1, heading()),
+            body_block("3.1 Stray Subsection", 1, heading()),
+        ];
+        let _ = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(blocks[0].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(blocks[1].kind, BlockKind::Body);
+    }
+
+    #[test]
+    fn math_lines_are_rejected_outright() {
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![
+            body_block("1 Introduction", 1, heading()),
+            // "2 Z (R + \u{25b3}f) 2 e \u{2212}f dV \u{2265}" contains
+            // \u{25b3} (Geometric Shapes) and \u{2265} (Math Operators).
+            body_block(
+                "2 Z (R + \u{25b3}f) 2 e \u{2212}f dV \u{2265}",
+                1,
+                heading(),
+            ),
+            body_block("2 Background", 2, heading()),
+        ];
+        let _ = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(blocks[0].kind, BlockKind::Heading { level: 1 });
+        assert_eq!(
+            blocks[1].kind,
+            BlockKind::Body,
+            "math line rejected by Unicode block filter"
+        );
+        assert_eq!(blocks[2].kind, BlockKind::Heading { level: 1 });
+    }
+
+    #[test]
+    fn unnumbered_lines_are_always_rejected() {
+        // Even with strong geometry, an un-numbered line is not a
+        // heading under the strict gate.
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![
+            body_block("Introduction", 1, heading()),
+            body_block("Related Work", 2, heading()),
         ];
         let sos = extract_paper_structured(&mut blocks, &Toc::default());
         assert_eq!(sos, SourceOfStructure::None);
-        for block in &blocks {
-            assert_eq!(block.kind, BlockKind::Body, "{:?}", block.text);
-        }
+        assert!(blocks.iter().all(|b| matches!(b.kind, BlockKind::Body)));
+    }
+
+    #[test]
+    fn page_zero_is_accepted_when_it_carries_a_real_heading() {
+        // Page 0 was special-cased through one iteration of the
+        // smoke-test redesign and dropped wholesale, but losing
+        // "1 Introduction" on conference-style two-column papers
+        // (BERT, ACL, …) where sections start on page 0 hurt recall
+        // for no precision gain. The strict gate (numbered prefix +
+        // geometry + sequence) handles page 0 the same as any other
+        // page.
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![body_block("1 Introduction", 0, heading())];
+        let sos = extract_paper_structured(&mut blocks, &Toc::default());
+        assert_eq!(sos, SourceOfStructure::Heuristic);
+        assert_eq!(blocks[0].kind, BlockKind::Heading { level: 1 });
     }
 
     #[test]
@@ -840,41 +1183,64 @@ mod tests {
     }
 
     #[test]
-    fn numbered_level_decodes_dotted_prefix_depth() {
-        assert_eq!(numbered_level("1. Introduction"), Some(1));
-        assert_eq!(numbered_level("1.2 Background"), Some(2));
-        assert_eq!(numbered_level("3.4.5 Inner section"), Some(3));
-        assert_eq!(numbered_level("Appendix A: Details"), Some(1));
-        assert_eq!(numbered_level("IV. Discussion"), Some(1));
-        assert_eq!(numbered_level("A. First letter section"), Some(2));
-        // CJK: "\u{7b2c}1\u{7ae0}" = "Chapter 1"; "\u{7b2c}1\u{8282}" = "Section 1".
+    fn parse_numbered_prefix_decodes_supported_families() {
         assert_eq!(
-            numbered_level("\u{7b2c}1\u{7ae0} \u{5f15}\u{8a00}"),
-            Some(1)
+            parse_numbered_prefix("1. Introduction"),
+            Some((1, vec![1], false, false))
         );
         assert_eq!(
-            numbered_level("\u{7b2c}1\u{8282} \u{80cc}\u{666f}"),
-            Some(2)
+            parse_numbered_prefix("1 Introduction"),
+            Some((1, vec![1], false, false))
         );
-        assert_eq!(numbered_level("Not numbered"), None);
+        assert_eq!(
+            parse_numbered_prefix("1.2 Background"),
+            Some((2, vec![1, 2], false, false))
+        );
+        assert_eq!(
+            parse_numbered_prefix("3.4.5 Inner"),
+            Some((3, vec![3, 4, 5], false, false))
+        );
+        assert_eq!(
+            parse_numbered_prefix("Appendix A: Details"),
+            Some((1, vec![], false, true))
+        );
+        assert_eq!(
+            parse_numbered_prefix("IV. Discussion"),
+            Some((1, vec![4], true, false))
+        );
+        // After the number must be a letter, not a digit.
+        assert_eq!(parse_numbered_prefix("1 512 5.29"), None);
+        // Bare un-numbered text never matches.
+        assert_eq!(parse_numbered_prefix("Introduction"), None);
+        // A solo letter "A. Details" is no longer treated as a heading
+        // marker — too noisy on table-of-contents style enumerations.
+        assert_eq!(parse_numbered_prefix("A. First letter section"), None);
     }
 
     #[test]
-    fn template_blacklist_rejects_definition_and_theorem() {
-        let s = style(13.0, true, 1.5);
-        // "Definition 1." matches the template head — score_as_heading
-        // refuses it even though geometry would otherwise vote yes.
-        assert_eq!(score_as_heading("Definition 1. Some defn.", &s, 10.0), None);
-        assert_eq!(score_as_heading("Theorem 3.2 Big result.", &s, 10.0), None);
-        // "1. Introduction" with the same geometry passes.
-        assert_eq!(score_as_heading("1. Introduction", &s, 10.0), Some(1));
+    fn roman_numeral_value_clamps_to_safe_range() {
+        assert_eq!(roman_value("I"), Some(1));
+        assert_eq!(roman_value("IV"), Some(4));
+        assert_eq!(roman_value("XII"), Some(12));
+        assert_eq!(roman_value("XX"), Some(20));
+        assert_eq!(roman_value("XXX"), Some(30));
+        // Beyond 30 we reject — past that, real papers don't number
+        // sections in Roman.
+        assert_eq!(roman_value("XXXI"), None);
+        // Non-Roman characters reject.
+        assert_eq!(roman_value("XAB"), None);
     }
 
     #[test]
-    fn math_unicode_ratio_rejects_equation_lines() {
-        let s = style(13.0, true, 1.5);
-        // Mostly mathematical operators (U+2200..U+22FF range).
-        let math = "\u{2200}x\u{2208}\u{2115}: x\u{2264}x\u{2295}\u{2207}";
-        assert_eq!(score_as_heading(math, &s, 10.0), None);
+    fn template_words_like_definition_or_theorem_are_blacklisted() {
+        // "Definition 1. …" matches the template head and is rejected
+        // by collect_strict_candidates, not by the sequence stage.
+        let heading = || Some(style(13.0, true, 1.5));
+        let mut blocks = vec![
+            body_block("Definition 1. A defn.", 1, heading()),
+            body_block("Theorem 3.2 Big result.", 1, heading()),
+        ];
+        let _ = extract_paper_structured(&mut blocks, &Toc::default());
+        assert!(blocks.iter().all(|b| matches!(b.kind, BlockKind::Body)));
     }
 }
