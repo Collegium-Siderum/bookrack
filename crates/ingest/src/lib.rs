@@ -1522,6 +1522,7 @@ mod tests {
             kind: BlockKind::Body,
             text: text.to_string(),
             source_unit: unit,
+            style: None,
         }
     }
 
@@ -1530,6 +1531,7 @@ mod tests {
             kind: BlockKind::Heading { level },
             text: text.to_string(),
             source_unit: unit,
+            style: None,
         }
     }
 
@@ -1758,16 +1760,19 @@ mod tests {
                     kind: BlockKind::Footnote,
                     text: "A footnote.".to_string(),
                     source_unit: 0,
+                    style: None,
                 },
                 Block {
                     kind: BlockKind::Caption,
                     text: "A caption.".to_string(),
                     source_unit: 0,
+                    style: None,
                 },
                 Block {
                     kind: BlockKind::Other,
                     text: "Something else.".to_string(),
                     source_unit: 0,
+                    style: None,
                 },
             ],
             Vec::new(),
@@ -1799,6 +1804,7 @@ mod tests {
                 kind: BlockKind::Caption,
                 text: "Lonely caption.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             Vec::new(),
             None,
@@ -1945,6 +1951,7 @@ mod tests {
                 kind: BlockKind::Body,
                 text: "Only paragraph.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             Vec::new(),
             None,
@@ -2331,6 +2338,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2402,6 +2410,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2480,6 +2489,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2543,6 +2553,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2609,6 +2620,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2673,6 +2685,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),
@@ -2736,6 +2749,7 @@ mod book_pipeline_tests {
                 kind: bookrack_extract::BlockKind::Body,
                 text: "A short English body sample for the audit.".to_string(),
                 source_unit: 0,
+                style: None,
             }],
             toc: bookrack_extract::Toc {
                 entries: Vec::new(),

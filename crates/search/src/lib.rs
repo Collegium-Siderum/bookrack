@@ -676,11 +676,13 @@ mod tests {
                         kind: BlockKind::Heading { level: 1 },
                         text: "Chapter One".to_string(),
                         source_unit: 0,
+                        style: None,
                     },
                     Block {
                         kind: BlockKind::Body,
                         text: "The passage body.".to_string(),
                         source_unit: 0,
+                        style: None,
                     },
                 ],
                 vec![TocEntry {
@@ -695,6 +697,7 @@ mod tests {
                     kind: BlockKind::Body,
                     text: "The passage body.".to_string(),
                     source_unit: 0,
+                    style: None,
                 }],
                 Vec::new(),
             )

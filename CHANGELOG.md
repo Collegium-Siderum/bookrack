@@ -73,6 +73,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- The PDF adapter now attaches a `BlockStyle` geometry summary to every
+  paragraph it reconstructs — font-size median and 90th-percentile, a
+  bold-majority flag aggregated from per-character font weights, line
+  count, first-line left coordinate, and a vertical gap above the block
+  normalized by the page's median line height. Book-side TXT / EPUB /
+  OCR adapters leave the field absent; older envelopes deserialize
+  with `style = None` and remain readable. `EXTRACTOR_VERSION` bumps
+  5 → 6; PDF sources need re-ingest before the heading heuristics that
+  consume the geometry can take effect (see `docs/UPGRADE.md`).
+
 - The PDF text-layer quality gate now counts U+FFFD as
   *replacement-character sites* — a `(FFFD | ' ')+` span counts as one
   signal rather than once per glyph — so a TOC dot-leader fill backed

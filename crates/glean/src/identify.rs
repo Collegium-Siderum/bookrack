@@ -228,6 +228,7 @@ mod tests {
                     kind,
                     text: text.to_string(),
                     source_unit,
+                    style: None,
                 })
                 .collect(),
             toc: Toc::default(),

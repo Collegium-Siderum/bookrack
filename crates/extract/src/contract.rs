@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 // consumed one at a time, never held in bulk — boxing would only add an
 // allocation to the hot path for no aggregate-memory gain.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExtractOutcome {
     /// A usable text layer was extracted.
     Extracted(Extraction),
@@ -45,7 +45,7 @@ pub enum ExtractOutcome {
 }
 
 /// One source file, fully extracted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Extraction {
     /// Content blocks in reading order.
     pub blocks: Vec<Block>,
@@ -65,7 +65,7 @@ pub struct Extraction {
 /// only to resolve TOC hrefs onto blocks; once [`TocEntry::start_block`]
 /// is computed they serve no downstream purpose, and a single block can
 /// carry several ids that one field could not represent anyway.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Block {
     /// Coarse extraction-time classification.
     pub kind: BlockKind,
@@ -77,6 +77,35 @@ pub struct Block {
     /// For EPUB, the spine-document index (the reader position); for
     /// PDF, the 0-based page index.
     pub source_unit: u32,
+    /// Geometry summary the heading heuristics consume. Set by the PDF
+    /// adapter; left absent by adapters whose source has no glyph
+    /// geometry (TXT, EPUB, OCR) and by older envelopes that predate
+    /// this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<BlockStyle>,
+}
+
+/// Per-block geometry summary the paper heading heuristics consume.
+/// Carried inside [`Block::style`] as `Some(...)` by the PDF adapter
+/// and `None` by every other source. The numbers are in page
+/// coordinates (PDF points); they are not normalized across pages.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BlockStyle {
+    /// Median character font size across the block.
+    pub font_size_median: f32,
+    /// 90th-percentile character font size. Sits above the median when
+    /// the block mixes small caps or a slightly larger lead character.
+    pub font_size_p90: f32,
+    /// True when over 50 % of the block's characters carry a bold font
+    /// weight (PDF font weight ≥ 600, aggregated per character).
+    pub is_bold_majority: bool,
+    /// Physical line count.
+    pub line_count: u32,
+    /// Left coordinate of the block's first line.
+    pub x0_first_line: f32,
+    /// Vertical gap above the block, normalized by the page's median
+    /// line height. 0 at the top of a page or across a page break.
+    pub above_gap_ratio: f32,
 }
 
 /// Coarse block classification. Deliberately fewer values than the
@@ -332,16 +361,19 @@ mod tests {
                     kind: BlockKind::Heading { level: 1 },
                     text: "Chapter One".into(),
                     source_unit: 0,
+                    style: None,
                 },
                 Block {
                     kind: BlockKind::Body,
                     text: "Some prose here.".into(),
                     source_unit: 0,
+                    style: None,
                 },
                 Block {
                     kind: BlockKind::Footnote,
                     text: "A footnote body.".into(),
                     source_unit: 1,
+                    style: None,
                 },
             ],
             toc: Toc {

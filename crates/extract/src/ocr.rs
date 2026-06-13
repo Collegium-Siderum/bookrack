@@ -281,6 +281,7 @@ fn blocks_from_pages(pages: &[Page]) -> Vec<Block> {
                 kind: BlockKind::Body,
                 text: paragraph,
                 source_unit,
+                style: None,
             });
         }
     }

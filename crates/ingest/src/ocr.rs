@@ -507,6 +507,7 @@ mod tests {
                 kind: BlockKind::Body,
                 text: format!("body for sheet {sheet}"),
                 source_unit: sheet - 1,
+                style: None,
             })
             .collect();
         Extraction {

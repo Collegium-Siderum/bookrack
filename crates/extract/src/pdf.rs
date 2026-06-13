@@ -44,8 +44,8 @@ use pdfium_render::prelude::*;
 
 use crate::EXTRACTOR_VERSION;
 use crate::contract::{
-    Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, ExtractOutcome,
-    Extraction, Provenance, SkippedUnit, Toc, TocEntry,
+    Biblio, Block, BlockKind, BlockStyle, Contributor, ContributorRole, ExtractError,
+    ExtractOutcome, Extraction, Provenance, SkippedUnit, Toc, TocEntry,
 };
 use crate::quality::{self, QualityDecision};
 
@@ -371,7 +371,16 @@ fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
 /// One page's reconstructed paragraphs, tagged with its page number.
 struct PageParagraphs {
     page: u32,
-    paragraphs: Vec<String>,
+    paragraphs: Vec<Paragraph>,
+}
+
+/// One reconstructed paragraph: the body text plus the geometry summary
+/// the paper heading heuristics consume. `style` is always `Some(...)` on
+/// the PDF path — every paragraph that survives reconstruction was built
+/// from at least one segment whose chars contributed glyph metrics.
+struct Paragraph {
+    text: String,
+    style: Option<BlockStyle>,
 }
 
 /// The longest a paragraph can be and still be taken for a running
@@ -397,9 +406,9 @@ fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
     let mut pages_of: HashMap<&str, HashSet<u32>> = HashMap::new();
     for page in &pages {
         for paragraph in &page.paragraphs {
-            if paragraph.chars().count() <= RUNNING_ELEMENT_MAX_CHARS {
+            if paragraph.text.chars().count() <= RUNNING_ELEMENT_MAX_CHARS {
                 pages_of
-                    .entry(paragraph.as_str())
+                    .entry(paragraph.text.as_str())
                     .or_default()
                     .insert(page.page);
             }
@@ -410,13 +419,14 @@ fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
     let mut blocks = Vec::new();
     for page in &pages {
         for paragraph in &page.paragraphs {
-            if is_page_number(paragraph) || is_running(paragraph) {
+            if is_page_number(&paragraph.text) || is_running(&paragraph.text) {
                 continue;
             }
             blocks.push(Block {
                 kind: BlockKind::Body,
-                text: paragraph.clone(),
+                text: paragraph.text.clone(),
                 source_unit: page.page,
+                style: paragraph.style,
             });
         }
     }
@@ -437,12 +447,19 @@ fn is_page_number(text: &str) -> bool {
 /// One pdfium text segment's geometry: a run of characters sharing a
 /// baseline and font, positioned in page coordinates (origin
 /// bottom-left, y increasing upward). The segment text is deliberately
-/// not kept — see [`build_line`].
+/// not kept — see [`build_line`]. The char-level glyph metrics
+/// `font_sizes` and `bold_chars` are gathered once at segment-collection
+/// time so a later block-level aggregation does not re-iterate the
+/// pdfium char stream.
 struct Seg {
     left: f32,
     right: f32,
     top: f32,
     bottom: f32,
+    /// Per-character scaled font sizes (PDF points), in segment order.
+    font_sizes: Vec<f32>,
+    /// Count of characters with a bold weight (PDF font weight ≥ 600).
+    bold_chars: u32,
 }
 
 impl Seg {
@@ -456,28 +473,58 @@ impl Seg {
 }
 
 /// One reconstructed line of text, with the page-coordinate extent the
-/// paragraph splitter needs.
+/// paragraph splitter needs. `font_sizes` and `bold_chars` flow up from
+/// the segments that contributed glyphs to the line, and the paragraph
+/// splitter aggregates them into a [`BlockStyle`].
 struct Line {
     text: String,
     left: f32,
     cy: f32,
+    font_sizes: Vec<f32>,
+    bold_chars: u32,
+    /// Total characters across the contributing segments. Used as the
+    /// denominator when deciding whether the bold count crosses the
+    /// majority threshold.
+    char_count: u32,
 }
 
 /// Reconstruct a page's paragraphs from text geometry: group segments
 /// into rows, detect columns, then split each column's lines into
 /// paragraphs by spacing and indentation.
-fn reconstruct_by_coords(text: &PdfPageText, page_width: f32) -> Vec<String> {
+fn reconstruct_by_coords(text: &PdfPageText, page_width: f32) -> Vec<Paragraph> {
     let mut segments: Vec<Seg> = Vec::new();
     for segment in text.segments().iter() {
         if segment.text().trim().is_empty() {
             continue;
         }
         let bounds = segment.bounds();
+        // Walk the segment's chars to gather per-glyph font size and a
+        // bold-character count. If pdfium refuses the char query the
+        // segment still contributes its rectangle to row grouping, just
+        // without style metrics.
+        let mut font_sizes: Vec<f32> = Vec::new();
+        let mut bold_chars: u32 = 0;
+        if let Ok(chars) = segment.chars() {
+            for ch in chars.iter() {
+                font_sizes.push(ch.scaled_font_size().value);
+                if matches!(
+                    ch.font_weight(),
+                    Some(PdfFontWeight::Weight600)
+                        | Some(PdfFontWeight::Weight700Bold)
+                        | Some(PdfFontWeight::Weight800)
+                        | Some(PdfFontWeight::Weight900)
+                ) {
+                    bold_chars += 1;
+                }
+            }
+        }
         segments.push(Seg {
             left: bounds.left().value,
             right: bounds.right().value,
             top: bounds.top().value,
             bottom: bounds.bottom().value,
+            font_sizes,
+            bold_chars,
         });
     }
     if segments.is_empty() {
@@ -688,10 +735,25 @@ fn build_line(segments: &[&Seg], text: &PdfPageText) -> Line {
     // to single spaces; this leaves CJK, which has none, untouched.
     let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
 
+    // Concatenate per-glyph metrics across the line's contributing
+    // segments. The counts and font-size list are kept separately so
+    // the paragraph splitter can compute median / p90 directly.
+    let mut font_sizes: Vec<f32> = Vec::new();
+    let mut bold_chars: u32 = 0;
+    let mut char_count: u32 = 0;
+    for seg in segments {
+        font_sizes.extend(seg.font_sizes.iter().copied());
+        bold_chars += seg.bold_chars;
+        char_count += seg.font_sizes.len() as u32;
+    }
+
     Line {
         text: normalized,
         left,
         cy,
+        font_sizes,
+        bold_chars,
+        char_count,
     }
 }
 
@@ -699,7 +761,7 @@ fn build_line(segments: &[&Seg], text: &PdfPageText) -> Line {
 /// taken where the inter-line gap is markedly larger than the column's
 /// usual line spacing, or where a line begins with a first-line
 /// indent — the two ways books mark a new paragraph.
-fn lines_to_paragraphs(lines: &[Line], unit: f32) -> Vec<String> {
+fn lines_to_paragraphs(lines: &[Line], unit: f32) -> Vec<Paragraph> {
     let lines: Vec<&Line> = lines.iter().filter(|l| !l.text.is_empty()).collect();
     if lines.is_empty() {
         return Vec::new();
@@ -719,19 +781,89 @@ fn lines_to_paragraphs(lines: &[Line], unit: f32) -> Vec<String> {
     let indent = 0.8 * unit;
 
     let mut paragraphs = Vec::new();
-    let mut current = String::new();
+    let mut current = ParagraphBuilder::default();
     for (i, line) in lines.iter().enumerate() {
+        let gap_above = if i == 0 { 0.0 } else { gaps[i - 1] };
         let starts_paragraph =
-            i == 0 || gaps[i - 1] > normal_gap * 1.5 || line.left > column_left + indent;
+            i == 0 || gap_above > normal_gap * 1.5 || line.left > column_left + indent;
         if starts_paragraph {
-            push_paragraph(&mut paragraphs, &mut current);
-            current.push_str(&line.text);
+            current.flush(&mut paragraphs, unit);
+            current.start(line, gap_above);
         } else {
-            append_line(&mut current, &line.text);
+            current.append(line);
         }
     }
-    push_paragraph(&mut paragraphs, &mut current);
+    current.flush(&mut paragraphs, unit);
     paragraphs
+}
+
+/// Accumulator for one paragraph in progress: the joined text plus the
+/// per-glyph metrics gathered from the lines that contributed to it.
+#[derive(Default)]
+struct ParagraphBuilder {
+    text: String,
+    font_sizes: Vec<f32>,
+    bold_chars: u32,
+    char_count: u32,
+    /// First-line left coordinate, captured at [`Self::start`].
+    x0_first_line: f32,
+    /// Vertical gap above the paragraph's first line, in page units.
+    above_gap: f32,
+    line_count: u32,
+}
+
+impl ParagraphBuilder {
+    fn start(&mut self, line: &Line, gap_above: f32) {
+        debug_assert!(self.text.is_empty());
+        self.text.push_str(&line.text);
+        self.font_sizes.extend(line.font_sizes.iter().copied());
+        self.bold_chars = line.bold_chars;
+        self.char_count = line.char_count;
+        self.x0_first_line = line.left;
+        self.above_gap = gap_above;
+        self.line_count = 1;
+    }
+
+    fn append(&mut self, line: &Line) {
+        append_line(&mut self.text, &line.text);
+        self.font_sizes.extend(line.font_sizes.iter().copied());
+        self.bold_chars += line.bold_chars;
+        self.char_count += line.char_count;
+        self.line_count += 1;
+    }
+
+    fn flush(&mut self, out: &mut Vec<Paragraph>, unit: f32) {
+        let trimmed = self.text.trim().to_string();
+        if !trimmed.is_empty() {
+            let style = if self.font_sizes.is_empty() {
+                None
+            } else {
+                Some(BlockStyle {
+                    font_size_median: median(&self.font_sizes),
+                    font_size_p90: percentile(&self.font_sizes, 90),
+                    is_bold_majority: self.char_count > 0 && self.bold_chars * 2 > self.char_count,
+                    line_count: self.line_count,
+                    x0_first_line: self.x0_first_line,
+                    above_gap_ratio: if unit > 0.0 {
+                        self.above_gap / unit
+                    } else {
+                        0.0
+                    },
+                })
+            };
+            out.push(Paragraph {
+                text: trimmed,
+                style,
+            });
+        }
+        self.text.clear();
+        self.font_sizes.clear();
+        self.bold_chars = 0;
+        self.char_count = 0;
+        self.x0_first_line = 0.0;
+        self.above_gap = 0.0;
+        self.line_count = 0;
+    }
 }
 
 /// The median of a slice of measurements. The slice is small (segment
@@ -745,13 +877,20 @@ fn median(values: &[f32]) -> f32 {
     sorted[sorted.len() / 2]
 }
 
-/// Flush the paragraph being built into `out`, if it holds any text.
-fn push_paragraph(out: &mut Vec<String>, current: &mut String) {
-    let text = current.trim();
-    if !text.is_empty() {
-        out.push(text.to_string());
+/// Nearest-rank percentile of a slice of measurements; `p` is in
+/// `1..=100`. Returns 0.0 for an empty slice. Used to flag a block
+/// whose 90th-percentile glyph size sits markedly above its median —
+/// the giveaway for a heading line embedded in otherwise body-sized
+/// text.
+fn percentile(values: &[f32], p: u8) -> f32 {
+    if values.is_empty() {
+        return 0.0;
     }
-    current.clear();
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    let rank = (sorted.len() * p.min(100) as usize).div_ceil(100);
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    sorted[idx]
 }
 
 /// Append a soft-wrapped line to the paragraph being built — without a

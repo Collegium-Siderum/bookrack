@@ -963,6 +963,7 @@ mod tests {
             kind: BlockKind::Body,
             text: text.to_string(),
             source_unit,
+            style: None,
         }
     }
 
@@ -971,6 +972,7 @@ mod tests {
             kind,
             text: text.to_string(),
             source_unit,
+            style: None,
         }
     }
 

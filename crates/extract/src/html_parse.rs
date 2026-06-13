@@ -144,6 +144,7 @@ fn emit(el: ElementRef, ctx: Ctx, st: &mut State) {
         kind,
         text,
         source_unit: st.source_unit,
+        style: None,
     });
 }
 

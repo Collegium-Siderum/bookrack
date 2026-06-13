@@ -103,7 +103,7 @@ fn envelope_filename_alternatives(primary: &Path) -> Vec<std::path::PathBuf> {
 
 /// On-disk schema. The `extraction` payload is the value
 /// [`bookrack_corpus::rebuild`] feeds into STRUCTURE + CHUNK.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtractionEnvelope {
     pub schema_version: u32,
     pub intake_id: i64,
@@ -175,6 +175,7 @@ mod tests {
                 kind: BlockKind::Body,
                 text: "sample prose".into(),
                 source_unit: 0,
+                style: None,
             }],
             toc: Toc::default(),
             biblio: Biblio::default(),

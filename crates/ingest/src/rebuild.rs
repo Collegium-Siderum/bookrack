@@ -217,11 +217,13 @@ mod tests {
                     kind: BlockKind::Heading { level: 1 },
                     text: "Chapter One".into(),
                     source_unit: 0,
+                    style: None,
                 },
                 Block {
                     kind: BlockKind::Body,
                     text: "Some sample prose for rebuild.".into(),
                     source_unit: 0,
+                    style: None,
                 },
             ],
             toc: Toc::default(),

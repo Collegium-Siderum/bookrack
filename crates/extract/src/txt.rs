@@ -64,6 +64,7 @@ pub fn extract(
             kind,
             text: line.to_string(),
             source_unit: 0,
+            style: None,
         });
     }
 
