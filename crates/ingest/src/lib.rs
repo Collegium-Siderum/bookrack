@@ -502,7 +502,10 @@ pub async fn ingest_book<E: Embedder>(
     // store and record its path in `intake.stored_path`. Failure is
     // logged but not fatal: the envelope is a rebuild cache, not the
     // source of truth.
-    let envelope_path = books_dir.join(bookrack_extract::envelope_filename(intake_id));
+    let envelope_path = books_dir.join(bookrack_extract::envelope_filename(
+        ItemKind::Book,
+        intake_id,
+    ));
     match bookrack_extract::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
         Ok(()) => {
             if let Err(err) = catalog.set_stored_path(
@@ -2271,7 +2274,7 @@ mod book_pipeline_tests {
         let envelope_path = std::path::PathBuf::from(&stored_path);
         assert_eq!(
             envelope_path.file_name().and_then(|n| n.to_str()),
-            Some(envelope_filename(report.intake_id).as_str())
+            Some(envelope_filename(ItemKind::Book, report.intake_id).as_str())
         );
 
         let envelope = read_envelope(&envelope_path).expect("read envelope");

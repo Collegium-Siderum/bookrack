@@ -91,7 +91,9 @@ fn seed_book(fx: &Fixture, sha: &str) -> i64 {
         .expect("register")
         .intake()
         .intake_id;
-    let path = fx.books_dir.join(envelope_filename(intake_id));
+    let path = fx
+        .books_dir
+        .join(envelope_filename(ItemKind::Book, intake_id));
     write_envelope(&path, &sample_extraction(), intake_id, sha).expect("write envelope");
     catalog
         .set_stored_path(ItemKind::Book, intake_id, &path.to_string_lossy())

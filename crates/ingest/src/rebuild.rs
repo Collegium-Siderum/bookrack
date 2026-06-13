@@ -254,7 +254,7 @@ mod tests {
         sha: &str,
         extraction: &Extraction,
     ) -> String {
-        let path = books_dir.join(envelope_filename(intake_id));
+        let path = books_dir.join(envelope_filename(ItemKind::Book, intake_id));
         write_envelope(&path, extraction, intake_id, sha).expect("write envelope");
         path.to_string_lossy().into_owned()
     }

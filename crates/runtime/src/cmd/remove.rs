@@ -271,8 +271,10 @@ mod tests {
             .intake_id;
         let books_dir = cfg.books_dir();
         std::fs::create_dir_all(&books_dir).expect("books_dir");
-        let envelope_path =
-            books_dir.join(bookrack_extract::envelope::envelope_filename(intake_id));
+        let envelope_path = books_dir.join(bookrack_extract::envelope::envelope_filename(
+            ItemKind::Book,
+            intake_id,
+        ));
         std::fs::write(&envelope_path, b"{\"schema_version\":2}").expect("seed envelope");
         catalog
             .set_stored_path(

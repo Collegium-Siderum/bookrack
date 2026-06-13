@@ -34,27 +34,21 @@ pub const ENVELOPE_SCHEMA_VERSION: u32 = 2;
 pub const ENVELOPE_FILE_SUFFIX: &str = ".bookrack-extraction.v2.json";
 
 /// Computed filename within the opaque store for one intake.
-pub fn envelope_filename(intake_id: i64) -> String {
-    format!("{intake_id}{ENVELOPE_FILE_SUFFIX}")
-}
-
-/// Computed filename within the opaque store for one intake, with the
-/// pipeline kind written as an explicit prefix. The kinded form lets
-/// a cross-directory listing of the books and papers opaque stores
-/// disambiguate items that happen to share an `intake_id` between the
-/// two catalogs.
 ///
-/// The previous unprefixed shape, [`envelope_filename_legacy`], stays
-/// around for one release window so existing on-disk files keep
-/// loading; production writes will switch over to this kinded form in
-/// the next change.
-pub fn envelope_filename_kinded(kind: ItemKind, intake_id: i64) -> String {
+/// The filename carries the pipeline `kind` as an explicit prefix so
+/// a cross-directory listing of the books and papers opaque stores
+/// disambiguates items that happen to share an `intake_id` between
+/// the two catalogs. [`envelope_filename_legacy`] returns the
+/// previous unprefixed shape and stays around for one release window
+/// while the rename tool migrates existing files on disk.
+pub fn envelope_filename(kind: ItemKind, intake_id: i64) -> String {
     format!("{}-{intake_id}{ENVELOPE_FILE_SUFFIX}", kind.as_scope_str())
 }
 
 /// The historical envelope filename, kept as a fallback while writers
 /// are still on the unprefixed form and while the rename tool is
-/// migrating existing on-disk files to [`envelope_filename_kinded`].
+/// migrating existing on-disk files to [`envelope_filename`]'s kinded
+/// shape.
 pub fn envelope_filename_legacy(intake_id: i64) -> String {
     format!("{intake_id}{ENVELOPE_FILE_SUFFIX}")
 }
@@ -198,7 +192,7 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join(envelope_filename(42));
+        let path = dir.path().join(envelope_filename(ItemKind::Book, 42));
         let original = sample_extraction();
         write_envelope(&path, &original, 42, "deadbeef").expect("write");
         let parsed = read_envelope(&path).expect("read");
@@ -207,6 +201,22 @@ mod tests {
         assert_eq!(parsed.source_sha256, "deadbeef");
         assert!(!parsed.captured_at.is_empty());
         assert_eq!(parsed.extraction, original);
+    }
+
+    #[test]
+    fn envelope_filename_carries_the_kind_as_an_explicit_prefix() {
+        assert_eq!(
+            envelope_filename(ItemKind::Book, 42),
+            format!("book-42{ENVELOPE_FILE_SUFFIX}"),
+        );
+        assert_eq!(
+            envelope_filename(ItemKind::Paper, 42),
+            format!("paper-42{ENVELOPE_FILE_SUFFIX}"),
+        );
+        assert_eq!(
+            envelope_filename_legacy(42),
+            format!("42{ENVELOPE_FILE_SUFFIX}"),
+        );
     }
 
     #[test]
@@ -252,9 +262,7 @@ mod tests {
         // The caller still believes the file lives at the kinded path
         // (after a future rename) but the legacy file is what is on
         // disk. The fallback resolves it.
-        let kinded_path = dir
-            .path()
-            .join(envelope_filename_kinded(ItemKind::Book, 42));
+        let kinded_path = dir.path().join(envelope_filename(ItemKind::Book, 42));
         let parsed = read_envelope_with_fallback(&kinded_path).expect("read with fallback");
         assert_eq!(parsed.intake_id, 42);
     }
@@ -262,9 +270,7 @@ mod tests {
     #[test]
     fn read_envelope_with_fallback_finds_a_kinded_file_when_the_legacy_path_is_missing() {
         let dir = tempdir().expect("tempdir");
-        let kinded_path = dir
-            .path()
-            .join(envelope_filename_kinded(ItemKind::Paper, 7));
+        let kinded_path = dir.path().join(envelope_filename(ItemKind::Paper, 7));
         write_envelope(&kinded_path, &sample_extraction(), 7, "cafe").expect("write");
 
         // The caller addresses the file by its legacy (unprefixed)

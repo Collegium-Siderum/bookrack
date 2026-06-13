@@ -27,8 +27,8 @@ mod txt;
 pub use contract::*;
 pub use envelope::{
     ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
-    envelope_filename, envelope_filename_kinded, envelope_filename_legacy, read_envelope,
-    read_envelope_with_fallback, write_envelope,
+    envelope_filename, envelope_filename_legacy, read_envelope, read_envelope_with_fallback,
+    write_envelope,
 };
 pub use pdf_paper::{extract_paper_abstract, reason as paper_abstract_reason};
 

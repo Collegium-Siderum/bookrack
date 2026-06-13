@@ -255,7 +255,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     //    it does not abort the run. With the envelope on disk, the
     //    OCR intake is reachable from `corpus rebuild --only` without
     //    re-running the OCR adapter.
-    let envelope_path = books_dir.join(envelope::envelope_filename(ocr_intake_id));
+    let envelope_path = books_dir.join(envelope::envelope_filename(ItemKind::Book, ocr_intake_id));
     let envelope_path = match envelope::write_envelope(
         &envelope_path,
         &extraction,

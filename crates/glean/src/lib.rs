@@ -319,7 +319,7 @@ pub async fn glean_paper<E: Embedder>(
     )?;
     catalog.set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Extracted)?;
 
-    let envelope_path = papers_dir.join(envelope_filename(intake_id));
+    let envelope_path = papers_dir.join(envelope_filename(ItemKind::Paper, intake_id));
     match write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
         Ok(()) => {
             if let Err(err) = catalog.set_stored_path(
