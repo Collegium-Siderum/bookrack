@@ -8,7 +8,7 @@
 //! partition, so neither read takes an intake id: the book is implied
 //! and a forged pairing of book and node cannot be expressed.
 
-use bookrack_core::NodeId;
+use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_corpus::{Corpus, Node};
 use bookrack_embed::Embedder;
 
@@ -28,24 +28,38 @@ use crate::{Ops, OpsError, Result};
 ///
 /// Returns [`OpsError::NodeNotFound`] for an unknown node id and
 /// [`OpsError::NotALeaf`] when the anchor is an organizing node or
-/// carries no document-order position.
+/// carries no document-order position. Returns
+/// [`OpsError::PapersBackendNotConfigured`] when the target is a
+/// paper-kind node and this `Ops` was built without a papers backend.
 pub fn read_context<E: Embedder>(
     ops: &Ops<E>,
-    node_id: i64,
+    target: KindedNodeId,
     before: u32,
     after: u32,
 ) -> Result<ContextWindow> {
+    let node_id = target.node_id.get();
     record_call_sync!(
         ops,
         "library.read_context",
-        serde_json::json!({ "node_id": node_id, "before": before, "after": after }),
+        serde_json::json!({
+            "kind": target.kind.as_scope_str(),
+            "node_id": node_id,
+            "before": before,
+            "after": after,
+        }),
         {
             let clamped = before > MAX_CONTEXT_RADIUS || after > MAX_CONTEXT_RADIUS;
             let before = i64::from(before.min(MAX_CONTEXT_RADIUS));
             let after = i64::from(after.min(MAX_CONTEXT_RADIUS));
 
-            let corpus = Corpus::open(ops.corpus_db())?;
-            let id = NodeId::new(node_id);
+            let corpus_path = match target.kind {
+                ItemKind::Book => ops.corpus_db(),
+                ItemKind::Paper => ops
+                    .papers_corpus_db()
+                    .ok_or(OpsError::PapersBackendNotConfigured)?,
+            };
+            let corpus = Corpus::open(corpus_path)?;
+            let id = target.node_id;
             let Some(anchor) = corpus.get_node(id)? else {
                 return Err(OpsError::NodeNotFound { node_id });
             };
@@ -80,19 +94,32 @@ pub fn read_context<E: Embedder>(
 /// progress.
 ///
 /// Returns [`OpsError::NodeNotFound`] for an unknown node id and
-/// [`OpsError::NotOrganizing`] when the node is a leaf.
+/// [`OpsError::NotOrganizing`] when the node is a leaf. Returns
+/// [`OpsError::PapersBackendNotConfigured`] when the target is a
+/// paper-kind node and this `Ops` was built without a papers backend.
 pub fn read_span<E: Embedder>(
     ops: &Ops<E>,
-    node_id: i64,
+    target: KindedNodeId,
     start_after: Option<i64>,
 ) -> Result<SpanText> {
+    let node_id = target.node_id.get();
     record_call_sync!(
         ops,
         "library.read_span",
-        serde_json::json!({ "node_id": node_id, "start_after": start_after }),
+        serde_json::json!({
+            "kind": target.kind.as_scope_str(),
+            "node_id": node_id,
+            "start_after": start_after,
+        }),
         {
-            let corpus = Corpus::open(ops.corpus_db())?;
-            let id = NodeId::new(node_id);
+            let corpus_path = match target.kind {
+                ItemKind::Book => ops.corpus_db(),
+                ItemKind::Paper => ops
+                    .papers_corpus_db()
+                    .ok_or(OpsError::PapersBackendNotConfigured)?,
+            };
+            let corpus = Corpus::open(corpus_path)?;
+            let id = target.node_id;
             let Some(node) = corpus.get_node(id)? else {
                 return Err(OpsError::NodeNotFound { node_id });
             };

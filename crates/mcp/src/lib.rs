@@ -16,6 +16,7 @@ use std::time::Instant;
 use anyhow::Context;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
+use bookrack_core::{KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
 use bookrack_ops::dto::{BookFilter, PaperFilter};
@@ -1021,7 +1022,8 @@ impl BookrackServer {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let before = args.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
         let after = args.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-        match reads::passages::read_context(handle.ops(), args.node_id, before, after) {
+        let target = KindedNodeId::book(NodeId::new(args.node_id));
+        match reads::passages::read_context(handle.ops(), target, before, after) {
             Ok(window) => respond_with(&Some(window)),
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
@@ -1048,7 +1050,8 @@ impl BookrackServer {
         Parameters(args): Parameters<ReadSpanArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::passages::read_span(handle.ops(), args.node_id, args.start_after) {
+        let target = KindedNodeId::book(NodeId::new(args.node_id));
+        match reads::passages::read_span(handle.ops(), target, args.start_after) {
             Ok(span) => respond_with(&Some(span)),
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)

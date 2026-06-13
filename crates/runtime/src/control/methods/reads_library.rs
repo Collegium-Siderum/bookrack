@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use bookrack_core::{KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, PaperFilter};
 use bookrack_ops::registry::LibraryHandle;
@@ -292,7 +293,8 @@ pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     let handle = resolve(ctx, p.library.as_deref())?;
     let before = p.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
     let after = p.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-    match reads::passages::read_context(handle.ops(), p.node_id, before, after) {
+    let target = KindedNodeId::book(NodeId::new(p.node_id));
+    match reads::passages::read_context(handle.ops(), target, before, after) {
         Ok(window) => to_value(&Some(window)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),
         Err(e @ OpsError::NotALeaf { .. }) => Err(ops_invalid(e)),
@@ -303,7 +305,8 @@ pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 pub fn read_span(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ReadSpanParams = parse(params, "library.read_span")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    match reads::passages::read_span(handle.ops(), p.node_id, p.start_after) {
+    let target = KindedNodeId::book(NodeId::new(p.node_id));
+    match reads::passages::read_span(handle.ops(), target, p.start_after) {
         Ok(span) => to_value(&Some(span)),
         Err(OpsError::NodeNotFound { .. }) => Ok(Value::Null),
         Err(e @ OpsError::NotOrganizing { .. }) => Err(ops_invalid(e)),
