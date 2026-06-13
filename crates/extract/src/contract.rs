@@ -122,8 +122,32 @@ pub enum BlockKind {
     Footnote,
     /// A caption attached to a figure or table.
     Caption,
+    /// The paper's abstract. Emitted by the paper-side structuring
+    /// pass only; book-side adapters (TXT, EPUB, HTML, Markdown,
+    /// generic PDF) never carry this kind.
+    Abstract,
     /// Recognized non-prose extract cannot place precisely.
     Other,
+}
+
+/// Where a paper's heading / caption coloring came from, recorded on
+/// [`Provenance`] for observability over thin-structure samples. The
+/// values are mutually exclusive:
+///
+/// - [`SourceOfStructure::Outline`] — every heading came from the PDF
+///   `/Outline` map.
+/// - [`SourceOfStructure::Heuristic`] — every heading came from the
+///   text-pattern + geometry heuristic.
+/// - [`SourceOfStructure::Mixed`] — both signals contributed.
+/// - [`SourceOfStructure::None`] — no heading was identified at all
+///   (the paper appears flat to the structuring pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOfStructure {
+    Outline,
+    Heuristic,
+    Mixed,
+    None,
 }
 
 /// The table of contents: flattened, depth-tagged entries in order.
@@ -294,6 +318,12 @@ pub struct Provenance {
     /// page range is present — the normal case for every adapter.
     #[serde(default)]
     pub partial_pages: Option<Vec<u32>>,
+    /// Where the paper structuring pass (heading / caption coloring)
+    /// sourced its signal — `outline`, `heuristic`, `mixed`, or
+    /// `none`. Absent on book-side extractions, which do not run that
+    /// pass, and on older envelopes that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_of_structure: Option<SourceOfStructure>,
 }
 
 /// The quality grade of an extracted text layer.
@@ -411,6 +441,7 @@ mod tests {
                 }],
                 derived_from_sha256: None,
                 partial_pages: None,
+                source_of_structure: None,
             },
         }
     }

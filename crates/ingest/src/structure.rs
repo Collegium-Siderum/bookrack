@@ -425,6 +425,12 @@ fn leaf_type(kind: BlockKind) -> NodeType {
         BlockKind::Heading { .. } => NodeType::Heading,
         BlockKind::Footnote => NodeType::Footnote,
         BlockKind::Caption => NodeType::FigureCaption,
+        // Book-side STRUCTURE never sees Abstract: the paper structuring
+        // pass is the only producer of that kind and runs only against
+        // paper extractions. Falling through to Paragraph keeps the
+        // matcher total and makes a contract violation a tracked event
+        // rather than a crash.
+        BlockKind::Abstract => NodeType::Paragraph,
     }
 }
 

@@ -521,6 +521,7 @@ mod tests {
                 skipped_units: Vec::new(),
                 derived_from_sha256: None,
                 partial_pages: None,
+                source_of_structure: None,
             },
         }
     }

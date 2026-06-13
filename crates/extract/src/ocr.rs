@@ -176,6 +176,7 @@ pub fn extract_from_text(
             skipped_units: Vec::new(),
             derived_from_sha256: source_pdf_sha256.map(str::to_string),
             partial_pages: None,
+            source_of_structure: None,
         },
     })
 }

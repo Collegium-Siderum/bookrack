@@ -272,7 +272,7 @@ pub async fn glean_paper<E: Embedder>(
     let started = Instant::now();
     let audit_profile = bookrack_audit_profile_default();
     let extracted = bookrack_extract::extract(file, &audit_profile, &Default::default());
-    let extraction = match extracted {
+    let mut extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
             audit(
@@ -305,6 +305,20 @@ pub async fn glean_paper<E: Embedder>(
             return Err(e.into());
         }
     };
+    // Paper-side structuring pass: color the block stream with heading
+    // and caption classifications using the PDF outline first, then a
+    // text-pattern + geometry heuristic over `BlockStyle`. The PDF
+    // adapter is the only producer of `BlockStyle`, so other adapters
+    // pass through with `SourceOfStructure::None`.
+    let sos = if extraction.provenance.adapter == "pdf" {
+        Some(bookrack_extract::pdf_paper::extract_paper_structured(
+            &mut extraction.blocks,
+            &extraction.toc,
+        ))
+    } else {
+        None
+    };
+    extraction.provenance.source_of_structure = sos;
     audit(
         catalog,
         &run_id,
@@ -314,7 +328,7 @@ pub async fn glean_paper<E: Embedder>(
         "extract",
         "ok",
         started,
-        None,
+        sos.map(|s| format!(r#"{{"source_of_structure":"{s:?}"}}"#)),
         None,
     );
 

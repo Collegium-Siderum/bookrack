@@ -19,7 +19,7 @@ mod html;
 mod html_parse;
 pub mod ocr;
 mod pdf;
-mod pdf_paper;
+pub mod pdf_paper;
 pub mod pdfium_pin;
 mod quality;
 mod txt;

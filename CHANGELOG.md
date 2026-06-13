@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `bookrack_extract::pdf_paper::extract_paper_structured`: a paper-only
+  coloring pass that promotes [`BlockKind::Body`] blocks to
+  `BlockKind::Heading` / `BlockKind::Caption` using the PDF outline that
+  the adapter already attached to the extraction's `toc` first, then a
+  port of the `pdffigures2` SectionTitleExtractor rule set over
+  `BlockStyle` (font-size median, bold-majority, above-gap ratio,
+  numbered prefixes including the CJK `\u{7b2c}…\u{7ae0}` /
+  `\u{7b2c}…\u{8282}` families). Cross-page running headers whose
+  case-folded text recurs on three or more pages are dropped from the
+  candidate pool before promotion. The selected signal is recorded on
+  `Provenance::source_of_structure` as `outline` / `heuristic` /
+  `mixed` / `none`. `glean_paper` runs the pass against PDF
+  extractions inside its EXTRACT stage; book-side adapters are not
+  affected. A new `BlockKind::Abstract` variant is reserved for the
+  paper structuring pass — book-side adapters never emit it.
+
 - `bookrack doctor --install-pdfium`: downloads the pinned PDFium
   build, verifies its SHA-256 against the pin, and unpacks the
   library into a per-user managed directory that the loader searches
