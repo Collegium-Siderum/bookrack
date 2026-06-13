@@ -202,6 +202,10 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
             &req.params,
             ctx,
         )?)),
+        "papers.fetch_source" => Ok(DispatchOutcome::Result(reads_library::papers_fetch_source(
+            &req.params,
+            ctx,
+        )?)),
         "library.vectors_status" => Ok(DispatchOutcome::Result(
             reads_library::vectors_status(&req.params, ctx).await?,
         )),

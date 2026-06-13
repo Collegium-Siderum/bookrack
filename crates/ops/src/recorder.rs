@@ -185,6 +185,7 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::NotOrganizing { .. } => "not_organizing",
         OpsError::SearchUnavailable => "search_unavailable",
         OpsError::PapersBackendNotConfigured => "papers_backend_not_configured",
+        OpsError::SourceNotArchived { .. } => "source_not_archived",
         OpsError::Other(_) => "other",
     }
 }

@@ -529,6 +529,19 @@ pub fn papers_export_csl(params: &Option<Value>, ctx: &MethodContext) -> Result<
     }
 }
 
+pub fn papers_fetch_source(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "papers.fetch_source")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers::fetch_source(handle.ops(), p.intake_id) {
+        Ok(src) => to_value(&src),
+        // A missing intake is reported as `null` so clients can pattern-
+        // match on it without parsing an error envelope. A `null` here
+        // matches the rest of the `library.show_*` / `papers.*` family.
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
 pub async fn vectors_status(
     params: &Option<Value>,
     ctx: &MethodContext,

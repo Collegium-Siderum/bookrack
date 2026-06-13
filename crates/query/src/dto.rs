@@ -452,6 +452,27 @@ pub struct PaperDetail {
     pub abstract_text: Option<String>,
 }
 
+/// One `papers.fetch_source` response. Carries the locator of one
+/// paper's archived source PDF — its absolute on-disk path, its
+/// size, and the SHA-256 captured at REGISTER — so the calling
+/// client can open the bytes directly via `fs::read`. The bytes
+/// themselves never flow through the control plane.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperSource {
+    /// Catalog intake id of the paper this source belongs to.
+    pub intake_id: i64,
+    /// Absolute path to the archived PDF on disk.
+    pub path: String,
+    /// File size in bytes, read from the archived file's metadata at
+    /// call time.
+    pub bytes_size: i64,
+    /// SHA-256 of the source PDF, copied verbatim from
+    /// `intake.source_sha256`. It is the hash captured at REGISTER,
+    /// not a re-hash of the on-disk copy; clients that want to verify
+    /// the archive's integrity hash the bytes they read.
+    pub sha256: String,
+}
+
 /// Facade-level filter for `find_papers`. Mirrors
 /// [`bookrack_catalog::IntakeFilter`] for the paper-side scope and
 /// owns its strings so the caller can build it once and pass it

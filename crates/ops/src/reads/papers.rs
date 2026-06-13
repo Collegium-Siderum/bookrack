@@ -17,8 +17,8 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::{
-    ListPapersResult, MAX_TOC_NODES, PaperDetail, PaperFilter, PaperSummary, Toc, TocNode,
-    clamp_limit,
+    ListPapersResult, MAX_TOC_NODES, PaperDetail, PaperFilter, PaperSource, PaperSummary, Toc,
+    TocNode, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -203,6 +203,47 @@ pub fn export_csl<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<bookrack_
             };
             let contributors = catalog.contributors_for_address(intake_id, ItemKind::Paper)?;
             Ok(bookrack_catalog::csl_from_catalog(&attrs, &contributors))
+        }
+    )
+}
+
+/// Resolve the locator for one paper's archived source PDF: its
+/// absolute on-disk path, byte size, and the SHA-256 captured at
+/// REGISTER. The bytes themselves do not flow through this call —
+/// the caller opens the returned path with `fs::read`.
+///
+/// Returns [`OpsError::IntakeNotFound`] when no such intake is
+/// registered on the paper catalog, [`OpsError::SourceNotArchived`]
+/// when the intake exists but its `source_pdf_path` column is NULL
+/// (the glean run was configured with `keep_source_pdf = false`, or
+/// the row predates Phase 0), and
+/// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
+/// has no papers backend.
+pub fn fetch_source<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperSource> {
+    record_call_sync!(
+        ops,
+        "papers.fetch_source",
+        serde_json::json!({ "intake_id": intake_id }),
+        {
+            let papers_db = ops
+                .papers_catalog_db()
+                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let catalog = Catalog::open_read_only(papers_db)?;
+            let Some(intake) = catalog.intake_by_id(intake_id)? else {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            };
+            let path = intake
+                .source_pdf_path
+                .ok_or(OpsError::SourceNotArchived { intake_id })?;
+            let bytes_size = std::fs::metadata(&path)
+                .map(|m| m.len() as i64)
+                .map_err(|e| OpsError::Other(e.into()))?;
+            Ok(PaperSource {
+                intake_id,
+                path,
+                bytes_size,
+                sha256: intake.source_sha256,
+            })
         }
     )
 }

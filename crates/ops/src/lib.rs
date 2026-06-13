@@ -131,6 +131,15 @@ pub enum OpsError {
     #[error("papers backend not configured on this Ops handle")]
     PapersBackendNotConfigured,
 
+    /// A `fetch_source` op named an intake whose `source_pdf_path` is
+    /// NULL — either glean ran with `keep_source_pdf = false`, or the
+    /// intake was registered before Phase 0 added the column.
+    #[error("intake {intake_id} has no archived source PDF")]
+    SourceNotArchived {
+        /// The intake id the caller asked for.
+        intake_id: i64,
+    },
+
     /// Catch-all for ad-hoc errors that have no dedicated variant.
     #[error(transparent)]
     Other(anyhow::Error),
