@@ -10,6 +10,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `glean_paper` STRUCTURE now assembles a Section tree from the
+  heading-colored block stream: a `BlockKind::Heading{1}` opens a
+  Section organizer under the Work root, a `Heading{2}` opens a
+  Subsection (auto-opening a Section first when none is outstanding),
+  depth-3+ Heading blocks stay as Heading leaves under the deepest
+  open organizer, Body blocks attach as Paragraph leaves, and
+  `BlockKind::Caption` blocks land as `FigureCaption` structural
+  leaves. The abstract leaf is bit-for-bit unchanged (Tier 1 vector
+  anchor): same NodeId allocation order, same `intake:{id}:abstract`
+  stable anchor, same text / norm hashes, and the page bounds stay
+  `NULL`. Body-leaf stable anchors continue to count Body blocks only,
+  so a re-glean of a Phase-1 envelope still produces the same body
+  hashes. When the heading pass identifies no candidates the tree
+  falls back to the flat Phase-1 shape. The STRUCTURE audit row's
+  `metric_summary` JSON gains `sections`, `subsections`, and
+  `headings` counters alongside the existing `body_leaves`.
+
 - `bookrack_extract::pdf_paper::extract_paper_structured`: a paper-only
   coloring pass that promotes [`BlockKind::Body`] blocks to
   `BlockKind::Heading` / `BlockKind::Caption` using the PDF outline that

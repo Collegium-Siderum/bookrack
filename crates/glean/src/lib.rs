@@ -494,10 +494,13 @@ pub async fn glean_paper<E: Embedder>(
         "ok",
         started,
         Some(format!(
-            r#"{{"nodes":{},"leaves":{},"body_leaves":{}}}"#,
+            r#"{{"nodes":{},"leaves":{},"body_leaves":{},"sections":{},"subsections":{},"headings":{}}}"#,
             structure.nodes_written,
             if structure.has_leaf { 1 } else { 0 },
             structure.body_leaves,
+            structure.section_count,
+            structure.subsection_count,
+            structure.heading_leaves,
         )),
         None,
     );
@@ -612,15 +615,114 @@ struct StructureResult {
     nodes_written: usize,
     has_leaf: bool,
     body_leaves: usize,
+    /// Section organizing nodes written under the Work root. Zero when
+    /// the heading pass produced no candidates and the tree fell back
+    /// to the flat Phase-1 shape.
+    section_count: usize,
+    /// Subsection organizing nodes written under any Section.
+    subsection_count: usize,
+    /// Heading leaves carrying titled text (one per Section /
+    /// Subsection plus any depth-3+ heading still folded in as a
+    /// leaf). Independent of the organizer counts above.
+    heading_leaves: usize,
 }
 
-/// Build the paper's tree: one Work root, an optional abstract
-/// Paragraph leaf, and one Paragraph leaf per non-empty
-/// `BlockKind::Body` block in document order. Body leaves carry the
-/// raw extracted text and a per-block `pages_lo` / `pages_hi`
-/// drawn from `source_unit`; the abstract leaf stays bit-for-bit
-/// identical to the pre-Phase-1 shape so the CHUNK + EMBED stage
-/// keeps the same vector anchor.
+/// One planned node in the paper STRUCTURE pass. The flat plan vector
+/// is preorder: every entry's `parent_idx` points to an earlier entry,
+/// and leaves precede the next organizer of the same depth. The Work
+/// root itself is not in the vector — it is allocated by partition
+/// before any planning runs.
+struct PendingNode {
+    parent_idx: Option<usize>,
+    node_type: NodeType,
+    depth: i64,
+    text: Option<String>,
+    source_unit: Option<u32>,
+    content_namespace: Option<String>,
+    is_leaf: bool,
+}
+
+impl PendingNode {
+    fn leaf(
+        parent_idx: Option<usize>,
+        node_type: NodeType,
+        depth: i64,
+        text: String,
+        source_unit: u32,
+        content_namespace: String,
+    ) -> Self {
+        Self {
+            parent_idx,
+            node_type,
+            depth,
+            text: Some(text),
+            source_unit: Some(source_unit),
+            content_namespace: Some(content_namespace),
+            is_leaf: true,
+        }
+    }
+
+    /// Abstract leaf: same prose-leaf shape as `leaf`, except no
+    /// per-leaf source-page bounds. The abstract sits above the page
+    /// stream — extracting it inside IDENTIFY does not bind it to a
+    /// particular page — so its `pages_lo` / `pages_hi` are left
+    /// `NULL`. This is the Tier-1 vector-anchor invariant: the
+    /// abstract leaf's row matches Phase 1 bit for bit.
+    fn abstract_leaf(text: String, content_namespace: String) -> Self {
+        Self {
+            parent_idx: None,
+            node_type: NodeType::Paragraph,
+            depth: 1,
+            text: Some(text),
+            source_unit: None,
+            content_namespace: Some(content_namespace),
+            is_leaf: true,
+        }
+    }
+
+    fn organizer(parent_idx: Option<usize>, node_type: NodeType, depth: i64) -> Self {
+        Self {
+            parent_idx,
+            node_type,
+            depth,
+            text: None,
+            source_unit: None,
+            content_namespace: None,
+            is_leaf: false,
+        }
+    }
+}
+
+/// Pick the deepest open organizer as the parent for a new leaf and
+/// report its depth. Returns `(None, 0)` (the Work root, depth 0) when
+/// neither a Section nor a Subsection is open.
+fn current_parent(subsection: Option<usize>, section: Option<usize>) -> (Option<usize>, i64) {
+    if let Some(idx) = subsection {
+        (Some(idx), 2)
+    } else if let Some(idx) = section {
+        (Some(idx), 1)
+    } else {
+        (None, 0)
+    }
+}
+
+/// Build the paper's tree. Walks the heading-colored block stream with
+/// a small state machine: a `Heading{1}` block opens a Section under
+/// the Work root, a `Heading{2}` block opens a Subsection under the
+/// current Section (or a new auto-opened Section when none is
+/// outstanding), Body / Caption / depth-3+ Heading blocks attach as
+/// the matching prose-leaf type under the deepest open organizer (or
+/// the Work root in the SourceOfStructure::None fallback). Abstract
+/// blocks are skipped — the abstract leaf is already pushed first,
+/// from IDENTIFY's output, and is the Tier 1 vector anchor.
+///
+/// The abstract leaf's NodeId, content namespace, text / norm hashes,
+/// and (toc, page) span are bit-for-bit identical to the Phase-1
+/// shape: it is the first allocated id after the Work root, sits at
+/// depth 1 directly under it, and carries the same
+/// `intake:{intake_id}:abstract` namespace. Body-leaf namespaces
+/// continue to count Body blocks only, so a re-glean of an
+/// uncolored Phase-1 envelope still produces the same body hashes.
 fn build_structure(
     corpus: &mut Corpus,
     intake_id: i64,
@@ -635,89 +737,283 @@ fn build_structure(
     let abstract_trimmed = abstract_text
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    let bodies: Vec<&Block> = body_blocks
-        .iter()
-        .filter(|b| matches!(b.kind, BlockKind::Body) && !b.text.trim().is_empty())
-        .collect();
 
-    let abstract_count = usize::from(abstract_trimmed.is_some());
-    let leaf_count = abstract_count + bodies.len();
-    let ids = if leaf_count > 0 {
-        corpus.allocate_node_ids(partition_idx, leaf_count as u32)?
-    } else {
+    // Plan the tree as a flat preorder list. Each entry carries enough
+    // metadata to materialize a NewNode later; parents are referenced
+    // by index into the same Vec so an organizer can be patched with
+    // its descendants' page / toc span once they are known.
+    let mut plans: Vec<PendingNode> = Vec::new();
+    let mut abstract_plan_idx: Option<usize> = None;
+
+    if let Some(text) = abstract_trimmed {
+        let plan_idx = plans.len();
+        plans.push(PendingNode::abstract_leaf(
+            text,
+            format!("intake:{intake_id}:abstract"),
+        ));
+        abstract_plan_idx = Some(plan_idx);
+    }
+
+    let mut current_section: Option<usize> = None;
+    let mut current_subsection: Option<usize> = None;
+    let mut section_seq: i64 = 0;
+    let mut subsection_within_section: i64 = 0;
+    let mut body_seq: i64 = 0;
+    let mut caption_seq: i64 = 0;
+    let mut heading_leaf_seq: i64 = 0;
+    let mut section_count = 0usize;
+    let mut subsection_count = 0usize;
+    let mut heading_leaves = 0usize;
+    let mut body_leaves = 0usize;
+
+    for block in body_blocks {
+        let trimmed = block.text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if matches!(block.kind, BlockKind::Abstract) {
+            // Already promoted to the leaf above; the colored block
+            // remains in the envelope, but it does not enter the tree
+            // a second time.
+            continue;
+        }
+        match block.kind {
+            BlockKind::Heading { level } if level <= 1 => {
+                current_subsection = None;
+                section_seq += 1;
+                subsection_within_section = 0;
+                let section_idx = plans.len();
+                plans.push(PendingNode::organizer(None, NodeType::Section, 1));
+                plans.push(PendingNode::leaf(
+                    Some(section_idx),
+                    NodeType::Heading,
+                    2,
+                    trimmed.to_string(),
+                    block.source_unit,
+                    format!("intake:{intake_id}:heading:{section_seq}"),
+                ));
+                current_section = Some(section_idx);
+                section_count += 1;
+                heading_leaves += 1;
+            }
+            BlockKind::Heading { level: 2 } => {
+                let section_idx = match current_section {
+                    Some(idx) => idx,
+                    None => {
+                        section_seq += 1;
+                        subsection_within_section = 0;
+                        let idx = plans.len();
+                        plans.push(PendingNode::organizer(None, NodeType::Section, 1));
+                        current_section = Some(idx);
+                        section_count += 1;
+                        idx
+                    }
+                };
+                subsection_within_section += 1;
+                let subsection_idx = plans.len();
+                plans.push(PendingNode::organizer(
+                    Some(section_idx),
+                    NodeType::Subsection,
+                    2,
+                ));
+                plans.push(PendingNode::leaf(
+                    Some(subsection_idx),
+                    NodeType::Heading,
+                    3,
+                    trimmed.to_string(),
+                    block.source_unit,
+                    format!("intake:{intake_id}:heading:{section_seq}.{subsection_within_section}"),
+                ));
+                current_subsection = Some(subsection_idx);
+                subsection_count += 1;
+                heading_leaves += 1;
+            }
+            BlockKind::Heading { .. } => {
+                heading_leaf_seq += 1;
+                let (parent, depth) = current_parent(current_subsection, current_section);
+                plans.push(PendingNode::leaf(
+                    parent,
+                    NodeType::Heading,
+                    depth + 1,
+                    trimmed.to_string(),
+                    block.source_unit,
+                    format!("intake:{intake_id}:heading-leaf:{heading_leaf_seq}"),
+                ));
+                heading_leaves += 1;
+            }
+            BlockKind::Body => {
+                let (parent, depth) = current_parent(current_subsection, current_section);
+                plans.push(PendingNode::leaf(
+                    parent,
+                    NodeType::Paragraph,
+                    depth + 1,
+                    trimmed.to_string(),
+                    block.source_unit,
+                    format!("intake:{intake_id}:body:{body_seq}"),
+                ));
+                body_seq += 1;
+                body_leaves += 1;
+            }
+            // BlockKind::Footnote and BlockKind::Other are not produced
+            // by the paper PDF adapter and are not part of the paper
+            // STRUCTURE contract; drop them silently rather than have
+            // unrelated callers surface them as paper-side leaves.
+            BlockKind::Footnote | BlockKind::Other => continue,
+            BlockKind::Caption => {
+                caption_seq += 1;
+                let (parent, depth) = current_parent(current_subsection, current_section);
+                plans.push(PendingNode::leaf(
+                    parent,
+                    NodeType::FigureCaption,
+                    depth + 1,
+                    trimmed.to_string(),
+                    block.source_unit,
+                    format!("intake:{intake_id}:caption:{caption_seq}"),
+                ));
+            }
+            BlockKind::Abstract => unreachable!("filtered above"),
+        }
+    }
+
+    // Allocate one NodeId per planned node, then walk the plans in
+    // order to compute child indices, leaf preorder positions, and
+    // organizer (toc, page) spans.
+    let ids = if plans.is_empty() {
         Vec::new()
+    } else {
+        corpus.allocate_node_ids(partition_idx, plans.len() as u32)?
     };
 
-    let mut nodes = Vec::with_capacity(1 + leaf_count);
+    // child_index per plan: count siblings under the same parent
+    // earlier in the Vec.
+    let mut child_index_of: Vec<i64> = vec![0; plans.len()];
+    let mut child_count_under: std::collections::HashMap<Option<usize>, i64> =
+        std::collections::HashMap::new();
+    for (i, plan) in plans.iter().enumerate() {
+        let count = child_count_under.entry(plan.parent_idx).or_insert(0);
+        child_index_of[i] = *count;
+        *count += 1;
+    }
+
+    // Leaf preorder positions. Organizers get None; leaves get their
+    // running index over leaves only.
+    let mut leaf_position: Vec<Option<i64>> = vec![None; plans.len()];
+    let mut leaf_cursor: i64 = 0;
+    for (i, plan) in plans.iter().enumerate() {
+        if plan.is_leaf {
+            leaf_position[i] = Some(leaf_cursor);
+            leaf_cursor += 1;
+        }
+    }
+    let total_leaves = leaf_cursor;
+
+    // Children-of map for organizer span computation.
+    let mut children_of: Vec<Vec<usize>> = vec![Vec::new(); plans.len()];
+    for (i, plan) in plans.iter().enumerate() {
+        if let Some(parent_idx) = plan.parent_idx {
+            children_of[parent_idx].push(i);
+        }
+    }
+
+    // Span aggregation: for each organizer, walk its subtree and take
+    // the (min, max) of leaf positions and source_units. The recursion
+    // depth is at most three (Work → Section → Subsection → leaf) so
+    // an explicit stack would not save much.
+    fn subtree_spans(
+        idx: usize,
+        plans: &[PendingNode],
+        children_of: &[Vec<usize>],
+        leaf_position: &[Option<i64>],
+    ) -> Option<(i64, i64, u32, u32)> {
+        let mut span: Option<(i64, i64, u32, u32)> = None;
+        if let Some(pos) = leaf_position[idx] {
+            let pu = plans[idx].source_unit.unwrap_or(0);
+            span = Some((pos, pos, pu, pu));
+        }
+        for &child in &children_of[idx] {
+            if let Some((tlo, thi, plo, phi)) =
+                subtree_spans(child, plans, children_of, leaf_position)
+            {
+                span = match span {
+                    None => Some((tlo, thi, plo, phi)),
+                    Some((a, b, c, d)) => Some((a.min(tlo), b.max(thi), c.min(plo), d.max(phi))),
+                };
+            }
+        }
+        span
+    }
+
+    let mut nodes: Vec<NewNode> = Vec::with_capacity(1 + plans.len());
+
+    // Work root. The root spans every leaf when at least one exists;
+    // otherwise it is written bare.
     let mut root = NewNode::root(work_node_id, NodeType::Work);
-    if leaf_count > 0 {
-        root = root.toc_span(0, leaf_count as i64 - 1);
+    if total_leaves > 0 {
+        root = root.toc_span(0, total_leaves - 1);
     }
     nodes.push(root);
 
     let mut leaf_node_id: Option<NodeId> = None;
     let mut leaf_text: Option<String> = None;
-    let mut id_cursor = 0usize;
-    let mut ordinal: i64 = 0;
 
-    if let Some(trimmed) = abstract_trimmed {
-        let leaf_id = ids[id_cursor];
-        id_cursor += 1;
-        let char_count = trimmed.chars().count() as i64;
-        let text_sha = sha256_hex(trimmed.as_bytes());
-        let norm_sha = norm_text_sha256(&trimmed);
-        nodes.push(
-            NewNode::child(
-                leaf_id,
-                work_node_id,
-                work_node_id,
-                ordinal,
-                1,
-                NodeType::Paragraph,
-            )
-            .text(trimmed.clone())
-            .text_stats(char_count, 0)
-            .toc_span(ordinal, ordinal)
-            .content_hashes(format!("intake:{intake_id}:abstract"), text_sha, norm_sha),
+    for (i, plan) in plans.iter().enumerate() {
+        let node_id = ids[i];
+        let parent_id = plan.parent_idx.map(|p| ids[p]).unwrap_or(work_node_id);
+        let ordinal = child_index_of[i];
+        let mut node = NewNode::child(
+            node_id,
+            parent_id,
+            work_node_id,
+            ordinal,
+            plan.depth,
+            plan.node_type,
         );
-        leaf_node_id = Some(leaf_id);
-        leaf_text = Some(trimmed);
-        ordinal += 1;
-    }
-
-    for (body_idx, block) in bodies.iter().enumerate() {
-        let trimmed = block.text.trim().to_string();
-        let body_id = ids[id_cursor];
-        id_cursor += 1;
-        let char_count = trimmed.chars().count() as i64;
-        let text_sha = sha256_hex(trimmed.as_bytes());
-        let norm_sha = norm_text_sha256(&trimmed);
-        let page = i64::from(block.source_unit);
-        nodes.push(
-            NewNode::child(
-                body_id,
-                work_node_id,
-                work_node_id,
-                ordinal,
-                1,
-                NodeType::Paragraph,
-            )
-            .text(trimmed)
-            .text_stats(char_count, 0)
-            .toc_span(ordinal, ordinal)
-            .pages(page, page)
-            .content_hashes(
-                format!("intake:{intake_id}:body:{body_idx}"),
-                text_sha,
-                norm_sha,
-            ),
-        );
-        ordinal += 1;
+        if plan.is_leaf {
+            let text = plan.text.clone().expect("leaf carries text");
+            let char_count = text.chars().count() as i64;
+            let pos = leaf_position[i].expect("leaf has a preorder position");
+            node = node
+                .text(text.clone())
+                .text_stats(char_count, 0)
+                .toc_span(pos, pos);
+            // Leaves without a source unit (the abstract) leave their
+            // page bounds NULL; every other leaf collapses
+            // `source_unit` into both `pages_lo` and `pages_hi`.
+            if let Some(page) = plan.source_unit {
+                let page = i64::from(page);
+                node = node.pages(page, page);
+            }
+            // Content hashes are reserved for prose leaves at the
+            // corpus boundary. Structural leaves (FigureCaption) skip
+            // the anchor / text_sha / norm_sha triple.
+            if plan.node_type.is_prose_leaf() {
+                let text_sha = sha256_hex(text.as_bytes());
+                let norm_sha = norm_text_sha256(&text);
+                let namespace = plan
+                    .content_namespace
+                    .clone()
+                    .expect("prose leaf carries a namespace");
+                node = node.content_hashes(namespace, text_sha, norm_sha);
+            }
+            if Some(i) == abstract_plan_idx {
+                leaf_node_id = Some(node_id);
+                leaf_text = Some(text);
+            }
+        } else {
+            // Organizer: page and toc spans aggregated from descendants.
+            if let Some((tlo, thi, plo, phi)) =
+                subtree_spans(i, &plans, &children_of, &leaf_position)
+            {
+                node = node
+                    .toc_span(tlo, thi)
+                    .pages(i64::from(plo), i64::from(phi));
+            }
+        }
+        nodes.push(node);
     }
 
     let nodes_written = nodes.len();
     let has_leaf = leaf_node_id.is_some();
-    let body_leaves = bodies.len();
     corpus.insert_nodes(&nodes)?;
     Ok(StructureResult {
         work_node_id,
@@ -726,6 +1022,9 @@ fn build_structure(
         nodes_written,
         has_leaf,
         body_leaves,
+        section_count,
+        subsection_count,
+        heading_leaves,
     })
 }
 
@@ -992,25 +1291,30 @@ mod tests {
 
     #[test]
     fn build_structure_emits_abstract_and_body_paragraphs_in_document_order() {
+        // No headings in the block stream → the tree falls back to the
+        // flat Phase-1 shape: 1 Work root + 1 abstract leaf + N body
+        // Paragraph leaves directly under the Work root.
         let mut corpus = Corpus::open_in_memory().expect("corpus");
         let intake_id = 42_i64;
         let abstract_text = Some("Synthetic abstract for testing.".to_string());
         let blocks = vec![
             body("First body block on page 0.", 0),
             body("Second body block on page 0.", 0),
-            other(BlockKind::Heading { level: 1 }, "1. Introduction", 1),
             body("Body block on page 1.", 1),
-            other(BlockKind::Caption, "Figure 1: synthetic.", 1),
             body("Body block on page 2.", 2),
-            other(BlockKind::Footnote, "footnote text", 2),
-            other(BlockKind::Other, "unclassified text", 2),
         ];
 
         let result = build_structure(&mut corpus, intake_id, abstract_text, &blocks)
             .expect("build_structure");
 
         assert!(result.has_leaf, "abstract leaf must be present");
-        assert_eq!(result.body_leaves, 4, "only Body blocks become body leaves");
+        assert_eq!(
+            result.body_leaves, 4,
+            "every body block becomes a body leaf"
+        );
+        assert_eq!(result.section_count, 0, "no Section organizer in fallback");
+        assert_eq!(result.subsection_count, 0);
+        assert_eq!(result.heading_leaves, 0);
         assert_eq!(
             result.nodes_written, 6,
             "1 Work root + 1 abstract leaf + 4 body leaves"
@@ -1151,5 +1455,187 @@ mod tests {
 
         assert!(!result.has_leaf, "whitespace-only abstract is dropped");
         assert_eq!(result.body_leaves, 1);
+    }
+
+    #[test]
+    fn build_structure_assembles_section_tree_from_heading_blocks() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 7_i64;
+        let blocks = vec![
+            other(BlockKind::Heading { level: 1 }, "1. Introduction", 0),
+            body("Intro body line.", 0),
+            other(BlockKind::Heading { level: 2 }, "1.1 Motivation", 1),
+            body("Motivation body.", 1),
+            other(BlockKind::Caption, "Figure 1: example.", 1),
+            other(BlockKind::Heading { level: 1 }, "2. Method", 2),
+            body("Method body.", 2),
+        ];
+
+        let result = build_structure(&mut corpus, intake_id, None, &blocks).expect("structure");
+
+        assert_eq!(
+            result.section_count, 2,
+            "two Heading{{1}} blocks → two Sections"
+        );
+        assert_eq!(result.subsection_count, 1);
+        assert_eq!(
+            result.heading_leaves, 3,
+            "two Section + one Subsection heading"
+        );
+        assert_eq!(result.body_leaves, 3, "three Body blocks");
+        // 1 Work root + 2 Section organizers + 1 Subsection organizer
+        // + 3 Heading leaves + 3 Paragraph leaves + 1 FigureCaption.
+        assert_eq!(result.nodes_written, 11);
+
+        let work = result.work_node_id;
+        let children = corpus.children(work).expect("root children");
+        let kinds: Vec<NodeType> = children.iter().map(|c| c.node_type).collect();
+        assert_eq!(kinds, vec![NodeType::Section, NodeType::Section]);
+
+        // First Section: Heading + Paragraph leaf + a Subsection.
+        let first_section = &children[0];
+        let first_children = corpus
+            .children(first_section.node_id)
+            .expect("section children");
+        let first_kinds: Vec<NodeType> = first_children.iter().map(|c| c.node_type).collect();
+        assert_eq!(
+            first_kinds,
+            vec![NodeType::Heading, NodeType::Paragraph, NodeType::Subsection]
+        );
+
+        // Subsection holds Heading + Paragraph + FigureCaption.
+        let subsection = &first_children[2];
+        let sub_children = corpus.children(subsection.node_id).expect("sub children");
+        let sub_kinds: Vec<NodeType> = sub_children.iter().map(|c| c.node_type).collect();
+        assert_eq!(
+            sub_kinds,
+            vec![
+                NodeType::Heading,
+                NodeType::Paragraph,
+                NodeType::FigureCaption
+            ]
+        );
+
+        // FigureCaption carries text but no content hashes.
+        let caption = &sub_children[2];
+        assert_eq!(caption.text_content.as_deref(), Some("Figure 1: example."));
+        assert!(caption.norm_text_sha256.is_none());
+        assert!(caption.stable_anchor.is_none());
+
+        // Body Paragraph stable_anchor still counts only Body blocks:
+        // body:0 inside first Section, body:1 inside Subsection, body:2
+        // inside second Section.
+        let intro_para = &first_children[1];
+        assert_eq!(
+            intro_para.stable_anchor.as_deref(),
+            Some(format!("intake:{intake_id}:body:0").as_str()),
+        );
+        let motivation_para = &sub_children[1];
+        assert_eq!(
+            motivation_para.stable_anchor.as_deref(),
+            Some(format!("intake:{intake_id}:body:1").as_str()),
+        );
+
+        // Section organizers carry no body text, no content hashes, but
+        // their page span aggregates descendants.
+        assert!(first_section.text_content.is_none());
+        assert!(first_section.stable_anchor.is_none());
+        let first_pages = (
+            first_section.page_index_start.expect("section pages_lo"),
+            first_section.page_index_end.expect("section pages_hi"),
+        );
+        assert_eq!(first_pages, (0, 1), "first Section spans pages 0..=1");
+        // toc spans collapse to leaf preorder positions.
+        let first_toc = (
+            first_section.toc_lo.expect("section toc_lo"),
+            first_section.toc_hi.expect("section toc_hi"),
+        );
+        assert_eq!(
+            first_toc.1 - first_toc.0 + 1,
+            5,
+            "first Section covers 5 leaves"
+        );
+    }
+
+    #[test]
+    fn build_structure_preserves_abstract_leaf_bit_for_bit_under_heading_path() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let intake_id = 11_i64;
+        let abstract_text = Some("The abstract body text.".to_string());
+        // Same intake on the same abstract: with and without heading
+        // colorings must yield the exact same abstract leaf row.
+        let with_heading = vec![
+            other(BlockKind::Heading { level: 1 }, "1. Introduction", 0),
+            body("Intro body.", 0),
+        ];
+        let flat = vec![body("Intro body.", 0)];
+
+        let r_with = build_structure(&mut corpus, intake_id, abstract_text.clone(), &with_heading)
+            .expect("with-heading");
+        let abstract_id_a = r_with.leaf_node_id.expect("abstract leaf");
+        let abstract_text_a = r_with.leaf_text.clone();
+        let abstract_row_a = corpus
+            .get_node(abstract_id_a)
+            .expect("get a")
+            .expect("row a");
+
+        // Rebuild the structure: drop_partition runs inside
+        // build_structure, so calling it again replaces the tree.
+        let r_flat =
+            build_structure(&mut corpus, intake_id, abstract_text.clone(), &flat).expect("flat");
+        let abstract_id_b = r_flat.leaf_node_id.expect("abstract leaf");
+        let abstract_row_b = corpus
+            .get_node(abstract_id_b)
+            .expect("get b")
+            .expect("row b");
+
+        assert_eq!(abstract_id_a, abstract_id_b, "same NodeId");
+        assert_eq!(
+            abstract_row_a.stable_anchor, abstract_row_b.stable_anchor,
+            "same stable anchor"
+        );
+        assert_eq!(
+            abstract_row_a.text_sha256, abstract_row_b.text_sha256,
+            "same text sha"
+        );
+        assert_eq!(
+            abstract_row_a.norm_text_sha256, abstract_row_b.norm_text_sha256,
+            "same norm sha"
+        );
+        assert_eq!(abstract_row_a.toc_lo, abstract_row_b.toc_lo, "same toc_lo");
+        assert_eq!(
+            abstract_row_a.page_index_start, abstract_row_b.page_index_start,
+            "page bounds: both None"
+        );
+        assert_eq!(abstract_text_a, r_flat.leaf_text, "same leaf_text");
+    }
+
+    #[test]
+    fn build_structure_promotes_orphan_subsection_to_a_section() {
+        // A Heading{2} block without a preceding Heading{1} auto-opens
+        // a Section so the Subsection has a valid parent.
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let blocks = vec![
+            other(BlockKind::Heading { level: 2 }, "1.1 Orphan subsection", 0),
+            body("Body beneath the orphan subsection.", 0),
+        ];
+
+        let result = build_structure(&mut corpus, 3, None, &blocks).expect("structure");
+
+        assert_eq!(result.section_count, 1, "auto-opened Section");
+        assert_eq!(result.subsection_count, 1);
+        assert_eq!(
+            result.heading_leaves, 1,
+            "only the Subsection heading was colored"
+        );
+        let work = result.work_node_id;
+        let children = corpus.children(work).expect("children");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].node_type, NodeType::Section);
+        let section_children = corpus.children(children[0].node_id).expect("section");
+        let kinds: Vec<NodeType> = section_children.iter().map(|c| c.node_type).collect();
+        // Auto-opened Section carries only the Subsection — no leading
+        // Heading leaf, since no Heading{1} text existed.
+        assert_eq!(kinds, vec![NodeType::Subsection]);
     }
 }
