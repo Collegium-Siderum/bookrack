@@ -293,15 +293,20 @@ impl DaemonRuntime {
         )
         .context("build embedding client")?;
 
-        // 6. Catalog preflight: reject a schema the binary cannot
-        //    serve before exposing a listener. Both the book catalog
-        //    and (when it exists) the papers catalog are checked.
+        // 6. Catalog preflight: migrate each on-disk catalog forward
+        //    to the binary's `TARGET_VERSION` (with the usual one-shot
+        //    backup) before exposing a listener, then drop the handle
+        //    so `Library::open` below claims the read-write connection
+        //    fresh. A read-only check would refuse a database one
+        //    schema behind the binary even though the migration step
+        //    is forward-compatible — read-write open lets routine
+        //    binary upgrades just work.
         if cfg.catalog_db().exists() {
-            Catalog::open_read_only(&cfg.catalog_db())
+            Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir())
                 .context("preflight catalog schema check failed")?;
         }
         if cfg.papers_catalog_db().exists() {
-            Catalog::open_read_only(&cfg.papers_catalog_db())
+            Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
                 .context("preflight papers catalog schema check failed")?;
         }
 
