@@ -244,6 +244,7 @@ mod tests {
     use std::future::Future;
 
     use bookrack_catalog::NewIntake;
+    use bookrack_core::ItemKind;
     use bookrack_embed::{EmbedError, Embedder, Result as EmbedResult};
     use bookrack_vectors::ChunkRow;
 
@@ -304,6 +305,7 @@ mod tests {
         for &id in intake_ids {
             let reg = catalog
                 .register_intake(
+                    ItemKind::Book,
                     &NewIntake::new(format!("sha-{id}"))
                         .format("txt")
                         .byte_size(1),
@@ -311,7 +313,7 @@ mod tests {
                 .expect("register");
             assert_eq!(reg.intake().intake_id, id);
             catalog
-                .set_intake_status(id, IntakeStatus::Embedded)
+                .set_intake_status(ItemKind::Book, id, IntakeStatus::Embedded)
                 .expect("status");
         }
     }
@@ -358,10 +360,15 @@ mod tests {
         // default-zero state cannot be mistaken for stale, then mark
         // intake 2 stale by stamping a version below it.
         catalog
-            .set_extraction(1, "fake", EXTRACTOR_VERSION)
+            .set_extraction(ItemKind::Book, 1, "fake", EXTRACTOR_VERSION)
             .expect("pin extractor_version on intake 1");
         catalog
-            .set_extraction(2, "fake", EXTRACTOR_VERSION.saturating_sub(1))
+            .set_extraction(
+                ItemKind::Book,
+                2,
+                "fake",
+                EXTRACTOR_VERSION.saturating_sub(1),
+            )
             .expect("override extractor_version on intake 2");
 
         let full = plan_reembed(&catalog, dir.path(), None, false)

@@ -212,14 +212,17 @@ mod tests {
 
     fn seed_book(catalog: &mut Catalog, books_dir: &Path, sha: &str) -> i64 {
         let intake_id = catalog
-            .register_intake(&NewIntake::new(sha.to_string()).format("txt").byte_size(1))
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new(sha.to_string()).format("txt").byte_size(1),
+            )
             .expect("register")
             .intake()
             .intake_id;
         let path = books_dir.join(envelope_filename(intake_id));
         write_envelope(&path, &sample_extraction(), intake_id, sha).expect("write envelope");
         catalog
-            .set_stored_path(intake_id, &path.to_string_lossy())
+            .set_stored_path(ItemKind::Book, intake_id, &path.to_string_lossy())
             .expect("stored path");
         intake_id
     }
@@ -287,7 +290,10 @@ mod tests {
     fn reaudit_requires_a_readable_envelope() {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let id = catalog
-            .register_intake(&NewIntake::new("sha-no-envelope").format("txt").byte_size(1))
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new("sha-no-envelope").format("txt").byte_size(1),
+            )
             .expect("register")
             .intake()
             .intake_id;

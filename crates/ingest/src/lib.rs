@@ -473,6 +473,7 @@ pub async fn ingest_book<E: Embedder>(
     // breadcrumb fallback when no title is known; the column may be
     // null on pre-existing rows.
     let registration = catalog.register_intake(
+        ItemKind::Book,
         &NewIntake::new(source_sha.clone())
             .format(adapter.clone())
             .byte_size(bytes.len() as i64)
@@ -488,13 +489,14 @@ pub async fn ingest_book<E: Embedder>(
     // Stamp the extraction provenance, so a later re-extraction can tell
     // whether this book's partition is stale.
     catalog.set_extraction(
+        ItemKind::Book,
         intake_id,
         &extraction.provenance.adapter,
         extraction.provenance.extractor_version,
     )?;
     // The status track is `Pending` (set by `register_intake`) →
     // `Extracted` here → `Embedded` after the embed run completes.
-    catalog.set_intake_status(intake_id, IntakeStatus::Extracted)?;
+    catalog.set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Extracted)?;
 
     // Cache the post-EXTRACT Extraction as a v1 envelope in the opaque
     // store and record its path in `intake.stored_path`. Failure is
@@ -503,9 +505,11 @@ pub async fn ingest_book<E: Embedder>(
     let envelope_path = books_dir.join(bookrack_extract::envelope_filename(intake_id));
     match bookrack_extract::write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
         Ok(()) => {
-            if let Err(err) =
-                catalog.set_stored_path(intake_id, envelope_path.to_string_lossy().as_ref())
-            {
+            if let Err(err) = catalog.set_stored_path(
+                ItemKind::Book,
+                intake_id,
+                envelope_path.to_string_lossy().as_ref(),
+            ) {
                 tracing::warn!(
                     intake_id,
                     error = %err,
@@ -831,7 +835,7 @@ pub async fn resume_from_chunk<E: Embedder>(
         "embedded chunks"
     );
 
-    catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
+    catalog.set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)?;
     let embedded_at = catalog.now_iso()?;
     set_state(
         catalog,
@@ -2345,7 +2349,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         super::run_metadata_substep(
@@ -2413,7 +2420,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         super::run_metadata_substep(
@@ -2482,7 +2492,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2003, Sample Press)";
@@ -2546,7 +2559,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - Filename Title (2003, Sample Press)";
@@ -2609,7 +2625,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title -- isbn13 9780306406157";
@@ -2671,7 +2690,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2006, Sample Press)";
@@ -2731,7 +2753,10 @@ mod book_pipeline_tests {
             },
         };
         let intake = catalog
-            .register_intake(&bookrack_catalog::NewIntake::new("dummy-sha".to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new("dummy-sha".to_string()),
+            )
             .expect("register");
         let intake_id = intake.intake().intake_id;
         let stem = "Alice Author - A Sample Title (2019, Sample Press)";
@@ -3048,7 +3073,10 @@ mod book_pipeline_tests {
 
     fn intake_id(catalog: &mut Catalog, sha: &str) -> i64 {
         catalog
-            .register_intake(&bookrack_catalog::NewIntake::new(sha.to_string()))
+            .register_intake(
+                ItemKind::Book,
+                &bookrack_catalog::NewIntake::new(sha.to_string()),
+            )
             .expect("register")
             .intake()
             .intake_id

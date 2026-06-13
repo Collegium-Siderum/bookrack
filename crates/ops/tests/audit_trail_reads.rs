@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use bookrack_catalog::{ActorKind, Catalog, NewIntake, NewItemPipelineAudit, NewMetadataAudit};
-use bookrack_core::PartitionIdx;
+use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::metadata::show_audit_trail;
 use bookrack_ops::reads::pipeline::show_pipeline_trail;
@@ -52,7 +52,7 @@ impl Fixture {
 
     fn seed_intake(&self, sha: &str) -> i64 {
         self.catalog()
-            .register_intake(&NewIntake::new(sha))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register intake")
             .into_intake()
             .intake_id

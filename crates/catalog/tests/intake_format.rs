@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
+use bookrack_core::ItemKind;
 use tempfile::tempdir;
 
 /// Value of `bookrack_extract::EXTRACTOR_VERSION` at the moment this
@@ -117,7 +118,7 @@ fn intake_v1_fixture_round_trips() {
     // registration receives an id past the highest fixture row.
     let mut next_catalog = catalog;
     let fresh = next_catalog
-        .register_intake(&NewIntake::new("rt-fresh-sha"))
+        .register_intake(ItemKind::Book, &NewIntake::new("rt-fresh-sha"))
         .expect("register fresh");
     assert!(
         fresh.intake().intake_id > ROWS.len() as i64,
@@ -144,6 +145,7 @@ fn regenerate_intake_v1_fixture() {
     for row in ROWS {
         let id = catalog
             .register_intake(
+                ItemKind::Book,
                 &NewIntake::new(row.sha)
                     .original_path(row.original_path)
                     .format(row.format)
@@ -154,12 +156,12 @@ fn regenerate_intake_v1_fixture() {
             .intake_id;
         if let Some(adapter) = row.adapter {
             catalog
-                .set_extraction(id, adapter, FIXTURE_EXTRACTOR_VERSION)
+                .set_extraction(ItemKind::Book, id, adapter, FIXTURE_EXTRACTOR_VERSION)
                 .expect("set_extraction");
         }
         if row.final_status != IntakeStatus::Pending {
             catalog
-                .set_intake_status(id, row.final_status)
+                .set_intake_status(ItemKind::Book, id, row.final_status)
                 .expect("set_intake_status");
         }
     }

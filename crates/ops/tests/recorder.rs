@@ -12,6 +12,7 @@
 use std::path::PathBuf;
 
 use bookrack_catalog::{Catalog, McpToolCall, NewIntake};
+use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::reads::books::{list_books, show_book};
 use bookrack_ops::reads::info::{LibraryInfoContext, show_library_info};
@@ -62,7 +63,7 @@ impl Fixture {
 
     fn seed_intake(&self, sha: &str) -> i64 {
         self.catalog()
-            .register_intake(&NewIntake::new(sha))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register intake")
             .into_intake()
             .intake_id

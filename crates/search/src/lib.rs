@@ -853,6 +853,7 @@ mod tests {
         let (dir, corpus, mut catalog, store, _leaf) = fixture(None, false).await;
         catalog
             .register_intake(
+                ItemKind::Book,
                 &bookrack_catalog::NewIntake::new("sha-abc")
                     .format("epub")
                     .byte_size(1024)

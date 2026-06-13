@@ -9,6 +9,7 @@ repository.workspace = true
 bookrack-audit-profile.workspace = true
 bookrack-catalog = { path = "../catalog" }
 bookrack-config = { path = "../config" }
+bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-vectors = { path = "../vectors" }
 chrono.workspace = true

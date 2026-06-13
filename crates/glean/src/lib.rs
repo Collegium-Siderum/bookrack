@@ -301,6 +301,7 @@ pub async fn glean_paper<E: Embedder>(
     let started = Instant::now();
     let adapter = extraction.provenance.adapter.clone();
     let registration = catalog.register_intake(
+        ItemKind::Paper,
         &NewIntake::new(source_sha.clone())
             .format(adapter.clone())
             .byte_size(bytes.len() as i64)
@@ -311,18 +312,21 @@ pub async fn glean_paper<E: Embedder>(
     tracing::Span::current().record("intake_id", intake_id);
 
     catalog.set_extraction(
+        ItemKind::Paper,
         intake_id,
         &extraction.provenance.adapter,
         extraction.provenance.extractor_version,
     )?;
-    catalog.set_intake_status(intake_id, IntakeStatus::Extracted)?;
+    catalog.set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Extracted)?;
 
     let envelope_path = papers_dir.join(envelope_filename(intake_id));
     match write_envelope(&envelope_path, &extraction, intake_id, &source_sha) {
         Ok(()) => {
-            if let Err(err) =
-                catalog.set_stored_path(intake_id, envelope_path.to_string_lossy().as_ref())
-            {
+            if let Err(err) = catalog.set_stored_path(
+                ItemKind::Paper,
+                intake_id,
+                envelope_path.to_string_lossy().as_ref(),
+            ) {
                 tracing::warn!(
                     intake_id,
                     error = %err,
@@ -467,7 +471,7 @@ pub async fn glean_paper<E: Embedder>(
             .embedded_at(&embedded_at)
             .embed_model(&params.embed.model),
     )?;
-    catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
+    catalog.set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Embedded)?;
 
     Ok(GleanReport {
         intake_id,

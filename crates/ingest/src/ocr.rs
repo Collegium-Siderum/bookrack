@@ -161,6 +161,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     //    opaque-store copy land; on a re-registration we only verify
     //    the existing status is still on the OCR track.
     let pdf_reg = catalog.register_intake(
+        ItemKind::Book,
         &NewIntake::new(source_sha_pdf.clone())
             .format("pdf")
             .byte_size(pdf_bytes.len() as i64)
@@ -168,12 +169,16 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     )?;
     let pdf_intake_id = pdf_reg.intake().intake_id;
     if pdf_reg.is_new() {
-        catalog.set_intake_status(pdf_intake_id, IntakeStatus::NeedsOcr)?;
-        catalog.set_page_count(pdf_intake_id, i64::from(expected_pages))?;
+        catalog.set_intake_status(ItemKind::Book, pdf_intake_id, IntakeStatus::NeedsOcr)?;
+        catalog.set_page_count(ItemKind::Book, pdf_intake_id, i64::from(expected_pages))?;
         let pdf_stored = books_dir.join(format!("{pdf_intake_id}.pdf"));
         std::fs::create_dir_all(books_dir)?;
         std::fs::write(&pdf_stored, &pdf_bytes)?;
-        catalog.set_stored_path(pdf_intake_id, pdf_stored.to_string_lossy().as_ref())?;
+        catalog.set_stored_path(
+            ItemKind::Book,
+            pdf_intake_id,
+            pdf_stored.to_string_lossy().as_ref(),
+        )?;
     } else if pdf_reg.intake().status != IntakeStatus::NeedsOcr {
         return Err(IngestError::OcrSourceStatusMismatch {
             intake_id: pdf_intake_id,
@@ -185,6 +190,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     //    idempotent (matches the `ingest_book` convention); status
     //    advances later in this function.
     let ocr_reg = catalog.register_intake(
+        ItemKind::Book,
         &NewIntake::new(source_sha_ocr.clone())
             .format("ocr-markdown")
             .byte_size(ocr_bytes.len() as i64)
@@ -232,7 +238,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     let coverage = match check_coverage(&extraction, expected_pages, ocr_params.allow_partial) {
         Ok(c) => c,
         Err(e) => {
-            catalog.set_intake_status(ocr_intake_id, IntakeStatus::Aborted)?;
+            catalog.set_intake_status(ItemKind::Book, ocr_intake_id, IntakeStatus::Aborted)?;
             return Err(e);
         }
     };
@@ -240,7 +246,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         extraction.provenance.partial_pages = Some(present.clone());
     }
     let ocr_page_count = present_sheets(&extraction).last().copied().unwrap_or(0);
-    catalog.set_page_count(ocr_intake_id, i64::from(ocr_page_count))?;
+    catalog.set_page_count(ItemKind::Book, ocr_intake_id, i64::from(ocr_page_count))?;
 
     // 7. Write the rebuild-cache envelope. Mirrors `ingest_book`
     //    (lib.rs L429-L453): same opaque-store directory, same
@@ -257,7 +263,11 @@ pub async fn ingest_ocr_intake<E: Embedder>(
         &source_sha_ocr,
     ) {
         Ok(()) => {
-            catalog.set_stored_path(ocr_intake_id, envelope_path.to_string_lossy().as_ref())?;
+            catalog.set_stored_path(
+                ItemKind::Book,
+                ocr_intake_id,
+                envelope_path.to_string_lossy().as_ref(),
+            )?;
             Some(envelope_path)
         }
         Err(err) => {
@@ -275,11 +285,12 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     //    crate; using its `ADAPTER` string keeps the format
     //    commitment single-sourced.
     catalog.set_extraction(
+        ItemKind::Book,
         ocr_intake_id,
         bookrack_extract::ocr::ADAPTER,
         bookrack_extract::OCR_INTAKE_VERSION,
     )?;
-    catalog.set_intake_status(ocr_intake_id, IntakeStatus::Extracted)?;
+    catalog.set_intake_status(ItemKind::Book, ocr_intake_id, IntakeStatus::Extracted)?;
 
     // 9. STRUCTURE: build the corpus node tree from the extraction.
     //    The OCR book joins the same `partition_idx = intake_id`
@@ -859,12 +870,12 @@ mod tests {
         let sha = sha256_hex(&pdf_bytes);
         let id = p
             .catalog
-            .register_intake(&NewIntake::new(sha.clone()).format("pdf"))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha.clone()).format("pdf"))
             .expect("register")
             .intake()
             .intake_id;
         p.catalog
-            .set_intake_status(id, IntakeStatus::Extracted)
+            .set_intake_status(ItemKind::Book, id, IntakeStatus::Extracted)
             .expect("flip status");
 
         let err = ingest_ocr_intake(

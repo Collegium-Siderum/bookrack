@@ -340,7 +340,10 @@ mod tests {
     fn round_trip(item: &CslItem, expected_intake_id: i64) -> CslItem {
         let mut catalog = Catalog::open_in_memory().expect("open");
         let intake_id = catalog
-            .register_intake(&NewIntake::new(format!("sha-{expected_intake_id}")))
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new(format!("sha-{expected_intake_id}")),
+            )
             .expect("register")
             .into_intake()
             .intake_id;

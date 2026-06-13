@@ -84,14 +84,17 @@ fn sample_extraction() -> Extraction {
 fn seed_book(fx: &Fixture, sha: &str) -> i64 {
     let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
     let intake_id = catalog
-        .register_intake(&NewIntake::new(sha.to_string()).format("txt").byte_size(1))
+        .register_intake(
+            ItemKind::Book,
+            &NewIntake::new(sha.to_string()).format("txt").byte_size(1),
+        )
         .expect("register")
         .intake()
         .intake_id;
     let path = fx.books_dir.join(envelope_filename(intake_id));
     write_envelope(&path, &sample_extraction(), intake_id, sha).expect("write envelope");
     catalog
-        .set_stored_path(intake_id, &path.to_string_lossy())
+        .set_stored_path(ItemKind::Book, intake_id, &path.to_string_lossy())
         .expect("stored path");
     intake_id
 }
@@ -193,6 +196,7 @@ fn missing_envelope_is_an_error() {
     let mut catalog = Catalog::open(&fx.catalog_db).expect("open catalog");
     let id = catalog
         .register_intake(
+            ItemKind::Book,
             &NewIntake::new("sha-no-envelope".to_string())
                 .format("txt")
                 .byte_size(1),

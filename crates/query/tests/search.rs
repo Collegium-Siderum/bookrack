@@ -8,7 +8,7 @@ use std::future::Future;
 use std::path::Path;
 
 use bookrack_catalog::Catalog;
-use bookrack_core::NodeType;
+use bookrack_core::{ItemKind, NodeType};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{
@@ -247,7 +247,6 @@ async fn an_empty_index_is_served_without_stamps() {
 #[tokio::test]
 async fn show_book_and_show_toc_round_trip_through_the_facade() {
     use bookrack_catalog::{NewIntake, NewPublicationAttrs};
-    use bookrack_core::ItemKind;
 
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");
@@ -273,7 +272,7 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
     {
         let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
         catalog
-            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-1").format("epub"))
             .expect("register");
         let mut attrs = NewPublicationAttrs::new(1, ItemKind::Book);
         attrs.title = Some("A Test Book".to_string());
@@ -327,7 +326,7 @@ async fn list_books_clamps_to_max_list_limit() {
     {
         let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
         catalog
-            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-1").format("epub"))
             .expect("register");
     }
 

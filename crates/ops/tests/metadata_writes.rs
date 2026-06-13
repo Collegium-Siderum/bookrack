@@ -83,7 +83,7 @@ impl Fixture {
 
     fn seed_intake(&self, sha: &str) -> i64 {
         self.catalog()
-            .register_intake(&NewIntake::new(sha))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register intake")
             .into_intake()
             .intake_id

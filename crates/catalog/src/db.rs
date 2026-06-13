@@ -336,6 +336,7 @@ fn prune_old_backups(dir: &Path, db_stem: &str, keep: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_core::ItemKind;
 
     #[test]
     fn fresh_database_stamps_the_schema_version() {
@@ -612,7 +613,7 @@ mod tests {
             // Initialize the schema through the read-write entry point.
             let mut catalog = Catalog::open(&path).expect("first open");
             catalog
-                .register_intake(&NewIntake::new("sha-rw"))
+                .register_intake(ItemKind::Book, &NewIntake::new("sha-rw"))
                 .expect("seed");
         }
 
@@ -629,7 +630,7 @@ mod tests {
         // But any write through this handle fails with a SQLite error.
         let mut writer = read_only;
         let err = writer
-            .register_intake(&NewIntake::new("sha-blocked"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-blocked"))
             .expect_err("write must fail");
         assert!(matches!(err, CatalogError::Sqlite(_)), "{err:?}");
 

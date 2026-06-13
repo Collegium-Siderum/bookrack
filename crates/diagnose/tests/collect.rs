@@ -17,6 +17,7 @@ use bookrack_catalog::{
     ActorKind, Catalog, NewIntake, NewItemPipelineAudit, NewMcpToolCall, NewMetadataAudit,
 };
 use bookrack_config::Config;
+use bookrack_core::ItemKind;
 use bookrack_diagnose::{Options, collect};
 
 /// A fixed unix-ms timestamp the test runs against so the bundle name
@@ -52,7 +53,10 @@ impl Fixture {
         {
             let mut catalog = Catalog::open(&data_dir.join("catalog.db")).unwrap();
             catalog
-                .register_intake(&NewIntake::new("sha-fixture").format("epub"))
+                .register_intake(
+                    ItemKind::Book,
+                    &NewIntake::new("sha-fixture").format("epub"),
+                )
                 .unwrap();
             catalog
                 .record_tool_call(&NewMcpToolCall::new("cli", "library.list_books", "ok"))

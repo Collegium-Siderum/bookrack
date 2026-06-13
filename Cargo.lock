@@ -922,6 +922,7 @@ dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",
+ "bookrack-core",
  "bookrack-corpus",
  "bookrack-vectors",
  "chrono",

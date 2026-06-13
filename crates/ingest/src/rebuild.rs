@@ -202,6 +202,7 @@ fn is_rebuildable(status: IntakeStatus) -> bool {
 mod tests {
     use super::*;
     use bookrack_catalog::NewIntake;
+    use bookrack_core::ItemKind;
     use bookrack_extract::{
         Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc,
     };
@@ -238,7 +239,10 @@ mod tests {
 
     fn register(catalog: &mut Catalog, sha: &str) -> i64 {
         catalog
-            .register_intake(&NewIntake::new(sha.to_string()).format("txt").byte_size(1))
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new(sha.to_string()).format("txt").byte_size(1),
+            )
             .expect("register")
             .intake()
             .intake_id
@@ -343,10 +347,12 @@ mod tests {
 
         let intake_id = register(&mut catalog, "sha-1");
         catalog
-            .set_intake_status(intake_id, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)
             .expect("status");
         let path = seed_envelope(dir.path(), intake_id, "sha-1", &extraction);
-        catalog.set_stored_path(intake_id, &path).expect("stored");
+        catalog
+            .set_stored_path(ItemKind::Book, intake_id, &path)
+            .expect("stored");
 
         let report = rebuild_from_intakes(&mut corpus, &catalog, &RebuildParams::default())
             .expect("rebuild");
@@ -380,23 +386,37 @@ mod tests {
         // (also not stale today; pretend a future binary is at v2).
         let fresh = register(&mut catalog, "sha-fresh");
         catalog
-            .set_intake_status(fresh, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, fresh, IntakeStatus::Embedded)
             .expect("status");
         catalog
-            .set_extraction(fresh, "txt", bookrack_extract::EXTRACTOR_VERSION)
+            .set_extraction(
+                ItemKind::Book,
+                fresh,
+                "txt",
+                bookrack_extract::EXTRACTOR_VERSION,
+            )
             .expect("stamp fresh");
         let path = seed_envelope(dir.path(), fresh, "sha-fresh", &extraction);
-        catalog.set_stored_path(fresh, &path).expect("stored");
+        catalog
+            .set_stored_path(ItemKind::Book, fresh, &path)
+            .expect("stored");
 
         let stale = register(&mut catalog, "sha-stale");
         catalog
-            .set_intake_status(stale, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, stale, IntakeStatus::Embedded)
             .expect("status");
         catalog
-            .set_extraction(stale, "txt", bookrack_extract::EXTRACTOR_VERSION + 99)
+            .set_extraction(
+                ItemKind::Book,
+                stale,
+                "txt",
+                bookrack_extract::EXTRACTOR_VERSION + 99,
+            )
             .expect("stamp stale");
         let path = seed_envelope(dir.path(), stale, "sha-stale", &extraction);
-        catalog.set_stored_path(stale, &path).expect("stored");
+        catalog
+            .set_stored_path(ItemKind::Book, stale, &path)
+            .expect("stored");
 
         // Without the filter, both rebuild; with it, only the stale one.
         let report = rebuild_from_intakes(
@@ -418,7 +438,7 @@ mod tests {
         let mut catalog = Catalog::open_in_memory().expect("catalog");
         let intake_id = register(&mut catalog, "sha-1");
         catalog
-            .set_intake_status(intake_id, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)
             .expect("status");
 
         let report = rebuild_from_intakes(&mut corpus, &catalog, &RebuildParams::default())
@@ -436,11 +456,13 @@ mod tests {
 
         let intake_id = register(&mut catalog, "sha-real");
         catalog
-            .set_intake_status(intake_id, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)
             .expect("status");
         // Envelope records a different sha than the intake row.
         let path = seed_envelope(dir.path(), intake_id, "sha-other", &extraction);
-        catalog.set_stored_path(intake_id, &path).expect("stored");
+        catalog
+            .set_stored_path(ItemKind::Book, intake_id, &path)
+            .expect("stored");
 
         let report = rebuild_from_intakes(&mut corpus, &catalog, &RebuildParams::default())
             .expect("rebuild");
@@ -464,16 +486,16 @@ mod tests {
 
         let with_envelope = register(&mut catalog, "sha-a");
         catalog
-            .set_intake_status(with_envelope, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, with_envelope, IntakeStatus::Embedded)
             .expect("status");
         let path = seed_envelope(dir.path(), with_envelope, "sha-a", &extraction);
         catalog
-            .set_stored_path(with_envelope, &path)
+            .set_stored_path(ItemKind::Book, with_envelope, &path)
             .expect("stored");
 
         let without_envelope = register(&mut catalog, "sha-b");
         catalog
-            .set_intake_status(without_envelope, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, without_envelope, IntakeStatus::Embedded)
             .expect("status");
 
         let params = RebuildParams {

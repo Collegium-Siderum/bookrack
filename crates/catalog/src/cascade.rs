@@ -209,7 +209,7 @@ mod tests {
 
     fn seed_intake(catalog: &mut Catalog, sha: &str) -> i64 {
         catalog
-            .register_intake(&NewIntake::new(sha))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
             .expect("register")
             .into_intake()
             .intake_id

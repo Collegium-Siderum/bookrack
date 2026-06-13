@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::EmbedConfig;
-use bookrack_core::{PartitionIdx, error_chain};
+use bookrack_core::{ItemKind, PartitionIdx, error_chain};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_vectors::ChunkStore;
@@ -83,7 +83,7 @@ pub async fn reset_and_rechunk<E: Embedder>(
             .map(|i| i.intake_id)
             .collect();
         for id in embedded {
-            catalog.set_intake_status(id, IntakeStatus::Extracted)?;
+            catalog.set_intake_status(ItemKind::Book, id, IntakeStatus::Extracted)?;
         }
     }
 
@@ -180,7 +180,7 @@ pub async fn reset_and_rechunk<E: Embedder>(
             )),
             None,
         );
-        catalog.set_intake_status(intake_id, IntakeStatus::Embedded)?;
+        catalog.set_intake_status(ItemKind::Book, intake_id, IntakeStatus::Embedded)?;
         report.intakes_reembedded += 1;
         report.chunks_written += embed_run.chunks_written;
     }

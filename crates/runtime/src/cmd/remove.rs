@@ -251,7 +251,7 @@ fn confirm() -> Result<bool> {
 mod tests {
     use super::*;
     use bookrack_catalog::NewIntake;
-    use bookrack_core::NodeType;
+    use bookrack_core::{ItemKind, NodeType};
     use bookrack_corpus::NewNode;
 
     /// Seed a minimal book directly through the library APIs the
@@ -265,7 +265,7 @@ mod tests {
         sha: &str,
     ) -> (i64, std::path::PathBuf) {
         let intake_id = catalog
-            .register_intake(&NewIntake::new(sha).format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha).format("epub"))
             .expect("register")
             .into_intake()
             .intake_id;
@@ -275,7 +275,11 @@ mod tests {
             books_dir.join(bookrack_extract::envelope::envelope_filename(intake_id));
         std::fs::write(&envelope_path, b"{\"schema_version\":2}").expect("seed envelope");
         catalog
-            .set_stored_path(intake_id, envelope_path.to_string_lossy().as_ref())
+            .set_stored_path(
+                ItemKind::Book,
+                intake_id,
+                envelope_path.to_string_lossy().as_ref(),
+            )
             .expect("stored_path");
         let partition = corpus.allocate_partition(intake_id).expect("partition");
         let root_node =

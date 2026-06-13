@@ -491,12 +491,21 @@ impl Registration {
 impl Catalog {
     /// Register a source file, idempotently on its `source_sha256`.
     ///
+    /// The `kind` parameter declares which pipeline the caller is
+    /// writing for. The `Catalog` instance itself is already bound to
+    /// one underlying database file (the books catalog or the papers
+    /// catalog), so `kind` does not enter SQL here; it is a
+    /// signature-layer safety belt that promotes a mismatched-pipeline
+    /// call from a runtime symptom to a compile-time error at the call
+    /// site.
+    ///
     /// If the hash is already known the existing row is returned as
     /// [`Registration::AlreadyPresent`] and nothing is written;
     /// otherwise a new row is created with status
     /// [`IntakeStatus::Pending`] and returned as
     /// [`Registration::Created`].
-    pub fn register_intake(&mut self, new: &NewIntake) -> Result<Registration> {
+    pub fn register_intake(&mut self, kind: ItemKind, new: &NewIntake) -> Result<Registration> {
+        let _ = kind;
         let tx = self.conn.transaction()?;
         let existing = tx
             .query_row(
@@ -763,9 +772,16 @@ impl Catalog {
         count_as_u64(n)
     }
 
-    /// Advance an intake's lifecycle state. Returns whether a row with
-    /// that id existed.
-    pub fn set_intake_status(&self, intake_id: i64, status: IntakeStatus) -> Result<bool> {
+    /// Advance an intake's lifecycle state. The `kind` parameter is a
+    /// signature-layer safety belt; see [`Self::register_intake`]
+    /// for the rationale. Returns whether a row with that id existed.
+    pub fn set_intake_status(
+        &self,
+        kind: ItemKind,
+        intake_id: i64,
+        status: IntakeStatus,
+    ) -> Result<bool> {
+        let _ = kind;
         let affected = self.conn.execute(
             "UPDATE intake SET status = :status WHERE intake_id = :intake_id",
             named_params! { ":status": status.as_str(), ":intake_id": intake_id },
@@ -774,8 +790,16 @@ impl Catalog {
     }
 
     /// Record where an intake's file was placed in the opaque store.
-    /// Returns whether a row with that id existed.
-    pub fn set_stored_path(&self, intake_id: i64, stored_path: &str) -> Result<bool> {
+    /// The `kind` parameter is a signature-layer safety belt; see
+    /// [`Self::register_intake`] for the rationale. Returns whether a
+    /// row with that id existed.
+    pub fn set_stored_path(
+        &self,
+        kind: ItemKind,
+        intake_id: i64,
+        stored_path: &str,
+    ) -> Result<bool> {
+        let _ = kind;
         let affected = self.conn.execute(
             "UPDATE intake SET stored_path = :stored_path WHERE intake_id = :intake_id",
             named_params! { ":stored_path": stored_path, ":intake_id": intake_id },
@@ -783,11 +807,14 @@ impl Catalog {
         Ok(affected > 0)
     }
 
-    /// Record the physical sheet count for a paginated intake. Returns
-    /// whether a row with that id existed. The value, once set, is the
-    /// expected page count any derived OCR manifestation must cover; it
-    /// is the parameter the completeness check compares against.
-    pub fn set_page_count(&self, intake_id: i64, page_count: i64) -> Result<bool> {
+    /// Record the physical sheet count for a paginated intake. The
+    /// `kind` parameter is a signature-layer safety belt; see
+    /// [`Self::register_intake`] for the rationale. Returns whether a
+    /// row with that id existed. The value, once set, is the expected
+    /// page count any derived OCR manifestation must cover; it is the
+    /// parameter the completeness check compares against.
+    pub fn set_page_count(&self, kind: ItemKind, intake_id: i64, page_count: i64) -> Result<bool> {
+        let _ = kind;
         let affected = self.conn.execute(
             "UPDATE intake SET page_count = :page_count WHERE intake_id = :intake_id",
             named_params! { ":page_count": page_count, ":intake_id": intake_id },
@@ -799,13 +826,17 @@ impl Catalog {
     /// file and the value of `bookrack_extract::EXTRACTOR_VERSION` at
     /// that moment. Both are known together once EXTRACT completes;
     /// recording the version is what later lets a re-extraction detect
-    /// a stale partition. Returns whether a row with that id existed.
+    /// a stale partition. The `kind` parameter is a signature-layer
+    /// safety belt; see [`Self::register_intake`] for the rationale.
+    /// Returns whether a row with that id existed.
     pub fn set_extraction(
         &self,
+        kind: ItemKind,
         intake_id: i64,
         adapter: &str,
         extractor_version: u32,
     ) -> Result<bool> {
+        let _ = kind;
         let affected = self.conn.execute(
             "UPDATE intake SET adapter = :adapter, extractor_version = :extractor_version \
              WHERE intake_id = :intake_id",
@@ -832,7 +863,7 @@ mod tests {
     fn a_new_file_registers_as_created() {
         let mut catalog = catalog();
         let reg = catalog
-            .register_intake(&NewIntake::new("sha-abc"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-abc"))
             .expect("register");
         assert!(reg.is_new());
         let intake = reg.intake();
@@ -844,11 +875,32 @@ mod tests {
     }
 
     #[test]
+    fn same_sha_in_two_catalogs_yields_independent_intake_ids() {
+        let mut book_cat = catalog();
+        let mut paper_cat = catalog();
+        let payload = NewIntake::new("sha-shared").format("pdf");
+        let book_reg = book_cat
+            .register_intake(ItemKind::Book, &payload)
+            .expect("register book");
+        let paper_reg = paper_cat
+            .register_intake(ItemKind::Paper, &payload)
+            .expect("register paper");
+        assert!(book_reg.is_new());
+        assert!(paper_reg.is_new());
+        assert_eq!(
+            book_reg.intake().intake_id,
+            paper_reg.intake().intake_id,
+            "intake_id collides across catalogs; downstream consumers must \
+             disambiguate by (kind, intake_id), not by intake_id alone"
+        );
+    }
+
+    #[test]
     fn intakes_head_returns_the_first_n_intake_rows() {
         let mut catalog = catalog();
         for n in 1..=5 {
             catalog
-                .register_intake(&NewIntake::new(format!("sha-{n}")))
+                .register_intake(ItemKind::Book, &NewIntake::new(format!("sha-{n}")))
                 .expect("register");
         }
         let rows = catalog.intakes_head(3).expect("head");
@@ -867,6 +919,7 @@ mod tests {
         let mut catalog = catalog();
         let registered = catalog
             .register_intake(
+                ItemKind::Book,
                 &NewIntake::new("sha-rt")
                     .original_path("incoming/book.epub")
                     .format("epub")
@@ -875,10 +928,14 @@ mod tests {
             .expect("register")
             .into_intake();
         let id = registered.intake_id;
-        assert!(catalog.set_stored_path(id, "store/42").expect("set path"));
         assert!(
             catalog
-                .set_intake_status(id, IntakeStatus::Extracted)
+                .set_stored_path(ItemKind::Book, id, "store/42")
+                .expect("set path")
+        );
+        assert!(
+            catalog
+                .set_intake_status(ItemKind::Book, id, IntakeStatus::Extracted)
                 .expect("set status")
         );
 
@@ -909,11 +966,11 @@ mod tests {
     fn re_registering_the_same_file_returns_the_existing_row() {
         let mut catalog = catalog();
         let first = catalog
-            .register_intake(&NewIntake::new("sha-dup"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-dup"))
             .expect("register")
             .into_intake();
         let again = catalog
-            .register_intake(&NewIntake::new("sha-dup"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-dup"))
             .expect("re-register");
         assert!(!again.is_new(), "a known file must not create a second row");
         assert_eq!(again.intake().intake_id, first.intake_id);
@@ -925,22 +982,30 @@ mod tests {
         // Three rows at version 1 (the default), one we then advance
         // to version 2.
         let a = catalog
-            .register_intake(&NewIntake::new("sha-a"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-a"))
             .expect("register")
             .into_intake()
             .intake_id;
         let b = catalog
-            .register_intake(&NewIntake::new("sha-b"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-b"))
             .expect("register")
             .into_intake()
             .intake_id;
         let _c = catalog
-            .register_intake(&NewIntake::new("sha-c"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-c"))
             .expect("register")
             .into_intake()
             .intake_id;
-        assert!(catalog.set_extraction(a, "epub", 2).expect("stamp a"));
-        assert!(catalog.set_extraction(b, "epub", 2).expect("stamp b"));
+        assert!(
+            catalog
+                .set_extraction(ItemKind::Book, a, "epub", 2)
+                .expect("stamp a")
+        );
+        assert!(
+            catalog
+                .set_extraction(ItemKind::Book, b, "epub", 2)
+                .expect("stamp b")
+        );
         // _c stays at the default version 1.
 
         // Against current = 2, only _c is stale.
@@ -967,50 +1032,54 @@ mod tests {
         // at v2. Born-digital staleness must not surface OCR rows;
         // OCR staleness must not surface born-digital rows.
         let epub_old = catalog
-            .register_intake(&NewIntake::new("sha-epub-old"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-epub-old"))
             .expect("register")
             .into_intake()
             .intake_id;
         let epub_new = catalog
-            .register_intake(&NewIntake::new("sha-epub-new"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-epub-new"))
             .expect("register")
             .into_intake()
             .intake_id;
         let pdf_old = catalog
-            .register_intake(&NewIntake::new("sha-pdf-old"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-pdf-old"))
             .expect("register")
             .into_intake()
             .intake_id;
         let ocr_old = catalog
-            .register_intake(&NewIntake::new("sha-ocr-old"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-ocr-old"))
             .expect("register")
             .into_intake()
             .intake_id;
         let ocr_new = catalog
-            .register_intake(&NewIntake::new("sha-ocr-new"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-ocr-new"))
             .expect("register")
             .into_intake()
             .intake_id;
 
         assert!(
             catalog
-                .set_extraction(epub_old, "epub", 1)
+                .set_extraction(ItemKind::Book, epub_old, "epub", 1)
                 .expect("epub_old")
         );
         assert!(
             catalog
-                .set_extraction(epub_new, "epub", 2)
+                .set_extraction(ItemKind::Book, epub_new, "epub", 2)
                 .expect("epub_new")
         );
-        assert!(catalog.set_extraction(pdf_old, "pdf", 1).expect("pdf_old"));
         assert!(
             catalog
-                .set_extraction(ocr_old, "ocr-pages", 1)
+                .set_extraction(ItemKind::Book, pdf_old, "pdf", 1)
+                .expect("pdf_old")
+        );
+        assert!(
+            catalog
+                .set_extraction(ItemKind::Book, ocr_old, "ocr-pages", 1)
                 .expect("ocr_old")
         );
         assert!(
             catalog
-                .set_extraction(ocr_new, "ocr-pages", 2)
+                .set_extraction(ItemKind::Book, ocr_new, "ocr-pages", 2)
                 .expect("ocr_new")
         );
 
@@ -1056,7 +1125,7 @@ mod tests {
             .format("epub")
             .byte_size(4096);
         let intake = catalog
-            .register_intake(&new)
+            .register_intake(ItemKind::Book, &new)
             .expect("register")
             .into_intake();
         assert_eq!(intake.original_path.as_deref(), Some("incoming/book.epub"));
@@ -1068,7 +1137,7 @@ mod tests {
     fn intake_lookups_by_sha_and_id() {
         let mut catalog = catalog();
         let intake = catalog
-            .register_intake(&NewIntake::new("sha-find"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-find"))
             .expect("register")
             .into_intake();
 
@@ -1085,7 +1154,10 @@ mod tests {
     fn page_count_is_none_on_a_freshly_registered_intake() {
         let mut catalog = catalog();
         let intake = catalog
-            .register_intake(&NewIntake::new("sha-fresh-pc").format("pdf"))
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new("sha-fresh-pc").format("pdf"),
+            )
             .expect("register")
             .into_intake();
         // `register_intake` never writes `page_count`; it is set later
@@ -1097,36 +1169,48 @@ mod tests {
     fn set_page_count_writes_and_reads_back() {
         let mut catalog = catalog();
         let id = catalog
-            .register_intake(&NewIntake::new("sha-pc").format("pdf"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-pc").format("pdf"))
             .expect("register")
             .intake()
             .intake_id;
-        assert!(catalog.set_page_count(id, 612).expect("set"));
+        assert!(
+            catalog
+                .set_page_count(ItemKind::Book, id, 612)
+                .expect("set")
+        );
 
         let read = catalog.intake_by_id(id).expect("lookup").expect("present");
         assert_eq!(read.page_count, Some(612));
 
         // Re-setting overwrites the previous value (the column is a
         // plain UPDATE, not an append).
-        assert!(catalog.set_page_count(id, 613).expect("re-set"));
+        assert!(
+            catalog
+                .set_page_count(ItemKind::Book, id, 613)
+                .expect("re-set")
+        );
         let read = catalog.intake_by_id(id).expect("lookup").expect("present");
         assert_eq!(read.page_count, Some(613));
 
         // A missing intake reports "no row updated".
-        assert!(!catalog.set_page_count(9999, 1).expect("miss"));
+        assert!(
+            !catalog
+                .set_page_count(ItemKind::Book, 9999, 1)
+                .expect("miss")
+        );
     }
 
     #[test]
     fn needs_ocr_status_round_trips_through_the_database() {
         let mut catalog = catalog();
         let id = catalog
-            .register_intake(&NewIntake::new("sha-scan").format("pdf"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-scan").format("pdf"))
             .expect("register")
             .intake()
             .intake_id;
         assert!(
             catalog
-                .set_intake_status(id, IntakeStatus::NeedsOcr)
+                .set_intake_status(ItemKind::Book, id, IntakeStatus::NeedsOcr)
                 .expect("set status")
         );
 
@@ -1149,15 +1233,19 @@ mod tests {
     fn stored_path_and_status_can_be_set() {
         let mut catalog = catalog();
         let id = catalog
-            .register_intake(&NewIntake::new("sha-set"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-set"))
             .expect("register")
             .intake()
             .intake_id;
 
-        assert!(catalog.set_stored_path(id, "store/7").expect("set path"));
         assert!(
             catalog
-                .set_intake_status(id, IntakeStatus::Extracted)
+                .set_stored_path(ItemKind::Book, id, "store/7")
+                .expect("set path")
+        );
+        assert!(
+            catalog
+                .set_intake_status(ItemKind::Book, id, IntakeStatus::Extracted)
                 .expect("set status")
         );
 
@@ -1168,10 +1256,14 @@ mod tests {
         // No such intake: nothing updated.
         assert!(
             !catalog
-                .set_intake_status(9999, IntakeStatus::Aborted)
+                .set_intake_status(ItemKind::Book, 9999, IntakeStatus::Aborted)
                 .expect("miss")
         );
-        assert!(!catalog.set_stored_path(9999, "store/x").expect("miss"));
+        assert!(
+            !catalog
+                .set_stored_path(ItemKind::Book, 9999, "store/x")
+                .expect("miss")
+        );
     }
 
     /// Seed an intake with title `title` and one author `author`,
@@ -1180,7 +1272,7 @@ mod tests {
         use crate::{NewContributor, NewPublicationAttrs};
 
         let intake_id = catalog
-            .register_intake(&NewIntake::new(sha).format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new(sha).format("epub"))
             .expect("register")
             .intake()
             .intake_id;
@@ -1316,10 +1408,10 @@ mod tests {
         let b = seed_book(&mut catalog, "sha-b", "Beta", "Ben");
         seed_book(&mut catalog, "sha-c", "Gamma", "Cal");
         catalog
-            .set_intake_status(a, IntakeStatus::Extracted)
+            .set_intake_status(ItemKind::Book, a, IntakeStatus::Extracted)
             .expect("set");
         catalog
-            .set_intake_status(b, IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, b, IntakeStatus::Embedded)
             .expect("set");
 
         let filter = IntakeFilter {
@@ -1486,10 +1578,10 @@ mod tests {
     fn find_intakes_format_filter_excludes_null_format() {
         let mut catalog = catalog();
         catalog
-            .register_intake(&NewIntake::new("sha-no-format"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-no-format"))
             .expect("register");
         catalog
-            .register_intake(&NewIntake::new("sha-epub").format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-epub").format("epub"))
             .expect("register");
 
         let filter = IntakeFilter {
@@ -1568,10 +1660,10 @@ mod tests {
         let mut catalog = catalog();
         assert_eq!(catalog.count_intakes().expect("count empty"), 0);
         catalog
-            .register_intake(&NewIntake::new("sha-a"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-a"))
             .expect("register");
         catalog
-            .register_intake(&NewIntake::new("sha-b"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-b"))
             .expect("register");
         assert_eq!(catalog.count_intakes().expect("count two"), 2);
     }
@@ -1583,17 +1675,17 @@ mod tests {
             .iter()
             .map(|sha| {
                 catalog
-                    .register_intake(&NewIntake::new(*sha))
+                    .register_intake(ItemKind::Book, &NewIntake::new(*sha))
                     .expect("register")
                     .intake()
                     .intake_id
             })
             .collect();
         catalog
-            .set_intake_status(ids[1], IntakeStatus::Extracted)
+            .set_intake_status(ItemKind::Book, ids[1], IntakeStatus::Extracted)
             .expect("set");
         catalog
-            .set_intake_status(ids[2], IntakeStatus::Embedded)
+            .set_intake_status(ItemKind::Book, ids[2], IntakeStatus::Embedded)
             .expect("set");
 
         assert_eq!(
@@ -1620,10 +1712,10 @@ mod tests {
     fn count_intakes_by_status_empty_slice_counts_everything() {
         let mut catalog = catalog();
         catalog
-            .register_intake(&NewIntake::new("sha-x"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-x"))
             .expect("register");
         catalog
-            .register_intake(&NewIntake::new("sha-y"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-y"))
             .expect("register");
         assert_eq!(
             catalog
@@ -1637,17 +1729,17 @@ mod tests {
     fn count_intakes_by_format_filters_and_misses() {
         let mut catalog = catalog();
         catalog
-            .register_intake(&NewIntake::new("sha-1").format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-1").format("epub"))
             .expect("register");
         catalog
-            .register_intake(&NewIntake::new("sha-2").format("epub"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-2").format("epub"))
             .expect("register");
         catalog
-            .register_intake(&NewIntake::new("sha-3").format("pdf"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-3").format("pdf"))
             .expect("register");
         // A format-less intake is excluded by the WHERE.
         catalog
-            .register_intake(&NewIntake::new("sha-4"))
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-4"))
             .expect("register");
 
         assert_eq!(

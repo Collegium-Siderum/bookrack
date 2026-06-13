@@ -412,6 +412,7 @@ fn run_pipeline(
     let mut catalog = Catalog::open_in_memory()?;
     let mut corpus = Corpus::open_in_memory()?;
     let registration = catalog.register_intake(
+        ItemKind::Book,
         &NewIntake::new(synthetic_sha(stem))
             .format(extraction.provenance.adapter.clone())
             .byte_size(extraction.blocks.iter().map(|b| b.text.len() as i64).sum())
@@ -419,6 +420,7 @@ fn run_pipeline(
     )?;
     let intake_id = registration.intake().intake_id;
     catalog.set_extraction(
+        ItemKind::Book,
         intake_id,
         &extraction.provenance.adapter,
         extraction.provenance.extractor_version,
