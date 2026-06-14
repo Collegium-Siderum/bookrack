@@ -37,7 +37,10 @@ pub mod ingest;
 pub mod libraries;
 pub mod meta;
 pub mod metadata;
+pub mod papers_corpus;
 pub mod papers_remove;
+pub mod papers_stamps;
+pub mod papers_vectors;
 pub mod queue_writes;
 pub mod reads;
 pub mod reads_library;
@@ -277,6 +280,24 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "papers.remove" => Ok(DispatchOutcome::Result(
             papers_remove::run(&req.params, ctx).await?,
         )),
+        "papers.corpus_rebuild" => Ok(DispatchOutcome::Result(
+            papers_corpus::rebuild(&req.params, ctx).await?,
+        )),
+        "papers.vectors_rebuild" => Ok(DispatchOutcome::Result(
+            papers_vectors::rebuild(&req.params, ctx).await?,
+        )),
+        "papers.vectors_reembed" => Ok(DispatchOutcome::Result(
+            papers_vectors::reembed(&req.params, ctx).await?,
+        )),
+        "papers.vectors_reset" => Ok(DispatchOutcome::Result(
+            papers_vectors::reset(&req.params, ctx).await?,
+        )),
+        "papers.vectors_drop" => Ok(DispatchOutcome::Result(
+            papers_vectors::drop_index(&req.params, ctx).await?,
+        )),
+        "papers.stamps_reconcile" => Ok(DispatchOutcome::Result(
+            papers_stamps::reconcile(&req.params, ctx).await?,
+        )),
         "dryrun" => Ok(DispatchOutcome::Result(
             dryrun::run(&req.params, ctx).await?,
         )),
@@ -322,6 +343,12 @@ fn is_queue_bound_method(method: &str) -> bool {
             | "stamps.reconcile"
             | "remove"
             | "papers.remove"
+            | "papers.corpus_rebuild"
+            | "papers.vectors_rebuild"
+            | "papers.vectors_reembed"
+            | "papers.vectors_reset"
+            | "papers.vectors_drop"
+            | "papers.stamps_reconcile"
             | "dryrun"
     )
 }

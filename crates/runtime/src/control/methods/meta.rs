@@ -289,6 +289,30 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "papers.corpus_rebuild",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "papers.vectors_rebuild",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "papers.vectors_reembed",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "papers.vectors_reset",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "papers.vectors_drop",
+        kind: "write",
+    },
+    MethodSignature {
+        name: "papers.stamps_reconcile",
+        kind: "write",
+    },
+    MethodSignature {
         name: "dryrun",
         kind: "write",
     },
