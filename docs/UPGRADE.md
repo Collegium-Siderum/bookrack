@@ -33,11 +33,13 @@ earlier ones already happened.
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
-| `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` |
-| `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` |
-| Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
-| `catalog.db` schema bump | catalog `user_version` | none — migrated forward in place | open the library (migration is automatic) |
+| `text-splitter`, `bookrack_ingest::CHUNK_VERSION` | `chunk_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
+| `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |
+| `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
+| Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
+| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place | open the library (migration is automatic) |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
+| `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
 | `reedline`, `shlex` | none — REPL input layer only | none | open the library |

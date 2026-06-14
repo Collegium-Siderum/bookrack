@@ -301,10 +301,19 @@ book is the most expensive refresh; schedule it for a low-activity
 window and wrap the session with the platform's idle-sleep override
 covered under [Long ingestions](#long-ingestions).
 
-The commands above operate on the book store; the papers cluster
-is currently refreshed by re-running `papers ingest` against the
-affected PDFs, and per-stage paper-side maintenance commands are
-still landing.
+The commands above operate on the book store. The papers cluster
+exposes the same three primitives under a `papers` prefix:
+
+- `papers corpus rebuild` — regenerate `papers_corpus.db` from the
+  envelopes in `papers_dir`. Pass `--include-vectors` to chain a
+  reembed; otherwise the existing chunks are re-stamped against the
+  rebuilt tree.
+- `papers vectors reembed` — re-run the active embedder over each
+  paper's abstract chunks. Use after a `CHUNK_VERSION` /
+  `NORMALIZE_VERSION` bump.
+- `papers vectors reset` — drop the papers chunks table and re-derive
+  every abstract chunk under the env-configured embed model. For an
+  embedding model swap, follow with `papers stamps reconcile`.
 
 See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
 matrix and per-command guidance.

@@ -90,6 +90,17 @@ and tool-scoped.
   `vectors.drop` takes no params.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?, yes? }`.
 - `stamps.reconcile` — no params; rewrites the corpus index stamps.
+- `papers.corpus_rebuild` —
+  `{ include_vectors?, paper?, stale_only?, dry_run?, yes? }`. Peer of
+  `corpus.rebuild` for the paper pipeline; reconstructs
+  `papers_corpus.db` from envelopes in `papers_dir` and reseats each
+  abstract leaf from `node_publication_attrs`.
+- `papers.vectors_rebuild` / `papers.vectors_reembed` /
+  `papers.vectors_reset` / `papers.vectors_drop` — peers of
+  `vectors.*` against `lancedb_papers`. Same param shapes; the
+  reembed variant takes `paper?` instead of `book?`.
+- `papers.stamps_reconcile` — no params; rewrites the
+  `papers_corpus.db` index stamps from the active embedder.
 - `remove` — `{ intake_id?, sha?, dry_run?, yes? }`. Exactly one of
   `intake_id` or `sha` must be set.
 - `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL
@@ -249,7 +260,9 @@ catalog and corpus handles the daemon already holds.
   stable between CLI-only and GUI builds. `bookrack-mcp` gains a
   `--with-queue-worker` flag: without it, queue-bound write
   methods (`ingest.submit`, `ingest.cancel`, `vectors.*`,
-  `corpus.rebuild`, `stamps.reconcile`, `remove`, `dryrun`)
+  `corpus.rebuild`, `stamps.reconcile`, `remove`, `dryrun`,
+  `papers.corpus_rebuild`, `papers.vectors_*`, `papers.stamps_reconcile`,
+  `papers.remove`)
   short-circuit at dispatch with JSON-RPC error
   `-32002 queue worker disabled in headless mode` rather than
   enqueueing work no one will run; with it, the headless entry

@@ -8,6 +8,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- Paper-side maintenance commands brought to parity with the books
+  pipeline: `bookrack papers corpus rebuild`,
+  `bookrack papers vectors {rebuild,reembed,reset,drop}`, and
+  `bookrack papers stamps reconcile`. They expose the same
+  rebuild-from-envelopes, reembed, reset, ANN-rebuild, and
+  index-stamp reconciliation primitives the book pipeline carries,
+  routed through the control plane as `papers.corpus_rebuild`,
+  `papers.vectors_{rebuild,reembed,reset,drop}`, and
+  `papers.stamps_reconcile`. The `bookrack-glean` crate gains
+  `rebuild`, `reembed`, `reset`, and `stamps` modules implementing the
+  abstract-leaf-shaped paper variants; the runtime gains matching
+  `cmd::papers_{corpus,vectors,stamps}` shims and JSON-RPC handlers,
+  registered in the dispatch table and the `is_queue_bound_method`
+  set so headless `bookrack-mcp` short-circuits them without
+  `--with-queue-worker`. `docs/UPGRADE.md` and the README's Upgrading
+  section now document the paper-side bump-to-refresh row alongside
+  the book-side commands.
+
 ## [0.5.0] - 2026-06-14
 
 ### Added
