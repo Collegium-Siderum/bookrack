@@ -1,7 +1,7 @@
 # bookrack
 
 A local, offline RAG library. Point bookrack at a collection of
-long-form books — EPUB, TXT, or PDF — and it turns them into a
+long-form books and academic papers — EPUB, TXT, or PDF — and it turns them into a
 knowledge base an AI agent can search with precise, cited passages.
 The pipeline runs entirely on your own machine; nothing ever leaves
 the host. An MCP server speaks the standard agent protocol, so
@@ -11,8 +11,12 @@ clients like Claude Code can search the library as a tool.
 
 Pre-release. The end-to-end pipeline — extract, ingest, embed, and
 cited search — runs through the `bookrack run` daemon, driven by
-one-shot subcommands, the `bookrack repl` client, and MCP. The vector store ships with an IVF index family (flat / SQ / PQ
-and the IVF-HNSW variants) selectable through `vectors rebuild`.
+one-shot subcommands, the `bookrack repl` client, and MCP. Books
+and academic papers live in two parallel stores under one data
+root and share the same MCP surface; `library.search` accepts a
+`kind` switch to query one store or both. The vector store ships
+with an IVF index family (flat / SQ / PQ and the IVF-HNSW
+variants) selectable through `vectors rebuild`.
 Schema migrations and metadata workflows are still being hardened
 for production use.
 
@@ -88,6 +92,21 @@ for production use.
    .\bookrack.exe ingest path\to\book.epub
    ```
 
+   Submit a paper through the parallel `papers` subcommand instead;
+   ingest follows the same control-plane streaming, and
+   `--recursive` walks a directory and forwards every `.pdf` it
+   finds:
+
+   ```
+   ./bookrack papers ingest /path/to/paper.pdf
+   ./bookrack papers ingest --recursive /path/to/papers-dir/
+   ```
+
+   Papers live in a second cluster (catalog, corpus, vector store,
+   source-PDF archive) under the same data root and share the same
+   MCP server; `library.search` queries both stores at once unless
+   a `kind` switch narrows it.
+
    For a headless deployment — systemd unit, Windows service — run
    `bookrack-mcp` instead; it serves the same MCP endpoint, and takes
    `--with-queue-worker` if it should also process ingest jobs. The
@@ -145,6 +164,14 @@ on disk, Ollama daemon reachable, embed model pulled. Each row is
 `OK`, `WARN`, or `FAIL`; any FAIL exits with a non-zero status so a
 script can branch on the result. Pass `--json` for machine-readable
 output suitable for a bug report.
+
+Two doctor sub-commands cover one-off maintenance:
+`bookrack doctor --install-pdfium` downloads the pinned PDFium
+build, verifies its SHA-256, and unpacks it into the per-user
+managed directory the loader searches; `bookrack doctor
+--rename-envelopes [--dry-run]` migrates extraction envelopes from
+older libraries into the kind-prefixed filename layout 0.5.0
+introduced.
 
 If something is broken, `bookrack diagnose` bundles crash reports,
 recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
@@ -273,6 +300,11 @@ scopes the refresh to the partitions whose stored
 book is the most expensive refresh; schedule it for a low-activity
 window and wrap the session with the platform's idle-sleep override
 covered under [Long ingestions](#long-ingestions).
+
+The commands above operate on the book store; the papers cluster
+is currently refreshed by re-running `papers ingest` against the
+affected PDFs, and per-stage paper-side maintenance commands are
+still landing.
 
 See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
 matrix and per-command guidance.
