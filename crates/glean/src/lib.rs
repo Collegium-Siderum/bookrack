@@ -33,6 +33,7 @@ use bookrack_normalize::{NORMALIZE_VERSION, norm_text_sha256};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
+pub mod dryrun;
 pub mod identify;
 pub mod rebuild;
 pub mod reembed;
@@ -166,23 +167,6 @@ pub struct GleanReport {
     /// Source label of the abstract pick:
     /// `"heading" | "first_page_long_para" | "first_long_para"`.
     /// `None` when no body block could serve as the abstract.
-    pub abstract_source: Option<String>,
-}
-
-/// Parameters for [`dryrun_paper`]. Minimal until the dryrun surface
-/// grows.
-#[derive(Debug, Clone, Default)]
-pub struct DryrunPaperParams {
-    pub abstract_strategy: AbstractStrategy,
-}
-
-/// Outcome of [`dryrun_paper`] — a no-write inspection of what
-/// `glean_paper` would do.
-#[derive(Debug, Clone, Default)]
-pub struct DryrunPaperReport {
-    pub doi: Option<String>,
-    pub arxiv_id: Option<String>,
-    pub venue: Option<String>,
     pub abstract_source: Option<String>,
 }
 
@@ -587,12 +571,6 @@ pub async fn glean_paper<E: Embedder>(
         venue: biblio.container_title,
         abstract_source,
     })
-}
-
-/// Inspect what `glean_paper` would do without writing anything. Stub
-/// until the dryrun surface grows.
-pub fn dryrun_paper(_file: &Path, _params: &DryrunPaperParams) -> DryrunPaperReport {
-    DryrunPaperReport::default()
 }
 
 /// Five-stage paper pipeline runs match the books pipeline's audit
