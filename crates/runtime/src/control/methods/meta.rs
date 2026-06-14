@@ -419,4 +419,42 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn papers_maintenance_methods_are_registered_as_writes() {
+        for name in [
+            "papers.corpus_rebuild",
+            "papers.vectors_rebuild",
+            "papers.vectors_reembed",
+            "papers.vectors_reset",
+            "papers.vectors_drop",
+            "papers.stamps_reconcile",
+        ] {
+            let entry = REGISTRY
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("paper maintenance method {name} missing from REGISTRY"));
+            assert_eq!(
+                entry.kind, "write",
+                "{name} should be classified as a write method"
+            );
+        }
+    }
+
+    #[test]
+    fn papers_maintenance_methods_are_queue_bound() {
+        for name in [
+            "papers.corpus_rebuild",
+            "papers.vectors_rebuild",
+            "papers.vectors_reembed",
+            "papers.vectors_reset",
+            "papers.vectors_drop",
+            "papers.stamps_reconcile",
+        ] {
+            assert!(
+                super::super::is_queue_bound_method(name),
+                "{name} must be queue-bound so headless bookrack-mcp short-circuits it"
+            );
+        }
+    }
 }
