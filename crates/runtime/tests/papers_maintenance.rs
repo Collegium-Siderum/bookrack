@@ -93,6 +93,7 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
             "papers.vectors_reset",
             "papers.vectors_drop",
             "papers.stamps_reconcile",
+            "papers.dryrun",
         ] {
             assert!(
                 names.contains(expected),

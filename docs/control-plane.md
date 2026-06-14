@@ -101,6 +101,11 @@ and tool-scoped.
   reembed variant takes `paper?` instead of `book?`.
 - `papers.stamps_reconcile` — no params; rewrites the
   `papers_corpus.db` index stamps from the active embedder.
+- `papers.dryrun` — `{ path, out?, no_chunk? }`. Peer of `dryrun` for
+  the paper pipeline; writes a paper-shaped JSONL plus a summary
+  sidecar under `<data_root>/dryruns/dryrun-paper-...`. Reports
+  IDENTIFY hit rates (DOI / arXiv / ISSN / venue / title / year /
+  abstract) and the predicted STRUCTURE node shape per file.
 - `remove` — `{ intake_id?, sha?, dry_run?, yes? }`. Exactly one of
   `intake_id` or `sha` must be set.
 - `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL
@@ -262,7 +267,7 @@ catalog and corpus handles the daemon already holds.
   methods (`ingest.submit`, `ingest.cancel`, `vectors.*`,
   `corpus.rebuild`, `stamps.reconcile`, `remove`, `dryrun`,
   `papers.corpus_rebuild`, `papers.vectors_*`, `papers.stamps_reconcile`,
-  `papers.remove`)
+  `papers.dryrun`, `papers.remove`)
   short-circuit at dispatch with JSON-RPC error
   `-32002 queue worker disabled in headless mode` rather than
   enqueueing work no one will run; with it, the headless entry

@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use bookrack_repl_grammar::{
-    PapersAction, PapersCorpusAction, PapersFindArgs, PapersIngestArgs, PapersListArgs,
-    PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
+    PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
+    PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
 use serde_json::{Value, json};
 
@@ -30,7 +30,22 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::Corpus { action } => corpus(action, runtime_dir).await,
         PapersAction::Vectors { action } => vectors(action, runtime_dir).await,
         PapersAction::Stamps { action } => stamps(action, runtime_dir).await,
+        PapersAction::Dryrun(args) => dryrun(args, runtime_dir).await,
     }
+}
+
+async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let params = json!({
+        "path": args.path,
+        "out": args.out,
+        "no_chunk": args.no_chunk,
+    });
+    let value = helpers::call_with_progress_value(client, "papers.dryrun", params).await?;
+    let outcome: bookrack_runtime::cmd::papers_dryrun::PapersDryrunRunOutcome =
+        serde_json::from_value(value)
+            .map_err(|e| anyhow::anyhow!("papers.dryrun response did not match: {e}"))?;
+    bookrack_runtime::cmd::papers_dryrun::render_outcome(&outcome, args.stdout)
 }
 
 async fn corpus(action: PapersCorpusAction, runtime_dir: Option<PathBuf>) -> Result<()> {

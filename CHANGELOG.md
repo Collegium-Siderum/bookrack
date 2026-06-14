@@ -28,6 +28,18 @@ release workflow extracts the matching section verbatim from this file.
   section now document the paper-side bump-to-refresh row alongside
   the book-side commands.
 
+- `bookrack papers dryrun` replaces the placeholder `dryrun_paper`
+  stub with a full per-file simulation: EXTRACT runs against the
+  real adapter, IDENTIFY runs the same DOI / arXiv / ISSN / venue /
+  year / abstract pick that `glean_paper` drives, STRUCTURE is
+  predicted statically from the colored block stream, and CHUNK is
+  replayed without touching the embedder. The runner walks a path,
+  writes a paper-shaped JSONL plus a summary sidecar to
+  `<data_root>/dryruns/dryrun-paper-...`, and the per-file report
+  surfaces IDENTIFY hit rates so an operator can triage a paper
+  cluster before committing the embed run. Routed through the
+  control plane as `papers.dryrun`.
+
 ## [0.5.0] - 2026-06-14
 
 ### Added

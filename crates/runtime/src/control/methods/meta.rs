@@ -313,6 +313,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "papers.dryrun",
+        kind: "write",
+    },
+    MethodSignature {
         name: "dryrun",
         kind: "write",
     },
@@ -429,6 +433,7 @@ mod tests {
             "papers.vectors_reset",
             "papers.vectors_drop",
             "papers.stamps_reconcile",
+            "papers.dryrun",
         ] {
             let entry = REGISTRY
                 .iter()
@@ -450,6 +455,7 @@ mod tests {
             "papers.vectors_reset",
             "papers.vectors_drop",
             "papers.stamps_reconcile",
+            "papers.dryrun",
         ] {
             assert!(
                 super::super::is_queue_bound_method(name),

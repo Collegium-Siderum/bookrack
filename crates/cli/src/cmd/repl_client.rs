@@ -14,9 +14,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use bookrack_repl_grammar::{
-    CorpusAction, IntakeAction, PapersAction, PapersCorpusAction, PapersStampsAction,
-    PapersVectorsAction, QueueAction, ReplCli, ReplCommand, StampsAction, WriteMetadataAction,
-    WriteVectorsAction,
+    CorpusAction, IntakeAction, PapersAction, PapersCorpusAction, PapersDryrunArgs,
+    PapersStampsAction, PapersVectorsAction, QueueAction, ReplCli, ReplCommand, StampsAction,
+    WriteMetadataAction, WriteVectorsAction,
 };
 use clap::Parser;
 use reedline::{
@@ -587,6 +587,39 @@ async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
         PapersAction::Corpus { action } => dispatch_papers_corpus(client, action).await,
         PapersAction::Vectors { action } => dispatch_papers_vectors(client, action).await,
         PapersAction::Stamps { action } => dispatch_papers_stamps(client, action).await,
+        PapersAction::Dryrun(args) => dispatch_papers_dryrun(client, args).await,
+    }
+}
+
+async fn dispatch_papers_dryrun(client: &ControlClient, args: PapersDryrunArgs) -> bool {
+    let params = json!({
+        "path": args.path,
+        "out": args.out,
+        "no_chunk": args.no_chunk,
+    });
+    match client.call_raw("papers.dryrun", params).await {
+        Ok(value) => match serde_json::from_value::<
+            bookrack_runtime::cmd::papers_dryrun::PapersDryrunRunOutcome,
+        >(value)
+        {
+            Ok(outcome) => {
+                match bookrack_runtime::cmd::papers_dryrun::render_outcome(&outcome, args.stdout) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        eprintln!("papers dryrun: {err:#}");
+                        false
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("papers dryrun: response did not match expected shape: {err}");
+                false
+            }
+        },
+        Err(err) => {
+            eprintln!("papers dryrun: {err}");
+            false
+        }
     }
 }
 

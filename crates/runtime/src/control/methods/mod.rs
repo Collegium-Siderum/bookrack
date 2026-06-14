@@ -38,6 +38,7 @@ pub mod libraries;
 pub mod meta;
 pub mod metadata;
 pub mod papers_corpus;
+pub mod papers_dryrun;
 pub mod papers_remove;
 pub mod papers_stamps;
 pub mod papers_vectors;
@@ -298,6 +299,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "papers.stamps_reconcile" => Ok(DispatchOutcome::Result(
             papers_stamps::reconcile(&req.params, ctx).await?,
         )),
+        "papers.dryrun" => Ok(DispatchOutcome::Result(
+            papers_dryrun::run(&req.params, ctx).await?,
+        )),
         "dryrun" => Ok(DispatchOutcome::Result(
             dryrun::run(&req.params, ctx).await?,
         )),
@@ -349,6 +353,7 @@ fn is_queue_bound_method(method: &str) -> bool {
             | "papers.vectors_reset"
             | "papers.vectors_drop"
             | "papers.stamps_reconcile"
+            | "papers.dryrun"
             | "dryrun"
     )
 }

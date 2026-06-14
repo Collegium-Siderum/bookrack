@@ -458,6 +458,11 @@ pub enum PapersAction {
         #[command(subcommand)]
         action: PapersStampsAction,
     },
+    /// Simulate a paper ingest up to (but not including) embedding,
+    /// and write a JSONL report of IDENTIFY hit rates and predicted
+    /// STRUCTURE stats. The real catalog, corpus, and vector store
+    /// are not touched.
+    Dryrun(PapersDryrunArgs),
 }
 
 /// Paper-side corpus write commands. Peer of [`CorpusAction`].
@@ -555,6 +560,27 @@ pub enum PapersStampsAction {
     /// Probe the embedder for its vector dimension and write the
     /// resulting stamps into `papers_corpus.db`'s `index_meta`.
     Reconcile,
+}
+
+/// Positional + flag bundle for `papers dryrun`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PapersDryrunArgs {
+    /// Source PDF / EPUB / TXT / HTML, or a directory the dryrun
+    /// walks recursively.
+    pub path: PathBuf,
+    /// Write the per-paper report to this path instead of the default
+    /// `<data_root>/dryruns/dryrun-paper-...` location. Implies the
+    /// summary is written alongside with a `.summary.json` suffix.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+    /// Write JSONL to stdout instead of to a file. The summary still
+    /// lands on stderr at the end of the run.
+    #[arg(long)]
+    pub stdout: bool,
+    /// Skip the CHUNK preview. Saves a few milliseconds per file when
+    /// only the IDENTIFY hit rates are wanted.
+    #[arg(long)]
+    pub no_chunk: bool,
 }
 
 /// Positional + flag bundle for `papers ingest`. Mirrors
@@ -797,6 +823,33 @@ mod tests {
                     },
             } => {}
             other => panic!("expected papers stamps reconcile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_dryrun_carries_path_and_flags() {
+        let cmd = parse(&[
+            "papers",
+            "dryrun",
+            "/papers",
+            "--out",
+            "/tmp/r.jsonl",
+            "--no-chunk",
+            "--stdout",
+        ]);
+        match cmd {
+            ReplCommand::Papers {
+                action: PapersAction::Dryrun(args),
+            } => {
+                assert_eq!(args.path.to_string_lossy(), "/papers");
+                assert_eq!(
+                    args.out.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    Some("/tmp/r.jsonl".to_string())
+                );
+                assert!(args.no_chunk);
+                assert!(args.stdout);
+            }
+            other => panic!("expected papers dryrun, got {other:?}"),
         }
     }
 }

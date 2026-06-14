@@ -15,6 +15,7 @@ pub mod intake_ocr;
 pub mod libraries;
 pub mod metadata;
 pub mod papers_corpus;
+pub mod papers_dryrun;
 pub mod papers_stamps;
 pub mod papers_vectors;
 pub mod remove;
