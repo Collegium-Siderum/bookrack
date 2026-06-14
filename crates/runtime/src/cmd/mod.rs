@@ -15,6 +15,7 @@ pub mod intake_ocr;
 pub mod libraries;
 pub mod metadata;
 pub mod remove;
+pub mod remove_paper;
 pub mod stamps;
 pub mod vectors;
 pub mod verify;

@@ -285,6 +285,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "papers.remove",
+        kind: "write",
+    },
+    MethodSignature {
         name: "dryrun",
         kind: "write",
     },

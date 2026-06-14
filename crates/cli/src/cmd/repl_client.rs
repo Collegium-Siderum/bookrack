@@ -493,14 +493,29 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
 async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
     match action {
         PapersAction::Ingest(args) => {
-            if args.recursive {
-                eprintln!(
-                    "bookrack: papers ingest --recursive is not yet wired over the control plane; submit individual files",
-                );
-                return true;
-            }
+            let paths = if args.path.is_dir() {
+                if !args.recursive {
+                    eprintln!(
+                        "bookrack: {} is a directory; pass --recursive to enqueue every .pdf under it",
+                        args.path.display(),
+                    );
+                    return true;
+                }
+                let mut collected = crate::util::collect_pdf_files(&args.path);
+                if collected.is_empty() {
+                    eprintln!(
+                        "bookrack: no supported paper files found under {}",
+                        args.path.display(),
+                    );
+                    return true;
+                }
+                collected.sort();
+                collected
+            } else {
+                vec![args.path]
+            };
             let mut params = json!({
-                "paths": [args.path],
+                "paths": paths,
                 "force": args.force,
             });
             if let Some(level) = args.priority {
@@ -558,6 +573,15 @@ async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
                 json!({ "intake_id": intake_id }),
             )
             .await
+        }
+        PapersAction::Remove(args) => {
+            let params = json!({
+                "intake_id": args.intake_id,
+                "sha": args.sha,
+                "dry_run": args.dry_run,
+                "yes": args.yes,
+            });
+            call_and_print(client, "papers.remove", params).await
         }
     }
 }

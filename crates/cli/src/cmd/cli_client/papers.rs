@@ -2,13 +2,16 @@
 //! thin control-plane clients. Ingest submits to the glean queue
 //! (`glean.submit`, the paper-side peer of `ingest.submit`); list /
 //! find / show / toc route to the read-side `library.*` reads added
-//! alongside the book-side surface; `export-csl` calls the new
-//! `papers.export_csl` read.
+//! alongside the book-side surface; `export-csl` calls the
+//! `papers.export_csl` read; `remove` calls the `papers.remove`
+//! write.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::{PapersAction, PapersFindArgs, PapersIngestArgs, PapersListArgs};
+use bookrack_repl_grammar::{
+    PapersAction, PapersFindArgs, PapersIngestArgs, PapersListArgs, PapersRemoveArgs,
+};
 use serde_json::{Value, json};
 
 use super::helpers;
@@ -22,19 +25,44 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::Toc { intake_id } => toc(intake_id, runtime_dir).await,
         PapersAction::ExportCsl { intake_id } => export_csl(intake_id, runtime_dir).await,
         PapersAction::Source { intake_id } => source(intake_id, runtime_dir).await,
+        PapersAction::Remove(args) => remove(args, runtime_dir).await,
     }
 }
 
+async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let params = json!({
+        "intake_id": args.intake_id,
+        "sha": args.sha,
+        "dry_run": args.dry_run,
+        "yes": args.yes,
+    });
+    helpers::call_and_print(&client, "papers.remove", params).await
+}
+
 async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    if args.recursive {
-        anyhow::bail!(
-            "bookrack papers ingest --recursive is not yet wired through the control plane; \
-             pass individual files",
-        );
-    }
+    let paths = if args.path.is_dir() {
+        if !args.recursive {
+            anyhow::bail!(
+                "{} is a directory; pass --recursive to enqueue every .pdf under it",
+                args.path.display(),
+            );
+        }
+        let mut collected = crate::util::collect_pdf_files(&args.path);
+        if collected.is_empty() {
+            anyhow::bail!(
+                "no supported paper files found under {}",
+                args.path.display()
+            );
+        }
+        collected.sort();
+        collected
+    } else {
+        vec![args.path]
+    };
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
     let mut params = json!({
-        "paths": [args.path],
+        "paths": paths,
         "force": args.force,
     });
     if let Some(level) = args.priority {

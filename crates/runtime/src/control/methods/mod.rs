@@ -37,6 +37,7 @@ pub mod ingest;
 pub mod libraries;
 pub mod meta;
 pub mod metadata;
+pub mod papers_remove;
 pub mod queue_writes;
 pub mod reads;
 pub mod reads_library;
@@ -273,6 +274,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "remove" => Ok(DispatchOutcome::Result(
             remove::run(&req.params, ctx).await?,
         )),
+        "papers.remove" => Ok(DispatchOutcome::Result(
+            papers_remove::run(&req.params, ctx).await?,
+        )),
         "dryrun" => Ok(DispatchOutcome::Result(
             dryrun::run(&req.params, ctx).await?,
         )),
@@ -317,6 +321,7 @@ fn is_queue_bound_method(method: &str) -> bool {
             | "corpus.rebuild"
             | "stamps.reconcile"
             | "remove"
+            | "papers.remove"
             | "dryrun"
     )
 }
@@ -392,6 +397,7 @@ mod tests {
             "corpus.rebuild",
             "stamps.reconcile",
             "remove",
+            "papers.remove",
             "dryrun",
         ] {
             assert!(is_queue_bound_method(name), "{name} should be queue-bound");

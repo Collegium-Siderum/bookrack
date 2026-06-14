@@ -401,10 +401,6 @@ pub enum StampsAction {
     Reconcile,
 }
 
-/// Paper-side commands. Mirrors the book-side surface against the
-/// papers backend: ingest a paper file through `glean.submit`, browse
-/// the paper catalog through the read-side control-plane methods, and
-/// export one paper's bibliographic record as CSL-JSON.
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersAction {
     /// Submit a paper file to the glean pipeline. Mirrors the book-side
@@ -439,6 +435,11 @@ pub enum PapersAction {
         /// The intake id of the paper.
         intake_id: i64,
     },
+    /// Drop one paper from every paper-side store: the catalog
+    /// cascade, the corpus partition, the vector partition, the
+    /// envelope file, and the archived source PDF. Audit trail rows
+    /// are preserved.
+    Remove(PapersRemoveArgs),
 }
 
 /// Positional + flag bundle for `papers ingest`. Mirrors
@@ -494,6 +495,24 @@ pub struct PapersFindArgs {
     /// Number of leading rows to skip.
     #[arg(long)]
     pub offset: Option<u32>,
+}
+
+/// Positional + flag bundle for `papers remove`. Mirrors
+/// [`RemoveArgs`] for the paper pipeline. Either a positional intake
+/// id or `--sha <hex>` is required.
+#[derive(clap::Args, Debug, Clone)]
+pub struct PapersRemoveArgs {
+    /// The intake id of the paper to drop. Omit to pass `--sha`.
+    pub intake_id: Option<i64>,
+    /// Alternative locator: the paper's source SHA-256.
+    #[arg(long)]
+    pub sha: Option<String>,
+    /// Print the plan and exit without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the destructive-action confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[cfg(test)]
