@@ -440,6 +440,121 @@ pub enum PapersAction {
     /// envelope file, and the archived source PDF. Audit trail rows
     /// are preserved.
     Remove(PapersRemoveArgs),
+    /// Paper-side corpus write commands. Peer of the top-level
+    /// `corpus` subcommand for the book pipeline.
+    Corpus {
+        #[command(subcommand)]
+        action: PapersCorpusAction,
+    },
+    /// Paper-side vector-store write commands. Peer of the top-level
+    /// `vectors` subcommand for the book pipeline.
+    Vectors {
+        #[command(subcommand)]
+        action: PapersVectorsAction,
+    },
+    /// Paper-side index-stamp reconciliation. Peer of the top-level
+    /// `stamps` subcommand for the book pipeline.
+    Stamps {
+        #[command(subcommand)]
+        action: PapersStampsAction,
+    },
+}
+
+/// Paper-side corpus write commands. Peer of [`CorpusAction`].
+#[derive(clap::Subcommand, Debug)]
+pub enum PapersCorpusAction {
+    /// Rebuild `papers_corpus.db` from the v1 extraction envelopes
+    /// recorded in `papers_dir`. Intakes whose envelope is missing,
+    /// mismatched, or corrupt are reported but skipped.
+    Rebuild {
+        /// After the corpus tree is rebuilt, also re-embed every
+        /// rebuilt paper's abstract chunks. Without this flag the
+        /// LanceDB chunks table is left as-is; the index_meta stamps
+        /// are reseated from the existing rows.
+        #[arg(long)]
+        include_vectors: bool,
+        /// Restrict the rebuild to one paper intake id. Without this
+        /// flag, every paper intake past `Extracted` is rebuilt.
+        #[arg(long, value_name = "INTAKE_ID")]
+        paper: Option<i64>,
+        /// Restrict the rebuild to paper intakes whose stored
+        /// `extractor_version` does not equal this binary's
+        /// `bookrack_extract::EXTRACTOR_VERSION`. Combines with
+        /// `--paper` by intersection.
+        #[arg(long)]
+        stale_only: bool,
+        /// Print the per-intake classification and exit without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// Paper-side vector-store write commands. Peer of [`WriteVectorsAction`].
+#[derive(clap::Subcommand, Debug)]
+pub enum PapersVectorsAction {
+    /// Build or rebuild the ANN index over `lancedb_papers`.
+    Rebuild {
+        /// IVF family — `ivf-flat`, `ivf-sq`, `ivf-pq`, `ivf-hnsw-flat`,
+        /// `ivf-hnsw-sq`, `ivf-hnsw-pq`.
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        num_partitions: Option<u32>,
+        #[arg(long)]
+        num_sub_vectors: Option<u32>,
+        #[arg(long)]
+        num_bits: Option<u32>,
+        #[arg(long)]
+        nprobes: Option<u32>,
+        #[arg(long)]
+        refine_factor: Option<u32>,
+    },
+    /// Drop the ANN index over `lancedb_papers` and mark the meta as
+    /// brute-force.
+    Drop,
+    /// Re-embed every (or a single) paper's chunks in place: read the
+    /// existing chunk rows back from `lancedb_papers`, drop their
+    /// vectors, and rewrite under the active embedder.
+    Reembed {
+        /// Restrict the reembed to one paper intake id.
+        #[arg(long, value_name = "INTAKE_ID")]
+        paper: Option<i64>,
+        /// Restrict to paper intakes whose stored `extractor_version`
+        /// does not equal this binary's
+        /// `bookrack_extract::EXTRACTOR_VERSION`.
+        #[arg(long)]
+        stale_only: bool,
+        /// Print the plan (per-paper chunk counts) and exit without
+        /// writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Drop the papers chunks table, clear the papers_corpus index
+    /// stamps, and re-derive every paper's abstract chunk with the
+    /// env-configured embedding model.
+    Reset {
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Skip the destructive A-D steps and only re-embed paper
+        /// intakes still in `Extracted`. Use after an aborted reset.
+        #[arg(long)]
+        resume: bool,
+    },
+}
+
+/// Paper-side index-stamp reconciliation. Peer of [`StampsAction`].
+#[derive(clap::Subcommand, Debug)]
+pub enum PapersStampsAction {
+    /// Probe the embedder for its vector dimension and write the
+    /// resulting stamps into `papers_corpus.db`'s `index_meta`.
+    Reconcile,
 }
 
 /// Positional + flag bundle for `papers ingest`. Mirrors
@@ -580,6 +695,108 @@ mod tests {
                 action: PapersAction::ExportCsl { intake_id },
             } => assert_eq!(intake_id, 42),
             other => panic!("expected papers export-csl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_corpus_rebuild_round_trips_flags() {
+        let cmd = parse(&[
+            "papers",
+            "corpus",
+            "rebuild",
+            "--include-vectors",
+            "--paper",
+            "7",
+            "--stale-only",
+            "--dry-run",
+            "--yes",
+        ]);
+        match cmd {
+            ReplCommand::Papers {
+                action:
+                    PapersAction::Corpus {
+                        action:
+                            PapersCorpusAction::Rebuild {
+                                include_vectors,
+                                paper,
+                                stale_only,
+                                dry_run,
+                                yes,
+                            },
+                    },
+            } => {
+                assert!(include_vectors);
+                assert_eq!(paper, Some(7));
+                assert!(stale_only);
+                assert!(dry_run);
+                assert!(yes);
+            }
+            other => panic!("expected papers corpus rebuild, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_vectors_reembed_round_trips_flags() {
+        let cmd = parse(&[
+            "papers",
+            "vectors",
+            "reembed",
+            "--paper",
+            "9",
+            "--stale-only",
+            "--dry-run",
+            "--yes",
+        ]);
+        match cmd {
+            ReplCommand::Papers {
+                action:
+                    PapersAction::Vectors {
+                        action:
+                            PapersVectorsAction::Reembed {
+                                paper,
+                                stale_only,
+                                dry_run,
+                                yes,
+                            },
+                    },
+            } => {
+                assert_eq!(paper, Some(9));
+                assert!(stale_only);
+                assert!(dry_run);
+                assert!(yes);
+            }
+            other => panic!("expected papers vectors reembed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_vectors_reset_carries_resume_flag() {
+        let cmd = parse(&["papers", "vectors", "reset", "--yes", "--resume"]);
+        match cmd {
+            ReplCommand::Papers {
+                action:
+                    PapersAction::Vectors {
+                        action: PapersVectorsAction::Reset { yes, resume },
+                    },
+            } => {
+                assert!(yes);
+                assert!(resume);
+            }
+            other => panic!("expected papers vectors reset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn papers_stamps_reconcile_takes_no_args() {
+        let cmd = parse(&["papers", "stamps", "reconcile"]);
+        match cmd {
+            ReplCommand::Papers {
+                action:
+                    PapersAction::Stamps {
+                        action: PapersStampsAction::Reconcile,
+                    },
+            } => {}
+            other => panic!("expected papers stamps reconcile, got {other:?}"),
         }
     }
 }

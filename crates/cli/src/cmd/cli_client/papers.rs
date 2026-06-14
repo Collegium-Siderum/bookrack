@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use bookrack_repl_grammar::{
-    PapersAction, PapersFindArgs, PapersIngestArgs, PapersListArgs, PapersRemoveArgs,
+    PapersAction, PapersCorpusAction, PapersFindArgs, PapersIngestArgs, PapersListArgs,
+    PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
 use serde_json::{Value, json};
 
@@ -26,6 +27,85 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::ExportCsl { intake_id } => export_csl(intake_id, runtime_dir).await,
         PapersAction::Source { intake_id } => source(intake_id, runtime_dir).await,
         PapersAction::Remove(args) => remove(args, runtime_dir).await,
+        PapersAction::Corpus { action } => corpus(action, runtime_dir).await,
+        PapersAction::Vectors { action } => vectors(action, runtime_dir).await,
+        PapersAction::Stamps { action } => stamps(action, runtime_dir).await,
+    }
+}
+
+async fn corpus(action: PapersCorpusAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    match action {
+        PapersCorpusAction::Rebuild {
+            include_vectors,
+            paper,
+            stale_only,
+            dry_run,
+            yes,
+        } => {
+            let params = json!({
+                "include_vectors": include_vectors,
+                "paper": paper,
+                "stale_only": stale_only,
+                "dry_run": dry_run,
+                "yes": yes,
+            });
+            helpers::call_and_print(&client, "papers.corpus_rebuild", params).await
+        }
+    }
+}
+
+async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    match action {
+        PapersVectorsAction::Rebuild {
+            kind,
+            num_partitions,
+            num_sub_vectors,
+            num_bits,
+            nprobes,
+            refine_factor,
+        } => {
+            let params = json!({
+                "kind": kind,
+                "num_partitions": num_partitions,
+                "num_sub_vectors": num_sub_vectors,
+                "num_bits": num_bits,
+                "nprobes": nprobes,
+                "refine_factor": refine_factor,
+            });
+            helpers::call_and_print(&client, "papers.vectors_rebuild", params).await
+        }
+        PapersVectorsAction::Drop => {
+            helpers::call_and_print(&client, "papers.vectors_drop", json!({})).await
+        }
+        PapersVectorsAction::Reembed {
+            paper,
+            stale_only,
+            dry_run,
+            yes,
+        } => {
+            let params = json!({
+                "paper": paper,
+                "stale_only": stale_only,
+                "dry_run": dry_run,
+                "yes": yes,
+            });
+            helpers::call_and_print(&client, "papers.vectors_reembed", params).await
+        }
+        PapersVectorsAction::Reset { yes, resume } => {
+            let params = json!({ "yes": yes, "resume": resume });
+            helpers::call_and_print(&client, "papers.vectors_reset", params).await
+        }
+    }
+}
+
+async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    match action {
+        PapersStampsAction::Reconcile => {
+            helpers::call_and_print(&client, "papers.stamps_reconcile", json!({})).await
+        }
     }
 }
 

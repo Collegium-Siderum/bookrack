@@ -14,8 +14,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use bookrack_control_client::{ControlClient, ControlError, Event};
 use bookrack_repl_grammar::{
-    CorpusAction, IntakeAction, PapersAction, QueueAction, ReplCli, ReplCommand, StampsAction,
-    WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, IntakeAction, PapersAction, PapersCorpusAction, PapersStampsAction,
+    PapersVectorsAction, QueueAction, ReplCli, ReplCommand, StampsAction, WriteMetadataAction,
+    WriteVectorsAction,
 };
 use clap::Parser;
 use reedline::{
@@ -582,6 +583,82 @@ async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
                 "yes": args.yes,
             });
             call_and_print(client, "papers.remove", params).await
+        }
+        PapersAction::Corpus { action } => dispatch_papers_corpus(client, action).await,
+        PapersAction::Vectors { action } => dispatch_papers_vectors(client, action).await,
+        PapersAction::Stamps { action } => dispatch_papers_stamps(client, action).await,
+    }
+}
+
+async fn dispatch_papers_corpus(client: &ControlClient, action: PapersCorpusAction) -> bool {
+    match action {
+        PapersCorpusAction::Rebuild {
+            include_vectors,
+            paper,
+            stale_only,
+            dry_run,
+            yes,
+        } => {
+            let params = json!({
+                "include_vectors": include_vectors,
+                "paper": paper,
+                "stale_only": stale_only,
+                "dry_run": dry_run,
+                "yes": yes,
+            });
+            call_and_print(client, "papers.corpus_rebuild", params).await
+        }
+    }
+}
+
+async fn dispatch_papers_vectors(client: &ControlClient, action: PapersVectorsAction) -> bool {
+    match action {
+        PapersVectorsAction::Rebuild {
+            kind,
+            num_partitions,
+            num_sub_vectors,
+            num_bits,
+            nprobes,
+            refine_factor,
+        } => {
+            let params = json!({
+                "kind": kind,
+                "num_partitions": num_partitions,
+                "num_sub_vectors": num_sub_vectors,
+                "num_bits": num_bits,
+                "nprobes": nprobes,
+                "refine_factor": refine_factor,
+            });
+            call_and_print(client, "papers.vectors_rebuild", params).await
+        }
+        PapersVectorsAction::Drop => {
+            call_and_print(client, "papers.vectors_drop", Value::Null).await
+        }
+        PapersVectorsAction::Reembed {
+            paper,
+            stale_only,
+            dry_run,
+            yes,
+        } => {
+            let params = json!({
+                "paper": paper,
+                "stale_only": stale_only,
+                "dry_run": dry_run,
+                "yes": yes,
+            });
+            call_and_print(client, "papers.vectors_reembed", params).await
+        }
+        PapersVectorsAction::Reset { yes, resume } => {
+            let params = json!({ "yes": yes, "resume": resume });
+            call_and_print(client, "papers.vectors_reset", params).await
+        }
+    }
+}
+
+async fn dispatch_papers_stamps(client: &ControlClient, action: PapersStampsAction) -> bool {
+    match action {
+        PapersStampsAction::Reconcile => {
+            call_and_print(client, "papers.stamps_reconcile", Value::Null).await
         }
     }
 }
