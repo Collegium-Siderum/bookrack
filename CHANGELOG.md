@@ -8,7 +8,61 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-14
+
 ### Added
+
+- Two-store library: a `papers` cluster (`papers_catalog.db`,
+  `papers_corpus.db`, `lancedb_papers`, `papers_dir/`) sits beside the
+  existing book cluster under the same data root, with parallel
+  intake / corpus / vector / metadata schemas. The `config` crate
+  exposes paper-side getters; the in-process `LibraryRegistry` owns
+  both stores and routes work by item kind, so books and papers share
+  one scheduler, one MCP surface, and one search call.
+
+- `bookrack-glean`: paper-side pipeline crate covering
+  REGISTER → IDENTIFY → EXTRACT → STRUCTURE → CHUNK → EMBED. Driven
+  through the control plane by `glean.submit`, which the queue worker
+  consumes as paper-kinded jobs. REGISTER archives the source PDF
+  bytes next to the envelope and stamps `intake.source_pdf_path`;
+  IDENTIFY runs an offline pass that lifts DOI, arXiv id, venue, and
+  abstract from the cached extraction; EXTRACT reuses the shared PDF
+  adapter; STRUCTURE runs the paper-only coloring + Section tree
+  pass; CHUNK and EMBED reuse the book-side primitives against the
+  papers vector store.
+
+- `bookrack papers` subcommand tree (one-shot CLI and REPL): `papers
+  ingest [--recursive]` walks `.pdf` directories and forwards each
+  path to `glean.submit`; `papers source` streams the archived source
+  PDF back from `papers_dir/`; `papers remove` cascades a paper out
+  of the papers catalog, corpus, vector store, and `papers_dir/`;
+  the `papers <read>` commands mirror the book-side read family
+  against the paper backend.
+
+- MCP surface for papers: `library.search` accepts a `kind` switch
+  (`book` / `paper` / unset for both); `library.read_context` /
+  `library.read_span` and the other library read tools accept a
+  `kind` field on their arguments; the `papers.*` read family,
+  `papers.fetch_source`, and `glean.submit` expose papers to agent
+  clients.
+
+- CSL-JSON item model with two-way conversion in `bookrack-catalog`.
+  `Biblio` and `Contributor` gain paper-shaped fields (DOI,
+  container-title, volume / issue / pages, publication date parts,
+  …) and round-trip through the M8 paper columns without lossy
+  detours.
+
+- `KindedNodeId`: every cross-store addressing surface
+  (`read_context`, `read_span`, search citations, queue jobs) now
+  carries the item kind alongside the intake id, so a hit, a context
+  read, or a queued job is unambiguous between the two stores.
+  `library.search` citations report the store they came from.
+
+- Extraction envelopes are written with an explicit kind prefix in
+  their filename; `bookrack-extract` tolerates the un-prefixed legacy
+  layout on read. `bookrack doctor --rename-envelopes [--dry-run]` is
+  the one-shot migrator that rewrites existing envelopes into the new
+  naming.
 
 - `glean_paper` STRUCTURE now assembles a Section tree from the
   heading-colored block stream: a `BlockKind::Heading{1}` opens a
@@ -106,6 +160,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- M8 catalog migration: state tables shed their `book_` prefix in
+  favour of item-shaped names (`item_review`, `item_pipeline_audit`,
+  …) and gain a `kind` column where the table is shared between
+  books and papers; scope strings in the catalog API are replaced by
+  `core::ItemKind`. New paper-shaped columns land on `biblio`,
+  `contributor`, and `intake` (`source_pdf_path`). The migration
+  runs automatically at daemon preflight against an older library;
+  the per-database backup it writes is clustered by database stem so
+  the books-side and papers-side migrations cannot overwrite each
+  other.
+
+- All MCP library read tools now reach the catalog and corpus through
+  the control plane, closing the last direct-handle path. The
+  standalone `bookrack-mcp` process and the in-tree daemon share one
+  in-process scheduler for both reads and writes — completing the
+  control-plane split started in 0.4.0.
+
+- The extraction envelope type is hoisted out of `bookrack-ingest`
+  into `bookrack-extract`, so the book-side ingest pipeline and the
+  paper-side glean pipeline consume one shared definition.
+
 - `extract_paper_structured` is now precision-first: it returns an
   empty TOC rather than guess. The pass runs in two cooperating
   stages — outline-guided heading promotion and a strict numbered
@@ -198,6 +273,10 @@ release workflow extracts the matching section verbatim from this file.
   `metadata.approve` / `metadata.ack` / `metadata.reject`. Approve and
   reject previously overwrote it with the review reason — which already
   lives on the audit row — and ack nulled it outright.
+- The daemon now migrates every catalog (books and papers) at
+  preflight before opening connections, so a newer build started
+  against an older library no longer fails mid-write when the first
+  stage reaches for a column the running schema does not yet have.
 
 ## [0.4.0] - 2026-06-11
 
@@ -491,7 +570,9 @@ is finalised; small-batch testing precedes a stable v0.1.0 cut.
   per-platform SHA-256 checksums (Linux x86_64, Windows x86_64, macOS
   arm64, macOS x86_64).
 
-[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.1.0-rc4...v0.2.0
 [0.1.0-rc1]: https://github.com/Collegium-Siderum/bookrack/releases/tag/v0.1.0-rc1
