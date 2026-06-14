@@ -592,7 +592,7 @@ pub fn dryrun_paper(_file: &Path, _params: &DryrunPaperParams) -> DryrunPaperRep
 // helper struct here would just shift the same field set into a
 // per-call literal one site over, without simplifying the call.
 #[allow(clippy::too_many_arguments)]
-fn audit(
+pub(crate) fn audit(
     catalog: &Catalog,
     run_id: &str,
     source_sha: &str,
@@ -621,23 +621,23 @@ fn audit(
 /// point at the abstract leaf — the Tier 1 vector anchor — and stay
 /// independent of the body leaf count so the downstream CHUNK + EMBED
 /// flow sees the same input as before body leaves existed.
-struct StructureResult {
-    work_node_id: NodeId,
-    leaf_node_id: Option<NodeId>,
-    leaf_text: Option<String>,
-    nodes_written: usize,
-    has_leaf: bool,
-    body_leaves: usize,
+pub(crate) struct StructureResult {
+    pub(crate) work_node_id: NodeId,
+    pub(crate) leaf_node_id: Option<NodeId>,
+    pub(crate) leaf_text: Option<String>,
+    pub(crate) nodes_written: usize,
+    pub(crate) has_leaf: bool,
+    pub(crate) body_leaves: usize,
     /// Section organizing nodes written under the Work root. Zero when
     /// the heading pass produced no candidates and the tree fell back
     /// to the flat Phase-1 shape.
-    section_count: usize,
+    pub(crate) section_count: usize,
     /// Subsection organizing nodes written under any Section.
-    subsection_count: usize,
+    pub(crate) subsection_count: usize,
     /// Heading leaves carrying titled text (one per Section /
     /// Subsection plus any depth-3+ heading still folded in as a
     /// leaf). Independent of the organizer counts above.
-    heading_leaves: usize,
+    pub(crate) heading_leaves: usize,
 }
 
 /// One planned node in the paper STRUCTURE pass. The flat plan vector
@@ -736,7 +736,7 @@ fn current_parent(subsection: Option<usize>, section: Option<usize>) -> (Option<
 /// `intake:{intake_id}:abstract` namespace. Body-leaf namespaces
 /// continue to count Body blocks only, so a re-glean of an
 /// uncolored Phase-1 envelope still produces the same body hashes.
-fn build_structure(
+pub(crate) fn build_structure(
     corpus: &mut Corpus,
     intake_id: i64,
     abstract_text: Option<String>,
@@ -1042,7 +1042,7 @@ fn build_structure(
 }
 
 /// Write the bibliographic columns and contributor rows for a paper.
-fn write_biblio(
+pub(crate) fn write_biblio(
     catalog: &Catalog,
     intake_id: i64,
     biblio: &bookrack_extract::Biblio,
@@ -1124,7 +1124,7 @@ fn serde_csl_type(t: bookrack_extract::CslType) -> &'static str {
 
 /// Plan the chunks for an abstract leaf. The abstract is almost always
 /// one chunk under the default 1000-character target.
-fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
+pub(crate) fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<PlannedChunk> {
     let splitter = text_splitter::TextSplitter::new(
         text_splitter::ChunkConfig::new(params.target_chars)
             .with_overlap(params.overlap_chars)
@@ -1153,19 +1153,19 @@ fn plan_chunks(leaf_id: NodeId, text: &str, params: &ChunkParams) -> Vec<Planned
     out
 }
 
-struct PlannedChunk {
-    start_node_id: NodeId,
-    start_char_offset: i32,
-    end_node_id: NodeId,
-    end_char_offset: i32,
-    text: String,
-    norm_chunk_sha256: String,
+pub(crate) struct PlannedChunk {
+    pub(crate) start_node_id: NodeId,
+    pub(crate) start_char_offset: i32,
+    pub(crate) end_node_id: NodeId,
+    pub(crate) end_char_offset: i32,
+    pub(crate) text: String,
+    pub(crate) norm_chunk_sha256: String,
 }
 
 /// Embed each planned chunk and append the rows to the paper vector
 /// store. Reconciles the store's index_meta with this pipeline's
 /// stamps on the first write into an empty dir.
-async fn embed_and_write_chunks<E: Embedder>(
+pub(crate) async fn embed_and_write_chunks<E: Embedder>(
     corpus: &mut Corpus,
     lancedb_dir: &Path,
     embedder: &E,
@@ -1259,7 +1259,7 @@ fn noop_if_up_to_date(
 }
 
 /// Hex-encoded SHA-256 of a byte slice — the source identity anchor.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
@@ -1268,7 +1268,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// One run id ties every audit row from this invocation together. The
 /// `glean-` prefix distinguishes paper-pipeline rows from ingest's
 /// `ingest-` prefix when a mixed log is inspected.
-fn new_run_id(source_sha: &str) -> String {
+pub(crate) fn new_run_id(source_sha: &str) -> String {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let prefix = source_sha.get(..8).unwrap_or(source_sha);
     format!("glean-{prefix}-{nanos}")
