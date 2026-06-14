@@ -212,6 +212,99 @@ pub fn extract_paper_abstract(path: &Path) -> Result<Option<(String, &'static st
     }
 }
 
+/// References-section heading that terminates the metadata-scan window.
+///
+/// Matched at line start, case-insensitive, against the
+/// fullwidth-folded page text. The Chinese-form `\u{53C2}\u{8003}\u{6587}\u{732E}`
+/// covers the two written orders (with and without an interior space)
+/// seen in CJK journal layouts.
+static REFS_HEADING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        "(?im)^\\s*(?:references|bibliography",
+        "|\u{53C2}\\s*\u{8003}\\s*\u{6587}\\s*\u{732E}",
+        ")\\b",
+    ))
+    .expect("static refs-heading regex compiles")
+});
+
+/// Maximum characters returned by [`extract_paper_metadata_text`]. The
+/// cap caps the DOI / venue scan against very long front matter on
+/// monograph-style PDFs and bounds worst-case allocation.
+const MAX_METADATA_CHARS: usize = 30_000;
+
+/// Take raw page text from a paper PDF, suitable for DOI / venue /
+/// ISSN scans.
+///
+/// Returns the concatenated [`PdfPageText::all`] output from every
+/// page up to (but not including) the first References-like heading,
+/// with full-width Latin and digits folded to ASCII. The fold turns
+/// PDFs that print their DOI as `\u{FF11}\u{FF10}\u{FF0E}\u{FF11}\u{FF18}\u{FF16}\u{FF15}\u{FF14}`
+/// into something matchable by `\d`-based regex; CJK ideographs pass
+/// through unchanged.
+///
+/// The window terminates at the References heading rather than at a
+/// fixed page count so identifier scans cannot match a citation in the
+/// bibliography. Chinese-language papers often hide the publisher's
+/// DOI banner on page 2 or 3 after a cover sheet, so a fixed leading-
+/// pages cap would miss those.
+///
+/// `Ok(None)` means the file decoded but produced no metadata-scan
+/// text (an image-only paper). Errors are reported only for structural
+/// failures opening the PDF or reading a page's text layer.
+pub fn extract_paper_metadata_text(path: &Path) -> Result<Option<String>, ExtractError> {
+    let pdfium = pdfium()?;
+    let _guard = EXTRACTION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let document =
+        pdfium
+            .load_pdf_from_file(path, None)
+            .map_err(|e| ExtractError::CorruptFile {
+                detail: e.to_string(),
+            })?;
+
+    let mut out = String::new();
+    for page in document.pages().iter() {
+        let text = page.text().map_err(|e| ExtractError::CorruptFile {
+            detail: e.to_string(),
+        })?;
+        out.push_str(&text.all());
+        out.push('\n');
+        if let Some(m) = REFS_HEADING_RE.find(&out) {
+            out.truncate(m.start());
+            break;
+        }
+        if out.chars().count() >= MAX_METADATA_CHARS {
+            break;
+        }
+    }
+    let folded = fold_fullwidth_to_ascii(&out);
+    if folded.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(folded))
+    }
+}
+
+/// Map full-width Latin letters, digits, and ASCII punctuation
+/// (Unicode block U+FF01..U+FF5E) to their ASCII equivalents and the
+/// ideographic space (U+3000) to a regular space. Leaves every other
+/// code point alone, so CJK ideographs in the text remain intact.
+fn fold_fullwidth_to_ascii(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{FF01}'..='\u{FF5E}' => {
+                let mapped = char::from_u32(ch as u32 - 0xFEE0).unwrap_or(ch);
+                out.push(mapped);
+            }
+            '\u{3000}' => out.push(' '),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Color one paper's block stream with heading and caption classifications.
 ///
 /// The pass is precision-first: it would rather miss a real heading

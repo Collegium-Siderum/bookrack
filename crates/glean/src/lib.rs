@@ -431,29 +431,42 @@ pub async fn glean_paper<E: Embedder>(
 
     // ── IDENTIFY ──────────────────────────────────────────────────────
     let started = Instant::now();
-    let body_text = identify::body_text(&extraction);
-    let footer_text = identify::footer_text(&extraction);
+    let metadata_text = if extraction.provenance.adapter == "pdf" {
+        bookrack_extract::extract_paper_metadata_text(file)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let filename_stem = file.file_stem().map(|s| s.to_string_lossy().into_owned());
     let mut biblio = extraction.biblio.clone();
-    if biblio.doi.is_none()
-        && let Some(d) = identify::detect_doi(&body_text)
-    {
-        biblio.doi = Some(d);
+    // Title sniff overrides the PDF /Info /Title field unconditionally:
+    // template-rendered titles (`PLME0208_696-701.indd`, rotated arXiv
+    // banners) are noisier than `None` for the downstream metadata
+    // audit.
+    biblio.title = identify::sniff_title(biblio.title.as_deref());
+    if biblio.doi.is_none() {
+        biblio.doi = identify::detect_doi(metadata_text.as_deref(), filename_stem.as_deref());
     }
-    if biblio.arxiv_id.is_none()
-        && let Some(a) = identify::detect_arxiv_id(biblio.title.as_deref(), &footer_text)
-    {
-        biblio.arxiv_id = Some(a);
+    if biblio.arxiv_id.is_none() {
+        biblio.arxiv_id = identify::detect_arxiv_id(
+            extraction.biblio.title.as_deref(),
+            metadata_text.as_deref(),
+            filename_stem.as_deref(),
+        );
     }
-    if biblio.container_title.is_none()
-        && let Some(v) = identify::detect_venue(&footer_text)
-    {
-        biblio.container_title = Some(v);
+    if biblio.container_title.is_none() {
+        biblio.container_title = identify::detect_venue(metadata_text.as_deref());
     }
-    if biblio.issn.is_none()
-        && let Some(i) = identify::detect_issn(&footer_text)
-    {
-        biblio.issn = Some(i);
+    if biblio.issn.is_none() {
+        biblio.issn = identify::detect_issn(metadata_text.as_deref());
     }
+    biblio.year = identify::detect_year_from_biblio(
+        biblio.arxiv_id.as_deref(),
+        biblio.doi.as_deref(),
+        &biblio,
+        metadata_text.as_deref(),
+    );
     let abstract_pick = identify::extract_abstract(file, &extraction, params.abstract_strategy);
     let abstract_source = abstract_pick.as_ref().map(|(_, src)| (*src).to_string());
     if let Some((text, _)) = &abstract_pick
