@@ -34,6 +34,10 @@ use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
 pub mod identify;
+pub mod rebuild;
+pub mod reembed;
+pub mod reset;
+pub mod stamps;
 
 /// Chunking-behaviour stamp the paper pipeline writes into the vector
 /// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
@@ -205,6 +209,12 @@ pub enum GleanError {
     UnimplementedEmbedStrategy { label: &'static str },
     #[error("enrichment `{label}` is not implemented in this milestone")]
     UnimplementedEnrichment { label: &'static str },
+    #[error("unknown intake: {0}")]
+    UnknownIntake(i64),
+    #[error("intake {0} is not in a rebuildable / re-embeddable state")]
+    IntakeNotRebuildable(i64),
+    #[error("embedder returned no vector")]
+    EmptyEmbedding,
 }
 
 /// Convenience alias for the crate's fallible operations.
@@ -604,11 +614,43 @@ pub(crate) fn audit(
     metric_summary: Option<String>,
     error_message: Option<&str>,
 ) {
+    audit_as(
+        catalog,
+        "glean",
+        run_id,
+        source_sha,
+        work_node_id,
+        stage,
+        sub_step,
+        outcome,
+        started,
+        metric_summary,
+        error_message,
+    );
+}
+
+/// Variant of [`audit`] that takes an explicit `actor_detail` label so
+/// maintenance modules (rebuild / reembed / reset) can distinguish
+/// their rows from the initial glean run in a mixed audit log.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn audit_as(
+    catalog: &Catalog,
+    actor_detail: &str,
+    run_id: &str,
+    source_sha: &str,
+    work_node_id: Option<i64>,
+    stage: &str,
+    sub_step: &str,
+    outcome: &str,
+    started: Instant,
+    metric_summary: Option<String>,
+    error_message: Option<&str>,
+) {
     let duration_ms = started.elapsed().as_millis() as i64;
     let mut row = NewItemPipelineAudit::new(stage, sub_step, outcome, run_id, ActorKind::Pipeline);
     row.source_sha256 = Some(source_sha.to_string());
     row.duration_ms = Some(duration_ms);
-    row.actor_detail = Some("glean".to_string());
+    row.actor_detail = Some(actor_detail.to_string());
     row.book_root_id = work_node_id;
     row.metric_summary = metric_summary;
     row.error_message = error_message.map(|s| s.to_string());
