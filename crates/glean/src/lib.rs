@@ -168,6 +168,14 @@ pub struct GleanReport {
     /// `"heading" | "first_page_long_para" | "first_long_para"`.
     /// `None` when no body block could serve as the abstract.
     pub abstract_source: Option<String>,
+    /// Audit verdict stored on `node_publication_attrs` for this
+    /// paper. `None` when the row has no verdict (audit not run yet,
+    /// or the profile disabled the audit).
+    pub audit_verdict: Option<String>,
+    /// Audit confidence (`high` / `medium` / `low`) stored on
+    /// `node_publication_attrs`. `None` when the row has no
+    /// confidence.
+    pub audit_confidence: Option<String>,
 }
 
 /// What went wrong during a glean run. Carries the source variant so
@@ -570,6 +578,8 @@ pub async fn glean_paper<E: Embedder>(
         arxiv_id: biblio.arxiv_id,
         venue: biblio.container_title,
         abstract_source,
+        audit_verdict: None,
+        audit_confidence: None,
     })
 }
 
@@ -1244,7 +1254,8 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
 
 /// Return a [`GleanReport`] when re-running the pipeline against this
 /// source would be a no-op: the file is already on file at
-/// `Embedded` status under the same embed model.
+/// `Embedded` status, the stored extractor version equals this
+/// binary's, and the embed model on the work state matches.
 fn noop_if_up_to_date(
     catalog: &Catalog,
     source_sha: &str,
@@ -1256,6 +1267,9 @@ fn noop_if_up_to_date(
     if intake.status != IntakeStatus::Embedded {
         return Ok(None);
     }
+    if intake.extractor_version != bookrack_extract::EXTRACTOR_VERSION {
+        return Ok(None);
+    }
     let book_root_id = PartitionIdx::new(intake.intake_id).root().get();
     let Some(state) = catalog.book_state(book_root_id)? else {
         return Ok(None);
@@ -1263,6 +1277,12 @@ fn noop_if_up_to_date(
     if state.embed_model.as_deref() != Some(embed_model) {
         return Ok(None);
     }
+    // Surface the audit outcome stored on the row at the previous
+    // glean run so a no-op still tells the operator whether the paper
+    // landed `clean` or `needs_work`.
+    let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Paper)?;
+    let audit_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
+    let audit_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
     Ok(Some(GleanReport {
         intake_id: intake.intake_id,
         work_node_id: NodeId::new(state.book_root_id),
@@ -1275,6 +1295,8 @@ fn noop_if_up_to_date(
         arxiv_id: None,
         venue: None,
         abstract_source: None,
+        audit_verdict,
+        audit_confidence,
     }))
 }
 

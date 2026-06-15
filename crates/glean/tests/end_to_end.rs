@@ -258,6 +258,30 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     assert!(forced.forced);
     assert!(!forced.no_op);
     assert_eq!(forced.intake_id, report.intake_id);
+
+    // Stamp the intake with a stale `extractor_version` to simulate a
+    // version bump between glean runs. The no-op path must invalidate
+    // on a stamp mismatch and walk the pipeline again rather than
+    // return the cached report.
+    catalog
+        .set_extraction(ItemKind::Paper, report.intake_id, "pdf", 0)
+        .expect("stale extractor_version stamp");
+    let after_bump = glean_paper(
+        &fixture_path(),
+        &mut corpus,
+        &mut catalog,
+        &lancedb_dir,
+        &papers_dir,
+        &embedder,
+        &GleanParams::default(),
+    )
+    .await
+    .expect("glean after extractor bump must succeed");
+    assert!(
+        !after_bump.no_op,
+        "stale extractor_version must invalidate the no-op path",
+    );
+    assert_eq!(after_bump.intake_id, report.intake_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
