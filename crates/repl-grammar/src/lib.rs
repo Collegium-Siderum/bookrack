@@ -487,6 +487,72 @@ pub enum PapersMetadataAction {
         #[arg(long)]
         audit_profile: Option<String>,
     },
+    /// Override one field on a paper's effective record.
+    Set {
+        intake_id: i64,
+        #[arg(long)]
+        field: String,
+        #[arg(long)]
+        value: String,
+        /// Mark the override as confirmed against the source.
+        #[arg(long)]
+        confirmed: bool,
+    },
+    /// Remove an override on one field, reverting to the extracted
+    /// value.
+    Clear {
+        intake_id: i64,
+        #[arg(long)]
+        field: String,
+    },
+    /// Set an override that deliberately voids one field's value.
+    Void {
+        intake_id: i64,
+        #[arg(long)]
+        field: String,
+    },
+    /// Acknowledge a flagged paper without changing its metadata —
+    /// move the review row to `acknowledged`.
+    Ack {
+        intake_id: i64,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Approve a paper's metadata as correct.
+    Approve {
+        intake_id: i64,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Reject a paper's metadata as wrong.
+    Reject {
+        intake_id: i64,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Move a previously approved / rejected paper back to
+    /// `pending`.
+    Reopen {
+        intake_id: i64,
+        #[arg(long)]
+        notes: Option<String>,
+    },
+    /// Add a contributor row to a paper.
+    ContributorAdd {
+        intake_id: i64,
+        #[arg(long)]
+        role: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        family: Option<String>,
+        #[arg(long)]
+        given: Option<String>,
+        #[arg(long)]
+        orcid: Option<String>,
+    },
+    /// Remove a contributor row by id.
+    ContributorRemove { contributor_id: i64 },
 }
 
 /// Paper-side corpus write commands. Peer of [`CorpusAction`].

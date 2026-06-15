@@ -597,7 +597,7 @@ async fn dispatch_papers_metadata(
     action: bookrack_repl_grammar::PapersMetadataAction,
 ) -> bool {
     use bookrack_repl_grammar::PapersMetadataAction;
-    match action {
+    let (method, params) = match action {
         PapersMetadataAction::Reaudit {
             intake_id,
             audit_profile,
@@ -606,9 +606,88 @@ async fn dispatch_papers_metadata(
             if let Some(name) = audit_profile {
                 params["audit_profile"] = Value::String(name);
             }
-            call_and_print(client, "papers.metadata.reaudit", params).await
+            ("papers.metadata.reaudit", params)
         }
-    }
+        PapersMetadataAction::Set {
+            intake_id,
+            field,
+            value,
+            confirmed,
+        } => (
+            "papers.metadata.set",
+            json!({
+                "intake_id": intake_id,
+                "field": field,
+                "value": value,
+                "confirmed": confirmed,
+            }),
+        ),
+        PapersMetadataAction::Clear { intake_id, field } => (
+            "papers.metadata.clear",
+            json!({ "intake_id": intake_id, "field": field }),
+        ),
+        PapersMetadataAction::Void { intake_id, field } => (
+            "papers.metadata.void",
+            json!({ "intake_id": intake_id, "field": field }),
+        ),
+        PapersMetadataAction::Ack { intake_id, notes } => {
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(notes) = notes {
+                params["notes"] = Value::String(notes);
+            }
+            ("papers.metadata.ack", params)
+        }
+        PapersMetadataAction::Approve { intake_id, notes } => {
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(notes) = notes {
+                params["notes"] = Value::String(notes);
+            }
+            ("papers.metadata.approve", params)
+        }
+        PapersMetadataAction::Reject { intake_id, notes } => {
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(notes) = notes {
+                params["notes"] = Value::String(notes);
+            }
+            ("papers.metadata.reject", params)
+        }
+        PapersMetadataAction::Reopen { intake_id, notes } => {
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(notes) = notes {
+                params["notes"] = Value::String(notes);
+            }
+            ("papers.metadata.reopen", params)
+        }
+        PapersMetadataAction::ContributorAdd {
+            intake_id,
+            role,
+            name,
+            family,
+            given,
+            orcid,
+        } => {
+            let mut params = json!({
+                "intake_id": intake_id,
+                "role": role,
+                "name": name,
+            });
+            if let Some(family) = family {
+                params["family"] = Value::String(family);
+            }
+            if let Some(given) = given {
+                params["given"] = Value::String(given);
+            }
+            if let Some(orcid) = orcid {
+                params["orcid"] = Value::String(orcid);
+            }
+            ("papers.metadata.contributor_add", params)
+        }
+        PapersMetadataAction::ContributorRemove { contributor_id } => (
+            "papers.metadata.contributor_remove",
+            json!({ "contributor_id": contributor_id }),
+        ),
+    };
+    call_and_print(client, method, params).await
 }
 
 async fn dispatch_papers_dryrun(client: &ControlClient, args: PapersDryrunArgs) -> bool {

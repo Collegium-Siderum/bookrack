@@ -236,6 +236,16 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         Ok(report)
     }
 
+    /// Open the paper catalog for synchronous read/write. Returns an
+    /// error when this handle has no papers backend attached.
+    pub fn open_paper_catalog(&self) -> anyhow::Result<Catalog> {
+        let catalog_db = self
+            .ops
+            .papers_catalog_db()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        Catalog::open_with_backup(catalog_db, self.ops.backup_dir()).context("open papers catalog")
+    }
+
     /// Re-run the paper-side metadata audit on an existing intake's
     /// cached extraction envelope and write only the `confidence` /
     /// `audit_verdict` rollup. Returns the new and previous verdict /

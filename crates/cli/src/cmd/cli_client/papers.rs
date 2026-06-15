@@ -40,12 +40,12 @@ async fn metadata(
     runtime_dir: Option<PathBuf>,
 ) -> Result<()> {
     use bookrack_repl_grammar::PapersMetadataAction;
+    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
     match action {
         PapersMetadataAction::Reaudit {
             intake_id,
             audit_profile,
         } => {
-            let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
             let mut params = json!({ "intake_id": intake_id });
             if let Some(name) = audit_profile {
                 params["audit_profile"] = Value::String(name);
@@ -75,7 +75,154 @@ async fn metadata(
             );
             Ok(())
         }
+        PapersMetadataAction::Set {
+            intake_id,
+            field,
+            value,
+            confirmed,
+        } => {
+            let params = json!({
+                "intake_id": intake_id,
+                "field": field,
+                "value": value,
+                "confirmed": confirmed,
+            });
+            helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
+            println!("Set {field} on paper {intake_id} to {value:?}.");
+            Ok(())
+        }
+        PapersMetadataAction::Clear { intake_id, field } => {
+            let params = json!({ "intake_id": intake_id, "field": field });
+            let value =
+                helpers::call_with_progress_value(client, "papers.metadata.clear", params).await?;
+            let removed = value
+                .get("removed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if removed {
+                println!("Cleared override on {field} for paper {intake_id}.");
+            } else {
+                println!("No override on {field} for paper {intake_id} to clear.");
+            }
+            Ok(())
+        }
+        PapersMetadataAction::Void { intake_id, field } => {
+            let params = json!({ "intake_id": intake_id, "field": field });
+            helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
+            println!("Voided {field} on paper {intake_id}.");
+            Ok(())
+        }
+        PapersMetadataAction::Ack { intake_id, notes } => {
+            review_status_call(
+                client,
+                "papers.metadata.ack",
+                intake_id,
+                notes,
+                "acknowledged",
+            )
+            .await
+        }
+        PapersMetadataAction::Approve { intake_id, notes } => {
+            review_status_call(
+                client,
+                "papers.metadata.approve",
+                intake_id,
+                notes,
+                "approved",
+            )
+            .await
+        }
+        PapersMetadataAction::Reject { intake_id, notes } => {
+            review_status_call(
+                client,
+                "papers.metadata.reject",
+                intake_id,
+                notes,
+                "rejected",
+            )
+            .await
+        }
+        PapersMetadataAction::Reopen { intake_id, notes } => {
+            review_status_call(
+                client,
+                "papers.metadata.reopen",
+                intake_id,
+                notes,
+                "pending",
+            )
+            .await
+        }
+        PapersMetadataAction::ContributorAdd {
+            intake_id,
+            role,
+            name,
+            family,
+            given,
+            orcid,
+        } => {
+            let mut params = json!({
+                "intake_id": intake_id,
+                "role": role,
+                "name": name,
+            });
+            if let Some(family) = family {
+                params["family"] = Value::String(family);
+            }
+            if let Some(given) = given {
+                params["given"] = Value::String(given);
+            }
+            if let Some(orcid) = orcid {
+                params["orcid"] = Value::String(orcid);
+            }
+            let value = helpers::call_with_progress_value(
+                client,
+                "papers.metadata.contributor_add",
+                params,
+            )
+            .await?;
+            let id = value.get("contributor_id").and_then(Value::as_i64);
+            println!(
+                "Added contributor to paper {intake_id} (contributor_id={}).",
+                id.map_or("unknown".to_string(), |i| i.to_string()),
+            );
+            Ok(())
+        }
+        PapersMetadataAction::ContributorRemove { contributor_id } => {
+            let params = json!({ "contributor_id": contributor_id });
+            let value = helpers::call_with_progress_value(
+                client,
+                "papers.metadata.contributor_remove",
+                params,
+            )
+            .await?;
+            let removed = value
+                .get("removed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if removed {
+                println!("Removed contributor {contributor_id}.");
+            } else {
+                println!("No contributor {contributor_id} to remove.");
+            }
+            Ok(())
+        }
     }
+}
+
+async fn review_status_call(
+    client: std::sync::Arc<bookrack_control_client::ControlClient>,
+    method: &str,
+    intake_id: i64,
+    notes: Option<String>,
+    pretty_status: &str,
+) -> Result<()> {
+    let mut params = json!({ "intake_id": intake_id });
+    if let Some(notes) = notes {
+        params["notes"] = Value::String(notes);
+    }
+    helpers::call_with_progress_value(client, method, params).await?;
+    println!("Paper {intake_id} review status is now {pretty_status}.");
+    Ok(())
 }
 
 async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {

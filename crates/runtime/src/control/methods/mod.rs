@@ -306,6 +306,33 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "papers.metadata.reaudit" => Ok(DispatchOutcome::Result(
             papers_metadata::reaudit(&req.params, ctx).await?,
         )),
+        "papers.metadata.set" => Ok(DispatchOutcome::Result(
+            papers_metadata::set(&req.params, ctx).await?,
+        )),
+        "papers.metadata.clear" => Ok(DispatchOutcome::Result(
+            papers_metadata::clear(&req.params, ctx).await?,
+        )),
+        "papers.metadata.void" => Ok(DispatchOutcome::Result(
+            papers_metadata::void(&req.params, ctx).await?,
+        )),
+        "papers.metadata.ack" => Ok(DispatchOutcome::Result(
+            papers_metadata::ack(&req.params, ctx).await?,
+        )),
+        "papers.metadata.approve" => Ok(DispatchOutcome::Result(
+            papers_metadata::approve(&req.params, ctx).await?,
+        )),
+        "papers.metadata.reject" => Ok(DispatchOutcome::Result(
+            papers_metadata::reject(&req.params, ctx).await?,
+        )),
+        "papers.metadata.reopen" => Ok(DispatchOutcome::Result(
+            papers_metadata::reopen(&req.params, ctx).await?,
+        )),
+        "papers.metadata.contributor_add" => Ok(DispatchOutcome::Result(
+            papers_metadata::contributor_add(&req.params, ctx).await?,
+        )),
+        "papers.metadata.contributor_remove" => Ok(DispatchOutcome::Result(
+            papers_metadata::contributor_remove(&req.params, ctx).await?,
+        )),
         "dryrun" => Ok(DispatchOutcome::Result(
             dryrun::run(&req.params, ctx).await?,
         )),
@@ -359,6 +386,15 @@ fn is_queue_bound_method(method: &str) -> bool {
             | "papers.stamps_reconcile"
             | "papers.dryrun"
             | "papers.metadata.reaudit"
+            | "papers.metadata.set"
+            | "papers.metadata.clear"
+            | "papers.metadata.void"
+            | "papers.metadata.ack"
+            | "papers.metadata.approve"
+            | "papers.metadata.reject"
+            | "papers.metadata.reopen"
+            | "papers.metadata.contributor_add"
+            | "papers.metadata.contributor_remove"
             | "dryrun"
     )
 }
