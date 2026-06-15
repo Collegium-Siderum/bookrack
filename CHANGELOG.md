@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `ingest.submit` accepts `recursive: true`, which expands every
+  directory in `paths` to its supported-format files via the
+  existing `bookrack_runtime::queue::collect_supported_files`
+  walker before enqueueing. `bookrack ingest --recursive` and the
+  REPL `ingest --recursive` flag now reach this code path instead
+  of bailing through the placeholder error.
+
 - `library.set_default` control-plane method re-points the
   registry's default-library pointer at one of its registered
   libraries; the change is in-memory only and fires the existing

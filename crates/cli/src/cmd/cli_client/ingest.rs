@@ -10,17 +10,16 @@ use serde_json::json;
 use super::helpers;
 
 pub async fn run(args: IngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    if args.recursive {
-        anyhow::bail!(
-            "bookrack ingest --recursive is not yet wired through the control plane; pass individual files or use the REPL's `queue add`",
-        );
-    }
     if args.hold_for_metadata {
         eprintln!(
             "bookrack: --hold-for-metadata is not yet wired over the control plane; the daemon proceeds without holding",
         );
     }
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
-    let params = json!({"paths": [args.path], "force": args.force});
+    let params = json!({
+        "paths": [args.path],
+        "force": args.force,
+        "recursive": args.recursive,
+    });
     helpers::call_with_progress(client, "ingest.submit", params).await
 }

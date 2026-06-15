@@ -35,6 +35,13 @@ pub struct IngestSubmitParams {
     priority: Option<PriorityRepr>,
     #[serde(default)]
     force: bool,
+    /// When `true`, every directory in `paths` is walked depth-first
+    /// and expanded to the set of supported-format files inside it
+    /// before enqueueing. Files passed directly are still enqueued
+    /// verbatim. When `false` (default), directory paths reach the
+    /// queue worker as-is, which treats them as ingest failures.
+    #[serde(default)]
+    recursive: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +84,28 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         .priority
         .map(PriorityRepr::into_priority)
         .unwrap_or_default();
+    let expanded: Vec<PathBuf> = if parsed.recursive {
+        let mut out = Vec::new();
+        for path in &parsed.paths {
+            if path.is_dir() {
+                let mut found = queue::collect_supported_files(path).map_err(|e| {
+                    RpcError::new(INTERNAL_ERROR, format!("walk {}: {e}", path.display()))
+                })?;
+                out.append(&mut found);
+            } else {
+                out.push(path.clone());
+            }
+        }
+        out
+    } else {
+        parsed.paths.clone()
+    };
+    if expanded.is_empty() {
+        return Err(RpcError::new(
+            INVALID_PARAMS,
+            "no supported files found in submitted paths",
+        ));
+    }
     let ids = {
         let mut guard = ctx
             .queue_state
@@ -84,7 +113,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
         let ids = queue::enqueue_files(
             &mut guard,
-            &parsed.paths,
+            &expanded,
             &library,
             bookrack_core::ItemKind::Book,
             priority,

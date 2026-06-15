@@ -76,9 +76,14 @@ and tool-scoped.
 
 ## Methods (Phase 2)
 
-- `ingest.submit` — `{ paths, library?, priority?, force? }` →
-  `{ job_ids: [<uuid v7>] }`. Appends jobs to the persistent queue
-  document; the worker picks them up on the next 200 ms tick.
+- `ingest.submit` — `{ paths, library?, priority?, force?,
+  recursive? }` → `{ job_ids: [<uuid v7>] }`. Appends jobs to the
+  persistent queue document; the worker picks them up on the next
+  200 ms tick. When `recursive` is `true`, every directory in
+  `paths` is walked depth-first and expanded to its supported-
+  format files before enqueueing; files passed directly are
+  enqueued verbatim. With `recursive` omitted or `false`,
+  directory paths reach the worker as-is and fail there.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
