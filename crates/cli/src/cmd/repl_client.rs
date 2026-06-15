@@ -588,6 +588,26 @@ async fn dispatch_papers(client: &ControlClient, action: PapersAction) -> bool {
         PapersAction::Vectors { action } => dispatch_papers_vectors(client, action).await,
         PapersAction::Stamps { action } => dispatch_papers_stamps(client, action).await,
         PapersAction::Dryrun(args) => dispatch_papers_dryrun(client, args).await,
+        PapersAction::Metadata { action } => dispatch_papers_metadata(client, action).await,
+    }
+}
+
+async fn dispatch_papers_metadata(
+    client: &ControlClient,
+    action: bookrack_repl_grammar::PapersMetadataAction,
+) -> bool {
+    use bookrack_repl_grammar::PapersMetadataAction;
+    match action {
+        PapersMetadataAction::Reaudit {
+            intake_id,
+            audit_profile,
+        } => {
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(name) = audit_profile {
+                params["audit_profile"] = Value::String(name);
+            }
+            call_and_print(client, "papers.metadata.reaudit", params).await
+        }
     }
 }
 

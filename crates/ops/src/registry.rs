@@ -235,6 +235,27 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         }
         Ok(report)
     }
+
+    /// Re-run the paper-side metadata audit on an existing intake's
+    /// cached extraction envelope and write only the `confidence` /
+    /// `audit_verdict` rollup. Returns the new and previous verdict /
+    /// confidence pair.
+    pub async fn reaudit_paper(
+        &self,
+        intake_id: i64,
+        profile: &bookrack_glean::audit::PaperAuditProfile,
+        data: &bookrack_glean::audit::PaperAuditData,
+    ) -> anyhow::Result<bookrack_glean::reaudit::ReauditOutcome> {
+        let catalog_db = self
+            .ops
+            .papers_catalog_db()
+            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+        let _guard = self.glean_lock.lock().await;
+        let catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
+            .context("open papers catalog for reaudit")?;
+        bookrack_glean::reaudit::reaudit_paper(&catalog, intake_id, profile, data)
+            .map_err(|e| anyhow::Error::from(e).context("registry-mediated paper reaudit"))
+    }
 }
 
 /// One row of [`LibraryRegistry::list`] — the registered name and the

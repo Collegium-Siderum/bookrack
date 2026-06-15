@@ -463,6 +463,30 @@ pub enum PapersAction {
     /// STRUCTURE stats. The real catalog, corpus, and vector store
     /// are not touched.
     Dryrun(PapersDryrunArgs),
+    /// Paper-side metadata curation commands. Peer of the top-level
+    /// `metadata` subcommand for the book pipeline.
+    Metadata {
+        #[command(subcommand)]
+        action: PapersMetadataAction,
+    },
+}
+
+/// Paper-side metadata curation actions. Peer of `MetadataAction`
+/// for the books pipeline; currently exposes the `reaudit` action.
+#[derive(clap::Subcommand, Debug)]
+pub enum PapersMetadataAction {
+    /// Re-run the paper-side metadata audit on an existing intake's
+    /// cached extraction. Writes only the `confidence` /
+    /// `audit_verdict` rollup; the base attrs, contributors, and
+    /// review status all stay as they are.
+    Reaudit {
+        /// The intake id of the paper to re-audit.
+        intake_id: i64,
+        /// Optional named audit profile. When absent the daemon's
+        /// effective profile (default + overlay) is used.
+        #[arg(long)]
+        audit_profile: Option<String>,
+    },
 }
 
 /// Paper-side corpus write commands. Peer of [`CorpusAction`].

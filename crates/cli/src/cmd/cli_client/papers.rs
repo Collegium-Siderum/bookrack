@@ -31,6 +31,50 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::Vectors { action } => vectors(action, runtime_dir).await,
         PapersAction::Stamps { action } => stamps(action, runtime_dir).await,
         PapersAction::Dryrun(args) => dryrun(args, runtime_dir).await,
+        PapersAction::Metadata { action } => metadata(action, runtime_dir).await,
+    }
+}
+
+async fn metadata(
+    action: bookrack_repl_grammar::PapersMetadataAction,
+    runtime_dir: Option<PathBuf>,
+) -> Result<()> {
+    use bookrack_repl_grammar::PapersMetadataAction;
+    match action {
+        PapersMetadataAction::Reaudit {
+            intake_id,
+            audit_profile,
+        } => {
+            let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+            let mut params = json!({ "intake_id": intake_id });
+            if let Some(name) = audit_profile {
+                params["audit_profile"] = Value::String(name);
+            }
+            let value =
+                helpers::call_with_progress_value(client, "papers.metadata.reaudit", params)
+                    .await?;
+            let verdict = value
+                .get("verdict")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let confidence = value
+                .get("confidence")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let previous_verdict = value
+                .get("previous_verdict")
+                .and_then(Value::as_str)
+                .unwrap_or("unset");
+            let previous_confidence = value
+                .get("previous_confidence")
+                .and_then(Value::as_str)
+                .unwrap_or("unset");
+            println!(
+                "Reaudited paper {intake_id}: verdict {verdict} (was {previous_verdict}), \
+                 confidence {confidence} (was {previous_confidence})."
+            );
+            Ok(())
+        }
     }
 }
 

@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 pub mod audit;
 pub mod dryrun;
 pub mod identify;
+pub mod reaudit;
 pub mod rebuild;
 pub mod reembed;
 pub mod reset;
@@ -228,6 +229,12 @@ pub enum GleanError {
     IntakeNotRebuildable(i64),
     #[error("embedder returned no vector")]
     EmptyEmbedding,
+    #[error("intake {0} has no readable extraction envelope")]
+    MissingEnvelope(i64),
+    #[error("envelope for intake {0} does not match the registered source")]
+    EnvelopeMismatch(i64),
+    #[error("envelope I/O error")]
+    Envelope(#[from] bookrack_extract::envelope::EnvelopeError),
 }
 
 /// Convenience alias for the crate's fallible operations.

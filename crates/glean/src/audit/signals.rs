@@ -76,7 +76,7 @@ pub fn audit_paper(
     grade_language(input, profile, &mut fields);
 
     let mut cross_field_flags = Vec::new();
-    if profile.identifier.require_any && !has_any_stable_identifier(input.biblio) {
+    if profile.identifier.require_any && !has_any_stable_identifier(input.effective) {
         cross_field_flags.push(PaperFlag::NoStableIdentifier);
     }
 
@@ -391,13 +391,9 @@ fn normalize_compare(s: &str) -> String {
         .collect()
 }
 
-fn has_any_stable_identifier(b: &Biblio) -> bool {
-    b.doi.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || b.arxiv_id.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || (b.issn.as_deref().is_some_and(|v| !v.trim().is_empty())
-            && b.container_title
-                .as_deref()
-                .is_some_and(|v| !v.trim().is_empty()))
+fn has_any_stable_identifier(effective: &EffectiveAttrs) -> bool {
+    let present = |field: &str| effective.get(field).is_some_and(|v| !v.trim().is_empty());
+    present("doi") || present("arxiv_id") || (present("issn") && present("container_title"))
 }
 
 fn looks_like_timestamp(raw: &str) -> bool {
