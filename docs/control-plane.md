@@ -56,6 +56,12 @@ and tool-scoped.
 - `library.list` — array of `{ name, default, dimension }` entries.
 - `library.info` — full status card for one library;
   `params.name` selects which.
+- `library.set_default` — `{ name }` → `{ ok: true, name }`. Move
+  the registry's default-library pointer to `name`. The change
+  lives in the daemon's in-memory registry only; the on-disk
+  library registry stays as written. Returns `-32602` with the
+  list of known libraries when `name` is unregistered. Fires a
+  `library.changed` event so subscribers can refresh their view.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,
   `queue.tick`, `library.list`, `library.changed`,

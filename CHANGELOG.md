@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `library.set_default` control-plane method re-points the
+  registry's default-library pointer at one of its registered
+  libraries; the change is in-memory only and fires the existing
+  `library.changed` event. The REPL `use <library>` built-in
+  drives it instead of bailing through the phase-unavailable
+  shim, parallel to the in-process REPL's `use` command.
+
 - `logs.tail` control-plane method snapshots the most recent `n`
   events from the daemon's in-memory log ring buffer (default 100,
   capped at 1024). Peer of the existing `session.logs_tail` MCP

@@ -347,6 +347,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "library.fork" => Ok(DispatchOutcome::Result(
             libraries::fork(&req.params, ctx).await?,
         )),
+        "library.set_default" => Ok(DispatchOutcome::Result(
+            libraries::set_default(&req.params, ctx).await?,
+        )),
         "diagnose.run" => Ok(DispatchOutcome::Result(
             diagnose::run(&req.params, ctx).await?,
         )),

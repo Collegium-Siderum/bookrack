@@ -336,6 +336,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         name: "logs.tail",
         kind: "read",
     },
+    MethodSignature {
+        name: "library.set_default",
+        kind: "write",
+    },
 ];
 
 pub fn methods(_ctx: &MethodContext) -> Value {

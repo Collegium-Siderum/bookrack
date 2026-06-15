@@ -3,14 +3,22 @@
 //! `library.fork` — clone the active library into a sibling data
 //! root and register it in the user's library registry. The MCP
 //! parity work in Phase 5 reuses this same handler.
+//!
+//! `library.set_default` — re-point the registry's default-library
+//! pointer at one of its known libraries. The change lives in the
+//! daemon's in-memory registry only; the persistent library
+//! registry on disk is untouched, so restarting the daemon picks
+//! up whatever the configured `--library` / TOML default says.
 
 use std::path::PathBuf;
 
+use bookrack_ops::registry::RegistryError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
+use super::super::events::Event;
 use super::super::jsonrpc::{INVALID_PARAMS, RpcError};
 use super::MethodContext;
 use super::run_write;
@@ -78,4 +86,37 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         }))
     })
     .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LibrarySetDefaultParams {
+    pub name: String,
+}
+
+/// Re-point the registry's default-library pointer at `name`. The
+/// daemon's primary `library_name` (used as a fallback when an RPC
+/// caller omits `library`) is unchanged — the call is advisory and
+/// fires a `library.changed` event so subscribers can refresh their
+/// view of which library the registry now reports as default.
+pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let raw = params
+        .clone()
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, "library.set_default: missing params"))?;
+    let parsed: LibrarySetDefaultParams = serde_json::from_value(raw)
+        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("library.set_default params: {e}")))?;
+    match ctx.registry.set_default(&parsed.name) {
+        Ok(()) => {
+            ctx.event_stream.publish(Event::LibraryChanged {
+                library: parsed.name.clone(),
+            });
+            Ok(json!({ "ok": true, "name": parsed.name }))
+        }
+        Err(err @ RegistryError::LibraryUnknown { .. }) => {
+            Err(RpcError::new(INVALID_PARAMS, err.to_string()))
+        }
+        Err(err) => Err(RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            err.to_string(),
+        )),
+    }
 }

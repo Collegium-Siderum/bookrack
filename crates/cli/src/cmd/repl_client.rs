@@ -288,10 +288,7 @@ async fn dispatch_line(client: &ControlClient, line: &str) -> bool {
         "libs" => return call_and_print(client, "library.list", Value::Null).await,
         "queue" => return handle_queue(client, &tokens).await,
         "logs" => return handle_logs(client, &tokens).await,
-        "use" => {
-            print_phase_unavailable("library.set_default");
-            return true;
-        }
+        "use" => return handle_use(client, &tokens).await,
         _ => {}
     }
     match ReplCli::try_parse_from(&tokens) {
@@ -388,6 +385,18 @@ async fn handle_queue(client: &ControlClient, tokens: &[String]) -> bool {
             true
         }
     }
+}
+
+async fn handle_use(client: &ControlClient, tokens: &[String]) -> bool {
+    let Some(name) = tokens.get(1) else {
+        eprintln!("use: missing library name; try `libs` to list known libraries");
+        return true;
+    };
+    if tokens.len() > 2 {
+        eprintln!("use: too many arguments; expected exactly one library name");
+        return true;
+    }
+    call_and_print(client, "library.set_default", json!({ "name": name })).await
 }
 
 async fn handle_logs(client: &ControlClient, tokens: &[String]) -> bool {
@@ -1053,10 +1062,6 @@ fn render_queue_list(value: &Value) {
     }
 }
 
-fn print_phase_unavailable(method: &str) {
-    eprintln!("bookrack: {method} is not yet wired through the control plane in this phase",);
-}
-
 fn print_repl_help() {
     println!("Built-in commands:");
     println!("  exit, quit       Leave the REPL");
@@ -1066,6 +1071,7 @@ fn print_repl_help() {
     println!("  queue add <path> [--library X] [--priority {{low|normal|high}}] [--force]");
     println!("  queue list       Show the daemon's persisted queue");
     println!("  queue cancel <id-prefix>");
+    println!("  use <library>    Re-point the registry's default-library pointer");
     println!("  logs [n]         Print the most recent N log events (default 100, max 1024)");
     println!();
     println!("Write commands (`ingest`, `metadata`, `vectors`, `corpus`, `stamps`,");
