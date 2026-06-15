@@ -77,13 +77,16 @@ and tool-scoped.
 ## Methods (Phase 2)
 
 - `ingest.submit` — `{ paths, library?, priority?, force?,
-  recursive? }` → `{ job_ids: [<uuid v7>] }`. Appends jobs to the
-  persistent queue document; the worker picks them up on the next
-  200 ms tick. When `recursive` is `true`, every directory in
-  `paths` is walked depth-first and expanded to its supported-
-  format files before enqueueing; files passed directly are
-  enqueued verbatim. With `recursive` omitted or `false`,
-  directory paths reach the worker as-is and fail there.
+  recursive?, hold_for_metadata? }` → `{ job_ids: [<uuid v7>] }`.
+  Appends jobs to the persistent queue document; the worker picks
+  them up on the next 200 ms tick. When `recursive` is `true`,
+  every directory in `paths` is walked depth-first and expanded to
+  its supported-format files before enqueueing; files passed
+  directly are enqueued verbatim. With `recursive` omitted or
+  `false`, directory paths reach the worker as-is and fail there.
+  When `hold_for_metadata` is `true`, the worker parks every book
+  whose audit verdict is `needs_work` at STRUCTURE, skipping CHUNK
+  and EMBED until a curator drives it past the metadata gate.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
 - `metadata.set` / `metadata.clear` / `metadata.void` /

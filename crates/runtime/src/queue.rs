@@ -242,8 +242,8 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
 }
 
 /// Append one job per `path` to the queue, all sharing `library`,
-/// `kind`, `priority`, and `force`. Returns the ids of the appended
-/// jobs in the order they were inserted.
+/// `kind`, `priority`, `force`, and `hold_for_metadata`. Returns the
+/// ids of the appended jobs in the order they were inserted.
 pub fn enqueue_files(
     state: &mut QueueState,
     paths: &[PathBuf],
@@ -251,6 +251,7 @@ pub fn enqueue_files(
     kind: ItemKind,
     priority: Priority,
     force: bool,
+    hold_for_metadata: bool,
 ) -> Vec<String> {
     let mut ids = Vec::with_capacity(paths.len());
     for path in paths {
@@ -262,6 +263,7 @@ pub fn enqueue_files(
             kind,
             priority,
             force,
+            hold_for_metadata,
             state: JobState::Pending,
             queued_at: Utc::now(),
             started_at: None,
@@ -531,6 +533,7 @@ mod tests {
             kind: ItemKind::Book,
             priority: Priority::Normal,
             force: false,
+            hold_for_metadata: false,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -610,6 +613,7 @@ mod tests {
             kind: ItemKind::Book,
             priority,
             force: false,
+            hold_for_metadata: false,
             state,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -777,6 +781,7 @@ mod tests {
             ItemKind::Book,
             Priority::High,
             true,
+            false,
         );
         assert_eq!(ids.len(), 3);
         assert_eq!(state.jobs.len(), 3);
@@ -849,6 +854,7 @@ mod tests {
             ItemKind::Book,
             Priority::Normal,
             false,
+            false,
         );
         let state = Arc::new(Mutex::new(initial));
         let (tx, rx) = broadcast::channel::<()>(2);
@@ -899,6 +905,7 @@ mod tests {
             "default",
             ItemKind::Book,
             Priority::Normal,
+            false,
             false,
         );
         let state = Arc::new(Mutex::new(initial));

@@ -822,6 +822,7 @@ fn queue_add(
             bookrack_core::ItemKind::Book,
             priority,
             force,
+            false,
         );
         if let Err(err) = queue::save_atomic(&guard, state_path) {
             eprintln!("bookrack: persist queue state: {err}");

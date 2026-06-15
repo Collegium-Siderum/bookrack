@@ -42,6 +42,13 @@ pub struct IngestSubmitParams {
     /// queue worker as-is, which treats them as ingest failures.
     #[serde(default)]
     recursive: bool,
+    /// When `true`, the worker parks each book at STRUCTURE if the
+    /// audit verdict is `needs_work`, skipping CHUNK and EMBED until
+    /// a curator drives the book past the metadata gate via
+    /// `metadata.approve` or `metadata.advance`. Off by default; the
+    /// audit remains advisory.
+    #[serde(default)]
+    hold_for_metadata: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +125,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             bookrack_core::ItemKind::Book,
             priority,
             parsed.force,
+            parsed.hold_for_metadata,
         );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;

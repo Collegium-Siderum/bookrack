@@ -418,15 +418,11 @@ async fn handle_logs(client: &ControlClient, tokens: &[String]) -> bool {
 async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> bool {
     match command {
         ReplCommand::Ingest(args) => {
-            if args.hold_for_metadata {
-                eprintln!(
-                    "bookrack: --hold-for-metadata is not yet wired over the control plane; the daemon proceeds without holding",
-                );
-            }
             let params = json!({
                 "paths": [args.path],
                 "force": args.force,
                 "recursive": args.recursive,
+                "hold_for_metadata": args.hold_for_metadata,
             });
             call_and_print(client, "ingest.submit", params).await
         }

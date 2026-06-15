@@ -19,7 +19,7 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
-pub const QUEUE_SCHEMA_VERSION: u32 = 2;
+pub const QUEUE_SCHEMA_VERSION: u32 = 3;
 
 /// Pull order hint for the worker. The first pending job at the
 /// highest priority is picked next.
@@ -59,6 +59,13 @@ pub struct QueueJob {
     /// Force a fresh ingest even when the source's noop-if-up-to-date
     /// check would otherwise short-circuit.
     pub force: bool,
+    /// Park the book at STRUCTURE when the audit verdict is
+    /// `needs_work`, skipping CHUNK and EMBED until a curator
+    /// resumes it. Off by default; a v2 queue document (no
+    /// `hold_for_metadata` field) loads with the flag unset, matching
+    /// the previous worker behaviour.
+    #[serde(default)]
+    pub hold_for_metadata: bool,
     /// Which pipeline owns this job: `Book` is dispatched to the ingest
     /// pipeline, `Paper` to the glean pipeline. Defaults to `Book`, so
     /// a v1 queue document (no `kind` field) loads as a book queue.
@@ -124,6 +131,28 @@ mod tests {
     }
 
     #[test]
+    fn queue_job_without_hold_for_metadata_loads_as_false() {
+        // A v2-shaped document persisted before the field was added
+        // must still deserialize cleanly, with the flag defaulting to
+        // off so the worker preserves the previous behaviour.
+        let v2 = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "state": "pending",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        }"#;
+        let job: QueueJob = serde_json::from_str(v2).expect("deserialize v2");
+        assert!(!job.hold_for_metadata);
+    }
+
+    #[test]
     fn queue_job_round_trips_kind() {
         let job = QueueJob {
             id: "0".to_string(),
@@ -132,6 +161,7 @@ mod tests {
             kind: ItemKind::Paper,
             priority: Priority::Normal,
             force: false,
+            hold_for_metadata: false,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()

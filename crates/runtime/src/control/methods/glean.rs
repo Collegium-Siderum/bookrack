@@ -65,6 +65,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             bookrack_core::ItemKind::Paper,
             priority,
             parsed.force,
+            false,
         );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;

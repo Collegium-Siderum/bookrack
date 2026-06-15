@@ -10,6 +10,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `ingest.submit` accepts `hold_for_metadata: true`, persisted onto
+  the per-job `QueueJob` record and forwarded to the ingest
+  pipeline's existing `IngestParams::hold_for_metadata` knob so the
+  worker parks the book at STRUCTURE when the audit verdict is
+  `needs_work`. `bookrack ingest --hold-for-metadata` and the REPL
+  `ingest --hold-for-metadata` flag now reach this code path
+  instead of being silently ignored.
+
 - `ingest.submit` accepts `recursive: true`, which expands every
   directory in `paths` to its supported-format files via the
   existing `bookrack_runtime::queue::collect_supported_files`
@@ -56,6 +64,10 @@ release workflow extracts the matching section verbatim from this file.
   metadata <action>` CLI / REPL commands. Override, void, and
   review-state writes route through the existing ItemKind-aware
   catalog APIs; an audit trail row lands in a follow-up.
+
+- Queue document schema bumped to v3: `QueueJob` carries a new
+  `hold_for_metadata` field. The field is `#[serde(default)]` so
+  any v2 document on disk continues to load with the flag unset.
 
 ### Changed
 

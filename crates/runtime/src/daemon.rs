@@ -442,6 +442,7 @@ impl DaemonRuntime {
                                 job.library.clone()
                             };
                             let force = job.force;
+                            let hold_for_metadata = job.hold_for_metadata;
                             let job_kind = job.kind;
                             let path = job.path.clone();
                             runtime.block_on(async move {
@@ -452,6 +453,7 @@ impl DaemonRuntime {
                                     bookrack_core::ItemKind::Book => {
                                         let mut params = params_template;
                                         params.force = force;
+                                        params.hold_for_metadata = hold_for_metadata;
                                         handle
                                             .ingest_book(&path, &params)
                                             .await
