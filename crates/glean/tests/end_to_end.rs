@@ -64,6 +64,24 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     .expect("glean must succeed");
     assert!(!report.no_op);
     assert!(!report.already_registered);
+    // The metadata audit substep populated a verdict + confidence on
+    // the report and onto `node_publication_attrs`.
+    let verdict = report
+        .audit_verdict
+        .as_deref()
+        .expect("paper audit must stamp a verdict on the report");
+    assert!(
+        matches!(verdict, "clean" | "needs_work"),
+        "verdict token must be `clean` or `needs_work`, got {verdict:?}",
+    );
+    let confidence = report
+        .audit_confidence
+        .as_deref()
+        .expect("paper audit must stamp a confidence on the report");
+    assert!(
+        matches!(confidence, "high" | "medium" | "low"),
+        "confidence token must be `high` / `medium` / `low`, got {confidence:?}",
+    );
     // After Phase 1: one Work root + one abstract leaf + one Paragraph
     // leaf per non-empty BlockKind::Body block. The exact body count
     // depends on the extractor's segmentation, so the test reads the

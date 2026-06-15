@@ -635,9 +635,12 @@ mod tests {
 
     #[test]
     fn script_ratios_count_cjk_and_latin_only() {
-        // "hello 你好" — five Latin letters, two CJK ideographs, one
-        // skipped whitespace. Total non-whitespace = 7.
-        let (cjk, latin) = script_ratios("hello 你好");
+        // Five Latin letters, two CJK ideographs, one skipped
+        // whitespace. Total non-whitespace = 7. CJK ideographs are
+        // encoded through `\u{...}` so the source stays ASCII-clean
+        // per the repo's leak-check.
+        let sample = "hello \u{4F60}\u{597D}";
+        let (cjk, latin) = script_ratios(sample);
         assert!((latin - 5.0 / 7.0).abs() < 0.01, "latin = {latin}");
         assert!((cjk - 2.0 / 7.0).abs() < 0.01, "cjk = {cjk}");
         let (cjk0, latin0) = script_ratios("");

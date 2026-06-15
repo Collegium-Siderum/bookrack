@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
-    NewItemState, NewPublicationAttrs,
+    NewItemState, NewPublicationAttrs, NewReview, STATUS_PENDING,
 };
 use bookrack_config::EmbedConfig;
 use bookrack_core::{ItemKind, NodeId, NodeType, PartitionIdx};
@@ -123,6 +123,22 @@ pub struct GleanParams {
     /// skips the byte archive and leaves `papers.fetch_source`
     /// returning [`OpsError::SourceNotArchived`] for this intake.
     pub keep_source_pdf: bool,
+    /// Extraction-side audit profile shared with the books pipeline.
+    /// Consumed by `bookrack_extract::extract` for PDF text-layer
+    /// thresholds, EPUB rules, etc. — concerns that live below any
+    /// pipeline-shape decision.
+    pub extract_profile: bookrack_audit_profile::AuditProfile,
+    /// Multi-language chapter / volume heading patterns the TXT
+    /// adapter consults. Shared with the books pipeline; consumed by
+    /// `bookrack_extract::extract`.
+    pub heading_patterns: bookrack_audit_profile::HeadingPatterns,
+    /// Paper-shape metadata audit profile. Drives the per-field
+    /// grading the glean pipeline runs after `write_biblio`.
+    pub paper_audit_profile: audit::PaperAuditProfile,
+    /// Runtime data lists the paper audit consults (venue whitelist,
+    /// placeholder titles, watermark tokens, sentinel contributor
+    /// names).
+    pub paper_audit_data: audit::PaperAuditData,
 }
 
 impl Default for GleanParams {
@@ -135,6 +151,10 @@ impl Default for GleanParams {
             embed: EmbedConfig::default(),
             force: false,
             keep_source_pdf: true,
+            extract_profile: bookrack_audit_profile::AuditProfile::default_profile(),
+            heading_patterns: bookrack_audit_profile::HeadingPatterns::default_patterns(),
+            paper_audit_profile: audit::PaperAuditProfile::default_profile(),
+            paper_audit_data: audit::PaperAuditData::default_data(),
         }
     }
 }
@@ -273,8 +293,8 @@ pub async fn glean_paper<E: Embedder>(
 
     // ── EXTRACT ───────────────────────────────────────────────────────
     let started = Instant::now();
-    let audit_profile = bookrack_audit_profile_default();
-    let extracted = bookrack_extract::extract(file, &audit_profile, &Default::default());
+    let extracted =
+        bookrack_extract::extract(file, &params.extract_profile, &params.heading_patterns);
     let mut extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
@@ -521,6 +541,24 @@ pub async fn glean_paper<E: Embedder>(
         None,
     );
     write_biblio(catalog, intake_id, &biblio)?;
+
+    // ── METADATA AUDIT ────────────────────────────────────────────────
+    let metadata_started = Instant::now();
+    let (audit_verdict, audit_confidence) = run_paper_audit_substep(
+        catalog,
+        intake_id,
+        structure.work_node_id.get(),
+        &biblio,
+        &extraction.provenance,
+        &extraction.blocks,
+        file,
+        &params.paper_audit_profile,
+        &params.paper_audit_data,
+        &run_id,
+        &source_sha,
+        metadata_started,
+    )?;
+
     let parsed_at = catalog.now_iso()?;
     catalog.upsert_book_state(
         &NewItemState::new(structure.work_node_id.get(), intake_id, "structure")
@@ -579,8 +617,8 @@ pub async fn glean_paper<E: Embedder>(
         arxiv_id: biblio.arxiv_id,
         venue: biblio.container_title,
         abstract_source,
-        audit_verdict: None,
-        audit_confidence: None,
+        audit_verdict,
+        audit_confidence,
     })
 }
 
@@ -1253,6 +1291,139 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
     Ok(first.len())
 }
 
+/// Run the paper-side metadata audit after `write_biblio`. Returns
+/// `(verdict, confidence)` to populate on `GleanReport`, also
+/// writing them through `update_audit_rollup` and a `pending` row
+/// onto `node_reviews` whose `reviewed_by` carries the active
+/// profile name. Failures inside this step are logged and the
+/// surrounding pipeline continues — the audit is consultative, not
+/// gating.
+#[allow(clippy::too_many_arguments)]
+fn run_paper_audit_substep(
+    catalog: &Catalog,
+    intake_id: i64,
+    work_node_id: i64,
+    biblio: &bookrack_extract::Biblio,
+    provenance: &bookrack_extract::Provenance,
+    blocks: &[Block],
+    file: &Path,
+    profile: &audit::PaperAuditProfile,
+    data: &audit::PaperAuditData,
+    run_id: &str,
+    source_sha: &str,
+    started: Instant,
+) -> Result<(Option<String>, Option<String>)> {
+    let reviewer = format!("bookrack-glean:{}", profile.name);
+    if !profile.audit_enabled {
+        if let Err(e) = catalog.upsert_review(
+            &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING).notes(format!(
+                "audit skipped: {} profile disables the metadata audit",
+                profile.name,
+            )),
+        ) {
+            tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
+        }
+        audit(
+            catalog,
+            run_id,
+            source_sha,
+            Some(work_node_id),
+            "metadata",
+            "audit",
+            "skipped",
+            started,
+            None,
+            None,
+        );
+        return Ok((None, None));
+    }
+    let effective = match catalog.effective_publication_attrs(intake_id, ItemKind::Paper) {
+        Ok(eff) => eff,
+        Err(e) => {
+            tracing::warn!(error = %e, "metadata: failed to read effective attrs");
+            audit(
+                catalog,
+                run_id,
+                source_sha,
+                Some(work_node_id),
+                "metadata",
+                "read_effective",
+                "fail",
+                started,
+                None,
+                Some(&e.to_string()),
+            );
+            return Ok((None, None));
+        }
+    };
+    let body_sample = paper_body_sample(blocks);
+    let source_stem = file.file_stem().and_then(|s| s.to_str());
+    let input = audit::PaperAuditInput {
+        biblio,
+        provenance,
+        effective: &effective,
+        body_sample: &body_sample,
+        source_stem,
+    };
+    let report = audit::audit_paper(&input, profile, data);
+    let confidence = report.confidence.as_token().to_string();
+    let verdict = report.verdict.as_token().to_string();
+    if let Err(e) = catalog.update_audit_rollup(intake_id, ItemKind::Paper, &confidence, &verdict) {
+        tracing::warn!(error = %e, "metadata: failed to write audit rollup");
+    }
+    if let Err(e) = catalog.upsert_review(
+        &NewReview::new(intake_id, ItemKind::Paper, &reviewer, STATUS_PENDING)
+            .notes(report.to_json()),
+    ) {
+        tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
+    }
+    let outcome = match report.verdict {
+        audit::PaperVerdict::Clean => "ok",
+        audit::PaperVerdict::NeedsWork => "partial",
+    };
+    let metric = format!(
+        r#"{{"verdict":"{}","confidence":"{}","fields":{}}}"#,
+        verdict,
+        confidence,
+        report.fields.len(),
+    );
+    audit(
+        catalog,
+        run_id,
+        source_sha,
+        Some(work_node_id),
+        "metadata",
+        "audit",
+        outcome,
+        started,
+        Some(metric),
+        None,
+    );
+    Ok((Some(verdict), Some(confidence)))
+}
+
+/// Concatenate text from the first few body blocks, bounded by a
+/// character cap, for the audit's language signal.
+fn paper_body_sample(blocks: &[Block]) -> String {
+    const SAMPLE_BLOCKS: usize = 10;
+    const SAMPLE_CHARS: usize = 4096;
+    let mut out = String::new();
+    for block in blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Body))
+        .take(SAMPLE_BLOCKS)
+    {
+        for ch in block.text.chars() {
+            if out.chars().count() >= SAMPLE_CHARS {
+                return out;
+            }
+            out.push(ch);
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Return a [`GleanReport`] when re-running the pipeline against this
 /// source would be a no-op: the file is already on file at
 /// `Embedded` status, the stored extractor version equals this
@@ -1315,12 +1486,6 @@ pub(crate) fn new_run_id(source_sha: &str) -> String {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     let prefix = source_sha.get(..8).unwrap_or(source_sha);
     format!("glean-{prefix}-{nanos}")
-}
-
-/// Default audit profile for the glean pipeline. Loaded from the
-/// embedded profile crate so glean stays free of the ingest crate.
-fn bookrack_audit_profile_default() -> bookrack_audit_profile::AuditProfile {
-    bookrack_audit_profile::AuditProfile::default()
 }
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ use bookrack_core::NodeId;
 use bookrack_extract::{Block, BlockKind, ExtractError, ExtractOutcome};
 use serde::{Deserialize, Serialize};
 
-use crate::{AbstractStrategy, ChunkParams, bookrack_audit_profile_default, identify, plan_chunks};
+use crate::{AbstractStrategy, ChunkParams, identify, plan_chunks};
 
 /// Knobs for one dryrun.
 #[derive(Debug, Clone, Default)]
@@ -164,7 +164,7 @@ pub fn dryrun_paper(file: &Path, params: &DryrunPaperParams) -> DryrunPaperRepor
         ..Default::default()
     };
 
-    let audit_profile = bookrack_audit_profile_default();
+    let audit_profile = bookrack_audit_profile::AuditProfile::default_profile();
     let extracted = bookrack_extract::extract(file, &audit_profile, &Default::default());
     let mut extraction = match extracted {
         Ok(ExtractOutcome::Extracted(e)) => e,

@@ -42,7 +42,10 @@ use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
+use crate::audit_helpers::{
+    load_audit_data, load_audit_profile, load_heading_patterns, load_paper_audit_data,
+    load_paper_audit_profile,
+};
 use crate::control::events::{
     DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, Event, EventStreamHandle, Stage,
 };
@@ -394,7 +397,7 @@ impl DaemonRuntime {
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
         let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
-        let glean_params_template = build_glean_params_template(&embed_cfg);
+        let glean_params_template = build_glean_params_template(&cfg, &embed_cfg);
 
         // Event stream, daemon-state flag, and control accept loop
         // come up after the queue state is loaded so the initial
@@ -643,9 +646,13 @@ fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestP
 /// Build the [`GleanParams`] template the queue worker reuses for
 /// every paper-side job. Mirrors [`build_queue_params_template`] for
 /// the book side: only `force` is patched per-job at dispatch time.
-fn build_glean_params_template(embed_cfg: &EmbedConfig) -> GleanParams {
+fn build_glean_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> GleanParams {
     GleanParams {
         embed: embed_cfg.clone(),
+        extract_profile: load_audit_profile(cfg, None),
+        heading_patterns: load_heading_patterns(cfg),
+        paper_audit_profile: load_paper_audit_profile(cfg, None),
+        paper_audit_data: load_paper_audit_data(cfg),
         ..Default::default()
     }
 }
