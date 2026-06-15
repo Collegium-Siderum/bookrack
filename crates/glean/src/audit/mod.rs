@@ -21,12 +21,20 @@
 //! Three named built-in profiles — `default`, `trust-source`,
 //! `strict` — match the books pipeline's preset shape.
 
+pub mod csl_required;
 pub mod data;
 pub mod profile;
+pub mod report;
+pub mod signals;
 
+pub use csl_required::{RequirementLevel, requirement};
 pub use data::{DATA_OVERLAY_FILE, DEFAULT_DATA_TOML, DataLoadError, PaperAuditData};
 pub use profile::{
     ALL_BUILT_IN_NAMES, DEFAULT_PROFILE_TOML, IdentifierToggles, LoadError as ProfileLoadError,
     PROFILE_DEFAULT, PROFILE_OVERLAY_FILE, PROFILE_STRICT, PROFILE_TRUST_SOURCE, PaperAuditProfile,
     SCHEMA_VERSION,
 };
+pub use report::{
+    PaperConfidence, PaperFieldGrade, PaperFieldReport, PaperFlag, PaperReport, PaperVerdict,
+};
+pub use signals::{PaperAuditInput, audit_paper, issn_checksum_ok, orcid_checksum_ok};
