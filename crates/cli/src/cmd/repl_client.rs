@@ -287,10 +287,7 @@ async fn dispatch_line(client: &ControlClient, line: &str) -> bool {
         "status" => return call_and_print(client, "status", Value::Null).await,
         "libs" => return call_and_print(client, "library.list", Value::Null).await,
         "queue" => return handle_queue(client, &tokens).await,
-        "logs" => {
-            print_phase_unavailable("logs.tail");
-            return true;
-        }
+        "logs" => return handle_logs(client, &tokens).await,
         "use" => {
             print_phase_unavailable("library.set_default");
             return true;
@@ -391,6 +388,22 @@ async fn handle_queue(client: &ControlClient, tokens: &[String]) -> bool {
             true
         }
     }
+}
+
+async fn handle_logs(client: &ControlClient, tokens: &[String]) -> bool {
+    let mut params = json!({});
+    if let Some(arg) = tokens.get(1) {
+        match arg.parse::<usize>() {
+            Ok(n) => {
+                params["n"] = Value::from(n);
+            }
+            Err(_) => {
+                eprintln!("logs: expected an integer count, got {arg:?}");
+                return true;
+            }
+        }
+    }
+    call_and_print(client, "logs.tail", params).await
 }
 
 async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> bool {
@@ -1053,6 +1066,7 @@ fn print_repl_help() {
     println!("  queue add <path> [--library X] [--priority {{low|normal|high}}] [--force]");
     println!("  queue list       Show the daemon's persisted queue");
     println!("  queue cancel <id-prefix>");
+    println!("  logs [n]         Print the most recent N log events (default 100, max 1024)");
     println!();
     println!("Write commands (`ingest`, `metadata`, `vectors`, `corpus`, `stamps`,");
     println!("`remove`, `dryrun`, `papers`) are parsed against the same grammar as the");

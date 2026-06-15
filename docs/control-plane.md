@@ -62,6 +62,11 @@ and tool-scoped.
   `mcp.availability`, `daemon.version`.
 - `events.snapshot` — explicit re-fetch of named channels;
   `params.channels` is the list to refresh.
+- `logs.tail` — `{ n? }` → `{ events, returned }`. Snapshot the most
+  recent `n` events from the daemon's in-memory log ring buffer,
+  oldest first. `n` defaults to 100 and is capped server-side at
+  1024. Peer of the `session.logs_tail` MCP tool; same backing
+  buffer.
 
 ## Methods (Phase 2)
 

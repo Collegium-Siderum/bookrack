@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
+use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
@@ -35,6 +36,7 @@ pub mod dryrun;
 pub mod glean;
 pub mod ingest;
 pub mod libraries;
+pub mod logs;
 pub mod meta;
 pub mod metadata;
 pub mod papers_corpus;
@@ -90,6 +92,10 @@ pub struct MethodContext {
     /// `QueueState::paused` so the on-disk snapshot agrees with the
     /// in-memory behaviour.
     pub queue_paused: Arc<AtomicBool>,
+    /// In-process log fan-out handle, shared with MCP. Backs
+    /// `logs.tail` (and the `log` event channel via the bridge in the
+    /// daemon bring-up).
+    pub log_stream: LogStreamHandle,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -215,6 +221,7 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "library.vectors_status" => Ok(DispatchOutcome::Result(
             reads_library::vectors_status(&req.params, ctx).await?,
         )),
+        "logs.tail" => Ok(DispatchOutcome::Result(logs::tail(&req.params, ctx)?)),
         "events.subscribe" => Ok(DispatchOutcome::Result(
             serde_json::json!({ "subscribed": true }),
         )),

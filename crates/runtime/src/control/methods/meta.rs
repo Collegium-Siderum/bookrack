@@ -332,6 +332,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         name: "tray.focus",
         kind: "write",
     },
+    MethodSignature {
+        name: "logs.tail",
+        kind: "read",
+    },
 ];
 
 pub fn methods(_ctx: &MethodContext) -> Value {

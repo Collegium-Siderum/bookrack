@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `logs.tail` control-plane method snapshots the most recent `n`
+  events from the daemon's in-memory log ring buffer (default 100,
+  capped at 1024). Peer of the existing `session.logs_tail` MCP
+  tool; shares the same `bookrack_obs` ring buffer. The REPL
+  `logs [n]` built-in now drives it instead of bailing through the
+  `print_phase_unavailable` shim.
+
 - Paper-side metadata audit lands as a peer of `bookrack-metadata`
   inside the `bookrack-glean` crate. `PaperAuditProfile`,
   `PaperAuditData`, `PaperFlag`, `PaperReport`, and `audit_paper`

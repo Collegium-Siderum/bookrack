@@ -506,6 +506,7 @@ impl DaemonRuntime {
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
             queue_paused: Arc::clone(&queue_paused),
+            log_stream: log_stream.clone(),
         };
 
         // Bridge the obs log stream into the control-plane event
