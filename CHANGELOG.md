@@ -10,6 +10,42 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- Paper-side metadata audit lands as a peer of `bookrack-metadata`
+  inside the `bookrack-glean` crate. `PaperAuditProfile`,
+  `PaperAuditData`, `PaperFlag`, `PaperReport`, and `audit_paper`
+  carry their own signal set (DOI / arXiv format checks, ISSN
+  MOD-11 and ORCID MOD 11-2 checksums, CSL-type-driven required
+  field matrix, abstract length floor, sentinel contributor
+  detection, body-script vs declared-language mismatch); the
+  shipped default and a `paper_audit_*.local.toml` overlay drive it
+  the same way `bookrack-audit-profile` drives the books audit. The
+  pipeline writes the verdict and confidence through
+  `update_audit_rollup` and posts a `pending` row to `node_reviews`
+  with `reviewed_by = bookrack-glean:<profile>`.
+
+- `bookrack_glean::reaudit::reaudit_paper` re-runs the audit
+  offline from the cached extraction envelope and refreshes only
+  the rollup; `build_report` exposes the same computation without
+  write-back.
+
+- Paper-side metadata curation surface: nine `papers.metadata.*`
+  control-plane methods (`reaudit`, `set`, `clear`, `void`, `ack`,
+  `approve`, `reject`, `reopen`, `contributor_add`,
+  `contributor_remove`) and the matching `bookrack papers
+  metadata <action>` CLI / REPL commands. Override, void, and
+  review-state writes route through the existing ItemKind-aware
+  catalog APIs; an audit trail row lands in a follow-up.
+
+### Changed
+
+- `bookrack_glean::glean_paper`'s no-op fast path now requires
+  `extractor_version` parity in addition to the embed model match,
+  matching `bookrack_ingest::ingest_book`. A stale stamp falls
+  through to the live pipeline instead of returning a cached report.
+  `GleanReport` carries `audit_verdict` and `audit_confidence`, both
+  populated on the live path from the paper audit and read back
+  from `node_publication_attrs` on the no-op path.
+
 - Paper-side maintenance commands brought to parity with the books
   pipeline: `bookrack papers corpus rebuild`,
   `bookrack papers vectors {rebuild,reembed,reset,drop}`, and

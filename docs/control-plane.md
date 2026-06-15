@@ -106,6 +106,37 @@ and tool-scoped.
   sidecar under `<data_root>/dryruns/dryrun-paper-...`. Reports
   IDENTIFY hit rates (DOI / arXiv / ISSN / venue / title / year /
   abstract) and the predicted STRUCTURE node shape per file.
+- `papers.metadata.reaudit` — `{ intake_id, audit_profile?,
+  library? }`. Re-runs the paper-side metadata audit against the
+  intake's cached extraction envelope and writes only the
+  `confidence` / `audit_verdict` rollup on
+  `node_publication_attrs`. The named profile (`default` /
+  `trust-source` / `strict`) takes precedence; absent it, the
+  `<data_root>/audit-rules/paper_audit_profile.local.toml` overlay
+  applies on top of the shipped default.
+- `papers.metadata.set` — `{ intake_id, field, value, confirmed?,
+  library? }`. Writes an override on one paper field. `field` must
+  belong to the editable set
+  (`title`, `subtitle`, `publisher`, `year`, `language`, `series`,
+  `doi`, `arxiv_id`, `issn`, `container_title`, `abstract`,
+  `csl_type`). `confirmed` marks the override as having been checked
+  against the source.
+- `papers.metadata.clear` — `{ intake_id, field, library? }`.
+  Removes the override row on one field, reverting to the extracted
+  value. Returns `{ removed: bool }`.
+- `papers.metadata.void` — `{ intake_id, field, library? }`.
+  Writes a value-less override row so the field reads as
+  deliberately empty rather than extracted.
+- `papers.metadata.ack` / `.approve` / `.reject` / `.reopen` —
+  `{ intake_id, reviewer?, notes?, library? }`. Move the review
+  row through the four states; `reviewer` defaults to `human`.
+  `reopen` returns the row to `pending` after an approve / reject.
+- `papers.metadata.contributor_add` — `{ intake_id, role, name,
+  family?, given?, orcid?, library? }`. Appends a curator-authored
+  contributor row after every extracted one.
+- `papers.metadata.contributor_remove` — `{ contributor_id,
+  library? }`. Removes a contributor row by id; returns
+  `{ removed: bool }`.
 - `remove` — `{ intake_id?, sha?, dry_run?, yes? }`. Exactly one of
   `intake_id` or `sha` must be set.
 - `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL

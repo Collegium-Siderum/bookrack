@@ -29,7 +29,7 @@ earlier ones already happened.
 | Dependency or constant bumped | Stamp it advances | Layers that go stale | Refresh command |
 |---|---|---|---|
 | `rbook`, `scraper`, `encoding_rs`, `unicode-normalization`, `pdfium-render` | `extractor_version` | extract → structure → chunks → vectors | re-ingest the affected sources |
-| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources |
+| `bookrack_extract::EXTRACTOR_VERSION` (manual bump) | `extractor_version` | same as above | re-ingest the affected sources (book-side); re-glean the affected papers (paper-side — the no-op fast path now invalidates on a stamp mismatch) |
 | Externalised extract-side knobs (HTML block / skip tags, PDF quality thresholds, language codes / ratios) — bumped 3 → 4 | `extractor_version` | same as above | re-ingest the affected sources |
 | `Block` carries per-paragraph `BlockStyle` geometry on the PDF path (font-size median / p90, bold-majority flag, line count, first-line left, normalized above-gap) — bumped 5 → 6 | `extractor_version` | same as above | re-ingest the affected PDF sources (book-side TXT / EPUB / OCR partitions read fine without a refresh, as their `style` is `None` on both old and new envelopes) |
 | `bookrack_extract::OCR_INTAKE_VERSION` (manual bump) | `extractor_version` on OCR rows only | OCR extract → structure → chunks → vectors | re-run `bookrack intake ocr` against each affected OCR product |
