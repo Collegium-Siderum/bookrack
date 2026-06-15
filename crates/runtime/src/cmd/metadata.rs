@@ -31,6 +31,11 @@ pub async fn run_write(
     if let WriteMetadataAction::Advance { book } = action {
         return advance(cfg, book, profile_name).await;
     }
+    let approve_book = if let WriteMetadataAction::Approve { book, .. } = &action {
+        Some(*book)
+    } else {
+        None
+    };
     let _migrate =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let ops = catalog_only_ops(cfg);
@@ -41,35 +46,58 @@ pub async fn run_write(
             value,
             reason,
             confirmed,
-        } => set(&ops, book, &field, &value, reason, confirmed),
+        } => set(&ops, book, &field, &value, reason, confirmed)?,
         WriteMetadataAction::Clear {
             book,
             field,
             reason,
-        } => clear(&ops, book, &field, reason),
+        } => clear(&ops, book, &field, reason)?,
         WriteMetadataAction::Void {
             book,
             field,
             reason,
-        } => void(&ops, book, &field, reason),
-        WriteMetadataAction::Reaudit { book } => reaudit(cfg, &ops, book, profile_name),
+        } => void(&ops, book, &field, reason)?,
+        WriteMetadataAction::Reaudit { book } => reaudit(cfg, &ops, book, profile_name)?,
         WriteMetadataAction::ContributorAdd {
             book,
             role,
             name,
             nationality,
             reason,
-        } => contributor_add(&ops, book, role, name, nationality, reason),
+        } => contributor_add(&ops, book, role, name, nationality, reason)?,
         WriteMetadataAction::ContributorRemove {
             book,
             contributor_id,
             reason,
-        } => contributor_remove(&ops, book, contributor_id, reason),
-        WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason),
-        WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref()),
-        WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason),
+        } => contributor_remove(&ops, book, contributor_id, reason)?,
+        WriteMetadataAction::Ack { book, reason } => ack(&ops, book, &reason)?,
+        WriteMetadataAction::Approve { book, reason } => approve(&ops, book, reason.as_deref())?,
+        WriteMetadataAction::Reject { book, reason } => reject(&ops, book, &reason)?,
         WriteMetadataAction::Advance { .. } => unreachable!("handled above"),
     }
+    if let Some(book) = approve_book
+        && book_is_parked_at_metadata(cfg, book)?
+    {
+        advance(cfg, book, profile_name).await?;
+    }
+    Ok(())
+}
+
+/// Read the book's pipeline stage and return `true` when the book is
+/// parked at the metadata gate (the state `ingest_book` writes when an
+/// audit verdict of `needs_work` lands with `hold_for_metadata` set).
+fn book_is_parked_at_metadata(cfg: &Config, book: i64) -> Result<bool> {
+    use bookrack_corpus::PartitionIdx;
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let book_root_id = PartitionIdx::new(book).root();
+    let Some(state) = catalog
+        .book_state(book_root_id.get())
+        .context("read book state")?
+    else {
+        return Ok(false);
+    };
+    Ok(state.current_stage == "metadata")
 }
 
 fn set(

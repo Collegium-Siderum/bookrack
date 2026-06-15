@@ -115,10 +115,8 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             )
             .await
         }
-        WriteMetadataAction::Advance { book: _ } => {
-            anyhow::bail!(
-                "metadata advance is not yet wired through the control plane; tracked for a follow-up release",
-            )
+        WriteMetadataAction::Advance { book } => {
+            helpers::call_and_print(&client, "metadata.advance", json!({ "book": book })).await
         }
     }
 }

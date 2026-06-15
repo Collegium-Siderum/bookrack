@@ -91,8 +91,11 @@ and tool-scoped.
   pending or running job as cancelled.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
-  `metadata.reject` — same params as the `bookrack metadata` REPL
-  subcommands; return `{ ok: true }` on success. `metadata.void`
+  `metadata.reject` / `metadata.advance` — same params as the
+  `bookrack metadata` REPL subcommands; return `{ ok: true }` on
+  success. `metadata.advance` resumes CHUNK→EMBED for a book held
+  at the metadata gate by `--hold-for-metadata`. `metadata.approve`
+  triggers the same resume implicitly when the book is parked. `metadata.void`
   (added post-Phase 5) writes a NULL override that suppresses a
   field's extracted value until a correct one is set;
   `metadata.clear` removes it. `metadata.reaudit` (same vintage)

@@ -257,6 +257,10 @@ pub const REGISTRY: &[MethodSignature] = &[
         kind: "write",
     },
     MethodSignature {
+        name: "metadata.advance",
+        kind: "write",
+    },
+    MethodSignature {
         name: "vectors.rebuild",
         kind: "write",
     },

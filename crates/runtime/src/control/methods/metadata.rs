@@ -104,6 +104,13 @@ pub struct MetadataRejectParams {
     reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct MetadataAdvanceParams {
+    book: i64,
+}
+
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataSetParams = parse(params, "metadata.set")?;
     let action = WriteMetadataAction::Set {
@@ -194,6 +201,12 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         book: parsed.book,
         reason: parsed.reason,
     };
+    run_metadata_action(ctx, action).await
+}
+
+pub async fn advance(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let parsed: MetadataAdvanceParams = parse(params, "metadata.advance")?;
+    let action = WriteMetadataAction::Advance { book: parsed.book };
     run_metadata_action(ctx, action).await
 }
 

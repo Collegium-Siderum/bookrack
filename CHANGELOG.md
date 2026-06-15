@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `metadata.advance` control-plane method resumes CHUNK→EMBED for
+  a book parked at the metadata gate by `--hold-for-metadata`. The
+  REPL grammar's existing `Advance` action and the CLI's
+  `metadata advance` subcommand now reach the control plane
+  instead of bailing through the placeholder error. `metadata.approve`
+  also triggers the resume implicitly when the book is parked,
+  matching the operator expectation that "approve" unblocks the
+  pipeline without a separate command.
+
 - `ingest.submit` accepts `hold_for_metadata: true`, persisted onto
   the per-job `QueueJob` record and forwarded to the ingest
   pipeline's existing `IngestParams::hold_for_metadata` knob so the

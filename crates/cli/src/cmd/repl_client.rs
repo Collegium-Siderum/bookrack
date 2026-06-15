@@ -916,11 +916,8 @@ async fn dispatch_metadata(client: &ControlClient, action: WriteMetadataAction) 
             )
             .await
         }
-        WriteMetadataAction::Advance { book: _ } => {
-            eprintln!(
-                "metadata advance: not yet available over the control plane; run via `bookrack metadata advance ...` after Phase 4",
-            );
-            true
+        WriteMetadataAction::Advance { book } => {
+            call_and_print(client, "metadata.advance", json!({ "book": book })).await
         }
     }
 }

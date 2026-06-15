@@ -265,6 +265,9 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         "metadata.reject" => Ok(DispatchOutcome::Result(
             metadata::reject(&req.params, ctx).await?,
         )),
+        "metadata.advance" => Ok(DispatchOutcome::Result(
+            metadata::advance(&req.params, ctx).await?,
+        )),
         "vectors.rebuild" => Ok(DispatchOutcome::Result(
             vectors::rebuild(&req.params, ctx).await?,
         )),
@@ -405,6 +408,7 @@ fn is_queue_bound_method(method: &str) -> bool {
             | "papers.metadata.reopen"
             | "papers.metadata.contributor_add"
             | "papers.metadata.contributor_remove"
+            | "metadata.advance"
             | "dryrun"
     )
 }
@@ -481,6 +485,7 @@ mod tests {
             "stamps.reconcile",
             "remove",
             "papers.remove",
+            "metadata.advance",
             "dryrun",
         ] {
             assert!(is_queue_bound_method(name), "{name} should be queue-bound");
