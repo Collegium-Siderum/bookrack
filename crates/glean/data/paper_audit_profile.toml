@@ -1,0 +1,74 @@
+# Default audit profile shipped with the papers pipeline.
+#
+# Schema-locked: every value is either a public constant or a boolean.
+# The defaults reproduce the audit's initial behaviour so an install
+# with no `paper_audit_profile.local.toml` overlay needs no on-disk
+# file to start.
+#
+# A runtime overlay at `<data_root>/audit-rules/paper_audit_profile.local.toml`
+# is merged on top: any field present there overrides the default,
+# missing fields fall through to the value declared here.
+#
+# This file is loaded through `include_str!` at build time. Do not
+# remove fields; downstream code reads every key.
+
+schema_version = 1
+
+# Master switch. When false, the audit substep is skipped entirely:
+# `node_reviews` is still written as `pending`, but no `PaperReport`
+# is produced and no audit-derived columns are filled.
+audit_enabled = true
+
+[identifier]
+# A paper is considered to carry a stable identifier when at least
+# one of DOI / arXiv / (ISSN + container_title) is present. When
+# `require_any` is true, the audit floors the verdict to NeedsWork
+# if none is.
+require_any = true
+doi_format_check = true
+arxiv_format_check = true
+issn_checksum_check = true
+orcid_checksum_check = true
+
+[abstract]
+required = true
+# Minimum character length below which `AbstractTooShort` fires.
+min_chars = 200
+
+[author]
+required = true
+sentinel_check = true
+single_word_check = true
+
+[title]
+required = true
+placeholder_check = true
+empty_check = true
+echoes_arxiv_banner_check = true
+equals_filename_check = true
+
+[year]
+required = true
+range_check = true
+min = 1900
+max = 2100
+pdf_likely_file_date = true
+timestamp_form = true
+
+[language]
+bcp47_check = true
+body_script_match = true
+cjk_codes = ["zh", "ja", "ko"]
+latin_codes = ["en", "fr", "de", "es", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "ru"]
+body_cjk_min_ratio = 0.1
+body_latin_min_ratio = 0.6
+body_cjk_max_ratio = 0.4
+
+[venue]
+# When true, `container_title` is matched against the
+# `venue_whitelist` from `PaperAuditData`; a miss downgrades the
+# field to Weak but never floors the verdict.
+whitelist_check = true
+
+[source_prior]
+enabled = true

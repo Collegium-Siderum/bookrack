@@ -33,6 +33,7 @@ use bookrack_normalize::{NORMALIZE_VERSION, norm_text_sha256};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 use sha2::{Digest, Sha256};
 
+pub mod audit;
 pub mod dryrun;
 pub mod identify;
 pub mod rebuild;

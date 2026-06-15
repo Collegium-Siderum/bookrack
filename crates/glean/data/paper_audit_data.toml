@@ -1,0 +1,47 @@
+# Default runtime data set shipped with the papers pipeline's audit.
+#
+# Schema-locked: arrays and tables only. Operators add entries by
+# dropping a `paper_audit_data.local.toml` overlay under
+# `<data_root>/audit-rules/`; missing fields fall through to the
+# values declared here.
+
+schema_version = 1
+
+# Containers — journals, conference proceedings, or book series — the
+# audit recognises as established venues. A miss downgrades
+# `container_title` to Weak but never floors the verdict. Empty by
+# default; grows as the operator's corpus grows.
+venue_whitelist = []
+
+# Titles whose normalised form matches one of these are graded
+# Missing rather than Strong.
+placeholder_titles = [
+    "untitled",
+    "untitled document",
+    "no title",
+]
+
+# Tokens whose presence in a field value flags `SourceWatermark`.
+watermark_tokens = [
+    "downloaded from",
+    "scribd",
+    "academia.edu",
+    "researchgate",
+    "z-lib",
+    "libgen",
+]
+
+# Contributor names treated as sentinels rather than real authors.
+sentinel_contributor_names = [
+    "Editorial Board",
+    "Anonymous",
+    "Author",
+    "Authors",
+    "TBA",
+    "TBD",
+]
+
+# Map a common short or informal venue spelling to its canonical
+# form. Applied at base-attrs assembly so audits and downstream
+# renderers see the canonical name. Empty by default.
+[venue_aliases]

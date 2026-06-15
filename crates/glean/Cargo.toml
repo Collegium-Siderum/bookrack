@@ -22,6 +22,7 @@ sha2.workspace = true
 text-splitter.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
