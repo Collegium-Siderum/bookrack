@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use super::MethodContext;
 use crate::audit_helpers::{load_paper_audit_data, load_paper_audit_profile};
+use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 const PAPER_SCOPE: &str = "paper";
@@ -64,13 +65,10 @@ fn parse<T: for<'de> Deserialize<'de>>(
 }
 
 fn open_paper_catalog(ctx: &MethodContext, library: Option<&str>) -> Result<Catalog, RpcError> {
-    let handle = ctx
-        .registry
-        .get(library)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library handle: {e}")))?;
+    let handle = ctx.registry.get(library).map_err(registry_err)?;
     handle
         .open_paper_catalog()
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("open papers catalog: {e:#}")))
+        .map_err(|e| write_err("papers.metadata", e))
 }
 
 fn require_editable(field: &str) -> Result<(), RpcError> {
@@ -100,13 +98,13 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     let handle = ctx
         .registry
         .get(parsed.library.as_deref())
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library handle: {e}")))?;
+        .map_err(registry_err)?;
     let profile = load_paper_audit_profile(&ctx.cfg, parsed.audit_profile.as_deref());
     let data = load_paper_audit_data(&ctx.cfg);
     let outcome = handle
         .reaudit_paper(parsed.intake_id, &profile, &data)
         .await
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("reaudit_paper: {e:#}")))?;
+        .map_err(|e| write_err("papers.metadata.reaudit", e))?;
     Ok(json!({
         "intake_id": outcome.intake_id,
         "verdict": outcome.verdict,

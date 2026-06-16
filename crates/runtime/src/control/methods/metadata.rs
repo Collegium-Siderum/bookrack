@@ -14,7 +14,8 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use crate::control::error_map::write_err;
+use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(TS))]
@@ -232,7 +233,7 @@ async fn run_metadata_action(
     run_write(ctx, || async move {
         run_metadata(&cfg, action, None)
             .await
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("metadata write failed: {e:#}")))?;
+            .map_err(|e| write_err("metadata.write", e))?;
         Ok(json!({ "ok": true }))
     })
     .await

@@ -48,6 +48,38 @@ and tool-scoped.
   `yes = true`. `dry_run` and `resume` paths are exempt where the
   method documents them.)
 
+#### Write-class error mapping
+
+Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
+`remove`, `dryrun`, `stamps.reconcile`, and their `papers.*`
+counterparts — distinguish caller-side input failures from
+handler-side faults:
+
+- **`-32602` invalid params** for typed user-input errors raised by
+  the downstream pipeline:
+  - Unknown intake id (`OpsError::IntakeNotFound`,
+    `IngestError::UnknownIntake`, `GleanError::UnknownIntake`).
+  - Unknown metadata field, contributor role, contributor row, node
+    id, or wrong-shape node addressing
+    (`OpsError::{UnknownMetadataField, UnknownContributorRole,
+    ContributorNotFound, NodeNotFound, NotALeaf, NotOrganizing,
+    SourceNotArchived}`).
+  - Validation refusals from the ingest / glean pipelines
+    (`EmptyExtraction`, `NeedsOcr`, `MissingEnvelope`,
+    `EnvelopeMismatch`, `IntakeNotEmbedded`,
+    `OcrSourceStatusMismatch`, `OcrPagesMissing`,
+    `OcrPagesExcess`, `IntakeNotRebuildable`).
+- **`-32010` invalid library** for `RegistryError::LibraryUnknown`
+  raised by any handler that resolves a `library` parameter.
+- **`-32603` internal error** is the residual: the handler tried, a
+  downstream subsystem (catalog DB, vector store, embedder, file IO)
+  failed in a way the caller cannot fix by re-submitting different
+  parameters.
+
+Clients distinguish "fix the request and retry" (`-32602` / `-32010`)
+from "report or escalate" (`-32603`) by the code, not by parsing the
+human-readable `error.message`.
+
 ## Methods (Phase 1)
 
 - `daemon.version` — `{ version, started_at }`.

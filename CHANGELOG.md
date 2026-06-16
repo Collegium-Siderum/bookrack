@@ -104,6 +104,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- Write-class control-plane RPCs (`metadata.*`, `corpus.rebuild`,
+  `vectors.{rebuild,reembed,reset,drop}`, `remove`, `dryrun`,
+  `stamps.reconcile`, and their `papers.*` counterparts) classify
+  downstream errors before responding. Unknown intake ids, unknown
+  metadata fields and contributor roles, contributor / node lookup
+  misses, and ingest / glean validation refusals (`NeedsOcr`,
+  `EmptyExtraction`, `MissingEnvelope`, `EnvelopeMismatch`,
+  `IntakeNotEmbedded`, `OcrPagesMissing`, ...) now surface as
+  `-32602 invalid params`; unknown `library` parameters surface as
+  `-32010 invalid library`. Genuine handler-side faults still surface
+  as `-32603 internal error`. MCP / CLI clients can now distinguish
+  "fix the request and retry" from "report or escalate" by the error
+  code instead of parsing the human-readable message.
+
 - `bookrack_glean::glean_paper`'s no-op fast path now requires
   `extractor_version` parity in addition to the embed model match,
   matching `bookrack_ingest::ingest_book`. A stale stamp falls

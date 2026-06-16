@@ -13,6 +13,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::dryrun;
+use crate::control::error_map::write_err;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -47,7 +48,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         })
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun join: {e}")))?
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun failed: {e:#}")))?;
+        .map_err(|e| write_err("dryrun", e))?;
         serde_json::to_value(&outcome)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("dryrun encode: {e}")))
     })

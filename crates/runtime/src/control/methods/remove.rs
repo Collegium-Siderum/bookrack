@@ -9,7 +9,8 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::remove::{RemoveArgs, run as run_remove};
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use crate::control::error_map::write_err;
+use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(test, derive(TS))]
@@ -47,7 +48,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     run_write(ctx, move || async move {
         run_remove(&cfg, args)
             .await
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("remove failed: {e:#}")))?;
+            .map_err(|e| write_err("remove", e))?;
         Ok(json!({ "ok": true }))
     })
     .await

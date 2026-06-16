@@ -16,7 +16,8 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::vectors;
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use crate::control::error_map::write_err;
+use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(test, derive(TS))]
@@ -50,7 +51,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             parsed.refine_factor,
         )
         .await
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.rebuild failed: {e:#}")))?;
+        .map_err(|e| write_err("vectors.rebuild", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -85,7 +86,7 @@ pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             deny_destructive,
         )
         .await
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.reembed failed: {e:#}")))?;
+        .map_err(|e| write_err("vectors.reembed", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -108,7 +109,7 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     run_write(ctx, move || async move {
         vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
             .await
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.reset failed: {e:#}")))?;
+            .map_err(|e| write_err("vectors.reset", e))?;
         Ok(json!({ "ok": true }))
     })
     .await
@@ -119,7 +120,7 @@ pub async fn drop_index(_params: &Option<Value>, ctx: &MethodContext) -> Result<
     run_write(ctx, move || async move {
         vectors::drop(&cfg)
             .await
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.drop failed: {e:#}")))?;
+            .map_err(|e| write_err("vectors.drop", e))?;
         Ok(json!({ "ok": true }))
     })
     .await

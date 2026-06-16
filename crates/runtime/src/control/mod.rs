@@ -13,6 +13,7 @@
 //! `library.changed` / `mcp.availability`, and [`progress`] for the
 //! sink the queue runner reports stage transitions through.
 
+pub mod error_map;
 pub mod events;
 pub mod jsonrpc;
 pub mod methods;
