@@ -595,6 +595,9 @@ impl DaemonRuntime {
             control_accept_handle,
             control_sock,
             event_stream,
+            // Bound (not folded into `..`) so the flock lives across
+            // the drain timeouts below; `..` would drop it here.
+            _tty_lock,
             ..
         } = self;
 
