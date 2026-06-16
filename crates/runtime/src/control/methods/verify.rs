@@ -27,3 +27,8 @@ pub async fn run(ctx: &MethodContext) -> Result<Value, RpcError> {
     })
     .await
 }
+
+/// Adapter to the uniform dispatch signature.
+pub async fn run_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    run(ctx).await
+}

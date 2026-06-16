@@ -106,6 +106,189 @@ pub enum DispatchOutcome {
     Shutdown(Value),
 }
 
+/// Single source of truth for every control-plane method.
+///
+/// Each row declares four facts about one method:
+///
+/// 1. `kind` — `read`, `write`, or `stream`; reflected in
+///    `daemon.methods` so clients can pick the right call surface.
+/// 2. `queue` — `queue` if the runtime routes the call through the
+///    persistent queue worker (and so a headless `bookrack-mcp`
+///    without `--with-queue-worker` must short-circuit it); otherwise
+///    `no_queue`.
+/// 3. `shape` — handler signature: `sync` for `fn(_, _) -> Result`,
+///    `async` for `async fn(_, _) -> Result`, `sidebar` for methods
+///    intercepted before `dispatch_normal` (the handler is left to a
+///    hand-written arm in `dispatch`).
+/// 4. The method `name` and `=> handler` path (omitted for `sidebar`
+///    entries).
+///
+/// The macro emits both the public `REGISTRY` const consumed by
+/// `daemon.methods` / `daemon.mcp_tools` and the `dispatch_normal`
+/// match table from this list, so the two tables cannot drift.
+/// `is_queue_bound_method` queries `REGISTRY` directly for the same
+/// reason. Sidebar rows still appear in `REGISTRY` but emit no arm in
+/// `dispatch_normal`; their wire behaviour is implemented in
+/// `dispatch` itself.
+macro_rules! methods {
+    (
+        $( $kind:ident $queue:ident $shape:ident $name:literal $( => $handler:path )? ),* $(,)?
+    ) => {
+        pub const REGISTRY: &[meta::MethodSignature] = &[
+            $(
+                meta::MethodSignature {
+                    name: $name,
+                    kind: methods!(@kind $kind),
+                    queue_bound: methods!(@queue $queue),
+                },
+            )*
+        ];
+
+        async fn dispatch_normal(
+            method: &str,
+            params: &Option<Value>,
+            ctx: &MethodContext,
+        ) -> Option<Result<Value, RpcError>> {
+            $(
+                methods!(@stmt $shape $name $( => $handler )?; method, params, ctx);
+            )*
+            None
+        }
+    };
+
+    (@kind read)      => { "read" };
+    (@kind write)     => { "write" };
+    (@kind stream)    => { "stream" };
+
+    (@queue queue)    => { true };
+    (@queue no_queue) => { false };
+
+    (@stmt sync $name:literal => $handler:path; $m:expr, $p:expr, $c:expr) => {
+        if $m == $name {
+            return Some($handler($p, $c));
+        }
+    };
+    (@stmt async $name:literal => $handler:path; $m:expr, $p:expr, $c:expr) => {
+        if $m == $name {
+            return Some($handler($p, $c).await);
+        }
+    };
+    (@stmt sidebar $name:literal; $_m:expr, $_p:expr, $_c:expr) => {
+        // Sidebar methods are intercepted in `dispatch` before
+        // `dispatch_normal` runs; no statement is emitted here.
+    };
+}
+
+methods! {
+    // daemon
+    read   no_queue sync    "daemon.version"     => reads::daemon_version_rpc,
+    write  no_queue sidebar "daemon.shutdown",
+    read   no_queue sync    "status"             => reads::status_rpc,
+    read   no_queue async   "doctor.gather"      => reads::doctor_gather_rpc,
+    read   no_queue sync    "daemon.methods"     => meta::methods_rpc,
+    read   no_queue sync    "daemon.mcp_tools"   => meta::mcp_tools_rpc,
+
+    // queue
+    read   no_queue sync    "queue.list"         => reads::queue_list,
+    write  no_queue async   "queue.pause"        => queue_writes::pause,
+    write  no_queue async   "queue.resume"       => queue_writes::resume,
+    write  no_queue async   "queue.clear"        => queue_writes::clear,
+
+    // library admin
+    read   no_queue sync    "library.list"          => reads::library_list_rpc,
+    read   no_queue async   "library.info"          => reads::library_info,
+    write  no_queue async   "library.fork"          => libraries::fork,
+    write  no_queue async   "library.set_default"   => libraries::set_default,
+
+    // library reads (sync, parametrised)
+    read   no_queue sync    "library.stats"                 => reads_library::stats,
+    read   no_queue sync    "library.list_books"            => reads_library::list_books,
+    read   no_queue sync    "library.find_books"            => reads_library::find_books,
+    read   no_queue sync    "library.show_book"             => reads_library::show_book,
+    read   no_queue sync    "library.show_toc"              => reads_library::show_toc,
+    read   no_queue sync    "library.read_context"          => reads_library::read_context,
+    read   no_queue sync    "library.read_span"             => reads_library::read_span,
+    read   no_queue sync    "library.show_metadata_audit"   => reads_library::show_metadata_audit,
+    read   no_queue sync    "library.show_metadata_report"  => reads_library::show_metadata_report,
+    read   no_queue sync    "library.list_metadata"         => reads_library::list_metadata,
+    read   no_queue sync    "library.list_pending_reviews"  => reads_library::list_pending_reviews,
+    read   no_queue sync    "library.show_audit_trail"      => reads_library::show_audit_trail,
+    read   no_queue sync    "library.show_pipeline_trail"   => reads_library::show_pipeline_trail,
+    read   no_queue sync    "library.list_papers"           => reads_library::list_papers,
+    read   no_queue sync    "library.find_papers"           => reads_library::find_papers,
+    read   no_queue sync    "library.show_paper"            => reads_library::show_paper,
+    read   no_queue sync    "library.show_paper_toc"        => reads_library::show_paper_toc,
+    read   no_queue sync    "papers.export_csl"             => reads_library::papers_export_csl,
+    read   no_queue sync    "papers.fetch_source"           => reads_library::papers_fetch_source,
+
+    // library reads (async)
+    read   no_queue async   "library.search"          => reads_library::search,
+    read   no_queue async   "library.search_in_book"  => reads_library::search_in_book,
+    read   no_queue async   "library.search_in_paper" => reads_library::search_in_paper,
+    read   no_queue async   "library.vectors_status"  => reads_library::vectors_status,
+
+    // events
+    stream no_queue sidebar "events.subscribe",
+    read   no_queue sync    "events.snapshot"     => reads::events_snapshot,
+
+    // ingest / glean
+    write  queue    async   "ingest.submit"       => ingest::submit,
+    write  queue    async   "ingest.cancel"       => ingest::cancel,
+    write  queue    async   "glean.submit"        => glean::submit,
+
+    // book metadata curation
+    write  no_queue async   "metadata.set"                => metadata::set,
+    write  no_queue async   "metadata.clear"              => metadata::clear,
+    write  no_queue async   "metadata.void"               => metadata::void,
+    write  no_queue async   "metadata.reaudit"            => metadata::reaudit,
+    write  no_queue async   "metadata.contributor_add"    => metadata::contributor_add,
+    write  no_queue async   "metadata.contributor_remove" => metadata::contributor_remove,
+    write  no_queue async   "metadata.ack"                => metadata::ack,
+    write  no_queue async   "metadata.approve"            => metadata::approve,
+    write  no_queue async   "metadata.reject"             => metadata::reject,
+    write  queue    async   "metadata.advance"            => metadata::advance,
+
+    // book vectors / corpus / stamps
+    write  queue    async   "vectors.rebuild"     => vectors::rebuild,
+    write  queue    async   "vectors.reembed"     => vectors::reembed,
+    write  queue    async   "vectors.reset"       => vectors::reset,
+    write  queue    async   "vectors.drop"        => vectors::drop_index,
+    write  queue    async   "corpus.rebuild"      => corpus::rebuild,
+    write  queue    async   "stamps.reconcile"    => stamps::reconcile,
+
+    // remove / dryrun (books)
+    write  queue    async   "remove"              => remove::run,
+    write  queue    async   "dryrun"              => dryrun::run,
+
+    // paper maintenance triplet
+    write  queue    async   "papers.remove"             => papers_remove::run,
+    write  queue    async   "papers.corpus_rebuild"     => papers_corpus::rebuild,
+    write  queue    async   "papers.vectors_rebuild"    => papers_vectors::rebuild,
+    write  queue    async   "papers.vectors_reembed"    => papers_vectors::reembed,
+    write  queue    async   "papers.vectors_reset"      => papers_vectors::reset,
+    write  queue    async   "papers.vectors_drop"       => papers_vectors::drop_index,
+    write  queue    async   "papers.stamps_reconcile"   => papers_stamps::reconcile,
+    write  queue    async   "papers.dryrun"             => papers_dryrun::run,
+
+    // paper metadata curation
+    write  queue    async   "papers.metadata.reaudit"            => papers_metadata::reaudit,
+    write  queue    async   "papers.metadata.set"                => papers_metadata::set,
+    write  queue    async   "papers.metadata.clear"              => papers_metadata::clear,
+    write  queue    async   "papers.metadata.void"               => papers_metadata::void,
+    write  queue    async   "papers.metadata.ack"                => papers_metadata::ack,
+    write  queue    async   "papers.metadata.approve"            => papers_metadata::approve,
+    write  queue    async   "papers.metadata.reject"             => papers_metadata::reject,
+    write  queue    async   "papers.metadata.reopen"             => papers_metadata::reopen,
+    write  queue    async   "papers.metadata.contributor_add"    => papers_metadata::contributor_add,
+    write  queue    async   "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
+
+    // verify / diagnose / tray / logs
+    read   no_queue async   "verify.run"     => verify::run_rpc,
+    read   no_queue async   "diagnose.run"   => diagnose::run,
+    write  no_queue sync    "tray.focus"     => tray::focus_rpc,
+    read   no_queue sync    "logs.tail"      => logs::tail,
+}
+
 /// Method router. Method names are matched verbatim against the table
 /// in [`docs/control-plane.md`](../../../../docs/control-plane.md).
 pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutcome, RpcError> {
@@ -115,253 +298,29 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
             "queue worker disabled in headless mode".to_string(),
         ));
     }
+
+    // Sidebar: methods whose handler shape does not fit
+    // `dispatch_normal` (a non-`Result` outcome or an inline literal).
+    // These names also appear in `REGISTRY` so `daemon.methods`
+    // enumerates them; `sidebar_methods_appear_in_registry` enforces
+    // that.
     match req.method.as_str() {
-        "daemon.version" => Ok(DispatchOutcome::Result(reads::daemon_version(ctx))),
-        "daemon.shutdown" => Ok(DispatchOutcome::Shutdown(reads::daemon_shutdown(ctx))),
-        "status" => Ok(DispatchOutcome::Result(reads::status(ctx))),
-        "doctor.gather" => Ok(DispatchOutcome::Result(reads::doctor_gather(ctx).await)),
-        "queue.list" => Ok(DispatchOutcome::Result(reads::queue_list(
-            &req.params,
-            ctx,
-        )?)),
-        "queue.pause" => Ok(DispatchOutcome::Result(
-            queue_writes::pause(&req.params, ctx).await?,
-        )),
-        "queue.resume" => Ok(DispatchOutcome::Result(
-            queue_writes::resume(&req.params, ctx).await?,
-        )),
-        "queue.clear" => Ok(DispatchOutcome::Result(
-            queue_writes::clear(&req.params, ctx).await?,
-        )),
-        "library.list" => Ok(DispatchOutcome::Result(reads::library_list(ctx)?)),
-        "library.info" => Ok(DispatchOutcome::Result(
-            reads::library_info(&req.params, ctx).await?,
-        )),
-        "library.stats" => Ok(DispatchOutcome::Result(reads_library::stats(
-            &req.params,
-            ctx,
-        )?)),
-        "library.list_books" => Ok(DispatchOutcome::Result(reads_library::list_books(
-            &req.params,
-            ctx,
-        )?)),
-        "library.find_books" => Ok(DispatchOutcome::Result(reads_library::find_books(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_book" => Ok(DispatchOutcome::Result(reads_library::show_book(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_toc" => Ok(DispatchOutcome::Result(reads_library::show_toc(
-            &req.params,
-            ctx,
-        )?)),
-        "library.read_context" => Ok(DispatchOutcome::Result(reads_library::read_context(
-            &req.params,
-            ctx,
-        )?)),
-        "library.read_span" => Ok(DispatchOutcome::Result(reads_library::read_span(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_metadata_audit" => Ok(DispatchOutcome::Result(
-            reads_library::show_metadata_audit(&req.params, ctx)?,
-        )),
-        "library.show_metadata_report" => Ok(DispatchOutcome::Result(
-            reads_library::show_metadata_report(&req.params, ctx)?,
-        )),
-        "library.list_metadata" => Ok(DispatchOutcome::Result(reads_library::list_metadata(
-            &req.params,
-            ctx,
-        )?)),
-        "library.list_pending_reviews" => Ok(DispatchOutcome::Result(
-            reads_library::list_pending_reviews(&req.params, ctx)?,
-        )),
-        "library.show_audit_trail" => Ok(DispatchOutcome::Result(reads_library::show_audit_trail(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_pipeline_trail" => Ok(DispatchOutcome::Result(
-            reads_library::show_pipeline_trail(&req.params, ctx)?,
-        )),
-        "library.search" => Ok(DispatchOutcome::Result(
-            reads_library::search(&req.params, ctx).await?,
-        )),
-        "library.search_in_book" => Ok(DispatchOutcome::Result(
-            reads_library::search_in_book(&req.params, ctx).await?,
-        )),
-        "library.list_papers" => Ok(DispatchOutcome::Result(reads_library::list_papers(
-            &req.params,
-            ctx,
-        )?)),
-        "library.find_papers" => Ok(DispatchOutcome::Result(reads_library::find_papers(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_paper" => Ok(DispatchOutcome::Result(reads_library::show_paper(
-            &req.params,
-            ctx,
-        )?)),
-        "library.show_paper_toc" => Ok(DispatchOutcome::Result(reads_library::show_paper_toc(
-            &req.params,
-            ctx,
-        )?)),
-        "library.search_in_paper" => Ok(DispatchOutcome::Result(
-            reads_library::search_in_paper(&req.params, ctx).await?,
-        )),
-        "papers.export_csl" => Ok(DispatchOutcome::Result(reads_library::papers_export_csl(
-            &req.params,
-            ctx,
-        )?)),
-        "papers.fetch_source" => Ok(DispatchOutcome::Result(reads_library::papers_fetch_source(
-            &req.params,
-            ctx,
-        )?)),
-        "library.vectors_status" => Ok(DispatchOutcome::Result(
-            reads_library::vectors_status(&req.params, ctx).await?,
-        )),
-        "logs.tail" => Ok(DispatchOutcome::Result(logs::tail(&req.params, ctx)?)),
-        "events.subscribe" => Ok(DispatchOutcome::Result(
-            serde_json::json!({ "subscribed": true }),
-        )),
-        "events.snapshot" => Ok(DispatchOutcome::Result(reads::events_snapshot(
-            &req.params,
-            ctx,
-        )?)),
-        "ingest.submit" => Ok(DispatchOutcome::Result(
-            ingest::submit(&req.params, ctx).await?,
-        )),
-        "ingest.cancel" => Ok(DispatchOutcome::Result(
-            ingest::cancel(&req.params, ctx).await?,
-        )),
-        "glean.submit" => Ok(DispatchOutcome::Result(
-            glean::submit(&req.params, ctx).await?,
-        )),
-        "metadata.set" => Ok(DispatchOutcome::Result(
-            metadata::set(&req.params, ctx).await?,
-        )),
-        "metadata.clear" => Ok(DispatchOutcome::Result(
-            metadata::clear(&req.params, ctx).await?,
-        )),
-        "metadata.void" => Ok(DispatchOutcome::Result(
-            metadata::void(&req.params, ctx).await?,
-        )),
-        "metadata.reaudit" => Ok(DispatchOutcome::Result(
-            metadata::reaudit(&req.params, ctx).await?,
-        )),
-        "metadata.contributor_add" => Ok(DispatchOutcome::Result(
-            metadata::contributor_add(&req.params, ctx).await?,
-        )),
-        "metadata.contributor_remove" => Ok(DispatchOutcome::Result(
-            metadata::contributor_remove(&req.params, ctx).await?,
-        )),
-        "metadata.ack" => Ok(DispatchOutcome::Result(
-            metadata::ack(&req.params, ctx).await?,
-        )),
-        "metadata.approve" => Ok(DispatchOutcome::Result(
-            metadata::approve(&req.params, ctx).await?,
-        )),
-        "metadata.reject" => Ok(DispatchOutcome::Result(
-            metadata::reject(&req.params, ctx).await?,
-        )),
-        "metadata.advance" => Ok(DispatchOutcome::Result(
-            metadata::advance(&req.params, ctx).await?,
-        )),
-        "vectors.rebuild" => Ok(DispatchOutcome::Result(
-            vectors::rebuild(&req.params, ctx).await?,
-        )),
-        "vectors.reembed" => Ok(DispatchOutcome::Result(
-            vectors::reembed(&req.params, ctx).await?,
-        )),
-        "vectors.reset" => Ok(DispatchOutcome::Result(
-            vectors::reset(&req.params, ctx).await?,
-        )),
-        "vectors.drop" => Ok(DispatchOutcome::Result(
-            vectors::drop_index(&req.params, ctx).await?,
-        )),
-        "corpus.rebuild" => Ok(DispatchOutcome::Result(
-            corpus::rebuild(&req.params, ctx).await?,
-        )),
-        "stamps.reconcile" => Ok(DispatchOutcome::Result(
-            stamps::reconcile(&req.params, ctx).await?,
-        )),
-        "remove" => Ok(DispatchOutcome::Result(
-            remove::run(&req.params, ctx).await?,
-        )),
-        "papers.remove" => Ok(DispatchOutcome::Result(
-            papers_remove::run(&req.params, ctx).await?,
-        )),
-        "papers.corpus_rebuild" => Ok(DispatchOutcome::Result(
-            papers_corpus::rebuild(&req.params, ctx).await?,
-        )),
-        "papers.vectors_rebuild" => Ok(DispatchOutcome::Result(
-            papers_vectors::rebuild(&req.params, ctx).await?,
-        )),
-        "papers.vectors_reembed" => Ok(DispatchOutcome::Result(
-            papers_vectors::reembed(&req.params, ctx).await?,
-        )),
-        "papers.vectors_reset" => Ok(DispatchOutcome::Result(
-            papers_vectors::reset(&req.params, ctx).await?,
-        )),
-        "papers.vectors_drop" => Ok(DispatchOutcome::Result(
-            papers_vectors::drop_index(&req.params, ctx).await?,
-        )),
-        "papers.stamps_reconcile" => Ok(DispatchOutcome::Result(
-            papers_stamps::reconcile(&req.params, ctx).await?,
-        )),
-        "papers.dryrun" => Ok(DispatchOutcome::Result(
-            papers_dryrun::run(&req.params, ctx).await?,
-        )),
-        "papers.metadata.reaudit" => Ok(DispatchOutcome::Result(
-            papers_metadata::reaudit(&req.params, ctx).await?,
-        )),
-        "papers.metadata.set" => Ok(DispatchOutcome::Result(
-            papers_metadata::set(&req.params, ctx).await?,
-        )),
-        "papers.metadata.clear" => Ok(DispatchOutcome::Result(
-            papers_metadata::clear(&req.params, ctx).await?,
-        )),
-        "papers.metadata.void" => Ok(DispatchOutcome::Result(
-            papers_metadata::void(&req.params, ctx).await?,
-        )),
-        "papers.metadata.ack" => Ok(DispatchOutcome::Result(
-            papers_metadata::ack(&req.params, ctx).await?,
-        )),
-        "papers.metadata.approve" => Ok(DispatchOutcome::Result(
-            papers_metadata::approve(&req.params, ctx).await?,
-        )),
-        "papers.metadata.reject" => Ok(DispatchOutcome::Result(
-            papers_metadata::reject(&req.params, ctx).await?,
-        )),
-        "papers.metadata.reopen" => Ok(DispatchOutcome::Result(
-            papers_metadata::reopen(&req.params, ctx).await?,
-        )),
-        "papers.metadata.contributor_add" => Ok(DispatchOutcome::Result(
-            papers_metadata::contributor_add(&req.params, ctx).await?,
-        )),
-        "papers.metadata.contributor_remove" => Ok(DispatchOutcome::Result(
-            papers_metadata::contributor_remove(&req.params, ctx).await?,
-        )),
-        "dryrun" => Ok(DispatchOutcome::Result(
-            dryrun::run(&req.params, ctx).await?,
-        )),
-        "verify.run" => Ok(DispatchOutcome::Result(verify::run(ctx).await?)),
-        "library.fork" => Ok(DispatchOutcome::Result(
-            libraries::fork(&req.params, ctx).await?,
-        )),
-        "library.set_default" => Ok(DispatchOutcome::Result(
-            libraries::set_default(&req.params, ctx).await?,
-        )),
-        "diagnose.run" => Ok(DispatchOutcome::Result(
-            diagnose::run(&req.params, ctx).await?,
-        )),
-        "daemon.methods" => Ok(DispatchOutcome::Result(meta::methods(ctx))),
-        "daemon.mcp_tools" => Ok(DispatchOutcome::Result(meta::mcp_tools(ctx))),
-        "tray.focus" => Ok(DispatchOutcome::Result(tray::focus(ctx))),
-        other => Err(RpcError::new(
+        "daemon.shutdown" => {
+            return Ok(DispatchOutcome::Shutdown(reads::daemon_shutdown(ctx)));
+        }
+        "events.subscribe" => {
+            return Ok(DispatchOutcome::Result(
+                serde_json::json!({ "subscribed": true }),
+            ));
+        }
+        _ => {}
+    }
+
+    match dispatch_normal(req.method.as_str(), &req.params, ctx).await {
+        Some(result) => result.map(DispatchOutcome::Result),
+        None => Err(RpcError::new(
             METHOD_NOT_FOUND,
-            format!("unknown method: {other}"),
+            format!("unknown method: {}", req.method),
         )),
     }
 }
@@ -373,44 +332,14 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
 /// state.
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 
-/// Method names that route work through the persistent queue worker.
-/// In a headless `bookrack-mcp` profile without `--with-queue-worker`,
-/// the dispatch short-circuits these to a `-32002 not_ready` response
-/// rather than enqueueing tasks no one will run.
+/// Returns `true` when the method routes work through the persistent
+/// queue worker. Backed by `REGISTRY.queue_bound`, which the
+/// `methods!` macro emits in lockstep with the dispatch arm — the two
+/// cannot drift.
 fn is_queue_bound_method(method: &str) -> bool {
-    matches!(
-        method,
-        "ingest.submit"
-            | "ingest.cancel"
-            | "glean.submit"
-            | "vectors.rebuild"
-            | "vectors.reembed"
-            | "vectors.reset"
-            | "vectors.drop"
-            | "corpus.rebuild"
-            | "stamps.reconcile"
-            | "remove"
-            | "papers.remove"
-            | "papers.corpus_rebuild"
-            | "papers.vectors_rebuild"
-            | "papers.vectors_reembed"
-            | "papers.vectors_reset"
-            | "papers.vectors_drop"
-            | "papers.stamps_reconcile"
-            | "papers.dryrun"
-            | "papers.metadata.reaudit"
-            | "papers.metadata.set"
-            | "papers.metadata.clear"
-            | "papers.metadata.void"
-            | "papers.metadata.ack"
-            | "papers.metadata.approve"
-            | "papers.metadata.reject"
-            | "papers.metadata.reopen"
-            | "papers.metadata.contributor_add"
-            | "papers.metadata.contributor_remove"
-            | "metadata.advance"
-            | "dryrun"
-    )
+    REGISTRY
+        .iter()
+        .any(|sig| sig.name == method && sig.queue_bound)
 }
 
 /// Acquire the runtime-wide write mutex, flip the daemon into
@@ -547,6 +476,35 @@ mod tests {
     #[test]
     fn queue_worker_disabled_code_is_stable() {
         assert_eq!(QUEUE_WORKER_DISABLED, -32002);
+    }
+
+    /// Names of every method intercepted by `dispatch` before
+    /// `dispatch_normal` (because their handler shape does not fit the
+    /// macro). Kept in lockstep with the sidebar match in `dispatch`
+    /// by `sidebar_methods_appear_in_registry` below.
+    const SIDEBAR_METHODS: &[&str] = &["daemon.shutdown", "events.subscribe"];
+
+    #[test]
+    fn sidebar_methods_appear_in_registry() {
+        for name in SIDEBAR_METHODS {
+            assert!(
+                REGISTRY.iter().any(|sig| sig.name == *name),
+                "sidebar method {name} must be added to REGISTRY so \
+                 daemon.methods enumerates it"
+            );
+        }
+    }
+
+    #[test]
+    fn sidebar_methods_are_not_queue_bound() {
+        for name in SIDEBAR_METHODS {
+            assert!(
+                !is_queue_bound_method(name),
+                "sidebar method {name} is intercepted before the queue-bound \
+                 short-circuit, so marking it queue_bound has no effect and \
+                 only confuses readers"
+            );
+        }
     }
 
     #[test]

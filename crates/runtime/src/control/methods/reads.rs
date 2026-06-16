@@ -65,6 +65,12 @@ pub fn daemon_version(ctx: &MethodContext) -> Value {
     })
 }
 
+/// Adapter to the uniform `(params, ctx) -> Result<Value, RpcError>`
+/// signature consumed by the dispatch macro.
+pub fn daemon_version_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    Ok(daemon_version(ctx))
+}
+
 pub fn daemon_shutdown(ctx: &MethodContext) -> Value {
     let _ = ctx.shutdown_tx.send(());
     Value::Null
@@ -105,6 +111,17 @@ pub async fn doctor_gather(ctx: &MethodContext) -> Value {
     serde_json::to_value(report).unwrap_or(Value::Null)
 }
 
+pub fn status_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    Ok(status(ctx))
+}
+
+pub async fn doctor_gather_rpc(
+    _params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    Ok(doctor_gather(ctx).await)
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[cfg_attr(test, derive(TS))]
 #[cfg_attr(test, ts(export, export_to = "./"))]
@@ -141,6 +158,10 @@ pub fn library_list(ctx: &MethodContext) -> Result<Value, RpcError> {
         .list()
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("registry list failed: {e}")))?;
     Ok(library_list_value(summaries))
+}
+
+pub fn library_list_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    library_list(ctx)
 }
 
 fn library_list_value(summaries: Vec<bookrack_ops::registry::LibrarySummary>) -> Value {

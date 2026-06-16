@@ -20,6 +20,10 @@ pub struct MethodSignature {
     pub name: &'static str,
     #[cfg_attr(test, ts(type = "string"))]
     pub kind: &'static str,
+    /// `true` iff the runtime routes the method through the persistent
+    /// queue worker. Headless `bookrack-mcp` profiles without
+    /// `--with-queue-worker` short-circuit these to `-32002 not_ready`.
+    pub queue_bound: bool,
 }
 
 /// One row in the `daemon.mcp_tools` response. Populated at daemon
@@ -37,7 +41,7 @@ pub struct McpToolInfo {
 /// [`super::dispatch`]. Exported as a TypeScript literal union so the
 /// webview's `ControlClient` can type its method names against the
 /// Rust-side registry with no hand maintenance. `current()` mirrors
-/// the runtime [`REGISTRY`] verbatim.
+/// the runtime [`super::REGISTRY`] verbatim.
 #[cfg(test)]
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "./")]
@@ -49,305 +53,13 @@ pub struct MethodCatalog {
 impl MethodCatalog {
     pub fn current() -> Self {
         Self {
-            names: REGISTRY.iter().map(|m| m.name.to_string()).collect(),
+            names: super::REGISTRY.iter().map(|m| m.name.to_string()).collect(),
         }
     }
 }
 
-/// Static registry of every method [`super::dispatch`] routes. Kept
-/// in lockstep with the match table by hand; `clippy::pedantic`
-/// would normally flag stringly-typed registries, but this one is the
-/// single source of truth a client uses to populate completion and
-/// help surfaces, so duplication is the lesser cost.
-pub const REGISTRY: &[MethodSignature] = &[
-    MethodSignature {
-        name: "daemon.version",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "daemon.shutdown",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "daemon.methods",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "daemon.mcp_tools",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "status",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "doctor.gather",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "queue.list",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "queue.pause",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "queue.resume",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "queue.clear",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "library.list",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.info",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.stats",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.list_books",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.find_books",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_book",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_toc",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.read_context",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.read_span",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_metadata_audit",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_metadata_report",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.list_metadata",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.list_pending_reviews",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_audit_trail",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_pipeline_trail",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.search",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.search_in_book",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.list_papers",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.find_papers",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_paper",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.show_paper_toc",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.search_in_paper",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "papers.export_csl",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.vectors_status",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.fork",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "events.subscribe",
-        kind: "stream",
-    },
-    MethodSignature {
-        name: "events.snapshot",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "ingest.submit",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "ingest.cancel",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "glean.submit",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.set",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.clear",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.void",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.reaudit",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.contributor_add",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.contributor_remove",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.ack",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.approve",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.reject",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "metadata.advance",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "vectors.rebuild",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "vectors.reembed",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "vectors.reset",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "vectors.drop",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "corpus.rebuild",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "stamps.reconcile",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "remove",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.remove",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.corpus_rebuild",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.vectors_rebuild",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.vectors_reembed",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.vectors_reset",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.vectors_drop",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.stamps_reconcile",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "papers.dryrun",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "dryrun",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "verify.run",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "diagnose.run",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "tray.focus",
-        kind: "write",
-    },
-    MethodSignature {
-        name: "logs.tail",
-        kind: "read",
-    },
-    MethodSignature {
-        name: "library.set_default",
-        kind: "write",
-    },
-];
-
 pub fn methods(_ctx: &MethodContext) -> Value {
-    json!({ "methods": REGISTRY })
+    json!({ "methods": super::REGISTRY })
 }
 
 pub fn mcp_tools(ctx: &MethodContext) -> Value {
@@ -355,8 +67,23 @@ pub fn mcp_tools(ctx: &MethodContext) -> Value {
     json!({ "tools": tools })
 }
 
+pub fn methods_rpc(
+    _params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, crate::control::jsonrpc::RpcError> {
+    Ok(methods(ctx))
+}
+
+pub fn mcp_tools_rpc(
+    _params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, crate::control::jsonrpc::RpcError> {
+    Ok(mcp_tools(ctx))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::REGISTRY;
     use super::*;
     use ts_rs::TS;
 

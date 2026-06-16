@@ -12,9 +12,15 @@
 use serde_json::{Value, json};
 
 use super::MethodContext;
+use crate::control::jsonrpc::RpcError;
 
 /// Raise the GUI window if a tray is attached; otherwise no-op.
 pub fn focus(ctx: &MethodContext) -> Value {
     ctx.tray_focus_signal.notify_one();
     json!({ "ok": true })
+}
+
+/// Adapter to the uniform dispatch signature.
+pub fn focus_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    Ok(focus(ctx))
 }
