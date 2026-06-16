@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#![recursion_limit = "256"]
 
 //! Daemon-side runtime primitives shared by `bookrack run` and the
 //! headless `bookrack-mcp` binary.

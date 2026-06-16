@@ -8,6 +8,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- `bookrack-runtime` raises its crate-level `recursion_limit` to
+  `256` so the trait solver can prove `Send` on the
+  `methods!`-generated dispatch future under `tokio::spawn`. The
+  macro collapses 30+ control-plane handlers into one async match;
+  combined with the layered `portable_atomic` shim pulled in
+  transitively through `lance` on targets without native 128-bit
+  atomics (Linux x86_64 without `cmpxchg16b`), the default limit of
+  128 was just past the depth required to walk every handler's
+  future and every wrapper type. Targets with native 128-bit atomics
+  (macOS aarch64, macOS x86_64 with the feature) stayed under the
+  default limit, which is why local builds passed while CI's Linux
+  job failed with `E0275`. Zero runtime cost; the knob only widens
+  the compile-time search budget.
+
 ## [0.6.0] - 2026-06-16
 
 ### Added
