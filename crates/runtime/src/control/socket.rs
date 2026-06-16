@@ -52,6 +52,47 @@ impl ControlSocketPath {
     }
 }
 
+/// RAII handle owning a freshly bound [`ControlSocketPath`] until
+/// [`crate::DaemonRuntime::start`] has cleared every fallible bring-up
+/// step. Dropping the guard without [`Self::disarm`] unlinks the
+/// socket entry, so a `?` between `bind` and the final `Ok(Self)` does
+/// not leave an orphan `control.sock` on disk for outside clients to
+/// attach to.
+pub struct ControlSocketGuard {
+    sock: Option<ControlSocketPath>,
+}
+
+impl ControlSocketGuard {
+    pub fn new(sock: ControlSocketPath) -> Self {
+        Self { sock: Some(sock) }
+    }
+
+    /// Borrow the bound path without releasing ownership.
+    pub fn path(&self) -> &Path {
+        &self
+            .sock
+            .as_ref()
+            .expect("ControlSocketGuard already disarmed")
+            .path
+    }
+
+    /// Hand the inner [`ControlSocketPath`] back to the caller and
+    /// disable cleanup-on-drop.
+    pub fn disarm(mut self) -> ControlSocketPath {
+        self.sock
+            .take()
+            .expect("ControlSocketGuard already disarmed")
+    }
+}
+
+impl Drop for ControlSocketGuard {
+    fn drop(&mut self) {
+        if let Some(sock) = self.sock.take() {
+            sock.cleanup();
+        }
+    }
+}
+
 /// Platform-typed listener handed back from [`bind`].
 pub enum BoundListener {
     #[cfg(unix)]
@@ -344,3 +385,43 @@ where
 
 #[allow(dead_code)]
 fn _request_compile_check(_: Request) {}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn guard_drop_unlinks_socket_when_not_disarmed() {
+        let runtime_dir = tempfile::tempdir().expect("tempdir");
+        let (_listener, sock) = bind(runtime_dir.path()).await.expect("bind");
+        let path = sock.path.clone();
+        assert!(path.exists(), "bind should create the socket entry");
+
+        let guard = ControlSocketGuard::new(sock);
+        drop(guard);
+
+        assert!(
+            !path.exists(),
+            "ControlSocketGuard drop should unlink {}",
+            path.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_disarm_preserves_socket_for_caller_owned_cleanup() {
+        let runtime_dir = tempfile::tempdir().expect("tempdir");
+        let (_listener, sock) = bind(runtime_dir.path()).await.expect("bind");
+        let path = sock.path.clone();
+
+        let guard = ControlSocketGuard::new(sock);
+        let recovered = guard.disarm();
+        assert_eq!(recovered.path, path);
+        assert!(
+            path.exists(),
+            "disarmed guard must not unlink the socket on drop",
+        );
+
+        recovered.cleanup();
+        assert!(!path.exists(), "explicit cleanup unlinks the socket");
+    }
+}

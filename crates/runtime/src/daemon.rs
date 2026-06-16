@@ -51,7 +51,9 @@ use crate::control::events::{
 };
 use crate::control::methods::MethodContext;
 use crate::control::progress::{EventProgressSink, ProgressSink};
-use crate::control::socket::{ControlSocketPath, bind as bind_control_socket, run_accept_loop};
+use crate::control::socket::{
+    ControlSocketGuard, ControlSocketPath, bind as bind_control_socket, run_accept_loop,
+};
 use crate::queue;
 
 /// Origin of a daemon bring-up, threaded into the second-launch
@@ -244,21 +246,28 @@ impl DaemonRuntime {
 
         // 3b. Bind the control-plane socket and record its path on
         //     the lock file. A bind failure releases the lock through
-        //     the `TtyLock` drop and returns the error.
+        //     the `TtyLock` drop and returns the error. The bound
+        //     socket is held in a `ControlSocketGuard` so that any
+        //     `?` between here and the final `Ok(Self)` unlinks the
+        //     filesystem entry on the way out; once the runtime is
+        //     fully stitched together the guard is `disarm`ed and
+        //     ownership moves into `Self::control_sock`, after which
+        //     cleanup happens in `run_until_shutdown`.
         let (control_listener, control_sock) =
             bind_control_socket(&runtime_dir).await.inspect_err(|_| {
                 tracing::warn!("control socket bind failed; releasing session lock");
             })?;
+        let control_sock_guard = ControlSocketGuard::new(control_sock);
         tty_lock
-            .record_control_sock(&control_sock.path)
+            .record_control_sock(control_sock_guard.path())
             .with_context(|| {
                 format!(
                     "record control socket path {} in session lock",
-                    control_sock.path.display()
+                    control_sock_guard.path().display()
                 )
             })?;
         tracing::info!(
-            path = %control_sock.path.display(),
+            path = %control_sock_guard.path().display(),
             "control plane socket bound",
         );
 
@@ -532,6 +541,11 @@ impl DaemonRuntime {
             method_ctx.clone(),
             shutdown_tx.subscribe(),
         ));
+
+        // Every fallible step has cleared. Move the socket path out
+        // of the guard so `Drop` no longer unlinks it; cleanup now
+        // belongs to `run_until_shutdown`.
+        let control_sock = control_sock_guard.disarm();
 
         Ok(Self {
             cfg,

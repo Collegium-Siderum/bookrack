@@ -85,6 +85,19 @@ release workflow extracts the matching section verbatim from this file.
   `hold_for_metadata` field. The field is `#[serde(default)]` so
   any v2 document on disk continues to load with the flag unset.
 
+### Fixed
+
+- `DaemonRuntime::start` no longer leaves an orphan `control.sock`
+  on disk when a post-bind bring-up step fails. A new
+  `ControlSocketGuard` owns the freshly bound socket between
+  `bind` and the final `Ok(Self)` and unlinks the filesystem entry
+  on `Drop`; the guard is `disarm`ed once every fallible step has
+  cleared, after which cleanup belongs to `run_until_shutdown` as
+  before. Without the guard a config / catalog / library / queue
+  failure between steps 3b and 11 left the socket inode dangling,
+  so an outside client polling `runtime_dir` could attach to a path
+  whose owner had already exited.
+
 ### Security
 
 - Destructive control-plane RPCs that expose a `yes` parameter —
