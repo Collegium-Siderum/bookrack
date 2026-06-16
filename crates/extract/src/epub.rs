@@ -18,10 +18,12 @@ use bookrack_audit_profile::{ExtractToggles, HtmlToggles};
 use rbook::Epub;
 
 use crate::contract::{
-    Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, Extraction, Provenance,
-    TextLayerQuality, Toc, TocEntry,
+    Biblio, Block, BlockKind, Contributor, ContributorRole, ExtractError, Extraction,
+    FallbackEvent, Provenance, TextLayerQuality, Toc, TocEntry, fallback_kinds,
 };
 use crate::html_parse;
+
+const ADAPTER: &str = "epub";
 
 /// Behaviour-sensitive extractor versions. Any change here can shift
 /// block boundaries, so it is stamped into `Provenance` for downstream
@@ -73,18 +75,26 @@ pub fn extract(
         return Err(ExtractError::EmptyExtraction);
     }
 
+    let mut fallbacks = Vec::new();
+
     // --- nav tree -> anchored TOC ------------------------------------
-    let toc = build_toc(&epub, &unit_of_manifest, &first_block_of, &block_of_anchor);
+    let toc = build_toc(
+        &epub,
+        &unit_of_manifest,
+        &first_block_of,
+        &block_of_anchor,
+        &mut fallbacks,
+    );
 
     // --- bibliographic metadata --------------------------------------
-    let biblio = build_biblio(&epub, toggles);
+    let biblio = build_biblio(&epub, toggles, &mut fallbacks);
 
     Ok(Extraction {
         blocks,
         toc,
         biblio,
         provenance: Provenance {
-            adapter: "epub".to_string(),
+            adapter: ADAPTER.to_string(),
             extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: TextLayerQuality::BornDigital,
             // Born-digital: a broken spine document aborts the whole
@@ -93,6 +103,7 @@ pub fn extract(
             derived_from_sha256: None,
             partial_pages: None,
             source_of_structure: None,
+            fallbacks,
         },
     })
 }
@@ -105,20 +116,35 @@ fn first_at_or_after(first_block_of: &BTreeMap<u32, usize>, unit: u32) -> Option
 }
 
 /// Flatten the nav tree, resolving each entry's href to a block index.
+/// Records [`fallback_kinds::EPUB_NAV_DEPTH_SATURATE`] the first time
+/// a nav entry's reported depth is 0 — `saturating_sub(1)` clamps to
+/// 0 there, hiding the depth information for that entry.
 fn build_toc(
     epub: &Epub,
     unit_of_manifest: &HashMap<String, u32>,
     first_block_of: &BTreeMap<u32, usize>,
     block_of_anchor: &HashMap<(u32, String), usize>,
+    fallbacks: &mut Vec<FallbackEvent>,
 ) -> Toc {
     let Some(root) = epub.toc().contents() else {
         return Toc::default();
     };
     let mut entries = Vec::new();
+    let mut depth_saturate_logged = false;
     for entry in root.flatten() {
         // rbook depth counts the (omitted) root as 0; topmost real
         // entries are 1. The contract wants 0 = topmost.
-        let depth = entry.depth().saturating_sub(1).min(u8::MAX as usize) as u8;
+        let raw_depth = entry.depth();
+        if raw_depth == 0 && !depth_saturate_logged {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::EPUB_NAV_DEPTH_SATURATE,
+                None,
+            );
+            depth_saturate_logged = true;
+        }
+        let depth = raw_depth.saturating_sub(1).min(u8::MAX as usize) as u8;
 
         let start_block = entry.manifest_entry().and_then(|manifest_entry| {
             let unit = *unit_of_manifest.get(manifest_entry.id())?;
@@ -143,7 +169,11 @@ fn build_toc(
 
 /// Transcribe the OPF Dublin Core metadata. Absent fields stay `None` —
 /// extract reports only what the file carries; enrichment is METADATA's.
-fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
+fn build_biblio(
+    epub: &Epub,
+    toggles: &ExtractToggles,
+    fallbacks: &mut Vec<FallbackEvent>,
+) -> Biblio {
     let md = epub.metadata();
 
     let title = md.title().map(|t| t.value().to_string());
@@ -160,7 +190,8 @@ fn build_biblio(epub: &Epub, toggles: &ExtractToggles) -> Biblio {
     let year = year_entry.as_deref().and_then(|v| parse_year(v, toggles));
     let language = md.language().map(|l| l.value().to_string());
     let isbn = if toggles.epub_isbn_recognition {
-        md.identifiers().find_map(|id| as_isbn(id.value()))
+        md.identifiers()
+            .find_map(|id| as_isbn(id.value(), fallbacks))
     } else {
         None
     };
@@ -250,7 +281,10 @@ fn parse_year(value: &str, toggles: &ExtractToggles) -> Option<i32> {
 
 /// Recognize an ISBN inside an identifier value (`urn:isbn:...`, or a
 /// bare 10/13-digit number). Returns the digit string, hyphens stripped.
-fn as_isbn(value: &str) -> Option<String> {
+/// Records [`fallback_kinds::EPUB_ISBN_SUBSTRING_FALLBACK`] when the
+/// match came from a value carrying `isbn` somewhere in the string
+/// without the canonical `urn:isbn:` prefix.
+fn as_isbn(value: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     let tail = lower
         .rsplit("isbn")
@@ -262,8 +296,64 @@ fn as_isbn(value: &str) -> Option<String> {
         .filter(|c| c.is_ascii_digit() || *c == 'x' || *c == 'X')
         .collect();
     if digits.len() == 10 || digits.len() == 13 {
+        if lower.contains("isbn") && !lower.starts_with("urn:isbn:") {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::EPUB_ISBN_SUBSTRING_FALLBACK,
+                Some(value.chars().take(64).collect()),
+            );
+        }
         Some(digits)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn urn_isbn_prefix_records_nothing() {
+        let mut fallbacks = Vec::new();
+        let isbn = as_isbn("urn:isbn:9780000000000", &mut fallbacks);
+        assert_eq!(isbn.as_deref(), Some("9780000000000"));
+        assert!(
+            fallbacks.is_empty(),
+            "canonical urn:isbn: prefix must record nothing, got {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn isbn_substring_without_urn_prefix_records_fallback() {
+        let mut fallbacks = Vec::new();
+        let isbn = as_isbn("ISBN 978-0-00-000000-0", &mut fallbacks);
+        assert_eq!(isbn.as_deref(), Some("9780000000000"));
+        assert!(
+            fallbacks
+                .iter()
+                .any(|e| e.kind == fallback_kinds::EPUB_ISBN_SUBSTRING_FALLBACK),
+            "expected EPUB_ISBN_SUBSTRING_FALLBACK in {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn bare_digit_identifier_records_nothing() {
+        let mut fallbacks = Vec::new();
+        let isbn = as_isbn("9780000000000", &mut fallbacks);
+        assert_eq!(isbn.as_deref(), Some("9780000000000"));
+        assert!(
+            fallbacks.is_empty(),
+            "bare-digit identifier without isbn substring must record nothing, got {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn non_isbn_value_returns_none_and_records_nothing() {
+        let mut fallbacks = Vec::new();
+        let isbn = as_isbn("not-an-identifier", &mut fallbacks);
+        assert!(isbn.is_none());
+        assert!(fallbacks.is_empty(), "unexpected events: {fallbacks:?}");
     }
 }

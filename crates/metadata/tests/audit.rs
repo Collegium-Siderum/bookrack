@@ -81,6 +81,7 @@ fn provenance(adapter: &str, quality: TextLayerQuality) -> Provenance {
         derived_from_sha256: None,
         partial_pages: None,
         source_of_structure: None,
+        fallbacks: Vec::new(),
     }
 }
 

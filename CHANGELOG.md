@@ -10,6 +10,28 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `Provenance.fallbacks: Vec<FallbackEvent>` captures the silent
+  fallback paths an adapter took during extraction — lossy decode,
+  oversize-window truncation, malformed metadata strings parsed
+  anyway. Each event names a namespaced kind from
+  `bookrack_extract::fallback_kinds` and rides into the envelope; a
+  paired `tracing::warn!(event = "extract.fallback", ...)` fires at
+  the same time so the live log and the envelope record never drift.
+  The seven known paths covered: TXT BOM-UTF8 lossy substitution
+  (`txt:utf8_lossy_substitution`), TXT strict-UTF8 fall-through to
+  GB18030 (`txt:gb18030`, detail = the `Utf8Error`), HTML lossy
+  decode (`html:utf8_lossy`), HTML `<head>` window exceeding 256 KiB
+  without a closing tag (`html:head_truncated_256k`), PDF
+  `/Info CreationDate` missing the spec `D:` prefix
+  (`pdf:info_creation_date_no_d_prefix`), EPUB nav entry with
+  `depth() == 0` saturating (`epub:nav_depth_saturate`), and EPUB
+  `as_isbn` accepting an identifier without the `urn:isbn:` prefix
+  (`epub:isbn_substring_fallback`). The new field is
+  `#[serde(default, skip_serializing_if = "Vec::is_empty")]` so an
+  older envelope deserialises with an empty vector and an envelope
+  written by this build remains readable by an older binary that
+  ignores the field.
+
 - The publisher audit names the specific sub-rule that produced its
   verdict. `PublisherVerdict` carries `WhitelistMatch`
   (`ExactLower` / `Normalized` / `AbbrevExpand`) on whitelist hits and

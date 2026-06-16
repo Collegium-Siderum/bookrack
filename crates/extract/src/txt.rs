@@ -26,9 +26,12 @@ use bookrack_audit_profile::{ExtractToggles, HeadingPatterns};
 
 use crate::EXTRACTOR_VERSION;
 use crate::contract::{
-    Biblio, Block, BlockKind, ExtractError, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
+    Biblio, Block, BlockKind, ExtractError, Extraction, FallbackEvent, Provenance,
+    TextLayerQuality, Toc, TocEntry, fallback_kinds,
 };
 use crate::headings;
+
+const ADAPTER: &str = "txt";
 
 /// Extract one plain-text file. `toggles.txt_toc_enabled` gates whether
 /// matching lines become `Heading` blocks; when off, every non-blank
@@ -41,7 +44,8 @@ pub fn extract(
     heading_patterns: &HeadingPatterns,
 ) -> Result<Extraction, ExtractError> {
     let bytes = std::fs::read(path)?;
-    let text = decode(&bytes);
+    let mut fallbacks = Vec::new();
+    let text = decode(&bytes, &mut fallbacks);
 
     // One non-blank line is one block; `str::lines` also strips the
     // `\r` of CRLF endings, and `trim` drops the leading ideographic
@@ -88,15 +92,28 @@ pub fn extract(
             derived_from_sha256: None,
             partial_pages: None,
             source_of_structure: None,
+            fallbacks,
         },
     })
 }
 
 /// Decode raw bytes to text, detecting the encoding. Order: BOM, then a
 /// strict UTF-8 trial, then GB18030 (covers GBK / GB2312) for legacy
-/// Chinese text.
-fn decode(bytes: &[u8]) -> String {
+/// Chinese text. Records a [`FallbackEvent`] on the lossy UTF-8 and
+/// GB18030 fallthrough paths so the envelope keeps the trace.
+fn decode(bytes: &[u8], fallbacks: &mut Vec<FallbackEvent>) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        // The BOM only claims UTF-8 — the rest may still contain
+        // invalid sub-sequences `from_utf8_lossy` then replaces with
+        // U+FFFD. Strict-check before the lossy decode to detect that.
+        if std::str::from_utf8(rest).is_err() {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::TXT_UTF8_LOSSY_SUBSTITUTION,
+                None,
+            );
+        }
         return String::from_utf8_lossy(rest).into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
@@ -107,11 +124,18 @@ fn decode(bytes: &[u8]) -> String {
         let (text, _) = encoding_rs::UTF_16BE.decode_without_bom_handling(rest);
         return text.into_owned();
     }
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_string();
-    }
+    let utf8_error = match std::str::from_utf8(bytes) {
+        Ok(s) => return s.to_string(),
+        Err(err) => err,
+    };
     // Not UTF-8 — assume legacy Chinese. GB18030 is a strict superset of
     // GBK and GB2312, so one decoder covers all three.
+    FallbackEvent::record(
+        fallbacks,
+        ADAPTER,
+        fallback_kinds::TXT_GB18030,
+        Some(utf8_error.to_string()),
+    );
     let (text, _, _) = encoding_rs::GB18030.decode(bytes);
     text.into_owned()
 }
@@ -129,4 +153,56 @@ fn toc_from_headings(blocks: &[Block]) -> Toc {
         }
     }
     Toc { entries }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn bom_utf8_lossy_substitution_is_recorded() {
+        // BOM, then a stray 0xFF that is not valid UTF-8 — `from_utf8_lossy`
+        // will substitute U+FFFD and the adapter must record the fallback.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"text");
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        assert!(
+            fallbacks
+                .iter()
+                .any(|e| e.kind == fallback_kinds::TXT_UTF8_LOSSY_SUBSTITUTION),
+            "expected TXT_UTF8_LOSSY_SUBSTITUTION in {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn bom_utf8_clean_records_nothing() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"clean ascii");
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        assert!(
+            fallbacks.is_empty(),
+            "clean BOM-prefixed UTF-8 must record nothing, got {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn gb18030_fallthrough_records_kind_and_detail() {
+        // A byte sequence that fails strict UTF-8 yet decodes through
+        // GB18030. 0xC4 0xE3 is the GB18030 encoding of `\u{4F60}`
+        // ("ni" in pinyin), commonly used in legacy Chinese text dumps.
+        let bytes = [0xC4, 0xE3];
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        let event = fallbacks
+            .iter()
+            .find(|e| e.kind == fallback_kinds::TXT_GB18030)
+            .expect("expected TXT_GB18030 fallback");
+        assert!(
+            event.detail.is_some(),
+            "GB18030 fallback should record the UTF-8 error detail",
+        );
+    }
 }

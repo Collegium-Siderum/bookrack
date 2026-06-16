@@ -60,7 +60,8 @@ use std::path::Path;
 
 use crate::OCR_INTAKE_VERSION;
 use crate::contract::{
-    Biblio, Block, BlockKind, ExtractError, Extraction, Provenance, TextLayerQuality, Toc,
+    Biblio, Block, BlockKind, ExtractError, Extraction, FallbackEvent, Provenance,
+    TextLayerQuality, Toc,
 };
 use crate::pdf;
 
@@ -160,8 +161,9 @@ pub fn extract_from_text(
     if !blocks.iter().any(|b| matches!(b.kind, BlockKind::Body)) {
         return Err(ExtractError::EmptyExtraction);
     }
+    let mut fallbacks = Vec::new();
     let (toc, biblio) = match source_pdf {
-        Some(p) => read_pdf_metadata(p, &blocks)?,
+        Some(p) => read_pdf_metadata(p, &blocks, &mut fallbacks)?,
         None => (Toc::default(), Biblio::default()),
     };
 
@@ -177,6 +179,7 @@ pub fn extract_from_text(
             derived_from_sha256: source_pdf_sha256.map(str::to_string),
             partial_pages: None,
             source_of_structure: None,
+            fallbacks,
         },
     })
 }
@@ -315,7 +318,11 @@ pub fn count_pdf_pages(source_pdf: &Path) -> Result<u32, ExtractError> {
 /// `blocks` and its `/Info` into a `Biblio`. Both reads use the shared
 /// PDFium handle and the process-level extraction lock the PDF adapter
 /// declares.
-fn read_pdf_metadata(source_pdf: &Path, blocks: &[Block]) -> Result<(Toc, Biblio), ExtractError> {
+fn read_pdf_metadata(
+    source_pdf: &Path,
+    blocks: &[Block],
+    fallbacks: &mut Vec<FallbackEvent>,
+) -> Result<(Toc, Biblio), ExtractError> {
     let pdfium = pdf::pdfium()?;
     // The lock guards a sequence of PDFium calls; recover from a
     // previous panicked extraction rather than failing every later
@@ -330,7 +337,7 @@ fn read_pdf_metadata(source_pdf: &Path, blocks: &[Block]) -> Result<(Toc, Biblio
                 detail: e.to_string(),
             })?;
     let toc = pdf::build_toc(&document, blocks);
-    let biblio = pdf::build_biblio(&pdf::read_info_tags(&document));
+    let biblio = pdf::build_biblio(&pdf::read_info_tags(&document), fallbacks);
     Ok((toc, biblio))
 }
 

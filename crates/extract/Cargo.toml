@@ -23,6 +23,9 @@ serde_json.workspace = true
 # Atomic write of the envelope file via a same-dir tempfile + rename.
 tempfile.workspace = true
 thiserror.workspace = true
+# Adapter fallback events emit a paired `tracing::warn!` so the
+# envelope record and the live log line cannot drift apart.
+tracing.workspace = true
 
 [dev-dependencies]
 # Also a normal dependency above; the TXT test re-encodes a fixture to

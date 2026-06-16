@@ -45,9 +45,12 @@ use pdfium_render::prelude::*;
 use crate::EXTRACTOR_VERSION;
 use crate::contract::{
     Biblio, Block, BlockKind, BlockStyle, Contributor, ContributorRole, ExtractError,
-    ExtractOutcome, Extraction, Provenance, SkippedUnit, Toc, TocEntry,
+    ExtractOutcome, Extraction, FallbackEvent, Provenance, SkippedUnit, Toc, TocEntry,
+    fallback_kinds,
 };
 use crate::quality::{self, QualityDecision};
+
+pub(crate) const ADAPTER: &str = "pdf";
 
 /// The process-wide PDFium handle.
 ///
@@ -138,20 +141,22 @@ pub fn extract(
     let blocks = build_blocks(pages);
 
     let toc = build_toc(&document, &blocks);
-    let biblio = build_biblio(&read_info_tags(&document));
+    let mut fallbacks = Vec::new();
+    let biblio = build_biblio(&read_info_tags(&document), &mut fallbacks);
 
     Ok(ExtractOutcome::Extracted(Extraction {
         blocks,
         toc,
         biblio,
         provenance: Provenance {
-            adapter: "pdf".to_string(),
+            adapter: ADAPTER.to_string(),
             extractor_version: EXTRACTOR_VERSION,
             text_layer_quality: grade,
             skipped_units,
             derived_from_sha256: None,
             partial_pages: None,
             source_of_structure: None,
+            fallbacks,
         },
     }))
 }
@@ -271,7 +276,10 @@ pub(crate) fn read_info_tags(document: &PdfDocument) -> Vec<(&'static str, Strin
 ///
 /// `/Info` is transcribed faithfully, garbage and all: reconciling it
 /// against the page text is the METADATA stage's job, not extract's.
-pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
+pub(crate) fn build_biblio(
+    info_tags: &[(&'static str, String)],
+    fallbacks: &mut Vec<FallbackEvent>,
+) -> Biblio {
     let find = |key: &str| {
         info_tags
             .iter()
@@ -291,7 +299,9 @@ pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
     }
 
     let creation_date = find("CreationDate");
-    let year = creation_date.as_deref().and_then(parse_pdf_year);
+    let year = creation_date
+        .as_deref()
+        .and_then(|date| parse_pdf_year(date, fallbacks));
     Biblio {
         title: find("Title"),
         year,
@@ -303,8 +313,20 @@ pub(crate) fn build_biblio(info_tags: &[(&'static str, String)]) -> Biblio {
 
 /// Extract the year from a PDF date string. PDF dates are formatted
 /// `D:YYYYMMDDHHmmSSOHH'mm'`; only the leading `YYYY` is needed.
-fn parse_pdf_year(date: &str) -> Option<i32> {
-    let digits: String = date.trim_start_matches("D:").chars().take(4).collect();
+/// A value present without the `D:` prefix is parsed anyway, with a
+/// [`fallback_kinds::PDF_INFO_CREATION_DATE_NO_D_PREFIX`] event
+/// recorded so the divergence from the PDF spec is observable.
+fn parse_pdf_year(date: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<i32> {
+    let stripped = date.trim_start_matches("D:");
+    if stripped.len() == date.len() && stripped.bytes().take(4).all(|b| b.is_ascii_digit()) {
+        FallbackEvent::record(
+            fallbacks,
+            ADAPTER,
+            fallback_kinds::PDF_INFO_CREATION_DATE_NO_D_PREFIX,
+            Some(date.chars().take(20).collect()),
+        );
+    }
+    let digits: String = stripped.chars().take(4).collect();
     if digits.len() == 4 && digits.bytes().all(|b| b.is_ascii_digit()) {
         let year: i32 = digits.parse().ok()?;
         if (1000..=9999).contains(&year) {
@@ -914,5 +936,33 @@ fn append_line(current: &mut String, line: &str) {
     } else {
         current.push(' ');
         current.push_str(line);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    #[test]
+    fn creation_date_without_d_prefix_records_fallback() {
+        let mut fallbacks = Vec::new();
+        let year = parse_pdf_year("20240117000000", &mut fallbacks);
+        assert_eq!(year, Some(2024));
+        let event = fallbacks
+            .iter()
+            .find(|e| e.kind == fallback_kinds::PDF_INFO_CREATION_DATE_NO_D_PREFIX)
+            .expect("expected PDF_INFO_CREATION_DATE_NO_D_PREFIX fallback");
+        assert_eq!(event.detail.as_deref(), Some("20240117000000"));
+    }
+
+    #[test]
+    fn creation_date_with_d_prefix_records_nothing() {
+        let mut fallbacks = Vec::new();
+        let year = parse_pdf_year("D:20240117000000Z", &mut fallbacks);
+        assert_eq!(year, Some(2024));
+        assert!(
+            fallbacks.is_empty(),
+            "spec-conforming D: prefix must record nothing, got {fallbacks:?}",
+        );
     }
 }

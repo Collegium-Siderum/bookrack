@@ -324,6 +324,104 @@ pub struct Provenance {
     /// pass, and on older envelopes that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_of_structure: Option<SourceOfStructure>,
+    /// Silent-fallback events the adapter took during extraction:
+    /// lossy decode, oversize-window truncation, malformed metadata
+    /// strings the adapter parsed anyway, and similar paths where the
+    /// adapter substituted a best-effort result rather than aborting.
+    /// Each entry names a stable, namespaced kind from
+    /// [`fallback_kinds`]; older envelopes that predate the field
+    /// deserialize as an empty vector.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<FallbackEvent>,
+}
+
+/// One silent-fallback event recorded during extraction.
+///
+/// "Silent" here means: the adapter took the fallback path without
+/// aborting and without surfacing it as a `Skipped` sub-unit. The
+/// envelope keeps these so a downstream consumer can attribute a
+/// surprising value to the path that produced it, and so aggregate
+/// statistics over a library can show which fallback paths fire and
+/// how often.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FallbackEvent {
+    /// Stable, namespaced identifier of the fallback. Adapters write
+    /// the `&'static str` constants under [`fallback_kinds`] through
+    /// [`FallbackEvent::record`]; the field is owned `String` so a
+    /// roundtrip through a stored envelope deserializes into bytes
+    /// the reader owns.
+    pub kind: String,
+    /// Optional free-form detail — e.g. the strict-decode error
+    /// message that triggered a permissive fallback. Omitted when
+    /// the kind alone is sufficient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl FallbackEvent {
+    /// Push one event and emit the paired `tracing::warn!` so the
+    /// envelope record and the live log line can never drift apart.
+    /// `adapter` flows into the tracing event only; the envelope
+    /// already carries the adapter on [`Provenance::adapter`]. The
+    /// `kind` argument is `&'static str` so a caller has to reach for
+    /// one of the [`fallback_kinds`] constants rather than inline a
+    /// literal at the push site.
+    pub fn record(
+        events: &mut Vec<FallbackEvent>,
+        adapter: &str,
+        kind: &'static str,
+        detail: Option<String>,
+    ) {
+        let detail_view: Option<&str> = detail.as_deref();
+        tracing::warn!(
+            event = "extract.fallback",
+            adapter = adapter,
+            kind = kind,
+            detail = detail_view,
+        );
+        events.push(FallbackEvent {
+            kind: kind.to_string(),
+            detail,
+        });
+    }
+}
+
+/// Namespaced identifiers for [`FallbackEvent::kind`].
+///
+/// One constant per known silent-fallback path; adapters reference
+/// the constant rather than inline a literal so the canonical set is
+/// discoverable and a misspelled kind cannot ship.
+pub mod fallback_kinds {
+    /// TXT decoder: BOM-stripped UTF-8 path saw byte sequences that
+    /// `from_utf8_lossy` replaced with U+FFFD — the file was not
+    /// fully valid UTF-8 despite the BOM.
+    pub const TXT_UTF8_LOSSY_SUBSTITUTION: &str = "txt:utf8_lossy_substitution";
+    /// TXT decoder: strict UTF-8 trial failed; the adapter fell
+    /// through to a permissive GB18030 decode. The detail string
+    /// carries the `str::Utf8Error` that triggered the fall-through.
+    pub const TXT_GB18030: &str = "txt:gb18030";
+    /// HTML adapter: bytes were not valid UTF-8 and were decoded
+    /// through `String::from_utf8_lossy`, substituting U+FFFD for
+    /// every invalid sub-sequence.
+    pub const HTML_UTF8_LOSSY: &str = "html:utf8_lossy";
+    /// HTML adapter: the bounded 256 KiB head-scan window did not
+    /// contain `</head>`, so any `<head>` metadata past the window
+    /// was not consulted. Fires whenever the window was used without
+    /// terminating in a real `</head>`.
+    pub const HTML_HEAD_TRUNCATED_256K: &str = "html:head_truncated_256k";
+    /// PDF book adapter: `/Info CreationDate` was present but did
+    /// not carry the PDF-spec `D:` prefix; the adapter took the
+    /// digit prefix anyway.
+    pub const PDF_INFO_CREATION_DATE_NO_D_PREFIX: &str = "pdf:info_creation_date_no_d_prefix";
+    /// EPUB adapter: a nav entry's `depth()` was 0, so
+    /// `saturating_sub(1)` clamped at 0 rather than yielding a
+    /// negative depth. Indicates a TOC entry the toolkit reported
+    /// without descending below the (omitted) root.
+    pub const EPUB_NAV_DEPTH_SATURATE: &str = "epub:nav_depth_saturate";
+    /// EPUB adapter: `as_isbn` accepted an identifier value that
+    /// contained `isbn` somewhere in the string but did not carry
+    /// the canonical `urn:isbn:` prefix.
+    pub const EPUB_ISBN_SUBSTRING_FALLBACK: &str = "epub:isbn_substring_fallback";
 }
 
 /// The quality grade of an extracted text layer.
@@ -442,6 +540,7 @@ mod tests {
                 derived_from_sha256: None,
                 partial_pages: None,
                 source_of_structure: None,
+                fallbacks: Vec::new(),
             },
         }
     }
