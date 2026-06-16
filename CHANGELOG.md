@@ -8,6 +8,8 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-16
+
 ### Added
 
 - `Provenance.fallbacks: Vec<FallbackEvent>` captures the silent
@@ -119,6 +121,29 @@ release workflow extracts the matching section verbatim from this file.
   `hold_for_metadata` field. The field is `#[serde(default)]` so
   any v2 document on disk continues to load with the flag unset.
 
+- Two-step pinned protocol for destructive control-plane RPCs
+  (`corpus.rebuild`, `vectors.reembed`, `remove`, and the
+  `papers.*` counterparts). The `dry_run` leg computes a target set
+  and registers it under a freshly minted `plan_id` in a
+  server-held, library-scoped, single-use, TTL-bounded registry;
+  the `execute` leg presents the `plan_id` and acts on exactly the
+  pinned intake set so catalog drift between the two legs cannot
+  leak into the execute pass. `remove` and `papers.remove` now
+  return their structured count breakdown over the wire instead of
+  printing it to the daemon's stdout. Three new JSON-RPC error
+  codes surface lookup failures: `-32013 plan not found`,
+  `-32014 plan kind mismatch`, `-32015 plan library mismatch`.
+  `bookrack_ingest` and `bookrack_glean` gain an optional
+  `only_ids` parameter on `rebuild_from_intakes`, `plan_reembed`,
+  and `reembed_all`; when set, the target set is exactly that list
+  and every id must resolve to a catalog row in a rebuildable /
+  embedded state, else the call aborts with the existing
+  `UnknownIntake` / `IntakeNotEmbedded` / `IntakeNotRebuildable`
+  errors. The CLI clients now chain dry-run plan and execute under
+  the same `plan_id`; a transitional fallback for `execute`
+  without `plan_id` preserves the legacy unpinned path behind a
+  deprecation warning so older clients keep working.
+
 ### Fixed
 
 - `DaemonRuntime::start` no longer leaves an orphan `control.sock`
@@ -131,6 +156,39 @@ release workflow extracts the matching section verbatim from this file.
   failure between steps 3b and 11 left the socket inode dangling,
   so an outside client polling `runtime_dir` could attach to a path
   whose owner had already exited.
+
+- `run_write` no longer strands the daemon in
+  `Writing { paused: true }` when the dispatcher future is
+  cancelled or the handler panics. A `WriteSession` RAII guard
+  moved into the blocking task owns the `DaemonState` and
+  `McpAvailability` transitions and the write mutex, so all three
+  always unwind together. `queue.pause` / `queue.resume` now
+  persist the new flag before flipping the in-memory atomic and
+  restore the atomic on `save_atomic` failure; the worker loop's
+  process-level pause path applies the same ordering, so the
+  running atomic and the persisted queue document can no longer
+  disagree across a restart when a persist fails.
+
+- `run_until_shutdown` now holds the tty advisory lock across the
+  control-accept, MCP, and queue-worker drain timeouts. The
+  destructuring pattern previously folded `_tty_lock` into the
+  rest binding and dropped it before the drain, so a second
+  daemon could acquire the lock while the queue worker was still
+  flushing writes.
+
+- `run_write` no longer publishes `library.changed` when the
+  handler errored or the spawn-blocking task panicked. The event
+  is gated on a successful outcome; the `McpAvailability` and
+  `DaemonState` transitions still fire unconditionally to pair
+  with the upfront `set_state(Writing)` call. Subscribers no
+  longer re-fetch against unchanged state after a failed write.
+
+- `probe_dimension` returns `EmptyEmbedding` instead of an
+  unrelated parameter-validation error when the local embedder
+  returns an empty probe, matching `bookrack-ingest`'s probe path;
+  the RPC surface maps the fault to `-32603 internal error`
+  instead of `-32602 invalid params`, since it is a local embedder
+  fault rather than a malformed request.
 
 ### Security
 
@@ -202,6 +260,44 @@ release workflow extracts the matching section verbatim from this file.
   surfaces IDENTIFY hit rates so an operator can triage a paper
   cluster before committing the embed run. Routed through the
   control plane as `papers.dryrun`.
+
+- Paper-side IDENTIFY rewritten against the references-truncated,
+  full-width-folded raw PDFium page text plus the source filename,
+  rather than the structured Body block stream. Filename-encoded
+  DOIs (`10.XXX_YYY.pdf`, `arxiv-NNNN.NNNNN.pdf`) and publisher
+  templates (`N19-1423`, `RJ-2016-007`) are folded to canonical
+  identifiers and used in preference to text scans, since curator
+  naming is more reliable than character-level recovery for ACL
+  Anthology / R Journal / Acta Petrologica Sinica fullwidth glyphs.
+  `detect_doi` adds a permissive variant that collapses internal
+  kerning whitespace and rejects ACM camera-ready placeholders
+  (`10.1145/nnnnnnn.nnnnnnn`); `detect_arxiv_id` requires an
+  `arXiv:` prefix or a `[cs.XX]`-style subject bracket in body
+  text, so a citation's `NNNN.NNNNN` no longer leaks in as the
+  paper's own id; `detect_year` falls back through the arXiv id
+  prefix, the DOI suffix, an on-page copyright stamp /
+  `Vol. NN, YYYY` line, then `biblio_year` unless the raw value is
+  the PDF `/Info /CreationDate` shape; `sniff_title` rejects
+  production source filenames, rotated arXiv banners, and
+  print-management codes; `detect_issn` / `detect_venue` are
+  scoped to the metadata-text window so references-section page
+  numbers and bibliography venue cues no longer leak into the
+  paper's own fields.
+
+- Control-plane method registry, dispatch arm, and queue-bound
+  classifier collapsed into one `methods!` macro invocation. The
+  three structures previously lived in parallel and had to be
+  edited in lockstep; ten `papers.metadata.*` methods and
+  `papers.fetch_source` had a dispatch arm but were missing from
+  `REGISTRY`, so `daemon.methods` did not list them. The macro
+  emits both the public `REGISTRY` const and the `dispatch_normal`
+  match body; `is_queue_bound_method` now queries the
+  `queue_bound` field on `REGISTRY` entries. Handler signatures
+  are normalised to
+  `async fn(&Option<Value>, &MethodContext) -> Result<Value, RpcError>`;
+  the small `daemon.shutdown` / `events.subscribe` sidebar pair
+  whose handler shape does not fit the macro is pinned by a
+  `sidebar_methods_appear_in_registry` test.
 
 ## [0.5.0] - 2026-06-14
 
