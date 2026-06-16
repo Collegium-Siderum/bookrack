@@ -3,13 +3,18 @@
 //! `papers.corpus_rebuild` JSON-RPC handler.
 //!
 //! Peer of [`super::corpus::rebuild`] for the paper pipeline.
+//!
+//! As with `corpus.rebuild`, a destructive rebuild requires the
+//! client to pass `yes = true`; the server never prompts on the
+//! caller's behalf and the `ask` closure denies any prompt that
+//! does reach the cmd layer.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, require_yes, run_write};
 use crate::cmd::papers_corpus;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
@@ -39,6 +44,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         })?,
         _ => PapersCorpusRebuildParams::default(),
     };
+    require_yes("papers.corpus_rebuild", parsed.yes, parsed.dry_run)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         papers_corpus::rebuild(
@@ -48,7 +54,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             parsed.stale_only,
             parsed.dry_run,
             parsed.yes,
-            |_prompt| Ok(true),
+            deny_destructive,
         )
         .await
         .map_err(|e| {
@@ -60,4 +66,8 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         Ok(json!({ "ok": true }))
     })
     .await
+}
+
+fn deny_destructive(_prompt: &str) -> anyhow::Result<bool> {
+    Ok(false)
 }

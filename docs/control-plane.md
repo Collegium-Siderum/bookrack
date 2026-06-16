@@ -41,6 +41,12 @@ and tool-scoped.
   not exist in the registry)
 - `-32011` job not found (bookrack-specific; `ingest.cancel` named a
   job id no longer in the queue document)
+- `-32012` confirmation required (bookrack-specific; a destructive
+  method that exposes a `yes` parameter was called without
+  `yes = true`. The control plane never prompts on the caller's
+  behalf — clients must confirm locally and resend with
+  `yes = true`. `dry_run` and `resume` paths are exempt where the
+  method documents them.)
 
 ## Methods (Phase 1)
 
@@ -166,6 +172,16 @@ and tool-scoped.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.
+
+Destructive methods that take a `yes` parameter — `corpus.rebuild`,
+`papers.corpus_rebuild`, `vectors.reembed`, `vectors.reset`,
+`papers.vectors_reembed`, `papers.vectors_reset` — require
+`yes = true` and reject `yes = false` with `-32012 confirmation
+required` before any work runs. The control plane never prompts on
+the caller's behalf, so clients must surface the confirmation
+locally and only then resend with the flag set. `dry_run` paths
+(rebuild / reembed) and `resume` paths (reset) are exempt because
+they do not destroy data on this call.
 
 ## Methods (library read proxies)
 

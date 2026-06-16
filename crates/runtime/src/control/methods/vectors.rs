@@ -3,16 +3,18 @@
 //! `vectors.{rebuild,reembed,reset,drop}` JSON-RPC handlers.
 //!
 //! Mirrors the CLI subcommand surface, plumbing each through
-//! [`super::run_write`]. The control-plane caller is assumed to have
-//! confirmed any destructive prompt on their side, so the `ask`
-//! closure simply approves.
+//! [`super::run_write`]. The control plane never prompts on the
+//! caller's behalf: any destructive method that exposes a `yes`
+//! parameter rejects requests with `yes = false` up front, and the
+//! `ask` closure handed to the cmd layer denies any prompt that
+//! does reach it.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, require_yes, run_write};
 use crate::cmd::vectors;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
@@ -70,6 +72,7 @@ pub struct VectorsReembedParams {
 
 pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: VectorsReembedParams = parse(params, "vectors.reembed")?;
+    require_yes("vectors.reembed", parsed.yes, parsed.dry_run)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         vectors::reembed(
@@ -79,7 +82,7 @@ pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             parsed.dry_run,
             parsed.yes,
             None,
-            approve_destructive,
+            deny_destructive,
         )
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.reembed failed: {e:#}")))?;
@@ -100,9 +103,10 @@ pub struct VectorsResetParams {
 
 pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: VectorsResetParams = parse(params, "vectors.reset")?;
+    require_yes("vectors.reset", parsed.yes, parsed.resume)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
-        vectors::reset(&cfg, parsed.yes, parsed.resume, approve_destructive)
+        vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
             .await
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("vectors.reset failed: {e:#}")))?;
         Ok(json!({ "ok": true }))
@@ -132,6 +136,6 @@ fn parse<T: serde::de::DeserializeOwned + Default>(
     }
 }
 
-fn approve_destructive(_prompt: &str) -> anyhow::Result<bool> {
-    Ok(true)
+fn deny_destructive(_prompt: &str) -> anyhow::Result<bool> {
+    Ok(false)
 }

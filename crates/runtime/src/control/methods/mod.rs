@@ -28,7 +28,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
 
 use super::events::{DaemonState, Event, EventStreamHandle};
-use super::jsonrpc::{BUSY, METHOD_NOT_FOUND, Request, RpcError};
+use super::jsonrpc::{BUSY, CONFIRMATION_REQUIRED, METHOD_NOT_FOUND, Request, RpcError};
 
 pub mod corpus;
 pub mod diagnose;
@@ -467,6 +467,27 @@ pub fn selection_data_dir(selection: &LibrarySelection) -> Option<&PathBuf> {
     selection.data_dir.as_ref()
 }
 
+/// Reject a destructive RPC with [`CONFIRMATION_REQUIRED`] unless the
+/// caller explicitly opted in with `yes = true` or the request takes
+/// a non-destructive path (`dry_run`, `resume`, ...).
+///
+/// The control plane never prompts on the client's behalf: every
+/// destructive method that exposes a `yes` parameter routes through
+/// this gate before any cmd-layer work runs.
+pub(crate) fn require_yes(method: &str, yes: bool, exempt: bool) -> Result<(), RpcError> {
+    if yes || exempt {
+        return Ok(());
+    }
+    Err(RpcError::new(
+        CONFIRMATION_REQUIRED,
+        format!(
+            "{method} requires `yes = true`: the control plane never prompts on \
+             the caller's behalf. Confirm the destructive operation on the \
+             client side, then resend with `yes = true`."
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +547,31 @@ mod tests {
     #[test]
     fn queue_worker_disabled_code_is_stable() {
         assert_eq!(QUEUE_WORKER_DISABLED, -32002);
+    }
+
+    #[test]
+    fn require_yes_rejects_default_request() {
+        let err = require_yes("vectors.reset", false, false).unwrap_err();
+        assert_eq!(err.code, CONFIRMATION_REQUIRED);
+        assert!(err.message.contains("vectors.reset"));
+        assert!(err.message.contains("yes = true"));
+    }
+
+    #[test]
+    fn require_yes_admits_explicit_consent() {
+        assert!(require_yes("vectors.reset", true, false).is_ok());
+    }
+
+    #[test]
+    fn require_yes_admits_exempt_path() {
+        assert!(require_yes("vectors.reembed", false, true).is_ok());
+        assert!(require_yes("vectors.reset", false, true).is_ok());
+    }
+
+    #[test]
+    fn require_yes_uses_distinct_error_code() {
+        assert_ne!(CONFIRMATION_REQUIRED, super::super::jsonrpc::INVALID_PARAMS);
+        assert_ne!(CONFIRMATION_REQUIRED, super::super::jsonrpc::INTERNAL_ERROR);
+        assert_eq!(CONFIRMATION_REQUIRED, -32012);
     }
 }

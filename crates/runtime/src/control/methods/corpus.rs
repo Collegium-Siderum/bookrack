@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `corpus.rebuild` JSON-RPC handler.
+//!
+//! The control plane never prompts on the caller's behalf: a
+//! destructive rebuild requires the client to pass `yes = true`.
+//! Otherwise the handler short-circuits with [`CONFIRMATION_REQUIRED`]
+//! and the supplied `ask` closure denies any prompt that does reach
+//! the cmd layer.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, require_yes, run_write};
 use crate::cmd::corpus;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
@@ -37,6 +43,7 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         })?,
         _ => CorpusRebuildParams::default(),
     };
+    require_yes("corpus.rebuild", parsed.yes, parsed.dry_run)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         corpus::rebuild(
@@ -47,11 +54,15 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
             parsed.dry_run,
             parsed.yes,
             None,
-            |_prompt| Ok(true),
+            deny_destructive,
         )
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("corpus.rebuild failed: {e:#}")))?;
         Ok(json!({ "ok": true }))
     })
     .await
+}
+
+fn deny_destructive(_prompt: &str) -> anyhow::Result<bool> {
+    Ok(false)
 }

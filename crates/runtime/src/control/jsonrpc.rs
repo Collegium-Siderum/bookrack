@@ -36,6 +36,11 @@ pub const INVALID_LIBRARY: i32 = -32010;
 /// bookrack-specific: `ingest.cancel` referenced a job id no longer
 /// in the queue document.
 pub const JOB_NOT_FOUND: i32 = -32011;
+/// bookrack-specific: a destructive RPC was issued without the
+/// caller-side confirmation flag. The control plane never prompts
+/// on behalf of the client, so any destructive method that exposes
+/// a `yes` parameter must receive `yes = true` to proceed.
+pub const CONFIRMATION_REQUIRED: i32 = -32012;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]

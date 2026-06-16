@@ -85,6 +85,23 @@ release workflow extracts the matching section verbatim from this file.
   `hold_for_metadata` field. The field is `#[serde(default)]` so
   any v2 document on disk continues to load with the flag unset.
 
+### Security
+
+- Destructive control-plane RPCs that expose a `yes` parameter —
+  `corpus.rebuild`, `papers.corpus_rebuild`, `vectors.reembed`,
+  `vectors.reset`, `papers.vectors_reembed`,
+  `papers.vectors_reset` — now reject requests with `yes = false`
+  before any work runs, returning the new
+  `-32012 confirmation required` error. The control plane never
+  prompts on the caller's behalf; previously the in-process `ask`
+  callback was hard-coded to approve, so a client that issued the
+  request with the flag unset would silently destroy the chunks
+  table or rebuild the corpus tree. `dry_run` (rebuild / reembed)
+  and `resume` (reset) paths remain exempt because they do not
+  destroy data on this call. The cmd-layer `ask` closure handed in
+  from the daemon also flipped to a denial so a future change to
+  the short-circuit logic cannot reintroduce the silent path.
+
 ### Changed
 
 - `bookrack_glean::glean_paper`'s no-op fast path now requires
