@@ -61,6 +61,16 @@ pub struct RebuildParams {
     /// was produced by an older extractor and so most needs a refresh.
     /// Combines with [`Self::only`] by intersection.
     pub stale_only: bool,
+    /// When set, the target set is exactly this list of intake ids —
+    /// [`Self::only`] and [`Self::stale_only`] are ignored. Each id
+    /// must resolve to an existing catalog row in a rebuildable state;
+    /// any unknown or non-rebuildable id aborts the whole call with
+    /// [`IngestError::UnknownIntake`] / [`IngestError::IntakeNotEmbedded`].
+    ///
+    /// Used by destructive RPCs to pin the execute leg to the exact
+    /// target set the operator confirmed during the dry-run leg,
+    /// independent of catalog drift between the two RPCs.
+    pub only_ids: Option<Vec<i64>>,
     /// When true, do not write anything: produce a [`RebuildReport`]
     /// that classifies each intake (rebuildable / missing_envelope /
     /// mismatched / failed) but skips the actual structure call.
@@ -75,15 +85,20 @@ pub fn rebuild_from_intakes(
     catalog: &Catalog,
     params: &RebuildParams,
 ) -> Result<RebuildReport> {
-    let mut targets = collect_targets(catalog, params.only)?;
-    if params.stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)
-            .map_err(IngestError::from)?
-            .into_iter()
-            .collect();
-        targets.retain(|i| stale.contains(&i.intake_id));
-    }
+    let targets = if let Some(ids) = params.only_ids.as_deref() {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, params.only)?;
+        if params.stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)
+                .map_err(IngestError::from)?
+                .into_iter()
+                .collect();
+            t.retain(|i| stale.contains(&i.intake_id));
+        }
+        t
+    };
     let mut report = RebuildReport::default();
     for intake in targets {
         let intake_id = intake.intake_id;
@@ -158,6 +173,21 @@ pub async fn stamp_index_from_existing_chunks(
     let dim = store.dimension() as u32;
     corpus.reconcile_index_stamps(&current_index_stamps(embed_model, dim))?;
     Ok(true)
+}
+
+fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<bookrack_catalog::Intake>> {
+    ids.iter()
+        .map(|id| {
+            let intake = catalog
+                .intake_by_id(*id)
+                .map_err(IngestError::from)?
+                .ok_or(IngestError::UnknownIntake(*id))?;
+            if !is_rebuildable(intake.status) {
+                return Err(IngestError::IntakeNotEmbedded(*id));
+            }
+            Ok(intake)
+        })
+        .collect()
 }
 
 fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_catalog::Intake>> {
@@ -515,5 +545,91 @@ mod tests {
                 .is_none(),
             "dry_run must not write any corpus nodes"
         );
+    }
+
+    #[test]
+    fn only_ids_pins_target_set_and_ignores_stale_only() {
+        let dir = tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let extraction = sample_extraction();
+
+        let fresh = register(&mut catalog, "sha-fresh");
+        catalog
+            .set_intake_status(ItemKind::Book, fresh, IntakeStatus::Embedded)
+            .expect("status");
+        catalog
+            .set_extraction(ItemKind::Book, fresh, "txt", EXTRACTOR_VERSION)
+            .expect("stamp fresh");
+        let fresh_path = seed_envelope(dir.path(), fresh, "sha-fresh", &extraction);
+        catalog
+            .set_stored_path(ItemKind::Book, fresh, &fresh_path)
+            .expect("stored fresh");
+
+        let stale = register(&mut catalog, "sha-stale");
+        catalog
+            .set_intake_status(ItemKind::Book, stale, IntakeStatus::Embedded)
+            .expect("status");
+        catalog
+            .set_extraction(ItemKind::Book, stale, "txt", EXTRACTOR_VERSION + 99)
+            .expect("stamp stale");
+        let stale_path = seed_envelope(dir.path(), stale, "sha-stale", &extraction);
+        catalog
+            .set_stored_path(ItemKind::Book, stale, &stale_path)
+            .expect("stored stale");
+
+        // Without pinning, stale_only would drop the fresh intake.
+        // With pinning to both ids, stale_only is bypassed.
+        let report = rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &RebuildParams {
+                only_ids: Some(vec![fresh, stale]),
+                stale_only: true,
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("rebuild");
+        let mut got = report.rebuilt.clone();
+        got.sort();
+        let mut want = vec![fresh, stale];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn only_ids_with_unknown_intake_errors_strict() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let catalog = Catalog::open_in_memory().expect("catalog");
+        let err = rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &RebuildParams {
+                only_ids: Some(vec![9999]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, IngestError::UnknownIntake(9999)));
+    }
+
+    #[test]
+    fn only_ids_with_non_rebuildable_status_errors_strict() {
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let pending = register(&mut catalog, "sha-pending");
+        // Default status after register is Pending, which is not in
+        // the rebuildable set (Extracted / DedupHold / Embedded).
+        let err = rebuild_from_intakes(
+            &mut corpus,
+            &catalog,
+            &RebuildParams {
+                only_ids: Some(vec![pending]),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, IngestError::IntakeNotEmbedded(id) if id == pending));
     }
 }

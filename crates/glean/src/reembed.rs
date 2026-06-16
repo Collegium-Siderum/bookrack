@@ -49,23 +49,36 @@ pub struct ReembedReport {
 ///
 /// When `stale_only` is true the target set is restricted to intakes
 /// whose stored `extractor_version` does not equal [`EXTRACTOR_VERSION`].
+///
+/// When `only_ids` is `Some`, the target set is exactly that list —
+/// `only` and `stale_only` are ignored. Each id must resolve to an
+/// existing catalog row in [`IntakeStatus::Embedded`]; any unknown
+/// or non-embedded id aborts with [`GleanError::UnknownIntake`] /
+/// [`GleanError::IntakeNotRebuildable`]. Used by destructive RPCs
+/// to pin the execute leg to the dry-run leg's confirmed set.
 pub async fn plan_reembed(
     catalog: &Catalog,
     lancedb_dir: &Path,
     only: Option<i64>,
+    only_ids: Option<&[i64]>,
     stale_only: bool,
 ) -> Result<Vec<ReembedPlan>> {
     // Passing 0 forces the open path to read dim from the schema for an
     // existing table.
     let store = ChunkStore::open(lancedb_dir, 0).await?;
-    let mut targets = collect_targets(catalog, only)?;
-    if stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)?
-            .into_iter()
-            .collect();
-        targets.retain(|intake| stale.contains(&intake.intake_id));
-    }
+    let targets = if let Some(ids) = only_ids {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, only)?;
+        if stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)?
+                .into_iter()
+                .collect();
+            t.retain(|intake| stale.contains(&intake.intake_id));
+        }
+        t
+    };
     let mut plans = Vec::new();
     for intake in targets {
         let intake_id = intake.intake_id;
@@ -110,6 +123,14 @@ pub async fn reembed_paper<E: Embedder>(
 /// When `stale_only` is true the target set is further restricted to
 /// intakes whose stored `extractor_version` does not equal
 /// [`EXTRACTOR_VERSION`]; combines with `only` by intersection.
+///
+/// When `only_ids` is `Some`, the target set is exactly that list —
+/// `only` and `stale_only` are ignored. Each id must resolve to an
+/// existing catalog row in [`IntakeStatus::Embedded`]; any unknown
+/// or non-embedded id aborts with [`GleanError::UnknownIntake`] /
+/// [`GleanError::IntakeNotRebuildable`]. Used by destructive RPCs
+/// to pin the execute leg to the dry-run leg's confirmed set.
+#[allow(clippy::too_many_arguments)]
 pub async fn reembed_all<E: Embedder>(
     catalog: &Catalog,
     corpus: &mut Corpus,
@@ -117,16 +138,22 @@ pub async fn reembed_all<E: Embedder>(
     cfg: &EmbedConfig,
     embedder: &E,
     only: Option<i64>,
+    only_ids: Option<&[i64]>,
     stale_only: bool,
 ) -> Result<ReembedReport> {
-    let mut targets = collect_targets(catalog, only)?;
-    if stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)?
-            .into_iter()
-            .collect();
-        targets.retain(|intake| stale.contains(&intake.intake_id));
-    }
+    let targets = if let Some(ids) = only_ids {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, only)?;
+        if stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)?
+                .into_iter()
+                .collect();
+            t.retain(|intake| stale.contains(&intake.intake_id));
+        }
+        t
+    };
     let run_id = new_run_id("reembed");
     let mut report = ReembedReport::default();
     for intake in targets {
@@ -192,6 +219,20 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_
         }
         None => catalog.intakes_with_status(IntakeStatus::Embedded)?,
     })
+}
+
+fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<bookrack_catalog::Intake>> {
+    ids.iter()
+        .map(|id| {
+            let intake = catalog
+                .intake_by_id(*id)?
+                .ok_or(GleanError::UnknownIntake(*id))?;
+            if intake.status != IntakeStatus::Embedded {
+                return Err(GleanError::IntakeNotRebuildable(*id));
+            }
+            Ok(intake)
+        })
+        .collect()
 }
 
 async fn read_chunk_plans(

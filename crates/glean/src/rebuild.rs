@@ -29,6 +29,16 @@ pub struct RebuildParams {
     /// `extractor_version` does not equal [`EXTRACTOR_VERSION`].
     /// Combines with [`Self::only`] by intersection.
     pub stale_only: bool,
+    /// When set, the target set is exactly this list of intake ids —
+    /// [`Self::only`] and [`Self::stale_only`] are ignored. Each id
+    /// must resolve to an existing catalog row in a rebuildable
+    /// state; any unknown or non-rebuildable id aborts the whole
+    /// call with [`GleanError::UnknownIntake`] /
+    /// [`GleanError::IntakeNotRebuildable`].
+    ///
+    /// Used by destructive RPCs to pin the execute leg to the exact
+    /// target set the operator confirmed during the dry-run leg.
+    pub only_ids: Option<Vec<i64>>,
     /// When true, do not write anything: classify each intake into the
     /// outcome buckets but skip the actual structure call.
     pub dry_run: bool,
@@ -59,14 +69,19 @@ pub fn rebuild_from_intakes(
     catalog: &Catalog,
     params: &RebuildParams,
 ) -> Result<RebuildReport> {
-    let mut targets = collect_targets(catalog, params.only)?;
-    if params.stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)?
-            .into_iter()
-            .collect();
-        targets.retain(|i| stale.contains(&i.intake_id));
-    }
+    let targets = if let Some(ids) = params.only_ids.as_deref() {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, params.only)?;
+        if params.stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)?
+                .into_iter()
+                .collect();
+            t.retain(|i| stale.contains(&i.intake_id));
+        }
+        t
+    };
     let mut report = RebuildReport::default();
     for intake in targets {
         let intake_id = intake.intake_id;
@@ -141,6 +156,20 @@ pub async fn stamp_index_from_existing_chunks(
         normalize_version: NORMALIZE_VERSION,
     })?;
     Ok(true)
+}
+
+fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<bookrack_catalog::Intake>> {
+    ids.iter()
+        .map(|id| {
+            let intake = catalog
+                .intake_by_id(*id)?
+                .ok_or(GleanError::UnknownIntake(*id))?;
+            if !is_rebuildable(intake.status) {
+                return Err(GleanError::IntakeNotRebuildable(*id));
+            }
+            Ok(intake)
+        })
+        .collect()
 }
 
 fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<bookrack_catalog::Intake>> {

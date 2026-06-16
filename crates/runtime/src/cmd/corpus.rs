@@ -134,6 +134,7 @@ where
             &embed_cfg,
             &embedder_client,
             book,
+            None,
             stale_only,
         )
         .await

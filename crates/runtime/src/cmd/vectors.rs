@@ -96,9 +96,10 @@ where
     let lancedb_dir = cfg.lancedb_dir();
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let plans = bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, stale_only)
-        .await
-        .context("plan reembed")?;
+    let plans =
+        bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, None, stale_only)
+            .await
+            .context("plan reembed")?;
     if plans.is_empty() {
         if stale_only {
             println!("no stale partitions; nothing to reembed");
@@ -143,6 +144,7 @@ where
         &embed_cfg,
         &embedder_client,
         book,
+        None,
         stale_only,
     )
     .await

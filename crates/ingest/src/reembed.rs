@@ -59,24 +59,37 @@ pub struct ReembedReport {
 /// whose stored `extractor_version` does not equal this binary's
 /// [`EXTRACTOR_VERSION`] — the same filter [`reembed_all`] applies, so
 /// the printed plan and the eventual run always agree.
+///
+/// When `only_ids` is `Some`, the target set is exactly that list —
+/// `only` and `stale_only` are ignored. Each id must resolve to an
+/// existing catalog row in [`IntakeStatus::Embedded`]; any unknown or
+/// non-embedded id aborts with [`IngestError::UnknownIntake`] /
+/// [`IngestError::IntakeNotEmbedded`]. Used by destructive RPCs to
+/// pin the execute leg to the dry-run leg's confirmed set.
 pub async fn plan_reembed(
     catalog: &Catalog,
     lancedb_dir: &Path,
     only: Option<i64>,
+    only_ids: Option<&[i64]>,
     stale_only: bool,
 ) -> Result<Vec<ReembedPlan>> {
     // The on-disk schema decides the dim; passing 0 forces the open
     // path to read it from the schema for an existing table.
     let store = ChunkStore::open(lancedb_dir, 0).await?;
-    let mut targets = collect_targets(catalog, only)?;
-    if stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)
-            .map_err(IngestError::from)?
-            .into_iter()
-            .collect();
-        targets.retain(|intake| stale.contains(&intake.intake_id));
-    }
+    let targets = if let Some(ids) = only_ids {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, only)?;
+        if stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)
+                .map_err(IngestError::from)?
+                .into_iter()
+                .collect();
+            t.retain(|intake| stale.contains(&intake.intake_id));
+        }
+        t
+    };
     let mut plans = Vec::new();
     for intake in targets {
         let intake_id = intake.intake_id;
@@ -125,6 +138,14 @@ pub async fn reembed_book<E: Embedder>(
 /// intakes whose stored `extractor_version` does not equal this
 /// binary's [`EXTRACTOR_VERSION`]; combines with `only` by
 /// intersection.
+///
+/// When `only_ids` is `Some`, the target set is exactly that list —
+/// `only` and `stale_only` are ignored. Each id must resolve to an
+/// existing catalog row in [`IntakeStatus::Embedded`]; any unknown or
+/// non-embedded id aborts with [`IngestError::UnknownIntake`] /
+/// [`IngestError::IntakeNotEmbedded`]. Used by destructive RPCs to
+/// pin the execute leg to the dry-run leg's confirmed set.
+#[allow(clippy::too_many_arguments)]
 pub async fn reembed_all<E: Embedder>(
     catalog: &Catalog,
     corpus: &Corpus,
@@ -132,17 +153,23 @@ pub async fn reembed_all<E: Embedder>(
     cfg: &EmbedConfig,
     embedder: &E,
     only: Option<i64>,
+    only_ids: Option<&[i64]>,
     stale_only: bool,
 ) -> Result<ReembedReport> {
-    let mut targets = collect_targets(catalog, only)?;
-    if stale_only {
-        let stale: std::collections::HashSet<i64> = catalog
-            .stale_partitions(EXTRACTOR_VERSION)
-            .map_err(IngestError::from)?
-            .into_iter()
-            .collect();
-        targets.retain(|intake| stale.contains(&intake.intake_id));
-    }
+    let targets = if let Some(ids) = only_ids {
+        collect_pinned_targets(catalog, ids)?
+    } else {
+        let mut t = collect_targets(catalog, only)?;
+        if stale_only {
+            let stale: std::collections::HashSet<i64> = catalog
+                .stale_partitions(EXTRACTOR_VERSION)
+                .map_err(IngestError::from)?
+                .into_iter()
+                .collect();
+            t.retain(|intake| stale.contains(&intake.intake_id));
+        }
+        t
+    };
     let run_id = maintenance_run_id("reembed");
     let mut report = ReembedReport::default();
     for intake in targets {
@@ -216,6 +243,21 @@ fn collect_targets(catalog: &Catalog, only: Option<i64>) -> Result<Vec<Intake>> 
             .intakes_with_status(IntakeStatus::Embedded)
             .map_err(IngestError::from)?,
     })
+}
+
+fn collect_pinned_targets(catalog: &Catalog, ids: &[i64]) -> Result<Vec<Intake>> {
+    ids.iter()
+        .map(|id| {
+            let intake = catalog
+                .intake_by_id(*id)
+                .map_err(IngestError::from)?
+                .ok_or(IngestError::UnknownIntake(*id))?;
+            if intake.status != IntakeStatus::Embedded {
+                return Err(IngestError::IntakeNotEmbedded(*id));
+            }
+            Ok(intake)
+        })
+        .collect()
 }
 
 /// Open the store, scan the partition, drop the vector column.
@@ -338,7 +380,7 @@ mod tests {
         seed_partition(dir.path(), 1, 3).await;
         // Partition 2 left empty: planner skips it.
 
-        let plans = plan_reembed(&catalog, dir.path(), None, false)
+        let plans = plan_reembed(&catalog, dir.path(), None, None, false)
             .await
             .expect("plan");
         assert_eq!(plans.len(), 1);
@@ -371,12 +413,12 @@ mod tests {
             )
             .expect("override extractor_version on intake 2");
 
-        let full = plan_reembed(&catalog, dir.path(), None, false)
+        let full = plan_reembed(&catalog, dir.path(), None, None, false)
             .await
             .expect("plan full");
         assert_eq!(full.len(), 2);
 
-        let stale = plan_reembed(&catalog, dir.path(), None, true)
+        let stale = plan_reembed(&catalog, dir.path(), None, None, true)
             .await
             .expect("plan stale");
         assert_eq!(stale.len(), 1);
@@ -437,6 +479,7 @@ mod tests {
             dir.path(),
             &cfg,
             &Fake { generation: 9 },
+            None,
             None,
             false,
         )

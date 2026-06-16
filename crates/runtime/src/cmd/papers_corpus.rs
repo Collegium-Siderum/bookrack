@@ -32,6 +32,7 @@ where
         only: paper,
         stale_only,
         dry_run: true,
+        ..Default::default()
     };
     let plan_report =
         bookrack_glean::rebuild::rebuild_from_intakes(&mut corpus, &catalog, &plan_params)
@@ -86,6 +87,7 @@ where
         only: paper,
         stale_only,
         dry_run: false,
+        ..Default::default()
     };
     let report = bookrack_glean::rebuild::rebuild_from_intakes(&mut corpus, &catalog, &run_params)
         .context("papers rebuild")?;
@@ -126,6 +128,7 @@ where
             &embed_cfg,
             &embedder_client,
             paper,
+            None,
             stale_only,
         )
         .await
