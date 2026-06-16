@@ -1292,9 +1292,7 @@ async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
     let first = vectors
         .into_iter()
         .next()
-        .ok_or_else(|| GleanError::NeedsOcr {
-            reason: "embedder returned no vector for the dimension probe".to_string(),
-        })?;
+        .ok_or(GleanError::EmptyEmbedding)?;
     Ok(first.len())
 }
 
