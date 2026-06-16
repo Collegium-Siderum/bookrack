@@ -379,9 +379,11 @@ where
             format!("write command join failed: {e}"),
         )),
     };
-    ctx.event_stream.publish(Event::LibraryChanged {
-        library: ctx.library_name.clone(),
-    });
+    if outcome.is_ok() {
+        ctx.event_stream.publish(Event::LibraryChanged {
+            library: ctx.library_name.clone(),
+        });
+    }
     ctx.event_stream
         .publish(Event::McpAvailability { paused: false });
     ctx.event_stream.set_state(DaemonState::Idle);
