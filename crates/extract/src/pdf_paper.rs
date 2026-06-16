@@ -308,30 +308,35 @@ fn fold_fullwidth_to_ascii(text: &str) -> String {
 /// Color one paper's block stream with heading and caption classifications.
 ///
 /// The pass is precision-first: it would rather miss a real heading
-/// than admit a noise line that looks "heading-shaped." Two modes,
-/// chosen by whether the PDF outline is usable:
+/// than admit a noise line that looks "heading-shaped." A caption
+/// sub-step runs first, then two cooperating heading signals:
 ///
-/// 1. **Outline-trust mode.** When the PDF's `/Outline` carries three
-///    or more anchored entries at depth ≥ 1 after the figure /
-///    table-caption labels are filtered out, the outline is the only
-///    signal. Each surviving entry's anchor block is promoted to
-///    `BlockKind::Heading { level }` (depth 0 → level 1, depth ≥ 1 →
-///    level 2). The heuristic does not run.
-/// 2. **Strict-numbered heuristic.** Used only when the outline is
-///    absent or too thin to trust. The heuristic accepts a candidate
-///    only when every rule below is satisfied, and then runs a
-///    sequence check (1, 2, 3, … or I, II, III, …) over the surviving
-///    set, dropping any candidate that does not fit the ascending
-///    series.
+/// 1. **Caption pass.** Strict `Figure N.` / `Table N.` / Chinese
+///    `\u{56fe}` / `\u{8868}` lines become [`BlockKind::Caption`]
+///    before any heading work, so a captioned line never enters
+///    either candidate pool below.
+/// 2. **Outline pass.** Runs whenever the PDF's `/Outline` has any
+///    entries. Each entry with a resolved `start_block` whose label
+///    is not a figure / table caption (`FIGURE_CAPTION_LABEL`)
+///    anchors a small forward window; the first block in that window
+///    passing the strict heading gate and matching the entry's label
+///    is promoted to `BlockKind::Heading { level }` (depth 0 → level
+///    1, depth ≥ 1 → level 2). Anchors that find no matching block
+///    in their window contribute nothing.
+/// 3. **Strict-numbered heuristic.** Runs over every block the outline
+///    pass left as `Body`. Candidates must pass the per-block gate
+///    (numbered prefix, single line, short, no math, geometry
+///    consistent with a heading) and then fit the ascending sequence
+///    (1, 2, 3, … or I, II, III, …). Outline-promoted Headings are
+///    absorbed as sequence anchors without being recounted, so an
+///    outline-anchored "2 Background" lets the heuristic recognise
+///    "3 Model Architecture" as the next L1 even when the outline
+///    skips it.
 ///
-/// In either mode a separate caption pass colors strict `Figure N.` /
-/// `Table N.` / Chinese `\u{56fe}` / `\u{8868}` lines as
-/// [`BlockKind::Caption`].
-///
-/// The returned [`SourceOfStructure`] records which signal contributed:
-/// `Outline`, `Heuristic`, `Mixed` when both did, and `None` when the
-/// paper produced no surviving headings at all — that is an explicit,
-/// safe-to-display answer, not a failure.
+/// The returned [`SourceOfStructure`] records which signal newly
+/// promoted at least one block: `Outline`, `Heuristic`, `Mixed` when
+/// both did, and `None` when neither produced a heading — that is an
+/// explicit, safe-to-display answer, not a failure.
 pub fn extract_paper_structured(blocks: &mut [Block], toc: &Toc) -> SourceOfStructure {
     // 1. Caption coloring. Strict head pattern: must have the
     //    introducer word + a number + a separator (period, colon,
