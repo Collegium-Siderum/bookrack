@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- `library.find_books` honours the `categories` filter end to end:
+  `BookFilter` and `IntakeFilter` carry the list, the catalog's
+  `find_intakes` SQL adds an EXISTS sub-query against
+  `node_categories` keyed on the book scope, and the MCP / RPC
+  layers drop the warning that the field was ignored. The match is
+  "at least one tag in the list".
+
 - `metadata.advance` control-plane method resumes CHUNK→EMBED for
   a book parked at the metadata gate by `--hold-for-metadata`. The
   REPL grammar's existing `Advance` action and the CLI's

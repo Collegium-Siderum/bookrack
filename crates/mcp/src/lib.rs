@@ -795,31 +795,25 @@ impl BookrackServer {
         respond_with(&page)
     }
 
-    /// Find books by title substring, contributor, format, or status.
+    /// Find books by title substring, contributor, format, status,
+    /// or category tags.
     #[tool(
         name = "library.find_books",
-        description = "Search the book registry by title substring (fuzzy) and / or \
-                       contributor name (exact). `categories` is reserved for a \
-                       future release and is ignored today."
+        description = "Search the book registry by title substring (fuzzy), contributor \
+                       name (exact), file format, or category tags. The `categories` \
+                       filter matches books carrying at least one of the listed tags."
     )]
     async fn library_find_books(
         &self,
         Parameters(args): Parameters<FindBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        if let Some(cats) = &args.categories
-            && !cats.is_empty()
-        {
-            tracing::warn!(
-                categories = ?cats,
-                "library.find_books: categories filter is not yet implemented and was ignored"
-            );
-        }
         let filter = BookFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
             contributor_role: args.contributor_role,
             format: args.format,
+            categories: args.categories.unwrap_or_default(),
             ..BookFilter::default()
         };
         let limit = args.limit.unwrap_or(0);

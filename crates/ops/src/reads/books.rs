@@ -53,18 +53,21 @@ pub fn find_books<E: Embedder>(
             .iter()
             .map(|s| s.as_str())
             .collect::<Vec<_>>(),
+        "categories": filter.categories,
         "limit": limit,
         "offset": offset,
     });
     record_call_sync!(ops, "library.find_books", args, {
         let (effective_limit, clamp_triggered) = clamp_limit(limit);
         let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        let categories_refs: Vec<&str> = filter.categories.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
             title_substring: filter.title_substring.as_deref(),
             contributor_name: filter.contributor_name.as_deref(),
             contributor_role: filter.contributor_role.as_deref(),
             statuses: filter.statuses.as_slice(),
             format: filter.format.as_deref(),
+            categories: categories_refs.as_slice(),
             ..IntakeFilter::default()
         };
         let intakes = catalog.find_intakes(&catalog_filter, effective_limit, offset)?;

@@ -275,6 +275,9 @@ pub struct BookFilter {
     pub statuses: Vec<IntakeStatus>,
     /// Exact-equality match against the file format.
     pub format: Option<String>,
+    /// Match books carrying at least one of these category tags.
+    /// Empty means no filter.
+    pub categories: Vec<String>,
 }
 
 impl BookSummary {

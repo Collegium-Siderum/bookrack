@@ -251,19 +251,12 @@ pub fn list_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    if let Some(cats) = &p.categories
-        && !cats.is_empty()
-    {
-        tracing::warn!(
-            categories = ?cats,
-            "library.find_books: categories filter is not yet implemented and was ignored"
-        );
-    }
     let filter = BookFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
         contributor_role: p.contributor_role,
         format: p.format,
+        categories: p.categories.unwrap_or_default(),
         ..BookFilter::default()
     };
     let page = reads::books::find_books(

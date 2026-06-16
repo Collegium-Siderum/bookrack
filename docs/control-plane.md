@@ -179,7 +179,9 @@ catalog and corpus handles the daemon already holds.
 
 - `library.stats` — aggregate counts over the library.
 - `library.list_books` / `library.find_books` — paginated registry
-  browse and filter.
+  browse and filter. `library.find_books` accepts a `categories`
+  list that matches books tagged with at least one of the listed
+  category strings in `node_categories`.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
   record and TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by

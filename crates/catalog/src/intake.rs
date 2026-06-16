@@ -231,6 +231,10 @@ pub struct IntakeFilter<'a> {
     /// Exact-equality match against the root publication-attrs `doi`
     /// column.
     pub doi: Option<&'a str>,
+    /// Match intakes that carry at least one of these category tags in
+    /// `node_categories`, joined on the item scope. An empty slice
+    /// means "no filter".
+    pub categories: &'a [&'a str],
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -340,6 +344,24 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
     if let Some(doi) = filter.doi {
         where_parts.push("npa.doi = ?".to_string());
         params.push(Box::new(doi.to_string()));
+    }
+    if !filter.categories.is_empty() {
+        debug_assert!(
+            filter.categories.len() <= 16,
+            "IntakeFilter.categories takes at most 16 entries, got {}",
+            filter.categories.len()
+        );
+        let placeholders = vec!["?"; filter.categories.len()].join(", ");
+        where_parts.push(format!(
+            "EXISTS (SELECT 1 FROM node_categories nc_cat \
+             WHERE nc_cat.intake_id = i.intake_id \
+               AND nc_cat.scope = ? \
+               AND nc_cat.category IN ({placeholders}))"
+        ));
+        params.push(Box::new(filter.kind.as_scope_str().to_string()));
+        for value in filter.categories {
+            params.push(Box::new((*value).to_string()));
+        }
     }
 
     let where_clause = if where_parts.is_empty() {
@@ -1827,6 +1849,65 @@ mod tests {
                 .expect("count unknown"),
             0
         );
+    }
+
+    #[test]
+    fn find_intakes_filters_on_categories() {
+        let mut catalog = catalog();
+        let philo = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-philo"))
+            .expect("register")
+            .intake()
+            .intake_id;
+        let bio = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-bio"))
+            .expect("register")
+            .intake()
+            .intake_id;
+        catalog
+            .register_intake(ItemKind::Book, &NewIntake::new("sha-other"))
+            .expect("register");
+        catalog
+            .add_category(&crate::NewCategory::new(
+                philo,
+                ItemKind::Book,
+                "philosophy",
+                "user",
+                "human",
+            ))
+            .expect("tag");
+        catalog
+            .add_category(&crate::NewCategory::new(
+                bio,
+                ItemKind::Book,
+                "biography",
+                "user",
+                "human",
+            ))
+            .expect("tag");
+
+        let filter = IntakeFilter {
+            categories: &["philosophy"],
+            ..IntakeFilter::default()
+        };
+        let hits = catalog
+            .find_intakes(&filter, 100, 0)
+            .expect("filtered find");
+        let ids: Vec<i64> = hits.iter().map(|i| i.intake_id).collect();
+        assert_eq!(ids, vec![philo]);
+
+        let filter_either = IntakeFilter {
+            categories: &["philosophy", "biography"],
+            ..IntakeFilter::default()
+        };
+        let hits_either = catalog
+            .find_intakes(&filter_either, 100, 0)
+            .expect("filtered find");
+        let mut ids_either: Vec<i64> = hits_either.iter().map(|i| i.intake_id).collect();
+        ids_either.sort();
+        assert_eq!(ids_either, vec![philo, bio]);
+
+        assert_eq!(catalog.count_find_intakes(&filter).expect("count"), 1);
     }
 
     #[test]
