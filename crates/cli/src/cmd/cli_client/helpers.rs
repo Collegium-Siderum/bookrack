@@ -170,3 +170,56 @@ pub fn print_value(value: &Value) {
         Err(_) => println!("{value}"),
     }
 }
+
+/// Drive the two-step pinned destructive RPC protocol used by
+/// `corpus.rebuild`, `vectors.reembed`, `remove`, and their paper
+/// peers. Sends the dry-run leg with `selectors`, prints the
+/// structured plan, then — unless the user passed `--dry-run` or
+/// declined a confirmation prompt — sends the execute leg with the
+/// returned `plan_id` and prints the outcome.
+///
+/// `selectors` is the JSON object that names what the dry-run should
+/// plan for (e.g. `{ "book": 7, "stale_only": true }`). The helper
+/// merges in `dry_run = true` for the first call and
+/// `{ yes = true, plan_id = … }` for the second.
+///
+/// When `user_yes` is `false` the helper prompts via
+/// [`crate::util::confirm`]; an empty / declined answer aborts
+/// before the execute leg runs.
+pub async fn run_pinned_destructive(
+    client: std::sync::Arc<ControlClient>,
+    method: &str,
+    mut selectors: Value,
+    user_dry_run: bool,
+    user_yes: bool,
+    confirm_prompt: &str,
+) -> Result<()> {
+    selectors["dry_run"] = Value::Bool(true);
+    let plan = call_with_progress_value(client.clone(), method, selectors).await?;
+    print_value(&plan);
+
+    if user_dry_run {
+        return Ok(());
+    }
+
+    let plan_id = plan
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("{method}: daemon dry-run response did not include a plan_id")
+        })?;
+
+    if !user_yes && !crate::util::confirm(confirm_prompt)? {
+        println!("aborted; no changes written");
+        return Ok(());
+    }
+
+    let execute_params = serde_json::json!({
+        "yes": true,
+        "plan_id": plan_id,
+    });
+    let outcome = call_with_progress_value(client, method, execute_params).await?;
+    print_value(&outcome);
+    Ok(())
+}

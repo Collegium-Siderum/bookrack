@@ -39,13 +39,22 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
             dry_run,
             yes,
         } => {
-            let params = json!({
+            let selectors = json!({
                 "book": book,
                 "stale_only": stale_only,
-                "dry_run": dry_run,
-                "yes": yes,
             });
-            helpers::call_with_progress(client, "vectors.reembed", params).await
+            helpers::run_pinned_destructive(
+                client,
+                "vectors.reembed",
+                selectors,
+                dry_run,
+                yes,
+                "About to delete-and-rewrite the chunk rows above.\n\
+                 Existing vectors will be overwritten by fresh embeddings\n\
+                 from the currently configured model. This is irreversible.\n\
+                 Type 'yes' to continue: ",
+            )
+            .await
         }
         WriteVectorsAction::Reset { yes, resume } => {
             if !crate::util::confirm_vectors_reset(yes, resume)? {

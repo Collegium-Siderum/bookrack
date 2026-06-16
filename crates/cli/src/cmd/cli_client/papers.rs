@@ -249,14 +249,35 @@ async fn corpus(action: PapersCorpusAction, runtime_dir: Option<PathBuf>) -> Res
             dry_run,
             yes,
         } => {
-            let params = json!({
+            let selectors = json!({
                 "include_vectors": include_vectors,
                 "paper": paper,
                 "stale_only": stale_only,
-                "dry_run": dry_run,
-                "yes": yes,
             });
-            helpers::call_and_print(&client, "papers.corpus_rebuild", params).await
+            let prompt = if include_vectors {
+                "About to overwrite papers_corpus.db node rows for the intakes\n\
+                 above, then re-embed each paper's abstract into lancedb_papers.\n\
+                 This is irreversible (the existing corpus tree is replaced).\n\
+                 Type 'yes' to continue: "
+            } else {
+                "About to overwrite papers_corpus.db node rows for the intakes\n\
+                 above. lancedb_papers will retain its current chunks; the\n\
+                 index_meta build stamps are re-stamped from the existing chunks\n\
+                 so search can continue to run. Re-embed with\n\
+                 `bookrack papers vectors reembed` if you bumped the chunking\n\
+                 or normalization algorithm. This is irreversible (the existing\n\
+                 corpus tree is replaced).\n\
+                 Type 'yes' to continue: "
+            };
+            helpers::run_pinned_destructive(
+                client,
+                "papers.corpus_rebuild",
+                selectors,
+                dry_run,
+                yes,
+                prompt,
+            )
+            .await
         }
     }
 }
@@ -291,13 +312,22 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
             dry_run,
             yes,
         } => {
-            let params = json!({
+            let selectors = json!({
                 "paper": paper,
                 "stale_only": stale_only,
-                "dry_run": dry_run,
-                "yes": yes,
             });
-            helpers::call_and_print(&client, "papers.vectors_reembed", params).await
+            helpers::run_pinned_destructive(
+                client,
+                "papers.vectors_reembed",
+                selectors,
+                dry_run,
+                yes,
+                "About to delete-and-rewrite the paper chunk rows above.\n\
+                 Existing vectors will be overwritten by fresh embeddings\n\
+                 from the currently configured model. This is irreversible.\n\
+                 Type 'yes' to continue: ",
+            )
+            .await
         }
         PapersVectorsAction::Reset { yes, resume } => {
             let params = json!({ "yes": yes, "resume": resume });
@@ -317,13 +347,21 @@ async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Res
 
 async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
-    let params = json!({
+    let selectors = json!({
         "intake_id": args.intake_id,
         "sha": args.sha,
-        "dry_run": args.dry_run,
-        "yes": args.yes,
     });
-    helpers::call_and_print(&client, "papers.remove", params).await
+    helpers::run_pinned_destructive(
+        client,
+        "papers.remove",
+        selectors,
+        args.dry_run,
+        args.yes,
+        "About to delete this paper from every store. This is\n\
+         irreversible (vector tombstones are not recoverable).\n\
+         Audit rows are preserved. Type 'yes' to continue: ",
+    )
+    .await
 }
 
 async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
