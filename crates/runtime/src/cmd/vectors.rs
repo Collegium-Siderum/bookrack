@@ -175,6 +175,50 @@ where
     Ok(())
 }
 
+/// Compute a reembed plan without writing anything. Returns the
+/// per-intake plan rows a subsequent
+/// [`execute_reembed_from_plan`] call will pin to.
+pub async fn plan_reembed(
+    cfg: &Config,
+    book: Option<i64>,
+    stale_only: bool,
+) -> Result<Vec<bookrack_ingest::reembed::ReembedPlan>> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    bookrack_ingest::reembed::plan_reembed(&catalog, &lancedb_dir, book, None, stale_only)
+        .await
+        .context("plan reembed")
+}
+
+/// Execute a reembed against the exact pinned set computed by an
+/// earlier [`plan_reembed`] call. Strict: every id in `pinned_ids`
+/// must still resolve to an Embedded catalog row, else the call
+/// aborts without writing.
+pub async fn execute_reembed_from_plan(
+    cfg: &Config,
+    pinned_ids: Vec<i64>,
+) -> Result<bookrack_ingest::reembed::ReembedReport> {
+    let lancedb_dir = cfg.lancedb_dir();
+    let catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
+    let embed_cfg = EmbedConfig::from_env();
+    let embedder_client = embedder(cfg, &embed_cfg)?;
+    bookrack_ingest::reembed::reembed_all(
+        &catalog,
+        &corpus,
+        &lancedb_dir,
+        &embed_cfg,
+        &embedder_client,
+        None,
+        Some(&pinned_ids),
+        false,
+    )
+    .await
+    .context("reembed_all")
+}
+
 /// Render `bookrack vectors drop` — drop any ANN index and stamp the
 /// meta as `kind = brute-force`. Search falls back to a full scan.
 pub async fn drop(cfg: &Config) -> Result<()> {

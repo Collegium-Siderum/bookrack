@@ -24,7 +24,11 @@ use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
 use bookrack_ops::registry::RegistryError;
 
-use super::jsonrpc::{INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, RpcError};
+use super::jsonrpc::{
+    INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH,
+    PLAN_NOT_FOUND, RpcError,
+};
+use super::plan_registry::PlanLookupError;
 
 /// Map a write-handler error onto a JSON-RPC error envelope.
 ///
@@ -58,6 +62,36 @@ pub(crate) fn ops_err(e: OpsError) -> RpcError {
 /// Map a directly-held [`RegistryError`] without an `anyhow` round-trip.
 pub(crate) fn registry_err(e: RegistryError) -> RpcError {
     from_registry(&e)
+}
+
+/// Map a [`PlanLookupError`] onto the corresponding wire code.
+///
+/// The destructive RPC pin protocol surfaces three failure modes on
+/// the execute leg: missing / expired ids land on
+/// [`PLAN_NOT_FOUND`] (collapsed together so the wire-level
+/// appearance of "I do not have this id" is consistent), and the
+/// scope-violation variants land on their dedicated codes so a
+/// client can distinguish operator error (wrong kind, wrong
+/// library) from drift (expired or consumed).
+pub(crate) fn plan_lookup_err(e: PlanLookupError) -> RpcError {
+    match e {
+        PlanLookupError::NotFound => RpcError::new(
+            PLAN_NOT_FOUND,
+            "plan_id not found: register a fresh plan with dry_run=true and re-confirm",
+        ),
+        PlanLookupError::Expired => RpcError::new(
+            PLAN_NOT_FOUND,
+            "plan_id has expired: register a fresh plan with dry_run=true and re-confirm",
+        ),
+        PlanLookupError::KindMismatch { expected, actual } => RpcError::new(
+            PLAN_KIND_MISMATCH,
+            format!("plan_id was registered for {actual}, not {expected}"),
+        ),
+        PlanLookupError::LibraryMismatch { expected, actual } => RpcError::new(
+            PLAN_LIBRARY_MISMATCH,
+            format!("plan_id was registered against library {actual:?}, not {expected:?}"),
+        ),
+    }
 }
 
 fn from_ops(e: &OpsError) -> RpcError {
