@@ -8,6 +8,8 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-16
+
 ### Fixed
 
 - `bookrack-runtime` raises its crate-level `recursion_limit` to
