@@ -442,12 +442,22 @@ where
         {
             let mut guard = state.lock().expect("queue state mutex poisoned");
             if pause_queue {
-                paused.store(true, Ordering::Release);
                 guard.paused = true;
             }
             apply_outcome(&mut guard, &job.id, outcome);
-            if let Err(err) = save_atomic(&guard, &state_path) {
+            let save_result = save_atomic(&guard, &state_path);
+            if let Err(err) = &save_result {
                 tracing::error!(error = %err, "queue worker: persist after outcome");
+            }
+            if pause_queue {
+                if save_result.is_ok() {
+                    paused.store(true, Ordering::Release);
+                } else {
+                    // Persist failed: keep the in-memory pause flag in
+                    // sync with what is on disk so a restart and the
+                    // running worker agree.
+                    guard.paused = false;
+                }
             }
             let last_finished = guard
                 .jobs
@@ -960,6 +970,63 @@ mod tests {
             .count();
         assert_eq!(failed, 1, "exactly one job burns: {snapshot:?}");
         assert_eq!(pending, 1, "the second job survives: {snapshot:?}");
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn process_level_failure_keeps_atomic_consistent_with_disk_when_persist_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file in the parent dir forces save_atomic to fail:
+        // `create_dir_all` cannot turn a file into a directory, so every
+        // attempt against `<blocker>/queue.json` errors out cross-
+        // platform.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let path = blocker.join("queue.json");
+
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/a.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            let paused = Arc::clone(&paused);
+            tokio::spawn(worker_loop(
+                path.clone(),
+                state,
+                rx,
+                |_job| async {
+                    Err(JobError::Process(
+                        "vector store error: Too many open files".to_string(),
+                    ))
+                },
+                EventStreamHandle::default(),
+                paused,
+            ))
+        };
+
+        // Give the worker time to pull, fail, and attempt to persist.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let snapshot = state.lock().unwrap().clone();
+        let atomic_paused = paused.load(Ordering::Acquire);
+        assert!(
+            !atomic_paused,
+            "atomic must not flip when save_atomic cannot persist"
+        );
+        assert!(
+            !snapshot.paused,
+            "in-memory QueueState::paused must be restored when save fails"
+        );
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
