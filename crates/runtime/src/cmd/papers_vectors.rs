@@ -298,3 +298,47 @@ where
     }
     Ok(())
 }
+
+/// Compute a papers reembed plan without writing anything. Returns
+/// the per-intake plan rows a subsequent
+/// [`execute_reembed_from_plan`] call will pin to.
+pub async fn plan_reembed(
+    cfg: &Config,
+    paper: Option<i64>,
+    stale_only: bool,
+) -> Result<Vec<bookrack_glean::reembed::ReembedPlan>> {
+    let lancedb_dir = cfg.papers_lancedb_dir();
+    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+        .context("open papers catalog")?;
+    bookrack_glean::reembed::plan_reembed(&catalog, &lancedb_dir, paper, None, stale_only)
+        .await
+        .context("plan papers reembed")
+}
+
+/// Execute a papers reembed against the exact pinned set computed by
+/// an earlier [`plan_reembed`] call. Strict: every id in
+/// `pinned_ids` must still resolve to an Embedded catalog row, else
+/// the call aborts without writing.
+pub async fn execute_reembed_from_plan(
+    cfg: &Config,
+    pinned_ids: Vec<i64>,
+) -> Result<bookrack_glean::reembed::ReembedReport> {
+    let lancedb_dir = cfg.papers_lancedb_dir();
+    let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+        .context("open papers catalog")?;
+    let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
+    let embed_cfg = EmbedConfig::from_env();
+    let embedder_client = embedder(cfg, &embed_cfg)?;
+    bookrack_glean::reembed::reembed_all(
+        &catalog,
+        &mut corpus,
+        &lancedb_dir,
+        &embed_cfg,
+        &embedder_client,
+        None,
+        Some(&pinned_ids),
+        false,
+    )
+    .await
+    .context("papers reembed_all")
+}

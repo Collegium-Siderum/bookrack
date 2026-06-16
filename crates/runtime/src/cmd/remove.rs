@@ -15,6 +15,17 @@
 //! The vector-store delete leaves tombstones in LanceDB. Compaction is
 //! left to the existing `optimize` path that the ingest and reembed
 //! flows run on their next pass — `remove` does not run it inline.
+//!
+//! Two entry-point shapes coexist:
+//!
+//! - [`run`] is the in-process path used by the local REPL: plan,
+//!   print, confirm, execute. The execute step looks the intake up
+//!   again to honour the resumption invariant.
+//! - [`plan_remove`] + [`execute_remove_from_plan`] are the
+//!   two-step path the control-plane handler drives: the operator
+//!   confirms a registered plan, and the execute leg acts on the
+//!   pinned intake id. Strict: the intake must still resolve when
+//!   the execute leg runs, else the call aborts without writing.
 
 use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
@@ -36,12 +47,40 @@ pub struct RemoveArgs {
 }
 
 pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
+    let plan = plan_remove(cfg, &args).await?;
+    print_plan(
+        &plan.intake,
+        &plan.counts,
+        plan.vector_rows,
+        plan.corpus_nodes,
+        plan.envelope_path.as_deref(),
+        plan.envelope_exists,
+    );
+
+    if args.dry_run {
+        return Ok(());
+    }
+    if !args.yes && !confirm()? {
+        println!("aborted; no changes written");
+        return Ok(());
+    }
+
+    let outcome = execute_remove_from_plan(cfg, plan.intake.intake_id).await?;
+    print_outcome(&outcome);
+    Ok(())
+}
+
+/// Plan a remove without writing: resolve the intake, count
+/// everything the execute step would delete, and report whether the
+/// envelope file is on disk. Used by both [`run`] and the
+/// control-plane handler's dry-run leg.
+pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
         anyhow::bail!("pass an intake id (positional) or --sha <hex>");
     }
-    let mut catalog =
+    let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
-    let intake = resolve_intake(&catalog, &args)?;
+    let intake = resolve_intake(&catalog, args)?;
     let intake_id = intake.intake_id;
     let partition = PartitionIdx::new(intake_id);
     let book_root_node_id: NodeId = partition.root();
@@ -68,23 +107,32 @@ pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
 
     let corpus_nodes = read_corpus_node_count(cfg, book_root_node_id)?;
 
-    print_plan(
-        &intake,
-        &counts,
+    Ok(RemovePlan {
+        intake,
+        counts,
         vector_rows,
         corpus_nodes,
-        envelope_path.as_deref(),
+        envelope_path,
         envelope_exists,
-    );
+    })
+}
 
-    if args.dry_run {
-        return Ok(());
-    }
-
-    if !args.yes && !confirm()? {
-        println!("aborted; no changes written");
-        return Ok(());
-    }
+/// Execute the remove sequence for an intake pinned by an earlier
+/// [`plan_remove`] call. Strict: the intake must still resolve in
+/// the catalog (even with the cascade rows already cleaned, e.g. a
+/// resumed removal), else the call aborts without writing.
+pub async fn execute_remove_from_plan(cfg: &Config, intake_id: i64) -> Result<RemoveOutcome> {
+    let mut catalog =
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
+    let intake = catalog
+        .intake_by_id(intake_id)
+        .context("look up intake")?
+        .with_context(|| {
+            format!("plan referenced intake {intake_id}, which no longer exists in the catalog")
+        })?;
+    let partition = PartitionIdx::new(intake_id);
+    let book_root_id: i64 = partition.root().get();
+    let envelope_path = intake.stored_path.clone();
 
     // Order:
     //   1. catalog derived rows (transactional)
@@ -102,7 +150,7 @@ pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
         .context("drop corpus partition")?;
     drop(corpus);
 
-    if let Some(dim) = vector_dim {
+    if let Some(dim) = corpus_vector_dim(cfg)? {
         let store = ChunkStore::open(&cfg.lancedb_dir(), dim)
             .await
             .context("open vector store")?;
@@ -124,24 +172,57 @@ pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
         .delete_intake(intake_id)
         .context("delete intake row")?;
 
+    Ok(RemoveOutcome {
+        intake_id,
+        source_sha256: intake.source_sha256,
+        catalog_deleted: deleted,
+        intake_row_existed: existed,
+    })
+}
+
+/// Plan side of [`run`] / the dry-run leg: what the execute step
+/// would delete.
+#[derive(Debug, Clone)]
+pub struct RemovePlan {
+    pub intake: Intake,
+    pub counts: ItemRemovalCounts,
+    pub vector_rows: Option<usize>,
+    pub corpus_nodes: u64,
+    pub envelope_path: Option<String>,
+    pub envelope_exists: bool,
+}
+
+/// Aggregate outcome of [`execute_remove_from_plan`]: what actually
+/// got deleted.
+#[derive(Debug, Clone, Default)]
+pub struct RemoveOutcome {
+    pub intake_id: i64,
+    pub source_sha256: String,
+    pub catalog_deleted: ItemRemovalCounts,
+    /// `true` if the `intake` row was deleted by this call;
+    /// `false` if a prior partial removal had already cleaned it.
+    pub intake_row_existed: bool,
+}
+
+fn print_outcome(o: &RemoveOutcome) {
     println!(
-        "removed: intake_id={intake_id}, source_sha256={}",
-        intake.source_sha256
+        "removed: intake_id={}, source_sha256={}",
+        o.intake_id, o.source_sha256
     );
     println!(
         "  catalog rows: {} (book_state={}, publication_attrs={}, overrides={}, \
          contributors={}, categories={}, reviews={}, role_takeovers={}, toc_edits={})",
-        deleted.total(),
-        deleted.book_state,
-        deleted.node_publication_attrs,
-        deleted.node_overrides,
-        deleted.node_contributors,
-        deleted.node_categories,
-        deleted.node_reviews,
-        deleted.node_role_takeovers,
-        deleted.toc_edits,
+        o.catalog_deleted.total(),
+        o.catalog_deleted.book_state,
+        o.catalog_deleted.node_publication_attrs,
+        o.catalog_deleted.node_overrides,
+        o.catalog_deleted.node_contributors,
+        o.catalog_deleted.node_categories,
+        o.catalog_deleted.node_reviews,
+        o.catalog_deleted.node_role_takeovers,
+        o.catalog_deleted.toc_edits,
     );
-    if !existed {
+    if !o.intake_row_existed {
         println!(
             "  note: intake row was already absent — likely a resumed removal cleaned the rest."
         );
@@ -150,7 +231,6 @@ pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
         "  audit rows preserved (metadata_audit, book_pipeline_audit). \
          Vector tombstones will compact on the next ingest's optimize pass."
     );
-    Ok(())
 }
 
 fn resolve_intake(catalog: &Catalog, args: &RemoveArgs) -> Result<Intake> {
