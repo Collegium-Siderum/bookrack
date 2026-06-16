@@ -501,6 +501,7 @@ impl DaemonRuntime {
         // every attached client.
         let mcp_tools = Arc::new(opts.mcp_tools);
         let tray_focus_signal = Arc::new(tokio::sync::Notify::new());
+        let plan_registry = Arc::new(crate::control::plan_registry::PlanRegistry::new());
         let method_ctx = MethodContext {
             cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
@@ -518,6 +519,7 @@ impl DaemonRuntime {
             tray_focus_signal: Arc::clone(&tray_focus_signal),
             queue_paused: Arc::clone(&queue_paused),
             log_stream: log_stream.clone(),
+            plan_registry,
         };
 
         // Bridge the obs log stream into the control-plane event

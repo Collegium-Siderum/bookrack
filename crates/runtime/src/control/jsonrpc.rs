@@ -41,6 +41,20 @@ pub const JOB_NOT_FOUND: i32 = -32011;
 /// on behalf of the client, so any destructive method that exposes
 /// a `yes` parameter must receive `yes = true` to proceed.
 pub const CONFIRMATION_REQUIRED: i32 = -32012;
+/// bookrack-specific: an execute leg referenced a `plan_id` that
+/// the daemon does not know — either it was never registered, was
+/// already consumed, or expired and was reaped.
+#[allow(dead_code)]
+pub const PLAN_NOT_FOUND: i32 = -32013;
+/// bookrack-specific: a `plan_id` was registered for a different
+/// method than the execute leg presenting it (e.g. a
+/// `corpus.rebuild` plan submitted to `vectors.reembed`).
+#[allow(dead_code)]
+pub const PLAN_KIND_MISMATCH: i32 = -32014;
+/// bookrack-specific: a `plan_id` was registered against a
+/// different library than the one the execute leg is scoped to.
+#[allow(dead_code)]
+pub const PLAN_LIBRARY_MISMATCH: i32 = -32015;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]

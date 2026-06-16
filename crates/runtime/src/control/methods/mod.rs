@@ -29,6 +29,7 @@ use tokio::sync::{Mutex as TokioMutex, Notify, broadcast};
 
 use super::events::{DaemonState, Event, EventStreamHandle};
 use super::jsonrpc::{BUSY, CONFIRMATION_REQUIRED, METHOD_NOT_FOUND, Request, RpcError};
+use super::plan_registry::PlanRegistry;
 
 pub mod corpus;
 pub mod diagnose;
@@ -96,6 +97,10 @@ pub struct MethodContext {
     /// `logs.tail` (and the `log` event channel via the bridge in the
     /// daemon bring-up).
     pub log_stream: LogStreamHandle,
+    /// Server-held registry of pinned plans for two-phase destructive
+    /// RPCs. Constructed once at daemon bring-up; see
+    /// [`super::plan_registry`] for the semantics.
+    pub plan_registry: Arc<PlanRegistry>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an

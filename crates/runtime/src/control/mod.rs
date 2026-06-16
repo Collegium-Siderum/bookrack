@@ -17,6 +17,7 @@ pub mod error_map;
 pub mod events;
 pub mod jsonrpc;
 pub mod methods;
+pub mod plan_registry;
 pub mod probe;
 pub mod progress;
 pub mod socket;
