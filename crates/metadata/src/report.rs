@@ -117,6 +117,13 @@ pub enum Flag {
     /// The publisher matched the curated whitelist of known reputable
     /// imprints.
     PublisherWhitelisted,
+    /// Observability companion to [`Flag::PublisherWhitelisted`] and
+    /// [`Flag::SourceWatermark`]: names the publisher sub-rule that
+    /// produced the verdict (whitelist normalisation path, or watermark
+    /// family). The string is one of the namespaced constants in
+    /// [`crate::publishers::rules`]. Grade-neutral — drives no
+    /// strengthening or weakening on its own.
+    PublisherRuleHit { rule: &'static str },
     /// The PDF `/Info` year is more likely the file's creation date
     /// than the work's publication year.
     PdfYearLikelyFileDate,
@@ -187,6 +194,7 @@ impl Flag {
             Flag::NonBcp47 => "non_bcp47",
             Flag::SourceWatermark => "source_watermark",
             Flag::PublisherWhitelisted => "publisher_whitelisted",
+            Flag::PublisherRuleHit { rule } => rule,
             Flag::PdfYearLikelyFileDate => "pdf_year_likely_file_date",
             Flag::PlaceholderValue => "placeholder_value",
             Flag::EqualsFilename => "equals_filename",

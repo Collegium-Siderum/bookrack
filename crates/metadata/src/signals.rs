@@ -472,15 +472,19 @@ fn audit_publisher(
                     profile.publisher.url_watermark,
                     profile.publisher.whitelist_normalize_abbreviations,
                 ) {
-                    PublisherVerdict::Watermark => {
+                    PublisherVerdict::Watermark { kind } => {
                         // Two notches: watermark is structurally not a
                         // publisher.
                         weaken(&mut grade);
                         weaken(&mut grade);
                         flags.push(Flag::SourceWatermark);
+                        flags.push(Flag::PublisherRuleHit { rule: kind.rule() });
                     }
-                    PublisherVerdict::Whitelisted => {
+                    PublisherVerdict::Whitelisted { match_kind } => {
                         flags.push(Flag::PublisherWhitelisted);
+                        flags.push(Flag::PublisherRuleHit {
+                            rule: match_kind.rule(),
+                        });
                     }
                     PublisherVerdict::Neutral => {}
                 }

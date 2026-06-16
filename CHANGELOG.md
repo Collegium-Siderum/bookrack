@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- The publisher audit names the specific sub-rule that produced its
+  verdict. `PublisherVerdict` carries `WhitelistMatch`
+  (`ExactLower` / `Normalized` / `AbbrevExpand`) on whitelist hits and
+  `WatermarkKind` (`UrlSubstring` / `EmailSubstring` / `ContactToken`
+  / `PromoToken` / `AsciiDistribution` / `CjkToken`) on watermark hits.
+  Each rule has a namespaced identifier under
+  `bookrack_metadata::publishers::rules` and rides into the audit
+  report as `Flag::PublisherRuleHit { rule }` alongside the existing
+  `PublisherWhitelisted` / `SourceWatermark` grade-driving flags. The
+  new flag is observability-only — it does not strengthen or weaken
+  the field grade on its own.
+
 - `library.find_books` honours the `categories` filter end to end:
   `BookFilter` and `IntakeFilter` carry the list, the catalog's
   `find_intakes` SQL adds an EXISTS sub-query against

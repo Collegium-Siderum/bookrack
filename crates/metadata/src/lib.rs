@@ -18,7 +18,7 @@
 //! its output as they see fit.
 
 mod filename;
-mod publishers;
+pub mod publishers;
 mod report;
 mod signals;
 

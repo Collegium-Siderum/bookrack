@@ -10,7 +10,7 @@ use bookrack_core::ItemKind;
 use bookrack_extract::{Biblio, Provenance, TextLayerQuality};
 use bookrack_metadata::{
     AuditData, AuditInput, AuditProfile, Confidence, FieldGrade, FieldOrigins, FieldReport, Flag,
-    MetadataReport, TocStats, Verdict, audit,
+    MetadataReport, TocStats, Verdict, audit, publishers,
 };
 
 /// Shared data set the audit tests use: starts from the shipped
@@ -144,6 +144,16 @@ fn epub_with_complete_record_grades_clean_and_high() {
         field(&report, "publisher")
             .flags
             .contains(&Flag::PublisherWhitelisted)
+    );
+    // The rule-hit companion identifies the comparison path that
+    // produced the whitelist match — here, exact lowercase equality
+    // against the seeded entry.
+    assert!(
+        field(&report, "publisher")
+            .flags
+            .contains(&Flag::PublisherRuleHit {
+                rule: publishers::rules::WHITELIST_EXACT_LOWER
+            })
     );
 }
 
@@ -529,6 +539,16 @@ fn watermark_publisher_is_flagged() {
             .flags
             .contains(&Flag::SourceWatermark)
     );
+    // Identifies which watermark family fired. The seeded value
+    // `free download www.example.net` matches the URL substring list
+    // (e.g. `www.`) before any other family is consulted.
+    assert!(
+        field(&report, "publisher")
+            .flags
+            .contains(&Flag::PublisherRuleHit {
+                rule: publishers::rules::WATERMARK_URL_SUBSTRING
+            })
+    );
     assert!(matches!(
         field(&report, "publisher").grade,
         FieldGrade::Weak | FieldGrade::Missing
@@ -573,6 +593,15 @@ fn cjk_watermark_publisher_is_flagged() {
         field(&report, "publisher")
             .flags
             .contains(&Flag::SourceWatermark)
+    );
+    // CJK substring sniff carries its own rule string so an audit
+    // consumer can tell it apart from the URL / contact / promo families.
+    assert!(
+        field(&report, "publisher")
+            .flags
+            .contains(&Flag::PublisherRuleHit {
+                rule: publishers::rules::WATERMARK_CJK_TOKEN
+            })
     );
     assert!(matches!(
         field(&report, "publisher").grade,

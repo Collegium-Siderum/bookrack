@@ -16,16 +16,104 @@
 //!   promo verbs, channel brands, CJK fragments) is data, loaded
 //!   alongside the whitelist; the abbreviation expansion map applied
 //!   during whitelist comparison is data too.
+//!
+//! Each verdict carries the specific sub-rule that matched, so an
+//! audit consumer can attribute the decision to a named rule without
+//! re-deriving the comparison.
 
 use crate::AuditData;
+
+/// Namespaced rule identifiers attached to publisher audit flags.
+///
+/// Strings are emitted verbatim in [`crate::report::Flag::PublisherRuleHit`]
+/// tokens. New whitelist or watermark families add a constant here
+/// before they appear in a flag.
+pub mod rules {
+    /// Whitelist match where the value, lowercased, equals a
+    /// lowercased whitelist entry — no further normalisation needed.
+    pub const WHITELIST_EXACT_LOWER: &str = "publisher:whitelist_exact_lower";
+    /// Whitelist match that required punctuation drop and whitespace
+    /// collapse to align with a whitelist entry.
+    pub const WHITELIST_NORMALIZED: &str = "publisher:whitelist_normalized";
+    /// Whitelist match that required the abbreviation-expansion pass
+    /// on top of the normalisation step.
+    pub const WHITELIST_ABBREV_EXPAND: &str = "publisher:whitelist_abbrev_expand";
+    /// Watermark hit on the closed-form URL substring list.
+    pub const WATERMARK_URL_SUBSTRING: &str = "publisher:watermark_url_substring";
+    /// Watermark hit on the closed-form e-mail substring list.
+    pub const WATERMARK_EMAIL_SUBSTRING: &str = "publisher:watermark_email_substring";
+    /// Watermark hit on the operator-curated contact-token list.
+    pub const WATERMARK_CONTACT_TOKEN: &str = "publisher:watermark_contact_token";
+    /// Watermark hit on the operator-curated promo-verb list.
+    pub const WATERMARK_PROMO_TOKEN: &str = "publisher:watermark_promo_token";
+    /// Watermark hit on the operator-curated ASCII distribution-handle list.
+    pub const WATERMARK_ASCII_DISTRIBUTION: &str = "publisher:watermark_ascii_distribution";
+    /// Watermark hit on the operator-curated CJK-token list.
+    pub const WATERMARK_CJK_TOKEN: &str = "publisher:watermark_cjk_token";
+}
+
+/// Which whitelist comparison path produced the match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhitelistMatch {
+    /// The value's lowercase form equals a whitelist entry's lowercase form.
+    ExactLower,
+    /// The match needed punctuation drop and whitespace collapse.
+    Normalized,
+    /// The match additionally required the abbreviation-expansion pass.
+    AbbrevExpand,
+}
+
+impl WhitelistMatch {
+    /// Namespaced rule identifier for this match path.
+    pub fn rule(self) -> &'static str {
+        match self {
+            WhitelistMatch::ExactLower => rules::WHITELIST_EXACT_LOWER,
+            WhitelistMatch::Normalized => rules::WHITELIST_NORMALIZED,
+            WhitelistMatch::AbbrevExpand => rules::WHITELIST_ABBREV_EXPAND,
+        }
+    }
+}
+
+/// Which watermark family the value matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatermarkKind {
+    /// Closed-form URL substring (e.g. `http://`, `www.`).
+    UrlSubstring,
+    /// Closed-form e-mail substring (e.g. `@`, `mailto:`).
+    EmailSubstring,
+    /// Operator-curated contact-token substring (e.g. `qq:`).
+    ContactToken,
+    /// Operator-curated promo-verb substring (e.g. `free ebook`).
+    PromoToken,
+    /// Operator-curated ASCII distribution-handle substring.
+    AsciiDistribution,
+    /// Operator-curated CJK-token substring.
+    CjkToken,
+}
+
+impl WatermarkKind {
+    /// Namespaced rule identifier for this watermark family.
+    pub fn rule(self) -> &'static str {
+        match self {
+            WatermarkKind::UrlSubstring => rules::WATERMARK_URL_SUBSTRING,
+            WatermarkKind::EmailSubstring => rules::WATERMARK_EMAIL_SUBSTRING,
+            WatermarkKind::ContactToken => rules::WATERMARK_CONTACT_TOKEN,
+            WatermarkKind::PromoToken => rules::WATERMARK_PROMO_TOKEN,
+            WatermarkKind::AsciiDistribution => rules::WATERMARK_ASCII_DISTRIBUTION,
+            WatermarkKind::CjkToken => rules::WATERMARK_CJK_TOKEN,
+        }
+    }
+}
 
 /// Decision the publisher evaluator returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublisherVerdict {
-    /// The value matched the curated whitelist of reputable imprints.
-    Whitelisted,
-    /// The value's shape looks like a watermark, not a publisher name.
-    Watermark,
+    /// The value matched the curated whitelist of reputable imprints,
+    /// carrying the path that produced the match.
+    Whitelisted { match_kind: WhitelistMatch },
+    /// The value's shape looks like a watermark, carrying the family
+    /// that fired.
+    Watermark { kind: WatermarkKind },
     /// Neither signal fired — neutral.
     Neutral,
 }
@@ -46,46 +134,46 @@ pub fn evaluate(
     if trimmed.is_empty() {
         return PublisherVerdict::Neutral;
     }
-    if looks_like_watermark(trimmed, data, url_watermark) {
-        return PublisherVerdict::Watermark;
+    if let Some(kind) = classify_watermark(trimmed, data, url_watermark) {
+        return PublisherVerdict::Watermark { kind };
     }
-    if is_whitelisted(trimmed, data, normalise_abbreviations) {
-        return PublisherVerdict::Whitelisted;
+    if let Some(match_kind) = classify_whitelist_match(trimmed, data, normalise_abbreviations) {
+        return PublisherVerdict::Whitelisted { match_kind };
     }
     PublisherVerdict::Neutral
 }
 
-/// True when the value carries any watermark / contact / promo
-/// pattern. The closed-form URL and e-mail substrings are gated by
+/// Return the first watermark family that matches the value, or
+/// `None`. The closed-form URL and e-mail substrings are gated by
 /// `url_watermark`; the operator-curated token lists are always
 /// consulted.
-fn looks_like_watermark(value: &str, data: &AuditData, url_watermark: bool) -> bool {
+fn classify_watermark(value: &str, data: &AuditData, url_watermark: bool) -> Option<WatermarkKind> {
     let lower: String = value.to_lowercase();
     if url_watermark {
         for needle in &data.watermark_url_substrings {
             if lower.contains(&needle.to_lowercase()) {
-                return true;
+                return Some(WatermarkKind::UrlSubstring);
             }
         }
         for needle in &data.watermark_email_substrings {
             if lower.contains(&needle.to_lowercase()) {
-                return true;
+                return Some(WatermarkKind::EmailSubstring);
             }
         }
     }
     for token in &data.contact_tokens {
         if lower.contains(&token.to_lowercase()) {
-            return true;
+            return Some(WatermarkKind::ContactToken);
         }
     }
     for token in &data.promo_tokens {
         if lower.contains(&token.to_lowercase()) {
-            return true;
+            return Some(WatermarkKind::PromoToken);
         }
     }
     for token in &data.ascii_distribution_tokens {
         if lower.contains(&token.to_lowercase()) {
-            return true;
+            return Some(WatermarkKind::AsciiDistribution);
         }
     }
     // CJK tokens match against the original value because
@@ -94,20 +182,49 @@ fn looks_like_watermark(value: &str, data: &AuditData, url_watermark: bool) -> b
     // configured.
     for token in &data.watermark_cjk_tokens {
         if value.contains(token.as_str()) {
-            return true;
+            return Some(WatermarkKind::CjkToken);
         }
     }
-    false
+    None
 }
 
-/// True when the value, after normalisation, matches the loaded
-/// whitelist. `expand_abbrev` controls whether the abbreviation pass
-/// runs on both sides of the comparison.
-fn is_whitelisted(value: &str, data: &AuditData, expand_abbrev: bool) -> bool {
-    let normalised = normalise(value, &data.abbreviations, expand_abbrev);
-    data.publisher_whitelist
+/// Classify how the value matches the whitelist, if at all. Tries the
+/// strictest path first so the returned variant identifies the lightest
+/// normalisation that sufficed: lowercase equality, then punctuation
+/// drop and whitespace collapse, then (when enabled) abbreviation
+/// expansion.
+fn classify_whitelist_match(
+    value: &str,
+    data: &AuditData,
+    expand_abbrev: bool,
+) -> Option<WhitelistMatch> {
+    let value_lower = value.to_lowercase();
+    if data
+        .publisher_whitelist
         .iter()
-        .any(|candidate| normalise(candidate, &data.abbreviations, expand_abbrev) == normalised)
+        .any(|candidate| candidate.to_lowercase() == value_lower)
+    {
+        return Some(WhitelistMatch::ExactLower);
+    }
+    let value_normalised = normalise(value, &data.abbreviations, false);
+    if data
+        .publisher_whitelist
+        .iter()
+        .any(|candidate| normalise(candidate, &data.abbreviations, false) == value_normalised)
+    {
+        return Some(WhitelistMatch::Normalized);
+    }
+    if expand_abbrev {
+        let value_expanded = normalise(value, &data.abbreviations, true);
+        if data
+            .publisher_whitelist
+            .iter()
+            .any(|candidate| normalise(candidate, &data.abbreviations, true) == value_expanded)
+        {
+            return Some(WhitelistMatch::AbbrevExpand);
+        }
+    }
+    None
 }
 
 /// Normalise a publisher name for whitelist comparison: lowercase,
@@ -215,19 +332,42 @@ mod tests {
     }
 
     #[test]
-    fn whitelist_matches_with_punctuation_and_case() {
-        let data = data_with_whitelist(&["Oxford University Press", "MIT Press"]);
+    fn whitelist_exact_lower_path() {
+        let data = data_with_whitelist(&["Oxford University Press"]);
         assert_eq!(
             evaluate("oxford university press", &data, true, true),
-            PublisherVerdict::Whitelisted
+            PublisherVerdict::Whitelisted {
+                match_kind: WhitelistMatch::ExactLower
+            }
         );
-        assert_eq!(
-            evaluate("Oxford Univ. Press", &data, true, true),
-            PublisherVerdict::Whitelisted
-        );
+    }
+
+    #[test]
+    fn whitelist_normalized_path_handles_punctuation() {
+        let data = data_with_whitelist(&["MIT Press"]);
         assert_eq!(
             evaluate("M.I.T. Press", &data, true, true),
-            PublisherVerdict::Whitelisted
+            PublisherVerdict::Whitelisted {
+                match_kind: WhitelistMatch::Normalized
+            }
+        );
+    }
+
+    #[test]
+    fn whitelist_abbrev_expand_path() {
+        let data = data_with_whitelist(&["Oxford University Press"]);
+        assert_eq!(
+            evaluate("Oxford Univ. Press", &data, true, true),
+            PublisherVerdict::Whitelisted {
+                match_kind: WhitelistMatch::AbbrevExpand
+            }
+        );
+        // Same input without the expansion pass falls through to
+        // neutral — the punctuation-dropped form `oxford univ press`
+        // does not equal `oxford university press` on its own.
+        assert_eq!(
+            evaluate("Oxford Univ. Press", &data, true, false),
+            PublisherVerdict::Neutral
         );
     }
 
@@ -236,20 +376,29 @@ mod tests {
         let data = data_with_default_url_patterns();
         assert_eq!(
             evaluate("https://example.com/free-ebooks", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::UrlSubstring
+            }
         );
         assert_eq!(
             evaluate("www.example.net", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::UrlSubstring
+            }
         );
     }
 
     #[test]
     fn email_value_flagged_as_watermark() {
         let data = data_with_default_url_patterns();
+        // Bare `@` form with no TLD substring, so only the email rule
+        // can fire — the URL list is consulted first and would otherwise
+        // claim values like `name@example.net` through `.net`.
         assert_eq!(
-            evaluate("contact: test@example.net", &data, true, true),
-            PublisherVerdict::Watermark
+            evaluate("contact: editor@somewhere", &data, true, true),
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::EmailSubstring
+            }
         );
     }
 
@@ -258,7 +407,9 @@ mod tests {
         let data = data_with_contact(&["qq:"]);
         assert_eq!(
             evaluate("scanned by anon, qq: 1234", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::ContactToken
+            }
         );
     }
 
@@ -267,7 +418,9 @@ mod tests {
         let data = data_with_promo(&["free ebook"]);
         assert_eq!(
             evaluate("free ebook download", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::PromoToken
+            }
         );
     }
 
@@ -276,12 +429,16 @@ mod tests {
         let data = data_with_ascii_distribution(&["acme-rip"]);
         assert_eq!(
             evaluate("acme-rip", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::AsciiDistribution
+            }
         );
         // Case-insensitive substring.
         assert_eq!(
             evaluate("ACME-RIP edition", &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::AsciiDistribution
+            }
         );
     }
 
@@ -295,7 +452,9 @@ mod tests {
         let input = format!("prefix {token} suffix");
         assert_eq!(
             evaluate(&input, &data, true, true),
-            PublisherVerdict::Watermark
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::CjkToken
+            }
         );
     }
 
@@ -316,5 +475,46 @@ mod tests {
             evaluate("   ", &data, true, true),
             PublisherVerdict::Neutral
         );
+    }
+
+    #[test]
+    fn whitelist_match_rule_names_round_trip() {
+        assert_eq!(
+            WhitelistMatch::ExactLower.rule(),
+            rules::WHITELIST_EXACT_LOWER
+        );
+        assert_eq!(
+            WhitelistMatch::Normalized.rule(),
+            rules::WHITELIST_NORMALIZED
+        );
+        assert_eq!(
+            WhitelistMatch::AbbrevExpand.rule(),
+            rules::WHITELIST_ABBREV_EXPAND
+        );
+    }
+
+    #[test]
+    fn watermark_kind_rule_names_round_trip() {
+        assert_eq!(
+            WatermarkKind::UrlSubstring.rule(),
+            rules::WATERMARK_URL_SUBSTRING
+        );
+        assert_eq!(
+            WatermarkKind::EmailSubstring.rule(),
+            rules::WATERMARK_EMAIL_SUBSTRING
+        );
+        assert_eq!(
+            WatermarkKind::ContactToken.rule(),
+            rules::WATERMARK_CONTACT_TOKEN
+        );
+        assert_eq!(
+            WatermarkKind::PromoToken.rule(),
+            rules::WATERMARK_PROMO_TOKEN
+        );
+        assert_eq!(
+            WatermarkKind::AsciiDistribution.rule(),
+            rules::WATERMARK_ASCII_DISTRIBUTION
+        );
+        assert_eq!(WatermarkKind::CjkToken.rule(), rules::WATERMARK_CJK_TOKEN);
     }
 }
