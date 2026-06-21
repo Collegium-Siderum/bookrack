@@ -198,11 +198,33 @@ pub async fn run_accept_loop(
                     _ = shutdown_rx.recv() => break,
                     accepted = server.connect() => match accepted {
                         Ok(()) => {
-                            let connected = std::mem::replace(
-                                &mut server,
-                                tokio::net::windows::named_pipe::ServerOptions::new()
-                                    .create(&name)?,
-                            );
+                            // Rebind a fresh server instance for the next
+                            // connect. A transient bind failure here must
+                            // not tear down the whole accept loop (the
+                            // unix arm logs-and-continues on errors), so
+                            // retry with a short backoff until success or
+                            // shutdown.
+                            let next = loop {
+                                match tokio::net::windows::named_pipe::ServerOptions::new()
+                                    .create(&name)
+                                {
+                                    Ok(s) => break Some(s),
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            error = %err,
+                                            "control named pipe rebind failed; retrying"
+                                        );
+                                        tokio::select! {
+                                            _ = shutdown_rx.recv() => break None,
+                                            _ = tokio::time::sleep(
+                                                std::time::Duration::from_millis(100),
+                                            ) => {}
+                                        }
+                                    }
+                                }
+                            };
+                            let Some(next) = next else { break };
+                            let connected = std::mem::replace(&mut server, next);
                             let ctx = ctx.clone();
                             let shutdown = ctx.shutdown_tx.subscribe();
                             tokio::spawn(async move {
@@ -283,7 +305,15 @@ async fn serve_connection(
                     write_notification(&mut writer, notif).await?;
                 }
                 Some(Err(broadcast::error::RecvError::Lagged(_))) => {
-                    write_notification(&mut writer, Notification::lag("daemon.state")).await?;
+                    // The broadcast multiplexes every channel, so a lag
+                    // reports the receiver fell behind without naming
+                    // which channels were missed. Fan one lag marker
+                    // out per snapshot channel so clients re-sync each
+                    // channel via `events.snapshot` rather than acting
+                    // on a single misleading channel name.
+                    for channel in SNAPSHOT_CHANNELS {
+                        write_notification(&mut writer, Notification::lag(*channel)).await?;
+                    }
                 }
                 Some(Err(broadcast::error::RecvError::Closed)) => {
                     event_rx = None;
