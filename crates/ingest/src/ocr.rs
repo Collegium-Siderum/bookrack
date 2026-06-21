@@ -207,6 +207,7 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     if !params.force
         && let Some(report) = ocr_noop_if_up_to_date(
             catalog,
+            corpus,
             ocr_intake_id,
             pdf_intake_id,
             &source_sha_pdf,
@@ -390,12 +391,13 @@ pub async fn ingest_ocr_intake<E: Embedder>(
 ///
 /// Mirrors [`noop_if_up_to_date`](crate::noop_if_up_to_date) but on
 /// the OCR side: the dimensions checked are the OCR intake's status,
-/// `OCR_INTAKE_VERSION`, the configured embed model, and the
-/// rebuild-cache envelope's presence (so the reloaded
-/// [`Extraction`] is honest, not a stub).
+/// `OCR_INTAKE_VERSION`, the configured embed model, the corpus-side
+/// chunk and normalize stamps, and the rebuild-cache envelope's
+/// presence (so the reloaded [`Extraction`] is honest, not a stub).
 #[allow(clippy::too_many_arguments)]
 fn ocr_noop_if_up_to_date(
     catalog: &Catalog,
+    corpus: &Corpus,
     ocr_intake_id: i64,
     pdf_intake_id: i64,
     source_sha_pdf: &str,
@@ -417,6 +419,18 @@ fn ocr_noop_if_up_to_date(
         return Ok(None);
     };
     if state.embed_model.as_deref() != Some(embed_model) {
+        return Ok(None);
+    }
+    let stored_chunk = corpus
+        .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
+        .and_then(|v| v.parse::<u32>().ok());
+    if stored_chunk != Some(crate::CHUNK_VERSION) {
+        return Ok(None);
+    }
+    let stored_normalize = corpus
+        .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
+        .and_then(|v| v.parse::<u32>().ok());
+    if stored_normalize != Some(bookrack_normalize::NORMALIZE_VERSION) {
         return Ok(None);
     }
     let stored_path = match ocr_intake.stored_path.as_deref() {

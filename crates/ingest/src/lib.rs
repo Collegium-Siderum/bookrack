@@ -406,7 +406,7 @@ pub async fn ingest_book<E: Embedder>(
     // The caller can override with [`IngestParams::force`] to re-extract
     // and re-embed regardless.
     if !params.force
-        && let Some(report) = noop_if_up_to_date(catalog, &source_sha, &params.embed.model)?
+        && let Some(report) = noop_if_up_to_date(catalog, corpus, &source_sha, &params.embed.model)?
     {
         tracing::info!(
             intake_id = report.intake_id,
@@ -674,6 +674,7 @@ pub async fn ingest_book<E: Embedder>(
 /// immediately; returns `None` to fall through to the full pipeline.
 fn noop_if_up_to_date(
     catalog: &Catalog,
+    corpus: &Corpus,
     source_sha: &str,
     embed_model: &str,
 ) -> Result<Option<IngestReport>> {
@@ -691,6 +692,22 @@ fn noop_if_up_to_date(
         return Ok(None);
     };
     if state.embed_model.as_deref() != Some(embed_model) {
+        return Ok(None);
+    }
+    // The chunk and normalize versions are recorded in corpus index_meta
+    // rather than on the catalog row; a bump on either invalidates the
+    // existing chunks, so a noop is only safe when both still match the
+    // versions this binary writes.
+    let stored_chunk = corpus
+        .meta_get(bookrack_corpus::CHUNK_VERSION_KEY)?
+        .and_then(|v| v.parse::<u32>().ok());
+    if stored_chunk != Some(CHUNK_VERSION) {
+        return Ok(None);
+    }
+    let stored_normalize = corpus
+        .meta_get(bookrack_corpus::NORMALIZE_VERSION_KEY)?
+        .and_then(|v| v.parse::<u32>().ok());
+    if stored_normalize != Some(bookrack_normalize::NORMALIZE_VERSION) {
         return Ok(None);
     }
     // Surface the audit outcome stored on the row at the previous
