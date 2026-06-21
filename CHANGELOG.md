@@ -18,6 +18,13 @@ release workflow extracts the matching section verbatim from this file.
   `LibraryHandle::ingest_ocr` runner. The standalone REPL's
   `intake ocr ...` command now routes through the same RPC, replacing
   the placeholder stub the previous release shipped.
+- `bookrack queue` top-level CLI subcommand covering the existing
+  control-plane methods that previously had no one-shot entry point:
+  `queue list` (→ `queue.list`), `queue pause` / `queue resume` /
+  `queue clear` (→ the matching `queue.*` RPC), and `queue cancel
+  <job-id-prefix>` (→ `ingest.cancel`). The shared `QueueAction`
+  grammar gains `List` and `Cancel` variants, so the batch-mode REPL
+  dispatcher exposes the same surface.
 
 ### Changed
 

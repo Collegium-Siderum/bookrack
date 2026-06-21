@@ -70,10 +70,12 @@ pub enum ReplCommand {
     },
 }
 
-/// One of three lifecycle actions on the persistent ingest queue.
-/// Dispatch maps each variant to the matching control-plane RPC.
-#[derive(clap::Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+/// Lifecycle actions on the persistent ingest queue. Dispatch maps
+/// each variant to the matching control-plane RPC.
+#[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
+    /// List every row in the queue document, oldest first.
+    List,
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
     Pause,
@@ -82,6 +84,14 @@ pub enum QueueAction {
     /// Cancel every pending row in one sweep. Running jobs are left
     /// alone.
     Clear,
+    /// Cancel the unique pending or running job whose id starts with
+    /// `job_id`. Empty prefixes are rejected. An ambiguous prefix
+    /// returns an error without cancelling anything.
+    Cancel {
+        /// Prefix of the job's UUIDv7 to cancel. The first eight
+        /// characters listed by `queue list` are usually enough.
+        job_id: String,
+    },
 }
 
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct

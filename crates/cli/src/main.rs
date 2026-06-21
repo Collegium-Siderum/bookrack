@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_repl_grammar::{
-    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, RemoveArgs, ReplCli,
-    ReplCommand, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, QueueAction, RemoveArgs,
+    ReplCli, ReplCommand, StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
@@ -211,6 +211,13 @@ enum Command {
     Intake {
         #[command(subcommand)]
         action: IntakeAction,
+    },
+    /// Inspect or mutate the persistent ingest queue via the daemon's
+    /// control plane. Covers `list`, `pause`, `resume`, `clear`, and
+    /// `cancel <job-id-prefix>`.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
     },
     /// Edit one book's metadata via the daemon's control plane.
     Metadata {
@@ -520,6 +527,7 @@ async fn run() -> Result<()> {
         } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
         Command::Ingest(args) => cmd::cli_client::ingest::run(args, None).await,
         Command::Intake { action } => cmd::cli_client::intake::run(action, None).await,
+        Command::Queue { action } => cmd::cli_client::queue::run(action, None).await,
         Command::Metadata { action } => cmd::cli_client::metadata::run(action, None).await,
         Command::Vectors { action } => cmd::cli_client::vectors::run(action, None).await,
         Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,

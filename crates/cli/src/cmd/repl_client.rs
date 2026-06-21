@@ -510,9 +510,13 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
             }
         }
         ReplCommand::Queue { action } => match action {
+            QueueAction::List => call_and_print(client, "queue.list", Value::Null).await,
             QueueAction::Pause => call_and_print(client, "queue.pause", Value::Null).await,
             QueueAction::Resume => call_and_print(client, "queue.resume", Value::Null).await,
             QueueAction::Clear => call_and_print(client, "queue.clear", Value::Null).await,
+            QueueAction::Cancel { job_id } => {
+                call_and_print(client, "ingest.cancel", json!({ "job_id": job_id })).await
+            }
         },
         ReplCommand::Papers { action } => dispatch_papers(client, action).await,
     }

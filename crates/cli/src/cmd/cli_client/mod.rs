@@ -19,6 +19,7 @@ pub mod intake;
 pub mod libraries;
 pub mod metadata;
 pub mod papers;
+pub mod queue;
 pub mod quit;
 pub mod remove;
 pub mod stamps;
