@@ -136,9 +136,13 @@ pub async fn embed_book_chunks<E: Embedder>(
     // versions, and absorb the freshly-appended rows into any existing
     // index. Failure is non-fatal — the table is still consistent, just
     // carrying tombstones and unindexed rows the next run will pick up.
-    if let Err(e) = store.optimize().await {
-        tracing::warn!(error = ?e, "lancedb optimize failed; continuing");
-    }
+    let optimize_ok = match store.optimize().await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = ?e, "lancedb optimize failed; continuing");
+            false
+        }
+    };
 
     // Bump the churn counter in vectors_meta.json if a meta file is
     // present. Skip when none — that's the "ANN not yet adopted" state,
@@ -154,9 +158,14 @@ pub async fn embed_book_chunks<E: Embedder>(
     // Cold-start build / retrain on churn threshold. The L1 optimize
     // above is the pre-step the retrain order requires (compaction
     // first so that tombstones do not flow into the kmeans training
-    // set); we do not run it again here.
-    if let Err(e) = maybe_build_ann_index(&store, lancedb_dir).await {
-        tracing::warn!(error = ?e, "ann build/retrain failed; will retry next run");
+    // set); skip the rebuild when optimize failed so tombstones do not
+    // poison the kmeans training set, and let the next run retry.
+    if optimize_ok {
+        if let Err(e) = maybe_build_ann_index(&store, lancedb_dir).await {
+            tracing::warn!(error = ?e, "ann build/retrain failed; will retry next run");
+        }
+    } else {
+        tracing::warn!("skipping ann build/retrain after optimize failure; will retry next run");
     }
 
     Ok(report)
