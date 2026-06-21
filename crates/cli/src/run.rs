@@ -128,7 +128,6 @@ fn spawn_repl_if_tty(
         let queue_state_path = runtime.queue_state_path.clone();
         let queue_paused = Arc::clone(&runtime.queue_paused);
         let event_stream = runtime.event_stream.clone();
-        let library_default = runtime.cfg.library().unwrap_or("default").to_string();
         let cfg = Arc::clone(&runtime.cfg);
         let started_at = runtime.started_at;
         let log_stream = runtime.log_stream.clone();
@@ -143,7 +142,6 @@ fn spawn_repl_if_tty(
                 queue_state_path,
                 queue_paused,
                 event_stream,
-                library_default,
                 cfg,
                 started_at,
                 log_stream,
@@ -303,7 +301,6 @@ fn repl_loop(
     queue_state_path: PathBuf,
     queue_paused: Arc<AtomicBool>,
     event_stream: EventStreamHandle,
-    library_default: String,
     cfg: Arc<Config>,
     started_at: Instant,
     log_stream: LogStreamHandle,
@@ -351,7 +348,6 @@ fn repl_loop(
                     &queue_state_path,
                     &queue_paused,
                     &event_stream,
-                    &library_default,
                     &cfg,
                     started_at,
                     &log_stream,
@@ -433,7 +429,6 @@ fn handle_line(
     queue_state_path: &Path,
     queue_paused: &Arc<AtomicBool>,
     event_stream: &EventStreamHandle,
-    library_default: &str,
     cfg: &Arc<Config>,
     started_at: Instant,
     log_stream: &LogStreamHandle,
@@ -472,7 +467,7 @@ fn handle_line(
                 queue_state_path,
                 queue_paused,
                 event_stream,
-                library_default,
+                registry,
                 &tokens,
             );
             return ReplOutcome::Continue;
@@ -644,7 +639,7 @@ fn handle_queue(
     state_path: &Path,
     queue_paused: &Arc<AtomicBool>,
     event_stream: &EventStreamHandle,
-    library_default: &str,
+    registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
     tokens: &[String],
 ) {
     let sub = match tokens.get(1) {
@@ -655,7 +650,7 @@ fn handle_queue(
         }
     };
     match sub {
-        "add" => queue_add(state, state_path, library_default, &tokens[2..]),
+        "add" => queue_add(state, state_path, registry, &tokens[2..]),
         "list" | "ls" => queue_list(state),
         "cancel" => queue_cancel(state, state_path, &tokens[2..]),
         "clear" => queue_clear(state, state_path, queue_paused, event_stream),
@@ -720,11 +715,17 @@ fn print_queue_usage() {
 fn queue_add(
     state: &Arc<Mutex<QueueState>>,
     state_path: &Path,
-    library_default: &str,
+    registry: &Arc<LibraryRegistry<OllamaEmbedClient>>,
     args: &[String],
 ) {
     let mut path_arg: Option<PathBuf> = None;
-    let mut library = library_default.to_string();
+    let mut library = match registry.default_name() {
+        Ok(name) => name,
+        Err(err) => {
+            eprintln!("bookrack: {err}");
+            return;
+        }
+    };
     let mut priority = Priority::Normal;
     let mut force = false;
     let mut i = 0;

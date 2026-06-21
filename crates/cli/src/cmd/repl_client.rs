@@ -61,7 +61,7 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
         .subscribe()
         .await
         .context("subscribe to control-plane events")?;
-    tokio::spawn(event_loop(events, Arc::clone(&status)));
+    tokio::spawn(event_loop(Arc::clone(&client), events, Arc::clone(&status)));
 
     if std::io::stdin().is_terminal() {
         run_interactive(Arc::clone(&client), Arc::clone(&status), runtime_dir).await
@@ -129,6 +129,7 @@ async fn bootstrap_status(client: &ControlClient, status: &Arc<RwLock<StatusSnap
 }
 
 async fn event_loop(
+    client: Arc<ControlClient>,
     mut events: tokio::sync::broadcast::Receiver<Event>,
     status: Arc<RwLock<StatusSnapshot>>,
 ) {
@@ -136,9 +137,7 @@ async fn event_loop(
         match events.recv().await {
             Ok(event) => {
                 if event.lag {
-                    if let Ok(mut guard) = status.write() {
-                        guard.state = PromptState::Disconnected;
-                    }
+                    bootstrap_status(&client, &status).await;
                     continue;
                 }
                 if let Ok(mut guard) = status.write() {
@@ -151,9 +150,7 @@ async fn event_loop(
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                if let Ok(mut guard) = status.write() {
-                    guard.state = PromptState::Disconnected;
-                }
+                bootstrap_status(&client, &status).await;
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 if let Ok(mut guard) = status.write() {
