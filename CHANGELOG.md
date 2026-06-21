@@ -25,6 +25,13 @@ release workflow extracts the matching section verbatim from this file.
   <job-id-prefix>` (→ `ingest.cancel`). The shared `QueueAction`
   grammar gains `List` and `Cancel` variants, so the batch-mode REPL
   dispatcher exposes the same surface.
+- `bookrack libraries info [--name <NAME>]` and `bookrack libraries
+  default <NAME>` round out the `libraries` subcommand: `info` prints
+  the per-library status card the daemon serves via `library.info`,
+  `default` moves the registry's default-library pointer through
+  `library.set_default`. Both RPCs were already on the control plane;
+  this lifts them out of the `bookrack exec library.*` catch-all into
+  first-class top-level commands.
 
 ### Changed
 

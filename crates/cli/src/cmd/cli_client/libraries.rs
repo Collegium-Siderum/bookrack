@@ -1,4 +1,4 @@
-//! `bookrack libraries {list,fork}` — control-plane wrapper.
+//! `bookrack libraries {list,info,default,fork}` — control-plane wrapper.
 
 use std::path::PathBuf;
 
@@ -19,6 +19,16 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             // emit the same payload now — pretty-printed JSON to
             // stdout.
             helpers::call_and_print(&client, "library.list", Value::Null).await
+        }
+        LibrariesAction::Info { name } => {
+            let params = match name {
+                Some(name) => json!({ "name": name }),
+                None => Value::Null,
+            };
+            helpers::call_and_print(&client, "library.info", params).await
+        }
+        LibrariesAction::Default { name } => {
+            helpers::call_and_print(&client, "library.set_default", json!({ "name": name })).await
         }
         LibrariesAction::Fork {
             new_name,

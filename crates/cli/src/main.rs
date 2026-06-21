@@ -287,6 +287,22 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         json: bool,
     },
+    /// Print the per-library status card the daemon serves over
+    /// `library.info`: configured paths, embed model, vector-store
+    /// shape, catalog counts.
+    Info {
+        /// Library short name. When omitted, the daemon picks the
+        /// registry's current default.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Move the registry's default-library pointer to `name`. The
+    /// change lives in the daemon's in-memory registry only; the
+    /// on-disk library registry stays as written.
+    Default {
+        /// Library short name to set as the daemon's default.
+        name: String,
+    },
     /// Clone the current library into a sibling at a new data root,
     /// share `books/` (envelope store) via hardlinks by default, and
     /// register the new library so `--library <name>` resolves it.
