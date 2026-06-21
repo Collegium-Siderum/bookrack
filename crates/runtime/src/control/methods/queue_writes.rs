@@ -52,9 +52,19 @@ pub async fn resume(_params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 pub async fn clear(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let (cleared, tick) = {
         let mut guard = ctx.queue_state.lock().expect("queue state mutex poisoned");
+        // Mirror `apply_pause`'s persist-then-publish ordering: snapshot
+        // the jobs before mutating so a `save_atomic` failure rolls the
+        // in-memory state back instead of letting a later successful
+        // save flush the unintended cancellations to disk.
+        let prev_jobs = guard.jobs.clone();
         let cleared = cancel_all_pending(&mut guard);
-        save_atomic(&guard, &ctx.queue_state_path)
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e:#}")))?;
+        if let Err(e) = save_atomic(&guard, &ctx.queue_state_path) {
+            guard.jobs = prev_jobs;
+            return Err(RpcError::new(
+                INTERNAL_ERROR,
+                format!("persist queue state: {e:#}"),
+            ));
+        }
         let tick = derive_tick(&guard, None);
         (cleared, tick)
     };
