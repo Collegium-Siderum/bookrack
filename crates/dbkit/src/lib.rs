@@ -13,6 +13,7 @@
 //! [`TableSpec`]; its `CREATE TABLE` text is rendered from that spec, so
 //! the schema and the code reading it cannot drift apart.
 
+mod backup;
 mod ddl;
 mod meta;
 mod open;
@@ -21,6 +22,7 @@ mod spec;
 mod timing;
 mod verify;
 
+pub use backup::backup_database;
 pub use ddl::render_ddl;
 pub use meta::{apply_schema, meta_get, meta_set};
 pub use open::{OpenDecision, READER_VERSION, reader_version_decision};

@@ -113,16 +113,20 @@ where
             .with_context(|| format!("create {}", target_books.display()))?;
     }
 
-    std::fs::copy(&source_catalog, &target_catalog).with_context(|| {
+    // SQLite's `VACUUM INTO` materializes a consistent snapshot even
+    // when the source has uncheckpointed WAL pages, so the fork is safe
+    // to run while another process holds a writer. A plain file copy
+    // would miss the `-wal`/`-shm` sidecars and risk a torn snapshot.
+    bookrack_dbkit::backup_database(&source_catalog, &target_catalog).with_context(|| {
         format!(
-            "copy {} -> {}",
+            "backup {} -> {}",
             source_catalog.display(),
             target_catalog.display()
         )
     })?;
-    std::fs::copy(&source_corpus, &target_corpus).with_context(|| {
+    bookrack_dbkit::backup_database(&source_corpus, &target_corpus).with_context(|| {
         format!(
-            "copy {} -> {}",
+            "backup {} -> {}",
             source_corpus.display(),
             target_corpus.display()
         )

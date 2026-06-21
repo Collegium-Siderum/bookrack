@@ -12,6 +12,7 @@ bookrack-config = { path = "../config" }
 bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
+bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
 bookrack-embed = { path = "../embed" }
 # `pdfium_install` reads the pinned-binary constants published next to
