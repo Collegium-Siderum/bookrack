@@ -36,6 +36,7 @@ pub mod diagnose;
 pub mod dryrun;
 pub mod glean;
 pub mod ingest;
+pub mod intake;
 pub mod libraries;
 pub mod logs;
 pub mod meta;
@@ -236,10 +237,11 @@ methods! {
     stream no_queue sidebar "events.subscribe",
     read   no_queue sync    "events.snapshot"     => reads::events_snapshot,
 
-    // ingest / glean
+    // ingest / glean / intake
     write  queue    async   "ingest.submit"       => ingest::submit,
     write  queue    async   "ingest.cancel"       => ingest::cancel,
     write  queue    async   "glean.submit"        => glean::submit,
+    write  queue    async   "intake.ocr"          => intake::submit,
 
     // book metadata curation
     write  no_queue async   "metadata.set"                => metadata::set,
@@ -512,6 +514,7 @@ mod tests {
             "ingest.submit",
             "ingest.cancel",
             "glean.submit",
+            "intake.ocr",
             "vectors.rebuild",
             "vectors.reembed",
             "vectors.reset",

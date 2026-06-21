@@ -24,6 +24,7 @@ use bookrack_catalog::Catalog;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
+use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake};
 use bookrack_ingest::{IngestParams, IngestReport};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -168,6 +169,58 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
                 .refresh_store()
                 .await
                 .context("refresh library store after ingest")?;
+        }
+        Ok(report)
+    }
+
+    /// Register an OCR markdown product as a derived-source intake of
+    /// an already-recorded scan PDF, then run the book pipeline
+    /// (STRUCTURE → CHUNK → EMBED) over its text layer.
+    ///
+    /// Mirrors [`Self::ingest_book`]: holds the per-library ingest
+    /// mutex, opens fresh [`Catalog`] and [`Corpus`] handles from the
+    /// library's stored paths, then forwards to
+    /// [`bookrack_ingest::ocr::ingest_ocr_intake`] with the library's
+    /// warm embedder. Refreshes the book-side [`Library`] store so the
+    /// first OCR intake into a previously empty data dir lights up the
+    /// read path on the same lock.
+    ///
+    /// Returns an error when this handle was built catalog-only, since
+    /// the OCR ingest path requires the embedder that lives on the
+    /// [`bookrack_query::Library`] half.
+    pub async fn ingest_ocr(
+        &self,
+        ocr_md: &Path,
+        from_pdf: &Path,
+        ocr_params: &OcrIngestParams,
+        params: &IngestParams,
+    ) -> anyhow::Result<OcrIngestReport> {
+        let embedder = self.ops.embedder().ok_or_else(|| {
+            anyhow::anyhow!("OCR intake requires a library handle with an embedder")
+        })?;
+        let _guard = self.ingest_lock.lock().await;
+        let mut corpus =
+            Corpus::open(self.ops.corpus_db()).context("open corpus for OCR intake write")?;
+        let mut catalog = Catalog::open_with_backup(self.ops.catalog_db(), self.ops.backup_dir())
+            .context("open catalog for OCR intake write")?;
+        let report = ingest_ocr_intake(
+            &mut corpus,
+            &mut catalog,
+            self.ops.lancedb_dir(),
+            self.ops.books_dir(),
+            ocr_md,
+            from_pdf,
+            embedder,
+            params,
+            ocr_params,
+        )
+        .await
+        .context("registry-mediated OCR intake")?;
+        if let Some(library) = self.ops.library() {
+            library
+                .refresh_store()
+                .await
+                .context("refresh library store after OCR intake")?;
         }
         Ok(report)
     }

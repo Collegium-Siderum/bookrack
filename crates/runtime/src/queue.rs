@@ -24,7 +24,9 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use bookrack_core::ItemKind;
-pub use bookrack_core::queue::{JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState};
+pub use bookrack_core::queue::{
+    IntakeOcrInfo, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
+};
 
 use crate::control::events::{Event, EventStreamHandle, JobOutcomeSummary, QueueTick};
 
@@ -264,6 +266,7 @@ pub fn enqueue_files(
             priority,
             force,
             hold_for_metadata,
+            intake_ocr: None,
             state: JobState::Pending,
             queued_at: Utc::now(),
             started_at: None,
@@ -273,6 +276,43 @@ pub fn enqueue_files(
         ids.push(id);
     }
     ids
+}
+
+/// Append one OCR-intake job to the queue. `path` is the OCR markdown
+/// product; `info` carries the source PDF anchor and the runtime knobs
+/// (`expected_pages`, `allow_partial`) the OCR ingest path consumes.
+/// Returns the appended job's id.
+///
+/// OCR intakes are dispatched to the book pipeline — the worker routes
+/// on `intake_ocr.is_some()`, then calls the OCR ingest path with the
+/// stored markdown + PDF pair. The job's `kind` therefore stays
+/// `ItemKind::Book`; a queue listing reads it as a book job.
+pub fn enqueue_ocr_intake(
+    state: &mut QueueState,
+    path: PathBuf,
+    info: IntakeOcrInfo,
+    library: &str,
+    priority: Priority,
+    force: bool,
+    hold_for_metadata: bool,
+) -> String {
+    let id = Uuid::now_v7().to_string();
+    state.jobs.push(QueueJob {
+        id: id.clone(),
+        library: library.to_string(),
+        path,
+        kind: ItemKind::Book,
+        priority,
+        force,
+        hold_for_metadata,
+        intake_ocr: Some(info),
+        state: JobState::Pending,
+        queued_at: Utc::now(),
+        started_at: None,
+        finished_at: None,
+        error: None,
+    });
+    id
 }
 
 /// Cancel the unique pending or running job whose id starts with
@@ -544,6 +584,7 @@ mod tests {
             priority: Priority::Normal,
             force: false,
             hold_for_metadata: false,
+            intake_ocr: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -624,6 +665,7 @@ mod tests {
             priority,
             force: false,
             hold_for_metadata: false,
+            intake_ocr: None,
             state,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()

@@ -19,7 +19,7 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
-pub const QUEUE_SCHEMA_VERSION: u32 = 3;
+pub const QUEUE_SCHEMA_VERSION: u32 = 4;
 
 /// Pull order hint for the worker. The first pending job at the
 /// highest priority is picked next.
@@ -41,6 +41,27 @@ pub enum JobState {
     Done,
     Failed,
     Cancelled,
+}
+
+/// Side data carried by an OCR-intake job. When set on a [`QueueJob`],
+/// the worker treats the job as a derived-source intake: the job's
+/// `path` is the OCR markdown product, and the fields below name the
+/// scan PDF the product was produced from along with the runtime knobs
+/// the OCR ingest path needs. Defaults are the same as the standalone
+/// runner's: no expected-page override, partial coverage rejected.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct IntakeOcrInfo {
+    /// Path to the scan PDF the OCR product was produced from.
+    pub from_pdf: PathBuf,
+    /// Override the expected page count rather than reading it from
+    /// the source PDF's `/Pages`.
+    #[serde(default)]
+    pub expected_pages: Option<u32>,
+    /// Accept a partial OCR product. Missing sheets surface in the OCR
+    /// intake's `partial_pages` field rather than being silently
+    /// treated as blank.
+    #[serde(default)]
+    pub allow_partial: bool,
 }
 
 /// One row in the persistent queue.
@@ -71,6 +92,13 @@ pub struct QueueJob {
     /// a v1 queue document (no `kind` field) loads as a book queue.
     #[serde(default)]
     pub kind: ItemKind,
+    /// When set, the job is an OCR-intake ingest. The worker routes it
+    /// to the OCR ingest path with `path` as the OCR markdown product
+    /// and the nested `from_pdf` as the source PDF anchor. A v3 queue
+    /// document (no `intake_ocr` field) loads with this `None`, so an
+    /// upgrade reads the previous shape as a plain book ingest.
+    #[serde(default)]
+    pub intake_ocr: Option<IntakeOcrInfo>,
     /// Current lifecycle state.
     pub state: JobState,
     /// When the job entered the queue.
@@ -153,6 +181,60 @@ mod tests {
     }
 
     #[test]
+    fn queue_job_without_intake_ocr_loads_as_none() {
+        // A v3-shaped document persisted before the field was added
+        // must still deserialize cleanly, with the side data defaulting
+        // to `None` so the worker treats the job as a plain book ingest.
+        let v3 = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "state": "pending",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        }"#;
+        let job: QueueJob = serde_json::from_str(v3).expect("deserialize v3");
+        assert!(job.intake_ocr.is_none());
+    }
+
+    #[test]
+    fn queue_job_round_trips_intake_ocr() {
+        let job = QueueJob {
+            id: "0".to_string(),
+            library: "default".to_string(),
+            path: "/tmp/example.md".into(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            force: false,
+            hold_for_metadata: false,
+            intake_ocr: Some(IntakeOcrInfo {
+                from_pdf: "/tmp/scan.pdf".into(),
+                expected_pages: Some(42),
+                allow_partial: true,
+            }),
+            state: JobState::Pending,
+            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            started_at: None,
+            finished_at: None,
+            error: None,
+        };
+        let json = serde_json::to_value(&job).expect("serialize");
+        assert_eq!(json["intake_ocr"]["from_pdf"], "/tmp/scan.pdf");
+        assert_eq!(json["intake_ocr"]["expected_pages"], 42);
+        assert_eq!(json["intake_ocr"]["allow_partial"], true);
+        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, job);
+    }
+
+    #[test]
     fn queue_job_round_trips_kind() {
         let job = QueueJob {
             id: "0".to_string(),
@@ -162,6 +244,7 @@ mod tests {
             priority: Priority::Normal,
             force: false,
             hold_for_metadata: false,
+            intake_ocr: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()

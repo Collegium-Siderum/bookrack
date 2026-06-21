@@ -204,6 +204,14 @@ enum Command {
     /// bookrack daemon; the command exits with code 2 if no daemon is
     /// found.
     Ingest(IngestArgs),
+    /// Drive an intake from a derived source manifestation (currently
+    /// OCR-only). The job is enqueued onto the persistent ingest queue
+    /// and dispatched by the worker as a book ingest job whose source
+    /// is the OCR markdown product paired with the original scan PDF.
+    Intake {
+        #[command(subcommand)]
+        action: IntakeAction,
+    },
     /// Edit one book's metadata via the daemon's control plane.
     Metadata {
         #[command(subcommand)]
@@ -511,6 +519,7 @@ async fn run() -> Result<()> {
             no_scrub,
         } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
         Command::Ingest(args) => cmd::cli_client::ingest::run(args, None).await,
+        Command::Intake { action } => cmd::cli_client::intake::run(action, None).await,
         Command::Metadata { action } => cmd::cli_client::metadata::run(action, None).await,
         Command::Vectors { action } => cmd::cli_client::vectors::run(action, None).await,
         Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,

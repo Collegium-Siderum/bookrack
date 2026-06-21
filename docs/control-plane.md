@@ -127,6 +127,16 @@ human-readable `error.message`.
   and EMBED until a curator drives it past the metadata gate.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
+- `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
+  library?, priority?, force?, hold_for_metadata? }` → `{ job_id: <uuid v7> }`.
+  Append a single OCR-intake job. The worker treats it as a book
+  ingest whose source is the OCR markdown product paired with the scan
+  PDF named by `from_pdf`; the queue document keeps `kind = "book"`
+  and carries the OCR fields in an `intake_ocr` sidecar so the row
+  reads as a book job in `queue.list`. `expected_pages` overrides the
+  page-count gate the OCR ingest derives from the source PDF;
+  `allow_partial = true` accepts an OCR product that does not cover
+  every page. The persistent queue schema is `v4`.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the

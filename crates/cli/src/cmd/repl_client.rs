@@ -427,12 +427,23 @@ async fn dispatch_repl_command(client: &ControlClient, command: ReplCommand) -> 
             call_and_print(client, "ingest.submit", params).await
         }
         ReplCommand::Intake {
-            action: IntakeAction::Ocr { .. },
+            action:
+                IntakeAction::Ocr {
+                    ocr_md,
+                    from_pdf,
+                    expected_pages,
+                    allow_partial,
+                },
         } => {
-            eprintln!(
-                "intake ocr: not yet available over the control plane; run via `bookrack intake ocr ...` after Phase 4",
-            );
-            true
+            let mut params = json!({
+                "ocr_md": ocr_md,
+                "from_pdf": from_pdf,
+                "allow_partial": allow_partial,
+            });
+            if let Some(pages) = expected_pages {
+                params["expected_pages"] = Value::from(pages);
+            }
+            call_and_print(client, "intake.ocr", params).await
         }
         ReplCommand::Metadata { action } => dispatch_metadata(client, action).await,
         ReplCommand::Vectors { action } => dispatch_vectors(client, action).await,

@@ -454,10 +454,25 @@ impl DaemonRuntime {
                             let hold_for_metadata = job.hold_for_metadata;
                             let job_kind = job.kind;
                             let path = job.path.clone();
+                            let intake_ocr = job.intake_ocr.clone();
                             runtime.block_on(async move {
                                 let handle = registry
                                     .get(Some(&library))
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
+                                if let Some(ocr) = intake_ocr {
+                                    let mut params = params_template;
+                                    params.force = force;
+                                    params.hold_for_metadata = hold_for_metadata;
+                                    let ocr_params = bookrack_ingest::ocr::OcrIngestParams {
+                                        expected_pages: ocr.expected_pages,
+                                        allow_partial: ocr.allow_partial,
+                                    };
+                                    handle
+                                        .ingest_ocr(&path, &ocr.from_pdf, &ocr_params, &params)
+                                        .await
+                                        .map_err(|e| queue::classify_ingest_error(&e))?;
+                                    return Ok::<(), queue::JobError>(());
+                                }
                                 match job_kind {
                                     bookrack_core::ItemKind::Book => {
                                         let mut params = params_template;

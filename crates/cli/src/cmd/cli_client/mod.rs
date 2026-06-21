@@ -15,6 +15,7 @@ pub mod doctor;
 pub mod dryrun;
 pub mod helpers;
 pub mod ingest;
+pub mod intake;
 pub mod libraries;
 pub mod metadata;
 pub mod papers;

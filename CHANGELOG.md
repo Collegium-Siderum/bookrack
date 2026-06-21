@@ -8,6 +8,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- `intake.ocr` control-plane method and the matching `bookrack intake
+  ocr <ocr_md> --from-pdf <pdf>` top-level CLI subcommand. The handler
+  enqueues a single OCR-intake job onto the persistent ingest queue;
+  the worker dispatches it as a book ingest whose source is the OCR
+  markdown product paired with the scan PDF anchor, by way of a new
+  `LibraryHandle::ingest_ocr` runner. The standalone REPL's
+  `intake ocr ...` command now routes through the same RPC, replacing
+  the placeholder stub the previous release shipped.
+
+### Changed
+
+- The persistent queue document schema bumps to `v4`: `QueueJob` grows
+  an `intake_ocr` sidecar that carries the `from_pdf`, `expected_pages`,
+  and `allow_partial` fields the OCR ingest path needs. The field is
+  optional and defaults to absent, so a `v3` document loads unchanged
+  and reads as a plain book ingest. The upgrade is one-way — an older
+  daemon will not understand a `v4` document.
+
 ## [0.6.1] - 2026-06-16
 
 ### Fixed
