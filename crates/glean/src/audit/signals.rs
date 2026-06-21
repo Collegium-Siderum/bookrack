@@ -273,8 +273,6 @@ fn grade_author(
     };
     if !present && profile.author.required {
         report.push_flag(PaperFlag::AuthorListEmpty);
-        fields.insert("author", report);
-        return;
     }
     if profile.author.sentinel_check
         && authors.iter().any(|c| {
@@ -300,24 +298,26 @@ fn grade_author(
     {
         report.weaken_to(PaperFieldGrade::Weak, PaperFlag::OrcidInvalidChecksum);
     }
-    fields.insert("author", report);
 
     // Source-format prior is attached to the author field as a
     // catch-all extraction-quality signal; the books audit follows
-    // the same pattern for its catch-all signals.
+    // the same pattern for its catch-all signals. Run these after the
+    // author-specific checks so a missing-and-required author still
+    // surfaces extraction-quality flags on the same field.
     if profile.source_prior.enabled {
         let weak_adapter = matches!(input.provenance.adapter.as_str(), "txt");
-        if weak_adapter && let Some(r) = fields.get_mut("author") {
-            r.weaken_to(PaperFieldGrade::Weak, PaperFlag::SourcePriorWeak);
+        if weak_adapter {
+            report.weaken_to(PaperFieldGrade::Weak, PaperFlag::SourcePriorWeak);
         }
     }
     if matches!(
         input.provenance.text_layer_quality,
         TextLayerQuality::Doubtful
-    ) && let Some(r) = fields.get_mut("author")
-    {
-        r.weaken_to(PaperFieldGrade::Weak, PaperFlag::DoubtfulTextLayer);
+    ) {
+        report.weaken_to(PaperFieldGrade::Weak, PaperFlag::DoubtfulTextLayer);
     }
+
+    fields.insert("author", report);
 }
 
 fn grade_language(
