@@ -158,12 +158,33 @@ impl Corpus {
         Ok(true)
     }
 
-    /// Write all four build stamps, replacing any previous values.
+    /// Write all four build stamps in one transaction, replacing any
+    /// previous values. A crash mid-write leaves the prior stamps
+    /// intact instead of a partial set, so the next open sees either
+    /// the old complete state or the new complete state, never a
+    /// mismatch with a trailing empty key.
     fn write_index_stamps(&self, stamps: &IndexStamps) -> Result<()> {
-        self.meta_set(EMBED_MODEL_KEY, &stamps.embed_model)?;
-        self.meta_set(VECTOR_DIM_KEY, &stamps.vector_dim.to_string())?;
-        self.meta_set(CHUNK_VERSION_KEY, &stamps.chunk_version.to_string())?;
-        self.meta_set(NORMALIZE_VERSION_KEY, &stamps.normalize_version.to_string())?;
+        let tx = self.conn.unchecked_transaction()?;
+        bookrack_dbkit::meta_set(&tx, SPEC.name, EMBED_MODEL_KEY, &stamps.embed_model)?;
+        bookrack_dbkit::meta_set(
+            &tx,
+            SPEC.name,
+            VECTOR_DIM_KEY,
+            &stamps.vector_dim.to_string(),
+        )?;
+        bookrack_dbkit::meta_set(
+            &tx,
+            SPEC.name,
+            CHUNK_VERSION_KEY,
+            &stamps.chunk_version.to_string(),
+        )?;
+        bookrack_dbkit::meta_set(
+            &tx,
+            SPEC.name,
+            NORMALIZE_VERSION_KEY,
+            &stamps.normalize_version.to_string(),
+        )?;
+        tx.commit()?;
         Ok(())
     }
 }
