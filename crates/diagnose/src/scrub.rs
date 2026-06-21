@@ -280,26 +280,25 @@ fn hash_book_basenames(input: &str, book_extensions: &[String]) -> String {
     out
 }
 
-/// Look for a `<basename>.<ext>` span starting at `cursor` where
-/// `<ext>` is one of `book_extensions` (case-insensitive). The
-/// basename must be preceded by a path separator (`/` or `\`) or by
-/// the start of the input. Returns `(basename_start, basename_end,
-/// canonical_lowercase_ext)`.
 fn match_book_basename(
     bytes: &[u8],
     cursor: usize,
     book_extensions: &[String],
 ) -> Option<(usize, usize, String)> {
-    // Anchor: the cursor sits either at position 0 or right after a
-    // path separator. Anywhere else, this is not a basename boundary.
-    if cursor != 0 {
-        let prev = bytes.get(cursor - 1)?;
-        if *prev != b'/' && *prev != b'\\' {
-            return None;
-        }
+    // Anchor: the cursor must sit right after a path separator. A
+    // basename without a leading `/` or `\` is body text — accepting
+    // such matches would redact prose like `the file foo.pdf is …`
+    // simply because the input happens to start with a dotted word.
+    if cursor == 0 {
+        return None;
     }
-    // Scan forward until a path separator, whitespace, or end of input
-    // — that is the basename span.
+    let prev = bytes.get(cursor - 1)?;
+    if *prev != b'/' && *prev != b'\\' {
+        return None;
+    }
+    // Scan forward until a path separator or end of input. Whitespace
+    // is NOT a separator here: legit book filenames can contain spaces
+    // (`Secret Title.epub`), so the scanner must keep going.
     let mut end = cursor;
     while end < bytes.len() {
         let b = bytes[end];
@@ -320,10 +319,28 @@ fn match_book_basename(
         return None;
     }
     let raw_ext = &basename[dot + 1..];
+    // Match each candidate as a prefix of `raw_ext` bounded by a
+    // non-alphanumeric byte (or end of span). A trailing prose suffix
+    // like `Title.pdf successfully` then still resolves to the `.pdf`
+    // basename ending right after the extension, instead of swallowing
+    // the suffix and failing the equality check.
     for candidate in book_extensions {
-        if raw_ext.eq_ignore_ascii_case(candidate.as_bytes()) {
-            return Some((cursor, end, candidate.to_ascii_lowercase()));
+        let ext_bytes = candidate.as_bytes();
+        if raw_ext.len() < ext_bytes.len() {
+            continue;
         }
+        let head = &raw_ext[..ext_bytes.len()];
+        if !head.eq_ignore_ascii_case(ext_bytes) {
+            continue;
+        }
+        let after_ext_in_basename = dot + 1 + ext_bytes.len();
+        if let Some(next) = basename.get(after_ext_in_basename)
+            && next.is_ascii_alphanumeric()
+        {
+            continue;
+        }
+        let basename_end = cursor + after_ext_in_basename;
+        return Some((cursor, basename_end, candidate.to_ascii_lowercase()));
     }
     None
 }
@@ -577,6 +594,18 @@ mod tests {
         let out = s.scrub_string("/x/intake-head.json");
         assert!(out.contains("intake-head.json"));
         assert!(!out.contains("<file:"));
+    }
+
+    #[test]
+    fn book_basename_terminates_at_whitespace_after_extension() {
+        let s = scrubber();
+        // A trailing prose suffix after the basename must not be
+        // absorbed into the scanned span; the extension still ends the
+        // basename and the title is redacted.
+        let out = s.scrub_string("loaded /x/Secret Title.pdf successfully");
+        assert!(out.contains("<file:"));
+        assert!(out.contains(">.pdf successfully"));
+        assert!(!out.contains("Secret Title"));
     }
 
     #[test]
