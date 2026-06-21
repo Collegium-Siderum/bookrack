@@ -348,6 +348,13 @@ pub enum LoadError {
     },
     /// A file's `schema_version` was not the supported value.
     SchemaVersion { path: PathBuf, found: u32 },
+    /// A ratio overlay value was outside the documented `0.0..=1.0`
+    /// range, NaN, or otherwise unrepresentable as basis points.
+    RatioOutOfRange {
+        path: PathBuf,
+        field: &'static str,
+        value: f64,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -362,11 +369,30 @@ impl std::fmt::Display for LoadError {
                 "unsupported schema_version {found} in {} (expected {SCHEMA_VERSION})",
                 path.display()
             ),
+            Self::RatioOutOfRange { path, field, value } => write!(
+                f,
+                "overlay `{field}` in {} has value {value}, expected a ratio in 0.0..=1.0",
+                path.display()
+            ),
         }
     }
 }
 
 impl std::error::Error for LoadError {}
+
+/// Convert a ratio in `0.0..=1.0` to basis points (0..=10_000).
+/// Rejects NaN, negative, and `> 1.0` values instead of letting the
+/// `as u32` cast saturate silently.
+fn ratio_to_bp(value: f64, path: &Path, field: &'static str) -> Result<u32, LoadError> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(LoadError::RatioOutOfRange {
+            path: path.to_path_buf(),
+            field,
+            value,
+        });
+    }
+    Ok((value * 10_000.0) as u32)
+}
 
 fn parse_str(toml_str: &str, name: &str) -> Result<PaperAuditProfile, LoadError> {
     let synthetic = PathBuf::from(format!("<embedded:{name}>"));
@@ -392,7 +418,7 @@ fn parse_str(toml_str: &str, name: &str) -> Result<PaperAuditProfile, LoadError>
         venue: VenueToggles::default(),
         source_prior: SourcePriorToggles::default(),
     };
-    apply_overlay(&mut profile, file);
+    apply_overlay(&mut profile, file, &synthetic)?;
     Ok(profile)
 }
 
@@ -407,11 +433,14 @@ fn merge_overlay(profile: &mut PaperAuditProfile, raw: &str, path: &Path) -> Res
             found: file.schema_version,
         });
     }
-    apply_overlay(profile, file);
-    Ok(())
+    apply_overlay(profile, file, path)
 }
 
-fn apply_overlay(profile: &mut PaperAuditProfile, file: ProfileFile) {
+fn apply_overlay(
+    profile: &mut PaperAuditProfile,
+    file: ProfileFile,
+    path: &Path,
+) -> Result<(), LoadError> {
     if let Some(v) = file.audit_enabled {
         profile.audit_enabled = v;
     }
@@ -502,13 +531,16 @@ fn apply_overlay(profile: &mut PaperAuditProfile, file: ProfileFile) {
             profile.language.latin_codes = v;
         }
         if let Some(v) = s.body_cjk_min_ratio {
-            profile.language.body_cjk_min_ratio_bp = (v * 10_000.0) as u32;
+            profile.language.body_cjk_min_ratio_bp =
+                ratio_to_bp(v, path, "language.body_cjk_min_ratio")?;
         }
         if let Some(v) = s.body_latin_min_ratio {
-            profile.language.body_latin_min_ratio_bp = (v * 10_000.0) as u32;
+            profile.language.body_latin_min_ratio_bp =
+                ratio_to_bp(v, path, "language.body_latin_min_ratio")?;
         }
         if let Some(v) = s.body_cjk_max_ratio {
-            profile.language.body_cjk_max_ratio_bp = (v * 10_000.0) as u32;
+            profile.language.body_cjk_max_ratio_bp =
+                ratio_to_bp(v, path, "language.body_cjk_max_ratio")?;
         }
     }
     if let Some(s) = file.venue
@@ -521,6 +553,7 @@ fn apply_overlay(profile: &mut PaperAuditProfile, file: ProfileFile) {
     {
         profile.source_prior.enabled = v;
     }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
