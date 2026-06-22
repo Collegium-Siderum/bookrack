@@ -153,18 +153,75 @@ fn file_size(path: &Path) -> Option<u64> {
 }
 
 fn dir_size(path: &Path) -> Option<u64> {
+    // Top-level absence «no lancedb yet» surfaces as `None` so the
+    // caller's DTO treats it as "unknown / not present" rather than
+    // reporting a misleading 0. Once the root is open, each
+    // unreadable subdirectory or vanished entry is best-effort: skip
+    // it and keep accumulating, so a single permission-denied
+    // subtree does not collapse the whole library size to `None`.
+    let root = std::fs::read_dir(path).ok()?;
     let mut total: u64 = 0;
-    let mut stack = vec![path.to_path_buf()];
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    accumulate(root, &mut total, &mut stack);
     while let Some(p) = stack.pop() {
-        let read_dir = std::fs::read_dir(&p).ok()?;
-        for entry in read_dir.flatten() {
-            let meta = entry.metadata().ok()?;
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else if meta.is_file() {
-                total = total.saturating_add(meta.len());
-            }
+        if let Ok(read_dir) = std::fs::read_dir(&p) {
+            accumulate(read_dir, &mut total, &mut stack);
         }
     }
     Some(total)
+}
+
+fn accumulate(read_dir: std::fs::ReadDir, total: &mut u64, stack: &mut Vec<std::path::PathBuf>) {
+    for entry in read_dir.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                *total = total.saturating_add(meta.len());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dir_size_returns_none_when_root_is_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("never-existed");
+        assert_eq!(dir_size(&missing), None);
+    }
+
+    #[test]
+    fn dir_size_sums_files_across_subdirectories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a"), b"123").expect("a");
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).expect("sub");
+        std::fs::write(sub.join("b"), b"45").expect("b");
+        assert_eq!(dir_size(dir.path()), Some(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_size_skips_unreadable_subdirectory_and_returns_partial_sum() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("visible"), b"1234").expect("visible");
+        let locked = dir.path().join("locked");
+        std::fs::create_dir_all(&locked).expect("locked");
+        std::fs::write(locked.join("hidden"), b"would be 9 bytes").expect("hidden");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+        // Root is readable; the locked subdir's entries cannot be
+        // scanned. The partial sum must still come back instead of
+        // collapsing to None.
+        let result = dir_size(dir.path());
+        // Restore permissions so the tempdir cleanup can run.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 755");
+        assert_eq!(result, Some(4));
+    }
 }
