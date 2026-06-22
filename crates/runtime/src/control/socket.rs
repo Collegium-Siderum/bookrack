@@ -94,11 +94,20 @@ impl Drop for ControlSocketGuard {
 }
 
 /// Platform-typed listener handed back from [`bind`].
+///
+/// On Windows the first [`tokio::net::windows::named_pipe::NamedPipeServer`]
+/// instance is bound here with `first_pipe_instance(true)` and carried
+/// inside the variant so the well-known pipe name is never unowned
+/// between bind and accept — handing it back as a bare name would
+/// leave a window where another process could grab the same name.
 pub enum BoundListener {
     #[cfg(unix)]
     Unix(tokio::net::UnixListener),
     #[cfg(windows)]
-    NamedPipe { name: String },
+    NamedPipe {
+        name: String,
+        server: tokio::net::windows::named_pipe::NamedPipeServer,
+    },
 }
 
 #[cfg(unix)]
@@ -137,14 +146,14 @@ pub async fn bind(runtime_dir: &Path) -> Result<(BoundListener, ControlSocketPat
     #[cfg(windows)]
     {
         let _ = runtime_dir;
-        let mut options = tokio::net::windows::named_pipe::ServerOptions::new();
-        let _server = options
+        let server = tokio::net::windows::named_pipe::ServerOptions::new()
             .first_pipe_instance(true)
             .create(WINDOWS_PIPE_NAME)
             .with_context(|| format!("bind control named pipe {WINDOWS_PIPE_NAME}"))?;
         Ok((
             BoundListener::NamedPipe {
                 name: WINDOWS_PIPE_NAME.to_string(),
+                server,
             },
             ControlSocketPath {
                 path: PathBuf::from(WINDOWS_PIPE_NAME),
@@ -184,15 +193,7 @@ pub async fn run_accept_loop(
             }
         },
         #[cfg(windows)]
-        BoundListener::NamedPipe { name } => {
-            let mut server =
-                match tokio::net::windows::named_pipe::ServerOptions::new().create(&name) {
-                    Ok(s) => s,
-                    Err(err) => {
-                        tracing::warn!(error = %err, "control named pipe rebind failed");
-                        return Ok(());
-                    }
-                };
+        BoundListener::NamedPipe { name, mut server } => {
             loop {
                 tokio::select! {
                     _ = shutdown_rx.recv() => break,
