@@ -154,9 +154,19 @@ fn validate_inputs(cfg: &Config, new_name: &str, target: &Path) -> Result<()> {
     if !target.is_absolute() {
         bail!("--data-dir must be an absolute path: {}", target.display());
     }
-    if target == cfg.data_dir() {
+    let source = cfg.data_dir();
+    let source_canonical = source
+        .canonicalize()
+        .with_context(|| format!("canonicalize source library {}", source.display()))?;
+    let target_canonical = canonicalize_target(target).with_context(|| {
+        format!(
+            "canonicalize target {} (parent must exist before fork runs)",
+            target.display()
+        )
+    })?;
+    if target_canonical == source_canonical {
         bail!(
-            "target {} is the same as the source library; fork would be a no-op",
+            "target {} resolves to the same path as the source library; fork would be a no-op",
             target.display()
         );
     }
@@ -181,6 +191,30 @@ fn validate_inputs(cfg: &Config, new_name: &str, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Canonicalize a fork target. The target may not exist on disk yet
+/// «fork creates it», so falls back to canonicalizing the parent and
+/// rejoining the requested file name. Both branches collapse symlinks,
+/// `.`/`..` segments, and trailing slashes, which is the whole point:
+/// the self-clone guard compares the result against the source's
+/// canonical form rather than against the raw user input.
+fn canonicalize_target(target: &Path) -> Result<PathBuf> {
+    if target.exists() {
+        return target
+            .canonicalize()
+            .with_context(|| format!("canonicalize {}", target.display()));
+    }
+    let parent = target
+        .parent()
+        .with_context(|| format!("target {} has no parent directory", target.display()))?;
+    let file_name = target
+        .file_name()
+        .with_context(|| format!("target {} has no final path component", target.display()))?;
+    let parent_canonical = parent
+        .canonicalize()
+        .with_context(|| format!("canonicalize parent {}", parent.display()))?;
+    Ok(parent_canonical.join(file_name))
 }
 
 /// Resolve the registry file to write the new entry into. `BOOKRACK_REGISTRY`
@@ -270,6 +304,60 @@ mod tests {
             fs::create_dir_all(parent).expect("parent");
         }
         fs::write(path, content).expect("write");
+    }
+
+    #[test]
+    fn validate_inputs_rejects_symlink_to_source() {
+        // Symlinking the target to the source bypasses a raw `==`
+        // comparison; canonicalize_target follows the link, so the
+        // guard catches it before any clone runs.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        let link = dir.path().join("link-to-source");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &link).expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&source, &link).expect("symlink");
+
+        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let err =
+            validate_inputs(&cfg, "clone", &link).expect_err("symlink to source must be rejected");
+        assert!(
+            format!("{err:#}").contains("resolves to the same path"),
+            "want self-clone bail, got: {err:#}",
+        );
+    }
+
+    #[test]
+    fn validate_inputs_rejects_dot_dot_loop_back_to_source() {
+        // `<source>/../source` collapses to `<source>`; the raw
+        // PathBuf equality misses it but canonicalize does not.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        let loopy = source.join("..").join("source");
+
+        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        let err = validate_inputs(&cfg, "clone", &loopy).expect_err("dotdot loop must be rejected");
+        assert!(
+            format!("{err:#}").contains("resolves to the same path"),
+            "want self-clone bail, got: {err:#}",
+        );
+    }
+
+    #[test]
+    fn validate_inputs_accepts_distinct_sibling_directory() {
+        // A genuine sibling target — does not yet exist on disk — must
+        // pass the guard. canonicalize_target falls back to canonicalizing
+        // the parent and rejoining the file name.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        let target = dir.path().join("clone");
+
+        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        validate_inputs(&cfg, "clone", &target).expect("sibling target accepted");
     }
 
     #[test]
