@@ -281,10 +281,17 @@ async fn serve_connection(
                         match side_effect {
                             SideEffect::None => {}
                             SideEffect::SnapshotBundle => {
-                                emit_snapshot_bundle(&mut writer, &ctx).await?;
+                                // Subscribe before snapshotting so an event
+                                // published in the gap between the two
+                                // operations lands in the receiver instead
+                                // of being silently dropped. Channels here
+                                // are state-convergent, so a duplicate
+                                // emission that predates the snapshot is
+                                // harmless on the client side.
                                 if event_rx.is_none() {
                                     event_rx = Some(ctx.event_stream.subscribe());
                                 }
+                                emit_snapshot_bundle(&mut writer, &ctx).await?;
                             }
                             SideEffect::Shutdown => {
                                 // accept loop will tear down; drain
