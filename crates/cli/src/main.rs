@@ -87,24 +87,33 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Inspect and compare audit profiles. Pure reflection over the
-    /// profiles compiled into the binary — no library, no MCP session.
+    /// Inspect and compare the built-in audit profiles.
+    ///
+    /// Pure reflection over the profiles compiled into the binary — no
+    /// library, no MCP session.
     AuditProfile {
         #[command(subcommand)]
         action: AuditProfileAction,
     },
-    /// Verify the catalog and corpus schemas against the binary's
-    /// TableSpecs and tally the cross-store counts (catalog intakes,
-    /// vectors-meta chunk count, intake-file existence on disk).
+    /// Verify schemas and cross-store counts against the live data root.
+    ///
+    /// Compare the catalog and corpus schemas against the binary's
+    /// TableSpecs and tally the cross-store counts: catalog intakes,
+    /// vectors-meta chunk count, and intake-file existence on disk.
     Verify,
-    /// Inspect the library registry — the file named by
-    /// `BOOKRACK_REGISTRY` that maps short names to data roots.
+    /// Inspect the library registry.
+    ///
+    /// The registry is the file named by `BOOKRACK_REGISTRY` that maps
+    /// short names to data roots.
     Libraries {
         #[command(subcommand)]
         action: LibrariesAction,
     },
-    /// Bundle the data root's crash reports, recent logs, and a small
-    /// catalog snapshot into a scrubbed `.tar.gz` for a bug report.
+    /// Bundle crash reports and logs into a scrubbed `.tar.gz`.
+    ///
+    /// Collects the data root's crash reports, recent logs, and a small
+    /// catalog snapshot. The bundle is suitable for attaching to a bug
+    /// report.
     Diagnose {
         /// Output path for the bundle. Defaults to
         /// `<data_dir>/diagnostics/diagnose-<unix_ms>.tar.gz`.
@@ -118,11 +127,12 @@ enum Command {
         #[arg(long)]
         no_scrub: bool,
     },
-    /// Start the daemon-REPL session: warm the library registry,
-    /// acquire the machine-wide session lock, and serve MCP over
-    /// streamable HTTP for the lifetime of the terminal. The
-    /// foreground task idles until a shutdown signal arrives (Ctrl-C,
-    /// SIGTERM, SIGHUP, or the control-plane `daemon.shutdown` RPC).
+    /// Start the daemon session and serve MCP for the terminal's lifetime.
+    ///
+    /// Warm the library registry, acquire the machine-wide session lock,
+    /// and serve MCP over streamable HTTP. The foreground task idles
+    /// until a shutdown signal arrives (Ctrl-C, SIGTERM, SIGHUP, or the
+    /// control-plane `daemon.shutdown` RPC).
     Run {
         /// Override the MCP listener address. Defaults to the value
         /// from `BOOKRACK_MCP_ADDR` (and falls back to the built-in
@@ -145,13 +155,13 @@ enum Command {
         #[arg(long, hide = true)]
         legacy_repl: bool,
     },
-    /// Connect to a running bookrack daemon over the control socket
-    /// and open an interactive REPL backed by reedline. Every command
-    /// is dispatched as a control-plane RPC; the REPL process does not
-    /// hold the session lock and does not read the data root directly.
-    /// In non-TTY mode (stdin piped) every line is parsed and
-    /// dispatched in sequence, and the process exits non-zero on the
-    /// first failure.
+    /// Open an interactive REPL against the running daemon.
+    ///
+    /// Connects to the daemon over its control socket and dispatches each
+    /// command as a control-plane RPC; the REPL process does not hold the
+    /// session lock and does not read the data root directly. In non-TTY
+    /// mode (stdin piped) every line is parsed and dispatched in sequence,
+    /// and the process exits non-zero on the first failure.
     Repl {
         /// Override the runtime directory used to discover the
         /// daemon's control socket. Falls back to
@@ -159,15 +169,20 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
     },
-    /// Reach the running bookrack session over MCP. Subcommands:
-    ///   `info` (default)        — print the session pid + MCP address.
-    ///                             Pure file read of the session lock;
-    ///                             never makes an HTTP call.
-    ///   `tools`                  — open an MCP client and run
-    ///                             `tools/list` against the live server.
+    /// Call MCP tools against the running session.
+    ///
+    /// Subcommands:
+    ///   `info` (default)          — print the session pid and MCP
+    ///                               address. Pure file read of the
+    ///                               session lock; never makes an HTTP
+    ///                               call.
+    ///   `tools`                   — open an MCP client and run
+    ///                               `tools/list` against the live
+    ///                               server.
     ///   `library.<tool> [<json>]` — call the named MCP tool, with the
-    ///                             second positional token forwarded
-    ///                             verbatim as JSON arguments.
+    ///                               second positional token forwarded
+    ///                               verbatim as JSON arguments.
+    ///
     /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
     /// the session; never opens a catalog, corpus, or vector store.
     Exec {
@@ -175,11 +190,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Run a one-screen health check: data root resolution, schema
-    /// versions, PDFium library presence, Ollama daemon reachability,
-    /// and whether the configured embed model is pulled. Exits with a
-    /// non-zero status when any row fails, so a script can branch on the
-    /// result.
+    /// Run a one-screen health check.
+    ///
+    /// Reports data root resolution, schema versions, PDFium library
+    /// presence, Ollama daemon reachability, and whether the configured
+    /// embed model is pulled. Exits with a non-zero status when any row
+    /// fails, so a script can branch on the result.
     Doctor {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
@@ -200,61 +216,71 @@ enum Command {
         #[arg(long, requires = "rename_envelopes")]
         dry_run: bool,
     },
-    /// Submit one or more files for ingest. Requires a running
-    /// bookrack daemon; the command exits with code 2 if no daemon is
-    /// found.
+    /// Submit one or more files for ingest.
+    ///
+    /// Requires a running bookrack daemon; the command exits with code
+    /// 2 if no daemon is found.
     Ingest(IngestArgs),
-    /// Drive an intake from a derived source manifestation (currently
-    /// OCR-only). The job is enqueued onto the persistent ingest queue
-    /// and dispatched by the worker as a book ingest job whose source
-    /// is the OCR markdown product paired with the original scan PDF.
+    /// Drive an intake from a derived source manifestation (OCR-only).
+    ///
+    /// The job is enqueued onto the persistent ingest queue and
+    /// dispatched by the worker as a book ingest job whose source is
+    /// the OCR markdown product paired with the original scan PDF.
     Intake {
         #[command(subcommand)]
         action: IntakeAction,
     },
-    /// Inspect or mutate the persistent ingest queue via the daemon's
-    /// control plane. Covers `list`, `pause`, `resume`, `clear`, and
+    /// Inspect or mutate the persistent ingest queue.
+    ///
+    /// Covers `list`, `pause`, `resume`, `clear`, and
     /// `cancel <job-id-prefix>`.
     Queue {
         #[command(subcommand)]
         action: QueueAction,
     },
-    /// Edit one book's metadata via the daemon's control plane.
+    /// Edit one book's metadata.
     Metadata {
         #[command(subcommand)]
         action: WriteMetadataAction,
     },
-    /// Vector-store writes via the daemon's control plane.
+    /// Vector-store writes: rebuild, reembed, reset, or drop.
     Vectors {
         #[command(subcommand)]
         action: WriteVectorsAction,
     },
-    /// Corpus rebuild via the daemon's control plane.
+    /// Rebuild the corpus tree from the opaque envelope store.
     Corpus {
         #[command(subcommand)]
         action: CorpusAction,
     },
-    /// Reconcile corpus index stamps via the daemon's control plane.
+    /// Reconcile corpus index stamps.
     Stamps {
         #[command(subcommand)]
         action: StampsAction,
     },
-    /// Drop a book from every store via the daemon's control plane.
+    /// Drop a book from every store.
     Remove(RemoveArgs),
-    /// Paper-side surface: ingest a paper file, browse the paper
-    /// catalog, export one paper's bibliographic record as CSL-JSON.
+    /// Paper-side surface: ingest, browse, and export papers.
+    ///
+    /// Ingest a paper file, browse the paper catalog, or export one
+    /// paper's bibliographic record as CSL-JSON. The book-side
+    /// counterparts are `ingest`, `metadata`, `corpus`, `vectors`,
+    /// and `stamps`.
     Papers {
         #[command(subcommand)]
         action: PapersAction,
     },
-    /// Simulate an ingest without writing into the live stores.
+    /// Simulate an ingest without writing the live stores.
     Dryrun(DryrunArgs),
-    /// Ask the running bookrack daemon to shut down. Exits with code
-    /// 0 whether or not a daemon was found.
+    /// Ask the running bookrack daemon to shut down.
+    ///
+    /// Exits with code 0 whether or not a daemon was found.
     Quit,
-    /// Walk the operator through a five-step install: pick a data root,
-    /// check the PDFium library, probe Ollama, smoke-test the
-    /// ingest -> embed -> query pipeline end-to-end in a tempdir, and
+    /// Run the interactive install wizard.
+    ///
+    /// Walks the operator through a five-step install: pick a data
+    /// root, check the PDFium library, probe Ollama, smoke-test the
+    /// ingest → embed → query pipeline end-to-end in a tempdir, and
     /// finally write `<data_root>/config.toml` plus a pointer in the
     /// platform-default registry. Run after a fresh tarball install.
     Init {
@@ -280,34 +306,39 @@ enum Command {
 
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum LibrariesAction {
-    /// List every entry in the registry, marking the `default = "..."`
-    /// fallback when one is set.
+    /// List every entry in the registry.
+    ///
+    /// Marks the `default = "..."` fallback when one is set.
     List {
         /// Emit machine-readable JSON instead of the human listing.
         #[arg(long)]
         json: bool,
     },
-    /// Print the per-library status card the daemon serves over
-    /// `library.info`: configured paths, embed model, vector-store
-    /// shape, catalog counts.
+    /// Print the per-library status card.
+    ///
+    /// The card is what the daemon serves over `library.info`:
+    /// configured paths, embed model, vector-store shape, and catalog
+    /// counts.
     Info {
         /// Library short name. When omitted, the daemon picks the
         /// registry's current default.
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
     },
-    /// Move the registry's default-library pointer to `name`. The
-    /// change lives in the daemon's in-memory registry only; the
+    /// Move the registry's default-library pointer to `name`.
+    ///
+    /// The change lives in the daemon's in-memory registry only; the
     /// on-disk library registry stays as written.
     Default {
         /// Library short name to set as the daemon's default.
         name: String,
     },
-    /// Clone the current library into a sibling at a new data root,
-    /// share `books/` (envelope store) via hardlinks by default, and
-    /// register the new library so `--library <name>` resolves it.
-    /// The new library has no vector store; run `vectors reset`
-    /// against it to rebuild under whatever model the env points at.
+    /// Clone the current library into a sibling at a new data root.
+    ///
+    /// Shares `books/` (the envelope store) via hardlinks by default,
+    /// and registers the new library so `--library <name>` resolves it.
+    /// The new library has no vector store; run `vectors reset` against
+    /// it to rebuild under whatever model the env points at.
     Fork {
         /// Short name to register in the library registry.
         new_name: String,

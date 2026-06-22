@@ -84,9 +84,10 @@ pub enum QueueAction {
     /// Cancel every pending row in one sweep. Running jobs are left
     /// alone.
     Clear,
-    /// Cancel the unique pending or running job whose id starts with
-    /// `job_id`. Empty prefixes are rejected. An ambiguous prefix
-    /// returns an error without cancelling anything.
+    /// Cancel the unique job whose id starts with `<JOB_ID>`.
+    ///
+    /// Empty prefixes are rejected. An ambiguous prefix returns an
+    /// error without cancelling anything.
     Cancel {
         /// Prefix of the job's UUIDv7 to cancel. The first eight
         /// characters listed by `queue list` are usually enough.
@@ -159,15 +160,16 @@ pub struct DryrunArgs {
 /// Intake-side write commands (currently OCR-only).
 #[derive(clap::Subcommand, Debug)]
 pub enum IntakeAction {
-    /// Bring an OCR product into the library as a derived source
-    /// manifestation. The scan PDF named by `--from-pdf` is registered
-    /// as the durable source anchor (status `needs_ocr`); the OCR
-    /// markdown is registered as its own intake whose `Provenance`
-    /// forensically references the PDF's hash and flows through
-    /// STRUCTURE / CHUNK / EMBED. The expected page count comes from
-    /// the source PDF's `/Pages`; pass `--expected-pages` to override
-    /// it when PDFium cannot read the source, and `--allow-partial`
-    /// to accept an OCR product whose sheets do not cover every page.
+    /// Bring an OCR product into the library as a derived source.
+    ///
+    /// The scan PDF named by `--from-pdf` is registered as the durable
+    /// source anchor (status `needs_ocr`); the OCR markdown is
+    /// registered as its own intake whose `Provenance` forensically
+    /// references the PDF's hash and flows through STRUCTURE / CHUNK /
+    /// EMBED. The expected page count comes from the source PDF's
+    /// `/Pages`; pass `--expected-pages` to override it when PDFium
+    /// cannot read the source, and `--allow-partial` to accept an OCR
+    /// product whose sheets do not cover every page.
     Ocr {
         /// Path to the polyocr single-file Markdown product, with
         /// page markers `<!-- page <label> (sheet <n>) -->`.
@@ -224,9 +226,10 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Suppress a field's extracted value without supplying a
-    /// replacement: the field reads as absent until a correct value is
-    /// set. `clear` removes the suppression.
+    /// Suppress a field's extracted value without supplying a replacement.
+    ///
+    /// The field reads as absent until a correct value is set. `clear`
+    /// removes the suppression.
     Void {
         /// The intake id of the book.
         book: i64,
@@ -237,17 +240,18 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Re-run the metadata plausibility audit from the book's cached
-    /// extraction, refreshing the stored verdict / confidence so they
-    /// reflect the current effective metadata. The review status is
-    /// untouched.
+    /// Re-run the metadata audit against the book's cached extraction.
+    ///
+    /// Refreshes the stored verdict and confidence so they reflect the
+    /// current effective metadata. The review status is untouched.
     Reaudit {
         /// The intake id of the book.
         book: i64,
     },
-    /// Attribute a contributor to the book (origin `user`), appended
-    /// after the role's existing contributors. User rows survive a
-    /// re-ingest.
+    /// Attribute a contributor to the book.
+    ///
+    /// Adds a row with origin `user`, appended after the role's existing
+    /// contributors. User rows survive a re-ingest.
     ContributorAdd {
         /// The intake id of the book.
         book: i64,
@@ -263,9 +267,11 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Remove one contributor row by its surrogate id (listed by
-    /// `show_book`), whatever its origin — the path for stripping a
-    /// wrong extracted attribution.
+    /// Remove one contributor row by its surrogate id.
+    ///
+    /// The id is the one listed by `show_book`. The row is removed
+    /// whatever its origin — this is the path for stripping a wrong
+    /// extracted attribution.
     ContributorRemove {
         /// The intake id of the book.
         book: i64,
@@ -276,8 +282,9 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Acknowledge a metadata gap and let the book through, signing
-    /// the override with a reason for the audit trail.
+    /// Acknowledge a metadata gap and let the book through.
+    ///
+    /// Signs the override with a reason for the audit trail.
     Ack {
         /// The intake id of the book.
         book: i64,
@@ -285,9 +292,10 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: String,
     },
-    /// Mark the record reviewed and correct. A human or LLM uses this
-    /// after confirming the metadata; the pipeline never writes this
-    /// status itself.
+    /// Mark the record reviewed and correct.
+    ///
+    /// A human or LLM uses this after confirming the metadata; the
+    /// pipeline never writes this status itself.
     Approve {
         /// The intake id of the book.
         book: i64,
@@ -295,9 +303,11 @@ pub enum WriteMetadataAction {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Reject the book outright (e.g. wrong source file, irrecoverable
-    /// metadata). The book stays ingested but downstream consumers can
-    /// filter on the rejected status.
+    /// Reject the book outright.
+    ///
+    /// Suitable for e.g. a wrong source file or irrecoverable metadata.
+    /// The book stays ingested but downstream consumers can filter on
+    /// the rejected status.
     Reject {
         /// The intake id of the book.
         book: i64,
@@ -315,10 +325,12 @@ pub enum WriteMetadataAction {
 /// Vector-store write commands.
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteVectorsAction {
-    /// Build or rebuild the ANN index from explicit parameters. Without
-    /// any flag, reads the persisted config from `vectors_meta.json` and
-    /// rebuilds from that — useful after corpus growth has exceeded the
-    /// L2 churn threshold.
+    /// Build or rebuild the ANN index.
+    ///
+    /// Without any flag, reads the persisted config from
+    /// `vectors_meta.json` and rebuilds from that — useful after corpus
+    /// growth has exceeded the L2 churn threshold. Any explicit flag
+    /// overrides the meta for that parameter.
     Rebuild {
         /// IVF family — `ivf-flat`, `ivf-sq`, `ivf-pq`, `ivf-hnsw-flat`,
         /// `ivf-hnsw-sq`, `ivf-hnsw-pq`. Defaults to whatever the meta
@@ -348,15 +360,17 @@ pub enum WriteVectorsAction {
         #[arg(long)]
         refine_factor: Option<u32>,
     },
-    /// Drop the ANN index and mark the meta as brute-force. Search
-    /// falls back to a full scan on the next query.
+    /// Drop the ANN index and mark the meta as brute-force.
+    ///
+    /// Search falls back to a full scan on the next query.
     Drop,
-    /// Re-embed every (or a single) book's chunks in place: read the
-    /// existing chunk rows back from LanceDB, drop their vectors, run
-    /// them back through the active embedder, and write them as the
-    /// new vectors. Use when the chunking or normalization algorithm
-    /// bumped; for an embedding model swap use `libraries fork` or
-    /// `vectors reset`.
+    /// Re-embed every (or a single) book's chunks in place.
+    ///
+    /// Reads the existing chunk rows back from LanceDB, drops their
+    /// vectors, runs them back through the active embedder, and writes
+    /// them as the new vectors. Use when the chunking or normalization
+    /// algorithm bumped; for an embedding model swap use `libraries
+    /// fork` or `vectors reset`.
     Reembed {
         /// Restrict the reembed to one intake id. Without this flag,
         /// every intake currently in the `Embedded` state is reembedded.
@@ -376,11 +390,13 @@ pub enum WriteVectorsAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Drop the chunks table, clear the corpus index stamps, and
-    /// re-derive every book's vectors with the env-configured
-    /// embedding model. Use after switching `BOOKRACK_EMBED_MODEL`.
-    /// The old vectors are unrecoverable; consider `libraries fork`
-    /// for a non-destructive trial first.
+    /// Drop and rebuild every vector under the active embedding model.
+    ///
+    /// Drops the chunks table, clears the corpus index stamps, and
+    /// re-derives every book's vectors with the env-configured embedding
+    /// model. Use after switching `BOOKRACK_EMBED_MODEL`. The old
+    /// vectors are unrecoverable; consider `libraries fork` for a
+    /// non-destructive trial first.
     Reset {
         /// Skip the destructive-action confirmation prompt. The
         /// command still rejects the run if the typed sentinel is not
@@ -399,9 +415,11 @@ pub enum WriteVectorsAction {
 /// Corpus-side write commands.
 #[derive(clap::Subcommand, Debug)]
 pub enum CorpusAction {
-    /// Rebuild `corpus.db` from the v1 extraction envelopes recorded in
-    /// the opaque store. Intakes whose envelope is missing, mismatched,
-    /// or corrupt are reported but skipped.
+    /// Rebuild `corpus.db` from the v1 extraction envelopes.
+    ///
+    /// Reads each intake's envelope from the opaque store and writes the
+    /// corpus tree afresh. Intakes whose envelope is missing,
+    /// mismatched, or corrupt are reported but skipped.
     Rebuild {
         /// After the corpus tree is rebuilt, also re-embed every
         /// reembedded book's chunks. Without this flag the LanceDB
@@ -431,7 +449,9 @@ pub enum CorpusAction {
 /// Index-stamp reconciliation.
 #[derive(clap::Subcommand, Debug)]
 pub enum StampsAction {
-    /// Probe the embedder for its vector dimension and write the
+    /// Probe the embedder and stamp `corpus.db`'s `index_meta`.
+    ///
+    /// Probes the embedder for its vector dimension and writes the
     /// resulting stamps into `corpus.db`'s `index_meta` when the table
     /// is unstamped. Fails on a stamp mismatch — the operator can then
     /// decide whether to rebuild.
@@ -440,9 +460,10 @@ pub enum StampsAction {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersAction {
-    /// Submit a paper file to the glean pipeline. Mirrors the book-side
-    /// `ingest` command; with `--recursive`, every supported file under
-    /// a directory is enqueued.
+    /// Submit a paper file to the glean pipeline.
+    ///
+    /// Mirrors the book-side `ingest` command. With `--recursive`,
+    /// every supported file under a directory is enqueued.
     Ingest(PapersIngestArgs),
     /// List papers in catalog order, paginated.
     List(PapersListArgs),
@@ -465,17 +486,20 @@ pub enum PapersAction {
         /// The intake id of the paper.
         intake_id: i64,
     },
-    /// Print the locator of one paper's archived source PDF: its
-    /// absolute on-disk path, byte size, and SHA-256. The bytes are
-    /// not streamed — open the path with the platform's own tools.
+    /// Print the locator of one paper's archived source PDF.
+    ///
+    /// Reports the absolute on-disk path, byte size, and SHA-256. The
+    /// bytes are not streamed — open the path with the platform's own
+    /// tools.
     Source {
         /// The intake id of the paper.
         intake_id: i64,
     },
-    /// Drop one paper from every paper-side store: the catalog
-    /// cascade, the corpus partition, the vector partition, the
-    /// envelope file, and the archived source PDF. Audit trail rows
-    /// are preserved.
+    /// Drop one paper from every paper-side store.
+    ///
+    /// Removes the catalog cascade, the corpus partition, the vector
+    /// partition, the envelope file, and the archived source PDF.
+    /// Audit trail rows are preserved.
     Remove(PapersRemoveArgs),
     /// Paper-side corpus write commands. Peer of the top-level
     /// `corpus` subcommand for the book pipeline.
@@ -495,10 +519,12 @@ pub enum PapersAction {
         #[command(subcommand)]
         action: PapersStampsAction,
     },
-    /// Simulate a paper ingest up to (but not including) embedding,
-    /// and write a JSONL report of IDENTIFY hit rates and predicted
-    /// STRUCTURE stats. The real catalog, corpus, and vector store
-    /// are not touched.
+    /// Simulate a paper ingest without writing the live stores.
+    ///
+    /// Runs each step up to (but not including) embedding and writes a
+    /// JSONL report of IDENTIFY hit rates and predicted STRUCTURE
+    /// stats. The real catalog, corpus, and vector store are not
+    /// touched.
     Dryrun(PapersDryrunArgs),
     /// Paper-side metadata curation commands. Peer of the top-level
     /// `metadata` subcommand for the book pipeline.
