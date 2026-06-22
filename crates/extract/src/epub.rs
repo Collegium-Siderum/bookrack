@@ -295,19 +295,30 @@ fn as_isbn(value: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<String> {
         .chars()
         .filter(|c| c.is_ascii_digit() || *c == 'x' || *c == 'X')
         .collect();
-    if digits.len() == 10 || digits.len() == 13 {
-        if lower.contains("isbn") && !lower.starts_with("urn:isbn:") {
-            FallbackEvent::record(
-                fallbacks,
-                ADAPTER,
-                fallback_kinds::EPUB_ISBN_SUBSTRING_FALLBACK,
-                Some(value.chars().take(64).collect()),
-            );
-        }
-        Some(digits)
-    } else {
-        None
+    // ISBN-10 permits 'X' / 'x' only as the final check digit; the
+    // EAN-13 form is digits-only. Reject any candidate that lands
+    // an 'X' anywhere ISBN syntax does not allow it.
+    let x_count = digits
+        .bytes()
+        .filter(|b| b.eq_ignore_ascii_case(&b'X'))
+        .count();
+    let well_placed = match digits.len() {
+        10 => x_count == 0 || (x_count == 1 && digits.ends_with(['X', 'x'])),
+        13 => x_count == 0,
+        _ => return None,
+    };
+    if !well_placed {
+        return None;
     }
+    if lower.contains("isbn") && !lower.starts_with("urn:isbn:") {
+        FallbackEvent::record(
+            fallbacks,
+            ADAPTER,
+            fallback_kinds::EPUB_ISBN_SUBSTRING_FALLBACK,
+            Some(value.chars().take(64).collect()),
+        );
+    }
+    Some(digits)
 }
 
 #[cfg(test)]
@@ -355,5 +366,31 @@ mod fallback_tests {
         let isbn = as_isbn("not-an-identifier", &mut fallbacks);
         assert!(isbn.is_none());
         assert!(fallbacks.is_empty(), "unexpected events: {fallbacks:?}");
+    }
+
+    #[test]
+    fn isbn13_with_x_is_rejected() {
+        // EAN-13 does not allow the 'X' check digit at all; the
+        // older ISBN-10 form does, but only as the trailing
+        // character. A 13-character value carrying an 'X' is
+        // malformed and must not pass.
+        let mut fallbacks = Vec::new();
+        assert_eq!(as_isbn("urn:isbn:978030640615X", &mut fallbacks), None);
+        assert_eq!(as_isbn("urn:isbn:97803064X6150", &mut fallbacks), None);
+    }
+
+    #[test]
+    fn isbn10_with_trailing_x_passes_other_x_positions_fail() {
+        // The trailing 'X' is the canonical ISBN-10 check digit
+        // for the value-10 case and must round-trip; any other
+        // position is invalid.
+        let mut fallbacks = Vec::new();
+        assert_eq!(
+            as_isbn("urn:isbn:080442957X", &mut fallbacks).as_deref(),
+            // `as_isbn` lower-cases the input before scanning, so the
+            // trailing check-digit survives as 'x'.
+            Some("080442957x"),
+        );
+        assert_eq!(as_isbn("urn:isbn:0X04429570", &mut fallbacks), None);
     }
 }

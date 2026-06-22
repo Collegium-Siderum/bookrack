@@ -311,14 +311,16 @@ pub(crate) fn build_biblio(
     }
 }
 
-/// Extract the year from a PDF date string. PDF dates are formatted
-/// `D:YYYYMMDDHHmmSSOHH'mm'`; only the leading `YYYY` is needed.
-/// A value present without the `D:` prefix is parsed anyway, with a
-/// [`fallback_kinds::PDF_INFO_CREATION_DATE_NO_D_PREFIX`] event
-/// recorded so the divergence from the PDF spec is observable.
 fn parse_pdf_year(date: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<i32> {
     let stripped = date.trim_start_matches("D:");
-    if stripped.len() == date.len() && stripped.bytes().take(4).all(|b| b.is_ascii_digit()) {
+    // Record the missing-prefix fallback only when there really is a
+    // four-digit year to parse; otherwise an empty input or a bare
+    // "D:" would slide through the `.all()` empty-iterator vacuous
+    // truth and log a spurious event with nothing to scrutinize.
+    let leading_four = stripped.bytes().take(4).collect::<Vec<_>>();
+    let has_year_prefix =
+        leading_four.len() == 4 && leading_four.iter().all(|b| b.is_ascii_digit());
+    if stripped.len() == date.len() && has_year_prefix {
         FallbackEvent::record(
             fallbacks,
             ADAPTER,
@@ -326,9 +328,8 @@ fn parse_pdf_year(date: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<i32>
             Some(date.chars().take(20).collect()),
         );
     }
-    let digits: String = stripped.chars().take(4).collect();
-    if digits.len() == 4 && digits.bytes().all(|b| b.is_ascii_digit()) {
-        let year: i32 = digits.parse().ok()?;
+    if has_year_prefix {
+        let year: i32 = std::str::from_utf8(&leading_four).ok()?.parse().ok()?;
         if (1000..=9999).contains(&year) {
             return Some(year);
         }

@@ -763,9 +763,11 @@ fn parse_numbered_prefix(trimmed: &str) -> Option<(u8, Vec<u32>, bool, bool)> {
     None
 }
 
-/// Decode a 1..=30 Roman numeral. Returns `None` for syntactically
-/// valid but out-of-range inputs so a stray `XL` token does not anchor
-/// a fake sequence.
+/// Decode a 1..=30 Roman numeral in canonical subtractive form.
+/// Returns `None` for syntactically valid but out-of-range inputs so a
+/// stray `XL` token does not anchor a fake sequence, and also for
+/// non-canonical spellings like `IIII` or `VV` that a naive left-to-right
+/// add/subtract walker would otherwise accept.
 fn roman_value(s: &str) -> Option<u32> {
     let mut total: i64 = 0;
     let mut prev: i64 = 0;
@@ -783,11 +785,42 @@ fn roman_value(s: &str) -> Option<u32> {
         }
         prev = v;
     }
-    if (1..=30).contains(&total) {
-        Some(total as u32)
-    } else {
-        None
+    if !(1..=30).contains(&total) {
+        return None;
     }
+    let n = total as u32;
+    // Round-trip against the single canonical encoding of `n`. Any
+    // non-canonical input «`IIII`, `VV`, `VIIII`, `IIIIIII`...» now
+    // sums to the right number but encodes differently from the
+    // canonical form, so equality is the gate.
+    (canonical_roman_within_thirty(n) == s).then_some(n)
+}
+
+/// Render `n` in the canonical Roman form for the 1..=30 sub-range
+/// (no `L`/`C`/`D`/`M`, single subtractive pair per position).
+fn canonical_roman_within_thirty(n: u32) -> String {
+    let mut out = String::new();
+    for _ in 0..(n / 10) {
+        out.push('X');
+    }
+    match n % 10 {
+        0 => {}
+        ones @ 1..=3 => {
+            for _ in 0..ones {
+                out.push('I');
+            }
+        }
+        4 => out.push_str("IV"),
+        ones @ 5..=8 => {
+            out.push('V');
+            for _ in 0..(ones - 5) {
+                out.push('I');
+            }
+        }
+        9 => out.push_str("IX"),
+        _ => unreachable!("n % 10 stays within 0..=9"),
+    }
+    out
 }
 
 /// Reject a block whose text contains any Unicode math operator,
@@ -1327,6 +1360,20 @@ mod tests {
         assert_eq!(roman_value("XXXI"), None);
         // Non-Roman characters reject.
         assert_eq!(roman_value("XAB"), None);
+    }
+
+    #[test]
+    fn roman_numeral_rejects_non_canonical_spellings() {
+        // Repeated-letter forms are arithmetically correct but
+        // violate the canonical subtractive encoding.
+        assert_eq!(roman_value("IIII"), None);
+        assert_eq!(roman_value("VIIII"), None);
+        assert_eq!(roman_value("VV"), None);
+        assert_eq!(roman_value("XXXXIII"), None);
+        // The subtractive forms themselves still round-trip.
+        assert_eq!(roman_value("IX"), Some(9));
+        assert_eq!(roman_value("XIX"), Some(19));
+        assert_eq!(roman_value("XXIV"), Some(24));
     }
 
     #[test]
