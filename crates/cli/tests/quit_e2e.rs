@@ -14,30 +14,13 @@
 //! cargo test -p bookrack-cli --test quit_e2e -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+mod common;
 
-use tokio::io::AsyncReadExt;
+use std::time::Duration;
+
 use tokio::process::Command;
 
-fn bookrack_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_bookrack"))
-}
-
-async fn wait_for_lock(path: &std::path::Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            let text = std::fs::read_to_string(path).unwrap_or_default();
-            if text.contains("mcp=") {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
+use crate::common::{DaemonProcess, bookrack_bin, wait_for_lock};
 
 #[tokio::test]
 #[ignore]
@@ -46,16 +29,13 @@ async fn quit_terminates_the_daemon_process() {
     let data_dir = tempfile::tempdir().expect("data tempdir");
     let lock_path = runtime_dir.path().join("bookrack.tty.lock");
 
-    let mut daemon = Command::new(bookrack_bin())
-        .arg("run")
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn bookrack run");
+    let daemon = DaemonProcess::spawn(
+        Command::new(bookrack_bin())
+            .arg("run")
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+            .env("BOOKRACK_DATA_DIR", data_dir.path()),
+    )
+    .expect("spawn bookrack run");
 
     assert!(
         wait_for_lock(&lock_path, Duration::from_secs(20)).await,
@@ -75,16 +55,11 @@ async fn quit_terminates_the_daemon_process() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let exit = tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+    let (status, stdout, _stderr) = daemon
+        .wait_with_output(Duration::from_secs(5))
         .await
-        .expect("daemon did not exit within 5s of `bookrack quit`")
-        .expect("daemon wait failed");
-    assert!(exit.success(), "daemon exited non-zero: {exit:?}");
-
-    let mut stdout = String::new();
-    if let Some(mut pipe) = daemon.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout).await;
-    }
+        .expect("daemon must exit within 5 s of `bookrack quit`");
+    assert!(status.success(), "daemon exited non-zero: {status:?}");
     assert!(
         stdout.contains("bookrack daemon running:"),
         "expected startup banner on stdout, got: {stdout}",

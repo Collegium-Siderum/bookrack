@@ -90,7 +90,33 @@ async fn repl_batch_dispatches_queue_list_over_control_plane() -> Result<()> {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
+                .kill_on_drop(true)
                 .spawn()?;
+            // Drain stdout and stderr concurrently so the repl's
+            // own writes never fill a piped buffer and deadlock
+            // the test on `child.wait()`. `kill_on_drop` above
+            // ensures a panic between spawn and wait kills the
+            // child instead of leaking it.
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            let stdout_handle = tokio::spawn(async move {
+                let mut buf = String::new();
+                let _ = tokio::io::AsyncReadExt::read_to_string(
+                    &mut tokio::io::BufReader::new(stdout),
+                    &mut buf,
+                )
+                .await;
+                buf
+            });
+            let stderr_handle = tokio::spawn(async move {
+                let mut buf = String::new();
+                let _ = tokio::io::AsyncReadExt::read_to_string(
+                    &mut tokio::io::BufReader::new(stderr),
+                    &mut buf,
+                )
+                .await;
+                buf
+            });
             let mut stdin = child.stdin.take().expect("stdin");
             stdin.write_all(b"queue\n").await?;
             stdin.write_all(b"status\n").await?;
@@ -98,6 +124,8 @@ async fn repl_batch_dispatches_queue_list_over_control_plane() -> Result<()> {
             stdin.shutdown().await?;
             drop(stdin);
             let status = child.wait().await?;
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
             assert!(status.success(), "repl exit status: {status:?}");
             Ok::<_, anyhow::Error>(())
         })

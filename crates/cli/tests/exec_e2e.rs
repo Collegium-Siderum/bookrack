@@ -15,30 +15,13 @@
 //! cargo test -p bookrack-cli --test exec_e2e -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+mod common;
 
-use tokio::io::AsyncReadExt;
+use std::time::Duration;
+
 use tokio::process::Command;
 
-fn bookrack_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_bookrack"))
-}
-
-async fn wait_for_lock(path: &std::path::Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.exists() {
-            let text = std::fs::read_to_string(path).unwrap_or_default();
-            if text.contains("mcp=") {
-                return true;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
-}
+use crate::common::{DaemonProcess, bookrack_bin, wait_for_lock};
 
 #[tokio::test]
 #[ignore]
@@ -47,16 +30,13 @@ async fn library_info_round_trips_through_running_daemon() {
     let data_dir = tempfile::tempdir().expect("data tempdir");
     let lock_path = runtime_dir.path().join("bookrack.tty.lock");
 
-    let mut daemon = Command::new(bookrack_bin())
-        .arg("run")
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn bookrack run");
+    let daemon = DaemonProcess::spawn(
+        Command::new(bookrack_bin())
+            .arg("run")
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+            .env("BOOKRACK_DATA_DIR", data_dir.path()),
+    )
+    .expect("spawn bookrack run");
 
     assert!(
         wait_for_lock(&lock_path, Duration::from_secs(20)).await,
@@ -84,24 +64,20 @@ async fn library_info_round_trips_through_running_daemon() {
     );
 
     if let Some(id) = daemon.id() {
-        // Send SIGTERM via nix-style signal; on stable, kill is SIGKILL,
-        // so we use a separate `kill -15` call to stay graceful.
+        // On stable Rust `Child::kill` is SIGKILL, so a separate
+        // `kill -15` is used to drive a graceful shutdown.
         let _ = Command::new("kill")
             .arg("-TERM")
             .arg(id.to_string())
             .status()
             .await;
     }
-    let exit = tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await;
+    let (status, _stdout, _stderr) = daemon
+        .wait_with_output(Duration::from_secs(5))
+        .await
+        .expect("daemon must exit within 5 s of SIGTERM");
     assert!(
-        exit.is_ok(),
-        "daemon did not exit within 5 s of SIGTERM; live stdout would be lost"
+        status.code().is_some() || status.success(),
+        "daemon exited abnormally: {status:?}",
     );
-
-    // Drain any remaining stdout so the assertion failure messages
-    // above stay useful while developing the test locally.
-    if let Some(mut stdout) = daemon.stdout.take() {
-        let mut buf = String::new();
-        let _ = stdout.read_to_string(&mut buf).await;
-    }
 }
