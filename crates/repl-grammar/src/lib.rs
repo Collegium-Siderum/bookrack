@@ -100,11 +100,20 @@ pub enum QueueAction {
 /// top-level CLI) without duplicating attributes.
 #[derive(clap::Args, Debug, Clone)]
 pub struct IngestArgs {
+    /// Source file, or a directory the ingest walks recursively (with
+    /// `--recursive`).
     pub path: PathBuf,
+    /// Walk `<PATH>` as a directory and enqueue every supported file.
+    /// Without this flag, `<PATH>` must point at a single book file.
     #[arg(long)]
     pub recursive: bool,
+    /// Pause each book after EXTRACT so a curator can review the audit
+    /// verdict before CHUNK / EMBED. Resume with `metadata advance`,
+    /// `metadata approve`, or any of the other gate decisions.
     #[arg(long)]
     pub hold_for_metadata: bool,
+    /// Re-ingest even when the source SHA-256 already exists in the
+    /// catalog. Without this flag, duplicate sources are skipped.
     #[arg(long)]
     pub force: bool,
 }
@@ -112,11 +121,17 @@ pub struct IngestArgs {
 /// Positional + flag bundle for `remove`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct RemoveArgs {
+    /// Intake id of the book to drop. Mutually exclusive with `--sha`;
+    /// exactly one of the two must be supplied.
     pub intake_id: Option<i64>,
+    /// Drop the book whose source SHA-256 starts with this hex prefix.
+    /// Mutually exclusive with the positional intake id.
     #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
     pub sha: Option<String>,
+    /// Print the per-store removal plan and exit without writing.
     #[arg(long)]
     pub dry_run: bool,
+    /// Skip the destructive-action confirmation prompt.
     #[arg(long)]
     pub yes: bool,
 }
@@ -310,14 +325,26 @@ pub enum WriteVectorsAction {
         /// holds, or `ivf-flat` for a fresh library.
         #[arg(long)]
         kind: Option<String>,
+        /// IVF coarse-cluster count. Higher values shrink each list but
+        /// raise rebuild cost. Defaults to whatever the meta holds, or
+        /// roughly `sqrt(n_rows)` for a fresh library.
         #[arg(long)]
         num_partitions: Option<u32>,
+        /// PQ sub-quantizer count (only for `ivf-pq` and `ivf-hnsw-pq`).
+        /// Must divide the embedding dimension.
         #[arg(long)]
         num_sub_vectors: Option<u32>,
+        /// PQ codebook bit width per sub-vector (only for the PQ
+        /// families).
         #[arg(long)]
         num_bits: Option<u32>,
+        /// Default number of partitions to scan at query time. Trades
+        /// recall for latency.
         #[arg(long)]
         nprobes: Option<u32>,
+        /// Rescore the top `refine_factor * k` ANN hits with exact
+        /// distance before returning `k`. Higher values trade latency
+        /// for recall.
         #[arg(long)]
         refine_factor: Option<u32>,
     },
@@ -499,9 +526,13 @@ pub enum PapersMetadataAction {
     },
     /// Override one field on a paper's effective record.
     Set {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Column on the paper attrs row to override (e.g. `title`,
+        /// `year`, `container_title`, `doi`).
         #[arg(long)]
         field: String,
+        /// The new value.
         #[arg(long)]
         value: String,
         /// Mark the override as confirmed against the source.
@@ -511,58 +542,81 @@ pub enum PapersMetadataAction {
     /// Remove an override on one field, reverting to the extracted
     /// value.
     Clear {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// The field whose override is removed.
         #[arg(long)]
         field: String,
     },
     /// Set an override that deliberately voids one field's value.
     Void {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// The field whose extracted value is suppressed.
         #[arg(long)]
         field: String,
     },
     /// Acknowledge a flagged paper without changing its metadata —
     /// move the review row to `acknowledged`.
     Ack {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Optional note for the audit trail.
         #[arg(long)]
         notes: Option<String>,
     },
     /// Approve a paper's metadata as correct.
     Approve {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Optional note for the audit trail.
         #[arg(long)]
         notes: Option<String>,
     },
     /// Reject a paper's metadata as wrong.
     Reject {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Optional note for the audit trail.
         #[arg(long)]
         notes: Option<String>,
     },
     /// Move a previously approved / rejected paper back to
     /// `pending`.
     Reopen {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Optional note for the audit trail.
         #[arg(long)]
         notes: Option<String>,
     },
     /// Add a contributor row to a paper.
     ContributorAdd {
+        /// Intake id of the paper.
         intake_id: i64,
+        /// Contribution role (author / editor / translator / other).
         #[arg(long)]
         role: String,
+        /// The contributor's display name, used when family / given
+        /// cannot be separated.
         #[arg(long)]
         name: String,
+        /// The contributor's family name, when separable.
         #[arg(long)]
         family: Option<String>,
+        /// The contributor's given name, when separable.
         #[arg(long)]
         given: Option<String>,
+        /// The contributor's ORCID identifier, when known.
         #[arg(long)]
         orcid: Option<String>,
     },
     /// Remove a contributor row by id.
-    ContributorRemove { contributor_id: i64 },
+    ContributorRemove {
+        /// Surrogate id of the contributor row to remove (listed by
+        /// `papers show`).
+        contributor_id: i64,
+    },
 }
 
 /// Paper-side corpus write commands. Peer of [`CorpusAction`].
@@ -606,14 +660,26 @@ pub enum PapersVectorsAction {
         /// `ivf-hnsw-sq`, `ivf-hnsw-pq`.
         #[arg(long)]
         kind: Option<String>,
+        /// IVF coarse-cluster count. Higher values shrink each list but
+        /// raise rebuild cost. Defaults to whatever the meta holds, or
+        /// roughly `sqrt(n_rows)` for a fresh library.
         #[arg(long)]
         num_partitions: Option<u32>,
+        /// PQ sub-quantizer count (only for `ivf-pq` and `ivf-hnsw-pq`).
+        /// Must divide the embedding dimension.
         #[arg(long)]
         num_sub_vectors: Option<u32>,
+        /// PQ codebook bit width per sub-vector (only for the PQ
+        /// families).
         #[arg(long)]
         num_bits: Option<u32>,
+        /// Default number of partitions to scan at query time. Trades
+        /// recall for latency.
         #[arg(long)]
         nprobes: Option<u32>,
+        /// Rescore the top `refine_factor * k` ANN hits with exact
+        /// distance before returning `k`. Higher values trade latency
+        /// for recall.
         #[arg(long)]
         refine_factor: Option<u32>,
     },
@@ -688,9 +754,15 @@ pub struct PapersDryrunArgs {
 /// queue priority of the resulting job.
 #[derive(clap::Args, Debug, Clone)]
 pub struct PapersIngestArgs {
+    /// Source file, or a directory the ingest walks recursively (with
+    /// `--recursive`).
     pub path: PathBuf,
+    /// Walk `<PATH>` as a directory and enqueue every supported file.
+    /// Without this flag, `<PATH>` must point at a single paper file.
     #[arg(long)]
     pub recursive: bool,
+    /// Re-ingest even when the source SHA-256 already exists in the
+    /// paper catalog. Without this flag, duplicate sources are skipped.
     #[arg(long)]
     pub force: bool,
     /// Queue priority for the enqueued job: `low`, `normal`, or
