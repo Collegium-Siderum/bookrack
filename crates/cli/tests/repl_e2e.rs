@@ -132,23 +132,19 @@ async fn repl_batch_dispatches_queue_list_over_control_plane() -> Result<()> {
     };
 
     let runner = runtime.run_until_shutdown(None, repl_handle);
-    let (driver_result, runner_result) =
-        tokio::join!(driver, driver_completion_then_shutdown(shutdown_tx, runner),);
+    let driver_then_shutdown = async {
+        let result = driver.await;
+        let _ = shutdown_tx.send(());
+        result
+    };
+    let runner_with_timeout = async {
+        match tokio::time::timeout(Duration::from_secs(30), runner).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!("runner did not exit within 30s")),
+        }
+    };
+    let (driver_result, runner_result) = tokio::join!(driver_then_shutdown, runner_with_timeout);
     driver_result??;
     runner_result?;
     Ok(())
-}
-
-async fn driver_completion_then_shutdown(
-    shutdown_tx: tokio::sync::broadcast::Sender<()>,
-    runner: impl std::future::Future<Output = Result<()>>,
-) -> Result<()> {
-    tokio::pin!(runner);
-    tokio::select! {
-        result = &mut runner => result,
-        _ = tokio::time::sleep(Duration::from_secs(30)) => {
-            let _ = shutdown_tx.send(());
-            (&mut runner).await
-        }
-    }
 }
