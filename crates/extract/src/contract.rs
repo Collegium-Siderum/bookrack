@@ -396,6 +396,14 @@ pub mod fallback_kinds {
     /// `from_utf8_lossy` replaced with U+FFFD — the file was not
     /// fully valid UTF-8 despite the BOM.
     pub const TXT_UTF8_LOSSY_SUBSTITUTION: &str = "txt:utf8_lossy_substitution";
+    /// TXT decoder: BOM-stripped UTF-16LE path saw byte sequences the
+    /// decoder replaced with U+FFFD — surrogate pairs or trailing odd
+    /// bytes that did not round-trip cleanly.
+    pub const TXT_UTF16LE_LOSSY_SUBSTITUTION: &str = "txt:utf16le_lossy_substitution";
+    /// TXT decoder: BOM-stripped UTF-16BE path saw byte sequences the
+    /// decoder replaced with U+FFFD — surrogate pairs or trailing odd
+    /// bytes that did not round-trip cleanly.
+    pub const TXT_UTF16BE_LOSSY_SUBSTITUTION: &str = "txt:utf16be_lossy_substitution";
     /// TXT decoder: strict UTF-8 trial failed; the adapter fell
     /// through to a permissive GB18030 decode. The detail string
     /// carries the `str::Utf8Error` that triggered the fall-through.

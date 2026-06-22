@@ -117,11 +117,27 @@ fn decode(bytes: &[u8], fallbacks: &mut Vec<FallbackEvent>) -> String {
         return String::from_utf8_lossy(rest).into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        let (text, _) = encoding_rs::UTF_16LE.decode_without_bom_handling(rest);
+        let (text, had_errors) = encoding_rs::UTF_16LE.decode_without_bom_handling(rest);
+        if had_errors {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::TXT_UTF16LE_LOSSY_SUBSTITUTION,
+                None,
+            );
+        }
         return text.into_owned();
     }
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        let (text, _) = encoding_rs::UTF_16BE.decode_without_bom_handling(rest);
+        let (text, had_errors) = encoding_rs::UTF_16BE.decode_without_bom_handling(rest);
+        if had_errors {
+            FallbackEvent::record(
+                fallbacks,
+                ADAPTER,
+                fallback_kinds::TXT_UTF16BE_LOSSY_SUBSTITUTION,
+                None,
+            );
+        }
         return text.into_owned();
     }
     let utf8_error = match std::str::from_utf8(bytes) {
@@ -185,6 +201,51 @@ mod fallback_tests {
         assert!(
             fallbacks.is_empty(),
             "clean BOM-prefixed UTF-8 must record nothing, got {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn bom_utf16le_lossy_substitution_is_recorded() {
+        // UTF-16LE BOM, then a lone low surrogate (0x00 0xD8) which the
+        // decoder must replace with U+FFFD. Followed by an odd trailing
+        // byte to keep the input ill-formed at the unit boundary too.
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend_from_slice(&[0x00, 0xD8, 0x41]);
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        assert!(
+            fallbacks
+                .iter()
+                .any(|e| e.kind == fallback_kinds::TXT_UTF16LE_LOSSY_SUBSTITUTION),
+            "expected TXT_UTF16LE_LOSSY_SUBSTITUTION in {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn bom_utf16le_clean_records_nothing() {
+        // UTF-16LE BOM, then "Hi" as two well-formed code units.
+        let bytes = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        assert!(
+            fallbacks.is_empty(),
+            "clean BOM-prefixed UTF-16LE must record nothing, got {fallbacks:?}",
+        );
+    }
+
+    #[test]
+    fn bom_utf16be_lossy_substitution_is_recorded() {
+        // UTF-16BE BOM, then a lone low surrogate (0xD8 0x00) which the
+        // decoder must replace with U+FFFD.
+        let mut bytes = vec![0xFE, 0xFF];
+        bytes.extend_from_slice(&[0xD8, 0x00, 0x00, 0x41]);
+        let mut fallbacks = Vec::new();
+        let _ = decode(&bytes, &mut fallbacks);
+        assert!(
+            fallbacks
+                .iter()
+                .any(|e| e.kind == fallback_kinds::TXT_UTF16BE_LOSSY_SUBSTITUTION),
+            "expected TXT_UTF16BE_LOSSY_SUBSTITUTION in {fallbacks:?}",
         );
     }
 
