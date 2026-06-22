@@ -16,7 +16,9 @@ use serde_json::{Value, json};
 use ts_rs::TS;
 
 use super::{MethodContext, run_write};
-use crate::cmd::remove::{RemoveArgs, execute_remove_from_plan, plan_remove, run as run_remove};
+use crate::cmd::remove::{
+    ExpectedFingerprint, RemoveArgs, execute_remove_from_plan, plan_remove, run as run_remove,
+};
 use crate::control::error_map::{plan_lookup_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
@@ -41,10 +43,14 @@ pub struct RemoveParams {
     plan_id: Option<String>,
 }
 
-/// Serialized form of a registered `remove` plan.
+/// Serialized form of a registered `remove` plan. The `fingerprint`
+/// pins the targeted state observed at dry-run time so the execute
+/// leg can reject a drifted target instead of deleting under an
+/// unconfirmed payload.
 #[derive(Debug, Serialize, Deserialize)]
 struct RegisteredRemovePlan {
     intake_id: i64,
+    fingerprint: String,
 }
 
 pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -83,8 +89,10 @@ async fn remove_dry_run(parsed: RemoveParams, ctx: &MethodContext) -> Result<Val
         let plan = plan_remove(&cfg, &args)
             .await
             .map_err(|e| write_err("remove", e))?;
+        let fingerprint = plan.fingerprint();
         let registered = RegisteredRemovePlan {
             intake_id: plan.intake.intake_id,
+            fingerprint,
         };
         let plan_id = registry
             .register("remove", library_name, &registered)
@@ -113,9 +121,13 @@ async fn remove_execute_from_plan(plan_id: String, ctx: &MethodContext) -> Resul
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
-        let outcome = execute_remove_from_plan(&cfg, plan.intake_id)
-            .await
-            .map_err(|e| write_err("remove", e))?;
+        let outcome = execute_remove_from_plan(
+            &cfg,
+            plan.intake_id,
+            ExpectedFingerprint::Required(&plan.fingerprint),
+        )
+        .await
+        .map_err(|e| write_err("remove", e))?;
         Ok(json!({
             "intake_id": outcome.intake_id,
             "source_sha256": outcome.source_sha256,

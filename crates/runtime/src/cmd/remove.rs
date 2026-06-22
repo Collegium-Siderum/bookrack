@@ -33,6 +33,7 @@ use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
+use sha2::{Digest, Sha256};
 
 /// Inputs `Cli` collects for a `bookrack remove` invocation.
 pub struct RemoveArgs {
@@ -65,7 +66,8 @@ pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
         return Ok(());
     }
 
-    let outcome = execute_remove_from_plan(cfg, plan.intake.intake_id).await?;
+    let outcome =
+        execute_remove_from_plan(cfg, plan.intake.intake_id, ExpectedFingerprint::None).await?;
     print_outcome(&outcome);
     Ok(())
 }
@@ -81,14 +83,28 @@ pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> 
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let intake = resolve_intake(&catalog, args)?;
+    drop(catalog);
+    derive_remove_plan(cfg, intake).await
+}
+
+/// Compute the plan body for an already-resolved intake. Reuses the
+/// catalog open and the corpus/vector probes without re-running the
+/// backup-on-open of [`Catalog::open_with_backup`], so the execute
+/// leg can re-derive the plan for the drift check without churning a
+/// second backup file per RPC.
+async fn derive_remove_plan(cfg: &Config, intake: Intake) -> Result<RemovePlan> {
     let intake_id = intake.intake_id;
     let partition = PartitionIdx::new(intake_id);
     let book_root_node_id: NodeId = partition.root();
     let book_root_id = book_root_node_id.get();
 
-    let counts = catalog
-        .count_book_derived(intake_id, book_root_id)
-        .context("count catalog rows")?;
+    let counts = {
+        let catalog = Catalog::open(&cfg.catalog_db()).context("open catalog")?;
+        catalog
+            .count_book_derived(intake_id, book_root_id)
+            .context("count catalog rows")?
+    };
+
     let envelope_path = intake.stored_path.clone();
     let envelope_exists = envelope_path
         .as_deref()
@@ -117,11 +133,31 @@ pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> 
     })
 }
 
+/// Drift-check selector for [`execute_remove_from_plan`].
+pub enum ExpectedFingerprint<'a> {
+    /// In-process callers «plan → execute in the same call frame»
+    /// have no drift window and skip the check.
+    None,
+    /// Two-step control-plane callers: the dry-run leg pins the
+    /// plan's fingerprint and the execute leg verifies the current
+    /// state still hashes to the same value before any deletion.
+    Required(&'a str),
+}
+
 /// Execute the remove sequence for an intake pinned by an earlier
 /// [`plan_remove`] call. Strict: the intake must still resolve in
 /// the catalog (even with the cascade rows already cleaned, e.g. a
 /// resumed removal), else the call aborts without writing.
-pub async fn execute_remove_from_plan(cfg: &Config, intake_id: i64) -> Result<RemoveOutcome> {
+///
+/// When `expected_fingerprint` is [`ExpectedFingerprint::Required`],
+/// the plan body is re-derived against current state and its
+/// fingerprint must match before any deletion runs; this is the
+/// drift guard for the two-RPC control-plane path.
+pub async fn execute_remove_from_plan(
+    cfg: &Config,
+    intake_id: i64,
+    expected_fingerprint: ExpectedFingerprint<'_>,
+) -> Result<RemoveOutcome> {
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let intake = catalog
@@ -130,6 +166,19 @@ pub async fn execute_remove_from_plan(cfg: &Config, intake_id: i64) -> Result<Re
         .with_context(|| {
             format!("plan referenced intake {intake_id}, which no longer exists in the catalog")
         })?;
+
+    if let ExpectedFingerprint::Required(expected) = expected_fingerprint {
+        let current = derive_remove_plan(cfg, intake.clone()).await?;
+        let actual = current.fingerprint();
+        if actual != expected {
+            anyhow::bail!(
+                "remove plan stale: target state for intake {intake_id} drifted since dry-run \
+                 (expected fingerprint {expected}, current {actual}). Re-run dry_run=true and \
+                 confirm again."
+            );
+        }
+    }
+
     let partition = PartitionIdx::new(intake_id);
     let book_root_id: i64 = partition.root().get();
     let envelope_path = intake.stored_path.clone();
@@ -190,6 +239,53 @@ pub struct RemovePlan {
     pub corpus_nodes: u64,
     pub envelope_path: Option<String>,
     pub envelope_exists: bool,
+}
+
+impl RemovePlan {
+    /// Stable hex SHA-256 over the fields the operator confirmed in
+    /// the dry-run output. The two-step control-plane path stores
+    /// this with the registered plan and the execute leg recomputes
+    /// it against current state; a mismatch means the catalog,
+    /// corpus, vector store, or envelope file drifted between the
+    /// two RPCs and the call must abort instead of deleting under
+    /// an unconfirmed target.
+    pub fn fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(b"remove\x00");
+        h.update(self.intake.intake_id.to_be_bytes());
+        h.update(b"\x00");
+        h.update(self.intake.source_sha256.as_bytes());
+        h.update(b"\x00");
+        h.update(self.intake.status.as_str().as_bytes());
+        h.update(b"\x00");
+        h.update(self.corpus_nodes.to_be_bytes());
+        h.update(b"\x00");
+        match self.vector_rows {
+            Some(n) => {
+                h.update(b"S");
+                h.update((n as u64).to_be_bytes());
+            }
+            None => h.update(b"N"),
+        }
+        h.update(b"\x00");
+        h.update(self.envelope_path.as_deref().unwrap_or("").as_bytes());
+        h.update(b"\x00");
+        h.update([u8::from(self.envelope_exists)]);
+        h.update(b"\x00");
+        for v in [
+            self.counts.book_state,
+            self.counts.node_publication_attrs,
+            self.counts.node_overrides,
+            self.counts.node_contributors,
+            self.counts.node_categories,
+            self.counts.node_reviews,
+            self.counts.node_role_takeovers,
+            self.counts.toc_edits,
+        ] {
+            h.update(v.to_be_bytes());
+        }
+        format!("{:x}", h.finalize())
+    }
 }
 
 /// Aggregate outcome of [`execute_remove_from_plan`]: what actually
@@ -541,5 +637,74 @@ mod tests {
         .await
         .expect_err("unknown id must error");
         assert!(format!("{err:#}").contains("no intake registered"));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_is_stable_for_unchanged_state() {
+        let (_tmp, cfg) = temp_cfg();
+        let intake_id = {
+            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            seed_book(&cfg, &mut catalog, &mut corpus, "sha-fp").0
+        };
+        let args = RemoveArgs {
+            intake_id: Some(intake_id),
+            sha: None,
+            dry_run: true,
+            yes: true,
+        };
+        let a = plan_remove(&cfg, &args).await.expect("plan a");
+        let b = plan_remove(&cfg, &args).await.expect("plan b");
+        assert_eq!(a.fingerprint(), b.fingerprint());
+    }
+
+    #[tokio::test]
+    async fn execute_aborts_when_target_state_drifts_after_plan() {
+        let (_tmp, cfg) = temp_cfg();
+        let (intake_id, _envelope) = {
+            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
+            seed_book(&cfg, &mut catalog, &mut corpus, "sha-drift")
+        };
+        let plan = plan_remove(
+            &cfg,
+            &RemoveArgs {
+                intake_id: Some(intake_id),
+                sha: None,
+                dry_run: true,
+                yes: true,
+            },
+        )
+        .await
+        .expect("plan");
+        let pinned = plan.fingerprint();
+        // Mutate the catalog cascade out from under the plan: drop
+        // the derived rows so corpus_nodes shrinks. The execute leg
+        // must notice and refuse to delete.
+        {
+            let mut catalog = Catalog::open(&cfg.catalog_db()).expect("reopen catalog");
+            let book_root_id = PartitionIdx::new(intake_id).root().get();
+            catalog
+                .delete_book_derived(intake_id, book_root_id)
+                .expect("drift cascade");
+            let mut corpus = Corpus::open(&cfg.corpus_db()).expect("reopen corpus");
+            corpus
+                .drop_partition(PartitionIdx::new(intake_id))
+                .expect("drift corpus");
+        }
+        let err = execute_remove_from_plan(&cfg, intake_id, ExpectedFingerprint::Required(&pinned))
+            .await
+            .expect_err("drift must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("plan stale") && msg.contains(&pinned),
+            "expected drift bail, got: {msg}",
+        );
+        // Without the guard, the same call proceeds to clean up the
+        // remaining intake row idempotently.
+        let outcome = execute_remove_from_plan(&cfg, intake_id, ExpectedFingerprint::None)
+            .await
+            .expect("unguarded execute");
+        assert_eq!(outcome.intake_id, intake_id);
     }
 }

@@ -21,6 +21,9 @@ use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
+use sha2::{Digest, Sha256};
+
+use crate::cmd::remove::ExpectedFingerprint;
 
 /// Inputs `Cli` collects for a `bookrack papers remove` invocation.
 pub struct RemovePaperArgs {
@@ -55,7 +58,8 @@ pub async fn run(cfg: &Config, args: RemovePaperArgs) -> Result<()> {
         return Ok(());
     }
 
-    let outcome = execute_remove_from_plan(cfg, plan.intake.intake_id).await?;
+    let outcome =
+        execute_remove_from_plan(cfg, plan.intake.intake_id, ExpectedFingerprint::None).await?;
     print_outcome(&outcome);
     Ok(())
 }
@@ -71,14 +75,28 @@ pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemoveP
     let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     let intake = resolve_intake(&catalog, args)?;
+    drop(catalog);
+    derive_remove_plan(cfg, intake).await
+}
+
+/// Compute the plan body for an already-resolved paper intake.
+/// Shared by [`plan_remove`] and the drift-check inside
+/// [`execute_remove_from_plan`] so the second derivation does not
+/// rewrite the catalog backup that [`Catalog::open_with_backup`]
+/// stamps on first open.
+async fn derive_remove_plan(cfg: &Config, intake: Intake) -> Result<RemovePaperPlan> {
     let intake_id = intake.intake_id;
     let partition = PartitionIdx::new(intake_id);
     let paper_root_node_id: NodeId = partition.root();
     let paper_root_id = paper_root_node_id.get();
 
-    let counts = catalog
-        .count_book_derived(intake_id, paper_root_id)
-        .context("count catalog rows")?;
+    let counts = {
+        let catalog = Catalog::open(&cfg.papers_catalog_db()).context("open papers catalog")?;
+        catalog
+            .count_book_derived(intake_id, paper_root_id)
+            .context("count catalog rows")?
+    };
+
     let envelope_path = intake.stored_path.clone();
     let envelope_exists = envelope_path
         .as_deref()
@@ -117,7 +135,16 @@ pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemoveP
 /// Execute the remove sequence for a paper intake pinned by an
 /// earlier [`plan_remove`] call. Strict: the intake must still
 /// resolve in the catalog, else the call aborts without writing.
-pub async fn execute_remove_from_plan(cfg: &Config, intake_id: i64) -> Result<RemovePaperOutcome> {
+///
+/// When `expected_fingerprint` is [`ExpectedFingerprint::Required`],
+/// the plan body is re-derived against current state and its
+/// fingerprint must match before any deletion runs; this is the
+/// drift guard for the two-RPC control-plane path.
+pub async fn execute_remove_from_plan(
+    cfg: &Config,
+    intake_id: i64,
+    expected_fingerprint: ExpectedFingerprint<'_>,
+) -> Result<RemovePaperOutcome> {
     let mut catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
     let intake = catalog
@@ -128,6 +155,19 @@ pub async fn execute_remove_from_plan(cfg: &Config, intake_id: i64) -> Result<Re
                 "plan referenced paper intake {intake_id}, which no longer exists in the catalog"
             )
         })?;
+
+    if let ExpectedFingerprint::Required(expected) = expected_fingerprint {
+        let current = derive_remove_plan(cfg, intake.clone()).await?;
+        let actual = current.fingerprint();
+        if actual != expected {
+            anyhow::bail!(
+                "papers.remove plan stale: target state for paper intake {intake_id} drifted \
+                 since dry-run (expected fingerprint {expected}, current {actual}). Re-run \
+                 dry_run=true and confirm again."
+            );
+        }
+    }
+
     let partition = PartitionIdx::new(intake_id);
     let paper_root_id: i64 = partition.root().get();
     let envelope_path = intake.stored_path.clone();
@@ -193,6 +233,54 @@ pub struct RemovePaperPlan {
     pub envelope_exists: bool,
     pub source_pdf_path: Option<String>,
     pub source_pdf_exists: bool,
+}
+
+impl RemovePaperPlan {
+    /// Stable hex SHA-256 over the fields the operator confirmed in
+    /// the dry-run output. Mirrors [`crate::cmd::remove::RemovePlan::fingerprint`]
+    /// and additionally folds the source-PDF path/presence in, since
+    /// `papers.remove` deletes that file too.
+    pub fn fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(b"papers.remove\x00");
+        h.update(self.intake.intake_id.to_be_bytes());
+        h.update(b"\x00");
+        h.update(self.intake.source_sha256.as_bytes());
+        h.update(b"\x00");
+        h.update(self.intake.status.as_str().as_bytes());
+        h.update(b"\x00");
+        h.update(self.corpus_nodes.to_be_bytes());
+        h.update(b"\x00");
+        match self.vector_rows {
+            Some(n) => {
+                h.update(b"S");
+                h.update((n as u64).to_be_bytes());
+            }
+            None => h.update(b"N"),
+        }
+        h.update(b"\x00");
+        h.update(self.envelope_path.as_deref().unwrap_or("").as_bytes());
+        h.update(b"\x00");
+        h.update([u8::from(self.envelope_exists)]);
+        h.update(b"\x00");
+        h.update(self.source_pdf_path.as_deref().unwrap_or("").as_bytes());
+        h.update(b"\x00");
+        h.update([u8::from(self.source_pdf_exists)]);
+        h.update(b"\x00");
+        for v in [
+            self.counts.book_state,
+            self.counts.node_publication_attrs,
+            self.counts.node_overrides,
+            self.counts.node_contributors,
+            self.counts.node_categories,
+            self.counts.node_reviews,
+            self.counts.node_role_takeovers,
+            self.counts.toc_edits,
+        ] {
+            h.update(v.to_be_bytes());
+        }
+        format!("{:x}", h.finalize())
+    }
 }
 
 /// Aggregate outcome of [`execute_remove_from_plan`].
