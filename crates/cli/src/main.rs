@@ -58,18 +58,28 @@ Prerequisites:
 struct Cli {
     /// Operate on the library at this data root, overriding the
     /// environment. Mutually exclusive with `--library`.
-    #[arg(long, global = true, conflicts_with = "library")]
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "library",
+        help_heading = "Common Options"
+    )]
     data_dir: Option<PathBuf>,
     /// Operate on the named library from the registry (see
     /// BOOKRACK_REGISTRY). Mutually exclusive with `--data-dir`.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
     /// Select an audit profile by name. Built-in names are
     /// `default`, `trust-source`, and `strict`. Without this flag the
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
     /// bypassed and the named preset wins.
-    #[arg(long, global = true, value_name = "NAME")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "NAME",
+        help_heading = "Common Options"
+    )]
     audit_profile: Option<String>,
     #[command(subcommand)]
     command: Command,
