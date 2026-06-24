@@ -30,6 +30,10 @@ dirs = "5"
 # Ctrl-C graceful-shutdown signal. Additive — other crates ignore them.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 # `bundled` compiles SQLite in-tree, so no system libsqlite is required.
+# The bundled SQLite is built with FTS5 enabled, which the `refs` crate
+# uses for per-entries-table sidecar indexes (trigram tokenizer over
+# chinese_name + english_name + bio_annotation). See
+# `crates/dbkit/tests/fts5_trigram.rs` for the conformance check.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # Schema migration engine for catalog.db, which is source-of-truth and
 # cannot be rebuilt. Tracks the applied revision in SQLite's user_version
