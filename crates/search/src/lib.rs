@@ -330,6 +330,10 @@ pub fn cite(
         let context = match kind {
             ItemKind::Book => leaf_context(corpus, catalog, hit.start_node_id)?,
             ItemKind::Paper => paper_context(corpus, catalog, hit.start_node_id)?,
+            ItemKind::Reference => unreachable!(
+                "reference items do not have corpus nodes; lookup goes through \
+                 `crates/refs` (see distill pipeline)",
+            ),
         };
         citations.push(Citation {
             breadcrumb: context.breadcrumb,
@@ -546,6 +550,10 @@ pub async fn search_unified<E: Embedder>(
         let (corpus, catalog) = match kind {
             ItemKind::Book => (books.corpus, books.catalog),
             ItemKind::Paper => (papers.corpus, papers.catalog),
+            ItemKind::Reference => unreachable!(
+                "unified vector search never returns reference items; \
+                 the distill pipeline owns its own lookup path",
+            ),
         };
         let mut single = cite(corpus, catalog, vec![hit], kind)?;
         citations.append(&mut single);

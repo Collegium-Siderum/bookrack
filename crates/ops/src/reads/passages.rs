@@ -57,6 +57,10 @@ pub fn read_context<E: Embedder>(
                 ItemKind::Paper => ops
                     .papers_corpus_db()
                     .ok_or(OpsError::PapersBackendNotConfigured)?,
+                ItemKind::Reference => unreachable!(
+                    "reference items have no corpus nodes; passage reads \
+                     are book/paper only — distill exposes its own lookup",
+                ),
             };
             let corpus = Corpus::open(corpus_path)?;
             let id = target.node_id;
@@ -117,6 +121,10 @@ pub fn read_span<E: Embedder>(
                 ItemKind::Paper => ops
                     .papers_corpus_db()
                     .ok_or(OpsError::PapersBackendNotConfigured)?,
+                ItemKind::Reference => unreachable!(
+                    "reference items have no corpus nodes; passage reads \
+                     are book/paper only — distill exposes its own lookup",
+                ),
             };
             let corpus = Corpus::open(corpus_path)?;
             let id = target.node_id;

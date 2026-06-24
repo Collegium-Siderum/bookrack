@@ -491,6 +491,15 @@ impl DaemonRuntime {
                                             .await
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
                                     }
+                                    bookrack_core::ItemKind::Reference => {
+                                        // distill pipeline lands in a later route step;
+                                        // until then a reference job in the queue is a
+                                        // submission bug, not a runtime condition.
+                                        unreachable!(
+                                            "reference jobs are routed through the distill \
+                                             worker (not wired yet); see route R5"
+                                        );
+                                    }
                                 }
                                 Ok::<(), queue::JobError>(())
                             })
