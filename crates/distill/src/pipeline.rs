@@ -77,13 +77,27 @@ impl Pipeline {
         self.stages.is_empty()
     }
 
-    /// Drive the pipeline over one source string. Returns the emitted
-    /// `EntryDraft`s plus the populated `Coverage`. Fails with
-    /// `ParseError::StageMismatch` if any stage rejects its input or
-    /// if the pipeline ends on a non-`Drafts` variant.
+    /// Drive the pipeline over one source string with a default
+    /// (empty) [`Ctx::extras`]. See [`Pipeline::run_with_extras`] for
+    /// the variant that seeds `book_slug` / `distill_run_id` /
+    /// `ocr_engine` into the context so the finalize stage can stamp
+    /// them onto `EntryDraft::source`.
     pub fn run(&self, source: String) -> Result<(Vec<EntryDraft>, Coverage), ParseError> {
+        self.run_with_extras(source, serde_json::Map::new())
+    }
+
+    /// Drive the pipeline with a pre-populated `Ctx::extras` map.
+    /// CLI callers stash `book_slug`, `distill_run_id`, and
+    /// `ocr_engine` strings here; the finalize stage reads them when
+    /// composing `EntryDraft::source`.
+    pub fn run_with_extras(
+        &self,
+        source: String,
+        extras: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(Vec<EntryDraft>, Coverage), ParseError> {
         let mut data = StageData::Source(source);
         let mut ctx = Ctx::new();
+        ctx.extras = extras;
         for stage in &self.stages {
             data = stage.run(data, &mut ctx)?;
         }

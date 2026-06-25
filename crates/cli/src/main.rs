@@ -312,6 +312,15 @@ enum Command {
         #[arg(long)]
         no_smoke: bool,
     },
+    /// Build, verify, or list distilled reference-book entries.
+    ///
+    /// Operates directly on `<data>/reference.db` and the per-book
+    /// `<data>/reference/<slug>/book.toml` directories. Does not go
+    /// through the daemon's control plane.
+    Distill {
+        #[command(subcommand)]
+        action: bookrack_cli::distill_cmd::DistillAction,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -573,6 +582,7 @@ async fn run() -> Result<()> {
     // is the lone exception — it reads compiled-in profiles and
     // needs no config.
     let _profile_name = cli.audit_profile.clone();
+    let selection = cli.selection();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::Verify => cmd::cli_client::verify::run(None).await,
@@ -592,6 +602,9 @@ async fn run() -> Result<()> {
         Command::Remove(args) => cmd::cli_client::remove::run(args, None).await,
         Command::Papers { action } => cmd::cli_client::papers::run(action, None).await,
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
+        Command::Distill { action } => {
+            bookrack_cli::distill_cmd::run(&selection, action).await
+        }
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),

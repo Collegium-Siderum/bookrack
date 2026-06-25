@@ -21,6 +21,13 @@ bookrack-ops = { path = "../ops" }
 bookrack-repl-grammar = { path = "../repl-grammar" }
 bookrack-runtime = { path = "../runtime" }
 bookrack-session = { path = "../session" }
+# v2 distill rollout (phase 10): the local `bookrack distill` family
+# (build / verify / list) opens `Refs` directly, reads book.toml,
+# and runs the pipeline without going through the daemon's control
+# plane.
+bookrack-refs.workspace = true
+bookrack-distill.workspace = true
+chrono.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
