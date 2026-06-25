@@ -8,4 +8,8 @@ repository.workspace = true
 [dependencies]
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
+# `Value` round-trips for `payload_json` / `source_json` / overlay
+# patches; `from_str` for view-side projection back into typed structs.
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
