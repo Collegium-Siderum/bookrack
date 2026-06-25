@@ -11,3 +11,7 @@ repository.workspace = true
 # stage carry between themselves.
 serde_json.workspace = true
 thiserror.workspace = true
+# Decode the three repo-shipped controlled vocabularies under data/
+# and the operator-authored `<data>/reference/<slug>/book.toml`.
+serde.workspace = true
+toml.workspace = true

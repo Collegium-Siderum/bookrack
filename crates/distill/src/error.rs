@@ -42,10 +42,10 @@ pub enum ParseError {
     /// A `book.toml` referenced a stage with the `@script::<fn>`
     /// escape-hatch syntax. The hatch is reserved for a future
     /// embedded scripting engine; the loader in phase 7 fails the
-    /// build with this variant and links to manual §1.4.
+    /// build with this variant.
     #[error(
         "@script::{0} stage references are not implemented; \
-         see drafts/手册/参考书管线-v2 重构落地-执行手册.md §1.4"
+         see the v2 distill execution manual §1.4"
     )]
     ScriptRefForbidden(String),
 
@@ -54,7 +54,7 @@ pub enum ParseError {
     /// loader in phase 7 fails the build with this variant.
     #[error(
         "@llm::{0} stage references are not implemented; \
-         see drafts/调查/参考书管线-pipeline 重构调查.md §8.1"
+         see the v2 distill investigation doc §8.1"
     )]
     LlmHookNotImplemented(String),
 }

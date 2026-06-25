@@ -1,0 +1,82 @@
+# Property catalog for the distill payload keyspace.
+#
+# Mother doc §5.7 + the four-book v1 superset. Every key referenced
+# by any book.toml's `parser.writes_properties` or by any
+# stage_catalog stage's `writes_properties` must appear here. Adding
+# a new property is a deliberate PR change, not an automatic side
+# effect of a new pipeline: the controlled-vocabulary discipline
+# protects payload_json from silent shape drift across books.
+
+schema_version = 1
+
+[gloss]
+type = "string"
+description = "Primary explanation, translation, or target-language equivalent."
+used_by = ["name_translation", "philosophy"]
+
+[etymology]
+type = "string"
+description = "Etymological note (e.g. derivation from Latin or Greek)."
+used_by = ["philosophy"]
+
+[chinese_name]
+type = "string"
+description = "Primary Chinese name in a name-translation entry."
+used_by = ["name_translation"]
+
+[country]
+type = "string"
+description = "Country or region tag; original-script label permitted."
+used_by = ["name_translation"]
+
+[year_span]
+type = { object = { birth = "int?", death = "int?" } }
+description = "Birth and death years; either bound may be absent."
+used_by = ["name_translation"]
+
+[gender]
+type = { enum = ["F", "M", "other"] }
+description = "Reported gender; broader than the binary on purpose."
+used_by = ["name_translation"]
+
+[pos]
+type = { enum = ["noun", "verb", "adj", "adv", "other"] }
+description = "Part of speech; reserved for future glossary-type books."
+
+[quotes]
+type = { array = { object = { text = "string", attribution = "string" } } }
+description = "Attributed quotations, in source order."
+used_by = ["philosophy"]
+
+[variants]
+type = { array = "string" }
+description = "Variant spellings or transliterations of the headword."
+used_by = ["name_translation"]
+
+[alternate_forms]
+type = { array = "string" }
+description = "Alternate spellings or readings; synonym of variants kept for older book.toml shapes."
+
+[redirect_to]
+type = "string"
+description = "Target entry_key for a cross-reference entry (mother doc §5.5)."
+
+[bio_annotation]
+type = "string"
+description = "Brief biographical note for a person entry."
+used_by = ["name_translation"]
+
+[zh_head]
+type = "string"
+description = "Chinese head of a bilingual philosophy entry."
+used_by = ["philosophy"]
+
+[en_text]
+type = "string"
+description = "English-language body of a bilingual entry."
+used_by = ["philosophy"]
+
+[zh_text]
+type = "string"
+description = "Chinese-language body of a bilingual entry."
+used_by = ["philosophy"]

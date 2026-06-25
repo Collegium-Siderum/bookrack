@@ -1,0 +1,35 @@
+# Per-entry quality flags written by distill stages and consumed by
+# `reference_lookup` (via `min_severity` filtering) and the user
+# overlay surface (which can stamp `verified_by_user`).
+#
+# Mother doc §5.11. Adding a flag requires a PR and follows the same
+# discipline as the property catalog: stages may not invent flag
+# names at runtime.
+
+schema_version = 1
+
+[pair_mismatch]
+severity = "warn"
+description = "Bilingual pair stage could not find a matching counterpart."
+sourced_from = "philosophy book pipeline §6.2"
+
+[spliced_from_orphan]
+severity = "info"
+description = "Body lines were spliced across a page boundary into the previous block."
+
+[low_ocr_confidence]
+severity = "warn"
+description = "The OCR engine reported low confidence on the source region."
+sourced_from = "future LLM-assist hook §8.1"
+
+[anchor_glued_with_body]
+severity = "warn"
+description = "Anchor line could not be cleanly separated from its body paragraph."
+
+[verified_by_user]
+severity = "ok"
+description = "User has reviewed and confirmed this entry via the overlay surface (§5.8)."
+
+[redirect_loop]
+severity = "error"
+description = "Redirect chain longer than one hop; the lookup was not followed."

@@ -1,0 +1,161 @@
+# Stage catalog: the public surface of every distill builtin.
+#
+# Each table declares one stage that a book.toml's `parser.stages`
+# may reference. Mother doc §5.2 enumerates the canonical set; the
+# three `(c)`-tier inline stages from the spike were promoted to
+# declarative builtins (§1.4 of the execution manual). `partition_body_around_match`,
+# `walk_anchors_per_lang`, and `unpack_paired_body` are the §1.4
+# additions.
+#
+# `input` and `output` name a `StageData` variant (source / pages /
+# blocks / raws / splits / drafts). `writes_properties` declares the
+# property_catalog keys this stage may populate; their union across
+# the chosen chain must be a subset of the book.toml's declared
+# `parser.writes_properties`. `emits_flags` declares the
+# quality_flags this stage may stamp on an entry.
+
+schema_version = 1
+
+[split_pages]
+input = "source"
+output = "pages"
+description = "Split polyocr Markdown by page markers of the form `<!-- page X (sheet Y) -->`."
+
+[one_block_per_page]
+input = "pages"
+output = "blocks"
+description = "Emit exactly one block per page, tagged with the configured language."
+params = [
+  { name = "lang", type = "string", required = false, default = "latin" },
+]
+
+[split_bilingual_blocks]
+input = "pages"
+output = "blocks"
+description = "Split each page into bilingual blocks at every flip between scripts."
+
+[walk_anchors]
+input = "blocks"
+output = "raws"
+description = "Walk an anchor pattern over each block and emit one raw entry per anchor line."
+emits_flags = ["spliced_from_orphan", "anchor_glued_with_body"]
+params = [
+  { name = "anchor", type = "anchor_rule_ref", required = true },
+  { name = "reject", type = "anchor_rule_ref[]", required = false, default = [] },
+  { name = "drop_lone_letter_dividers", type = "bool", required = false, default = false },
+  { name = "splice_orphans_to_prev_block", type = "bool", required = false, default = true },
+]
+
+[walk_anchors_per_lang]
+input = "blocks"
+output = "raws"
+description = "Partition blocks by language, walk each side with its own anchor rule, and merge results in source order."
+emits_flags = ["spliced_from_orphan", "anchor_glued_with_body"]
+params = [
+  { name = "rules", type = "per_lang_rule[]", required = true },
+]
+
+[pair_bilingual_entries]
+input = "raws"
+output = "raws"
+description = "Pair adjacent bilingual raw entries by language and merge them into one packed body."
+emits_flags = ["pair_mismatch"]
+params = [
+  { name = "primary_lang", type = "string", required = true },
+  { name = "secondary_lang", type = "string", required = true },
+  { name = "merge_key", type = "string", required = true },
+  { name = "mismatch_flag", type = "quality_flag_ref", required = false, default = "pair_mismatch" },
+]
+
+[split_at_first_cjk]
+input = "raws"
+output = "splits"
+description = "Cut each raw entry at the first CJK character; the head becomes the headword, the tail becomes the body."
+
+[split_headline_only]
+input = "raws"
+output = "splits"
+description = "Promote the anchor line as the headword and keep the body untouched."
+
+[extract_year_span]
+input = "splits"
+output = "splits"
+description = "Detect a year-span pattern in the body and write a structured payload key."
+writes_properties = ["year_span"]
+params = [
+  { name = "payload_key", type = "property_name", required = true },
+]
+
+[extract_bracketed_tag]
+input = "splits"
+output = "splits"
+description = "Detect a bracket-wrapped tag (angle / square / paren) and write its contents into a payload key."
+params = [
+  { name = "brackets", type = "bracket_kind", required = true },
+  { name = "payload_key", type = "property_name", required = true },
+  { name = "search_in", type = "search_target", required = false, default = "headword" },
+]
+
+[extract_gender_tag]
+input = "splits"
+output = "splits"
+description = "Detect and extract a gender marker into the configured payload key."
+writes_properties = ["gender"]
+params = [
+  { name = "payload_key", type = "property_name", required = true },
+]
+
+[split_variants]
+input = "splits"
+output = "splits"
+description = "Split a variants field on a separator pattern into an array of strings."
+writes_properties = ["variants", "alternate_forms"]
+params = [
+  { name = "sep", type = "regex", required = true },
+]
+
+[extract_quotes]
+input = "splits"
+output = "splits"
+description = "Detect attributed quotations in the body and emit a quotes payload array."
+writes_properties = ["quotes"]
+params = [
+  { name = "payload_key", type = "property_name", required = true },
+]
+
+[partition_body_around_match]
+input = "splits"
+output = "splits"
+description = "Partition the body around a pattern match; head goes to one payload key, tail to another, optionally splitting the head further by a regex."
+writes_properties = ["country", "chinese_name", "variants", "bio_annotation"]
+params = [
+  { name = "pattern", type = "pattern_ref", required = true },
+  { name = "head_payload_key", type = "property_name", required = true },
+  { name = "head_split_by", type = "regex", required = false, default = "" },
+  { name = "first_to", type = "property_name", required = false },
+  { name = "rest_to", type = "property_name", required = false },
+  { name = "tail_to", type = "property_name", required = false },
+]
+
+[unpack_paired_body]
+input = "splits"
+output = "splits"
+description = "Unpack a body that was packed as head_marker / body_marker by an earlier pair stage."
+writes_properties = ["zh_head", "en_text", "zh_text"]
+params = [
+  { name = "head_marker", type = "string", required = true },
+  { name = "body_marker", type = "string", required = true },
+  { name = "head_to", type = "property_name", required = true },
+  { name = "body_to", type = "property_name", required = true },
+  { name = "original_to", type = "property_name", required = true },
+]
+
+[to_entry_draft]
+input = "splits"
+output = "drafts"
+description = "Finalize split entries into entry drafts: normalize the lookup key, compose FTS text, and carry the declared payload keys forward."
+params = [
+  { name = "key_normalizer", type = "key_normalizer", required = true },
+  { name = "carry_payload_keys", type = "property_name[]", required = false, default = [] },
+  { name = "aliases_from_payload", type = "property_name[]", required = false, default = [] },
+]

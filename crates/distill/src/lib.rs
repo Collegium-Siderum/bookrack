@@ -11,10 +11,17 @@
 //! the controlled vocabularies, the builtin stages, and the
 //! dispatcher.
 
+pub mod book_toml;
+pub mod catalogs;
 pub mod core;
 pub mod error;
 pub mod pipeline;
 
+pub use book_toml::{BookToml, IndexEntry, ParserSection, StageConfig, StageRef};
+pub use catalogs::{
+    Catalogs, FlagSpec, ParamSpec, PropertyCatalog, PropertySpec, QualityFlagCatalog,
+    StageCatalog, StageSpec,
+};
 pub use core::{Block, Coverage, Ctx, EntryDraft, Page, RawEntry, SplitEntry, StageData};
 pub use error::ParseError;
 pub use pipeline::{Pipeline, Stage};
