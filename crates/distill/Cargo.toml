@@ -1,0 +1,13 @@
+[package]
+name = "bookrack-distill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `Map<String, Value>` for `Ctx::extras` and `EntryDraft::payload`, the
+# untyped grab-bags downstream stages and the `to_entry_draft` finalize
+# stage carry between themselves.
+serde_json.workspace = true
+thiserror.workspace = true

@@ -135,6 +135,10 @@ bookrack-audit-profile = { path = "crates/audit-profile" }
 # distill, mcp, and cli crates downstream consume the same surface
 # (the `Refs` handle and the `reference.db` migration target version).
 bookrack-refs = { path = "crates/refs" }
+# The distill pipeline. Pinned at the workspace level so the cli and
+# mcp crates downstream consume the same `Pipeline` / `Stage` /
+# `ParseError` surface. Phase 3 ships the framework only.
+bookrack-distill = { path = "crates/distill" }
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
 zip = "8"
