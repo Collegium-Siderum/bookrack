@@ -32,6 +32,22 @@ pub struct Pipeline {
     stages: Vec<Box<dyn Stage>>,
 }
 
+impl std::fmt::Debug for Pipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pipeline")
+            .field("name", &self.name)
+            .field(
+                "stages",
+                &self
+                    .stages
+                    .iter()
+                    .map(|s| s.name())
+                    .collect::<Vec<&str>>(),
+            )
+            .finish()
+    }
+}
+
 impl Pipeline {
     /// Build an empty pipeline. Useful for chaining `.push` from a
     /// catalog-driven loader.

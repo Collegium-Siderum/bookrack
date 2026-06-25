@@ -19,3 +19,8 @@ toml.workspace = true
 # year spans, bracketed tags, gender markers, variant separators,
 # quoted strings, and the splitter regex `head_split_by`.
 regex.workspace = true
+
+[dev-dependencies]
+# Throwaway directories for the phase-7 `load_pipeline` round-trip
+# test that writes a book.toml fixture before invoking the loader.
+tempfile.workspace = true

@@ -15,6 +15,7 @@ pub mod anchors;
 pub mod book_toml;
 pub mod catalogs;
 pub mod core;
+pub mod dispatch;
 pub mod error;
 pub mod extractor;
 pub mod finalize;
@@ -22,6 +23,19 @@ pub mod patterns;
 pub mod pipeline;
 pub mod segment;
 pub mod splitter;
+
+use std::path::Path;
+
+/// Read a `book.toml` from disk, load the controlled vocabularies,
+/// validate the book against them, and dispatch the stages into a
+/// runnable [`Pipeline`]. The top-level shortcut the CLI's
+/// `distill build` command and the MCP server's distill driver both
+/// call.
+pub fn load_pipeline(book_toml_path: &Path) -> Result<Pipeline, ParseError> {
+    let catalogs = Catalogs::load_all()?;
+    let book = BookToml::load(book_toml_path)?;
+    book.into_pipeline(&catalogs)
+}
 
 pub use book_toml::{BookToml, IndexEntry, ParserSection, StageConfig, StageRef};
 pub use catalogs::{
@@ -36,6 +50,7 @@ pub use extractor::{
 };
 pub use finalize::{FtsComposer, KeyNormalizer, to_entry_draft};
 pub use anchors::{AnchorRule, LangAnchorRule};
+pub use dispatch::dispatch_stage;
 pub use patterns::{BracketKind, PatternMatch, PatternRef, match_pattern};
 pub use pipeline::{Pipeline, Stage};
 pub use segment::{
