@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_repl_grammar::{
     CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, QueueAction, RemoveArgs,
-    ReplCli, ReplCommand, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
@@ -158,12 +158,6 @@ enum Command {
         /// `BOOKRACK_RUNTIME_DIR` or the platform default.
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
-        /// One-release transition: re-enable the in-process reedline
-        /// REPL. Default behaviour is the silent daemon; this flag
-        /// exists only to give CI scripts that fed REPL via stdin a
-        /// window to migrate to `bookrack repl`.
-        #[arg(long, hide = true)]
-        legacy_repl: bool,
     },
     /// Open an interactive REPL against the running daemon.
     ///
@@ -532,7 +526,6 @@ async fn run() -> Result<()> {
         mcp_addr,
         no_mcp,
         runtime_dir,
-        legacy_repl,
     } = &cli.command
     {
         let selection = cli.selection();
@@ -554,7 +547,6 @@ async fn run() -> Result<()> {
             mcp_addr: *mcp_addr,
             no_mcp: *no_mcp,
             runtime_dir: runtime_dir.clone(),
-            legacy_repl: *legacy_repl,
         })
         .await;
     }
@@ -640,41 +632,39 @@ mod tests {
     }
 
     #[test]
-    fn metadata_write_subcommands_parse_through_repl() {
-        // The write-side metadata surface lives inside `bookrack run`
-        // and is parsed against the REPL grammar with no binary prefix.
+    fn metadata_write_subcommands_parse_through_cli() {
         for argv in [
-            vec!["metadata", "set", "1", "title", "A New Title"],
-            vec!["metadata", "set", "1", "pub_place", "New York"],
-            vec!["metadata", "set", "1", "original_year", "1949"],
-            vec!["metadata", "clear", "1", "title"],
-            vec!["metadata", "ack", "1", "--reason", "test"],
-            vec!["metadata", "approve", "1"],
-            vec!["metadata", "approve", "1", "--reason", "verified"],
-            vec!["metadata", "reject", "1", "--reason", "wrong file"],
-            vec!["metadata", "advance", "1"],
+            vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
+            vec!["bookrack", "metadata", "set", "1", "pub_place", "New York"],
+            vec!["bookrack", "metadata", "set", "1", "original_year", "1949"],
+            vec!["bookrack", "metadata", "clear", "1", "title"],
+            vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
+            vec!["bookrack", "metadata", "approve", "1"],
+            vec!["bookrack", "metadata", "approve", "1", "--reason", "verified"],
+            vec!["bookrack", "metadata", "reject", "1", "--reason", "wrong file"],
+            vec!["bookrack", "metadata", "advance", "1"],
         ] {
-            ReplCli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
         }
     }
 
     #[test]
-    fn ingest_accepts_hold_for_metadata_flag_in_repl() {
-        ReplCli::try_parse_from(["ingest", "/x/book.epub", "--hold-for-metadata"])
-            .expect("the flag parses via ReplCli");
+    fn ingest_accepts_hold_for_metadata_flag() {
+        Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--hold-for-metadata"])
+            .expect("the flag parses");
     }
 
     #[test]
-    fn dryrun_subcommand_parses_through_repl() {
+    fn dryrun_subcommand_parses() {
         for argv in [
-            vec!["dryrun", "/x"],
-            vec!["dryrun", "/x", "--stdout"],
-            vec!["dryrun", "/x", "--no-chunk"],
-            vec!["dryrun", "/x", "--out", "/tmp/r.jsonl"],
+            vec!["bookrack", "dryrun", "/x"],
+            vec!["bookrack", "dryrun", "/x", "--stdout"],
+            vec!["bookrack", "dryrun", "/x", "--no-chunk"],
+            vec!["bookrack", "dryrun", "/x", "--out", "/tmp/r.jsonl"],
         ] {
-            ReplCli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
         }
     }
 
@@ -710,19 +700,16 @@ mod tests {
     }
 
     #[test]
-    fn remove_subcommand_parses_through_repl() {
-        // `remove` is REPL-only after C3a; positional intake id, --sha
-        // alternative, and the destructive toggles must all parse
-        // against the REPL grammar.
+    fn remove_subcommand_parses() {
         for argv in [
-            vec!["remove", "42"],
-            vec!["remove", "42", "--dry-run"],
-            vec!["remove", "42", "--yes"],
-            vec!["remove", "--sha", "deadbeef"],
-            vec!["remove", "--sha", "deadbeef", "--dry-run"],
+            vec!["bookrack", "remove", "42"],
+            vec!["bookrack", "remove", "42", "--dry-run"],
+            vec!["bookrack", "remove", "42", "--yes"],
+            vec!["bookrack", "remove", "--sha", "deadbeef"],
+            vec!["bookrack", "remove", "--sha", "deadbeef", "--dry-run"],
         ] {
-            ReplCli::try_parse_from(argv.iter().copied())
-                .unwrap_or_else(|_| panic!("argv must parse via ReplCli: {argv:?}"));
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
         }
     }
 
@@ -749,10 +736,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_rejects_both_intake_id_and_sha_together_in_repl() {
+    fn remove_rejects_both_intake_id_and_sha_together() {
         // The `--sha` and positional id select the same target two
         // different ways; supplying both is a user error.
-        let Err(err) = ReplCli::try_parse_from(["remove", "42", "--sha", "abc"]) else {
+        let Err(err) = Cli::try_parse_from(["bookrack", "remove", "42", "--sha", "abc"]) else {
             panic!("the two selectors must not be combined");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
