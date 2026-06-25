@@ -30,6 +30,8 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
+
+mod reference;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -1632,6 +1634,64 @@ impl BookrackServer {
             writes::metadata::reject_metadata(handle.ops(), req).map_err(ops_error_to_internal)?;
         respond_with(&outcome)
     }
+
+    // ----- reference-book surface (v2 distill phase 9) -----
+
+    /// Polymorphic reference-book lookup. Returns the
+    /// disambiguation array shape from mother doc §5.10 even for a
+    /// single-hit query, so callers do not branch on cardinality.
+    #[tool(
+        name = "reference.lookup",
+        description = "Look up a reference-book entry by its normalized key. \
+                       `book` is either a specific book slug or `*` to query \
+                       every registered book and rank cross-book hits by \
+                       authority_rank. `fields` optionally restricts which \
+                       payload keys appear on each hit; `min_severity` \
+                       (ok | info | warn | error) drops hits whose quality_flags \
+                       carry no concern at or above that severity. Single-hit \
+                       redirect entries auto-follow one hop."
+    )]
+    async fn reference_lookup(
+        &self,
+        Parameters(args): Parameters<reference::ReferenceLookupArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let refs_path = handle.ops().reference_db_path();
+        let refs = bookrack_refs::Refs::open(&refs_path)
+            .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
+        let result = reference::reference_lookup_logic(&refs, reference::catalogs(), &args)
+            .map_err(reference_error_to_mcp)?;
+        respond_with(&result)
+    }
+
+    /// Layer or replace one entry's overlay. The overlay JSON's keys
+    /// are validated against the property catalog before the row is
+    /// written; mismatches raise `invalid_params`.
+    #[tool(
+        name = "reference.overlay_set",
+        description = "Layer a user edit on top of one reference entry. Every key \
+                       in `overlay` must be in property_catalog.toml. `reason` is \
+                       recorded on the overlay row (mother doc §5.8). The \
+                       `edited_at` stamp is set to the daemon's current UTC time."
+    )]
+    async fn reference_overlay_set(
+        &self,
+        Parameters(args): Parameters<reference::ReferenceOverlaySetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(Some(args.library.as_str()))?;
+        let refs_path = handle.ops().reference_db_path();
+        let refs = bookrack_refs::Refs::open(&refs_path)
+            .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
+        let edited_at = chrono::Utc::now().to_rfc3339();
+        let receipt = reference::reference_overlay_set_logic(
+            &refs,
+            reference::catalogs(),
+            &args,
+            edited_at,
+        )
+        .map_err(reference_error_to_mcp)?;
+        respond_with(&receipt)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1691,6 +1751,22 @@ fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
         | OpsError::UnknownContributorRole { .. }
         | OpsError::ContributorNotFound { .. } => ErrorData::invalid_params(e.to_string(), None),
         _ => ops_error_to_internal(e),
+    }
+}
+
+/// Map a [`reference::ReferenceError`] to an MCP error: the
+/// catalog / argument-shape variants are caller-input problems and
+/// surface as `invalid_params`, the refs-store and catalog-load
+/// variants are environmental and surface as `internal_error`.
+fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData {
+    match e {
+        reference::ReferenceError::InvalidArgument(_)
+        | reference::ReferenceError::UnknownOverlayProperty { .. } => {
+            ErrorData::invalid_params(e.to_string(), None)
+        }
+        reference::ReferenceError::Refs(_) | reference::ReferenceError::Catalog(_) => {
+            ErrorData::internal_error(e.to_string(), None)
+        }
     }
 }
 

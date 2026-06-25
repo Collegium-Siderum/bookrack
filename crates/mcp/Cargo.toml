@@ -15,6 +15,18 @@ bookrack-ops = { path = "../ops" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-runtime = { path = "../runtime" }
 bookrack-session = { path = "../session" }
+# The reference-book read store opened on every `reference.lookup`
+# / `reference.overlay_set` call; phase 9 of the v2 distill rollout.
+bookrack-refs.workspace = true
+# Property-catalog validation for `reference.overlay_set` and the
+# quality-flag catalog used by `reference.lookup`'s `min_severity`
+# filter.
+bookrack-distill.workspace = true
+# RFC 3339 timestamps stamped on the `edited_at` overlay column.
+chrono.workspace = true
+# `#[derive(thiserror::Error)]` on the `reference` module's error
+# enum; mapped to MCP errors at the tool-method layer.
+thiserror.workspace = true
 rmcp.workspace = true
 axum.workspace = true
 # `BroadcastStream` adapter to fan the LogStreamHandle broadcast

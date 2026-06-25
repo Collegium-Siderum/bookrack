@@ -327,6 +327,18 @@ impl<E: Embedder> Ops<E> {
         &self.backup_dir
     }
 
+    /// Path of the reference-store database, derived from the data
+    /// root that hosts the catalog. The `refs` crate opens this path
+    /// on every MCP `reference.*` call and on every CLI
+    /// `distill build / verify` invocation; no warm handle is held
+    /// here because both call paths are stateless across requests.
+    pub fn reference_db_path(&self) -> PathBuf {
+        self.catalog_db
+            .parent()
+            .map(|p| p.join("reference.db"))
+            .unwrap_or_else(|| PathBuf::from("reference.db"))
+    }
+
     /// Borrow the warm embedder, if this `Ops` was built with a library.
     /// Used by the registry-level ingest wrapper, which feeds the
     /// embedder into [`bookrack_ingest::ingest_book`].
