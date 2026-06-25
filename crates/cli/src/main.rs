@@ -602,9 +602,7 @@ async fn run() -> Result<()> {
         Command::Remove(args) => cmd::cli_client::remove::run(args, None).await,
         Command::Papers { action } => cmd::cli_client::papers::run(action, None).await,
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
-        Command::Distill { action } => {
-            bookrack_cli::distill_cmd::run(&selection, action).await
-        }
+        Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),

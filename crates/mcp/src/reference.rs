@@ -119,13 +119,14 @@ pub(crate) fn reference_lookup_logic(
                  expected ok | info | warn | error"
             ))
         })?;
-        result.hits.retain(|hit| passes_severity(hit, catalogs, min));
+        result
+            .hits
+            .retain(|hit| passes_severity(hit, catalogs, min));
         result.primary_by_authority = (!result.hits.is_empty()).then_some(0);
     }
 
     if let Some(fields) = args.fields.as_deref() {
-        let allowed: std::collections::BTreeSet<&str> =
-            fields.iter().map(String::as_str).collect();
+        let allowed: std::collections::BTreeSet<&str> = fields.iter().map(String::as_str).collect();
         for hit in &mut result.hits {
             if let Some(obj) = hit.payload.as_object_mut() {
                 obj.retain(|k, _| allowed.contains(k.as_str()));
@@ -228,12 +229,7 @@ mod tests {
         }
     }
 
-    fn entry(
-        slug: &str,
-        key: &str,
-        payload: JsonValue,
-        quality_flags: Vec<&str>,
-    ) -> NewEntry {
+    fn entry(slug: &str, key: &str, payload: JsonValue, quality_flags: Vec<&str>) -> NewEntry {
         NewEntry {
             book_slug: slug.to_string(),
             entry_key: key.to_string(),
@@ -284,8 +280,7 @@ mod tests {
         .unwrap();
 
         let cats = Catalogs::load_all().unwrap();
-        let result =
-            reference_lookup_logic(&refs, &cats, &lookup("*", "smith")).unwrap();
+        let result = reference_lookup_logic(&refs, &cats, &lookup("*", "smith")).unwrap();
         assert_eq!(result.hits.len(), 2);
         assert_eq!(result.hits[0].book_slug, "high_authority");
         assert_eq!(result.primary_by_authority, Some(0));
@@ -313,12 +308,8 @@ mod tests {
         .unwrap();
 
         let cats = Catalogs::load_all().unwrap();
-        let result = reference_lookup_logic(
-            &refs,
-            &cats,
-            &lookup("book_a", "redirect_source"),
-        )
-        .unwrap();
+        let result =
+            reference_lookup_logic(&refs, &cats, &lookup("book_a", "redirect_source")).unwrap();
         assert_eq!(result.entry_key, "redirect_source");
         assert_eq!(result.redirect_followed.as_deref(), Some("redirect_source"));
         assert_eq!(result.hits.len(), 1);
@@ -387,13 +378,8 @@ mod tests {
         let refs = Refs::open_in_memory().expect("refs");
         refs.upsert_book(&book("book_a", 10, "2026-06-25T00:00:00Z"))
             .unwrap();
-        refs.upsert_entry(&entry(
-            "book_a",
-            "smith",
-            json!({"country": "USA"}),
-            vec![],
-        ))
-        .unwrap();
+        refs.upsert_entry(&entry("book_a", "smith", json!({"country": "USA"}), vec![]))
+            .unwrap();
 
         let cats = Catalogs::load_all().unwrap();
         let args = ReferenceOverlaySetArgs {
@@ -403,13 +389,9 @@ mod tests {
             overlay: json!({"random_key": "value"}),
             reason: "test".to_string(),
         };
-        let err = reference_overlay_set_logic(
-            &refs,
-            &cats,
-            &args,
-            "2026-06-25T01:00:00Z".to_string(),
-        )
-        .unwrap_err();
+        let err =
+            reference_overlay_set_logic(&refs, &cats, &args, "2026-06-25T01:00:00Z".to_string())
+                .unwrap_err();
         match err {
             ReferenceError::UnknownOverlayProperty { key } => {
                 assert_eq!(key, "random_key");
@@ -423,13 +405,8 @@ mod tests {
         let refs = Refs::open_in_memory().expect("refs");
         refs.upsert_book(&book("book_a", 10, "2026-06-25T00:00:00Z"))
             .unwrap();
-        refs.upsert_entry(&entry(
-            "book_a",
-            "smith",
-            json!({"country": "USA"}),
-            vec![],
-        ))
-        .unwrap();
+        refs.upsert_entry(&entry("book_a", "smith", json!({"country": "USA"}), vec![]))
+            .unwrap();
 
         let cats = Catalogs::load_all().unwrap();
         let args = ReferenceOverlaySetArgs {
@@ -439,18 +416,13 @@ mod tests {
             overlay: json!({"country": "United States"}),
             reason: "fix the OCR confusion".to_string(),
         };
-        let receipt = reference_overlay_set_logic(
-            &refs,
-            &cats,
-            &args,
-            "2026-06-25T01:00:00Z".to_string(),
-        )
-        .unwrap();
+        let receipt =
+            reference_overlay_set_logic(&refs, &cats, &args, "2026-06-25T01:00:00Z".to_string())
+                .unwrap();
         assert_eq!(receipt.book_slug, "book_a");
         assert_eq!(receipt.entry_key, "smith");
 
-        let result =
-            reference_lookup_logic(&refs, &cats, &lookup("book_a", "smith")).unwrap();
+        let result = reference_lookup_logic(&refs, &cats, &lookup("book_a", "smith")).unwrap();
         assert_eq!(result.hits[0].payload["country"], "United States");
         assert!(result.hits[0].has_overlay);
     }

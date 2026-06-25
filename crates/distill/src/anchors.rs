@@ -165,9 +165,10 @@ mod tests {
     #[test]
     fn latin_headword_rejects_running_headers_and_sentences() {
         assert!(!AnchorRule::LatinHeadword.matches("NEW YORK TIMES"));
-        assert!(!AnchorRule::LatinHeadword.matches(
-            "This is a complete sentence and ends with a period."
-        ));
+        assert!(
+            !AnchorRule::LatinHeadword
+                .matches("This is a complete sentence and ends with a period.")
+        );
         assert!(!AnchorRule::LatinHeadword.matches("\u{53F2}\u{5BC6}\u{65AF}"));
     }
 
@@ -202,8 +203,6 @@ mod tests {
         ]);
         assert!(rule.matches("\u{54F2}\u{5B66}"));
         assert!(rule.matches("philosophical knowledge"));
-        assert!(!rule.matches(
-            "this rejected sentence is too long for either branch"
-        ));
+        assert!(!rule.matches("this rejected sentence is too long for either branch"));
     }
 }

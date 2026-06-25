@@ -37,24 +37,24 @@ pub fn load_pipeline(book_toml_path: &Path) -> Result<Pipeline, ParseError> {
     book.into_pipeline(&catalogs)
 }
 
+pub use anchors::{AnchorRule, LangAnchorRule};
 pub use book_toml::{BookToml, IndexEntry, ParserSection, StageConfig, StageRef};
 pub use catalogs::{
     Catalogs, FlagSpec, ParamSpec, PropertyCatalog, PropertySpec, QualityFlagCatalog, StageCatalog,
     StageSpec,
 };
 pub use core::{Block, Coverage, Ctx, EntryDraft, Page, RawEntry, SplitEntry, StageData};
+pub use dispatch::dispatch_stage;
 pub use error::ParseError;
 pub use extractor::{
     SearchTarget, extract_bracketed_tag, extract_gender_tag, extract_quotes, extract_year_span,
     partition_body_around_match, split_variants, unpack_paired_body,
 };
 pub use finalize::{FtsComposer, KeyNormalizer, to_entry_draft};
-pub use anchors::{AnchorRule, LangAnchorRule};
-pub use dispatch::dispatch_stage;
 pub use patterns::{BracketKind, PatternMatch, PatternRef, match_pattern};
 pub use pipeline::{Pipeline, Stage};
 pub use segment::{
-    one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages,
-    walk_anchors, walk_anchors_per_lang,
+    one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages, walk_anchors,
+    walk_anchors_per_lang,
 };
 pub use splitter::{split_at_first_cjk, split_headline_only};

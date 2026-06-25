@@ -84,11 +84,7 @@ pub async fn run(
 ) -> Result<()> {
     let paths = DistillPaths::resolve(selection)?;
     match action {
-        DistillAction::Build {
-            book,
-            all,
-            dry_run,
-        } => build(&paths, book, all, dry_run),
+        DistillAction::Build { book, all, dry_run } => build(&paths, book, all, dry_run),
         DistillAction::Verify { book } => verify(&paths, book),
         DistillAction::List => list(&paths),
     }
@@ -98,12 +94,7 @@ pub async fn run(
 // build
 // ---------------------------------------------------------------------------
 
-fn build(
-    paths: &DistillPaths,
-    book: Option<String>,
-    all: bool,
-    dry_run: bool,
-) -> Result<()> {
+fn build(paths: &DistillPaths, book: Option<String>, all: bool, dry_run: bool) -> Result<()> {
     let scope = build_scope(paths, book, all)?;
     let distill_run_id = chrono::Utc::now().to_rfc3339();
 
@@ -114,8 +105,8 @@ fn build(
             .with_context(|| format!("load {}", book_toml_path.display()))?;
         let pipeline = load_pipeline(&book_toml_path)
             .with_context(|| format!("assemble pipeline for {slug}"))?;
-        let source = read_source(&book_dir)
-            .with_context(|| format!("read OCR source for {slug}"))?;
+        let source =
+            read_source(&book_dir).with_context(|| format!("read OCR source for {slug}"))?;
         let extras = compose_extras(&slug, &distill_run_id);
         let (drafts, coverage) = pipeline
             .run_with_extras(source, extras)
@@ -150,11 +141,7 @@ fn build(
     Ok(())
 }
 
-fn build_scope(
-    paths: &DistillPaths,
-    book: Option<String>,
-    all: bool,
-) -> Result<Vec<String>> {
+fn build_scope(paths: &DistillPaths, book: Option<String>, all: bool) -> Result<Vec<String>> {
     let mut on_disk = list_book_slugs(&paths.reference_root)?;
     on_disk.sort();
     if let Some(slug) = book {
@@ -243,11 +230,7 @@ fn compose_extras(slug: &str, distill_run_id: &str) -> JsonMap<String, JsonValue
     extras
 }
 
-fn register_book_indexes(
-    refs: &mut Refs,
-    slug: &str,
-    book_toml: &BookToml,
-) -> Result<()> {
+fn register_book_indexes(refs: &mut Refs, slug: &str, book_toml: &BookToml) -> Result<()> {
     let specs: Vec<IndexSpec> = book_toml
         .indexes
         .iter()
@@ -571,7 +554,9 @@ stages = [
         // remain readable afterward.
         verify(&paths, None).expect("verify");
         let refs = Refs::open(&paths.refs_path).expect("open after verify");
-        let _ = refs.lookup_resolved(None, "smith").expect("lookup post-verify");
+        let _ = refs
+            .lookup_resolved(None, "smith")
+            .expect("lookup post-verify");
     }
 
     #[test]
@@ -597,16 +582,11 @@ stages = [
             read_live_entries(&refs, "tiny").expect("live")
         };
         // Re-distill and diff in-process.
-        let book_toml_path = paths
-            .reference_root
-            .join("tiny")
-            .join("book.toml");
+        let book_toml_path = paths.reference_root.join("tiny").join("book.toml");
         let pipeline = load_pipeline(&book_toml_path).expect("pipeline");
         let source = read_source(&paths.reference_root.join("tiny")).expect("source");
         let extras = compose_extras("tiny", "2026-06-25T00:00:00Z");
-        let (drafts, _) = pipeline
-            .run_with_extras(source, extras)
-            .expect("run");
+        let (drafts, _) = pipeline.run_with_extras(source, extras).expect("run");
         let proposed: BTreeMap<String, EntryDraft> = drafts
             .into_iter()
             .map(|d| (d.entry_key.clone(), d))
@@ -615,8 +595,7 @@ stages = [
         let mut found_change = false;
         for key in proposed.keys() {
             if let Some(live_row) = live.get(key) {
-                let new_payload =
-                    serde_json::to_string(&proposed[key].payload).unwrap_or_default();
+                let new_payload = serde_json::to_string(&proposed[key].payload).unwrap_or_default();
                 if new_payload != live_row.payload_json {
                     found_change = true;
                     break;

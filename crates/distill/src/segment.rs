@@ -202,10 +202,7 @@ impl Stage for SplitBilingualBlocks {
 
 fn lang_of_line(line: &str) -> Option<String> {
     let cjk = line.chars().filter(|c| is_cjk(*c)).count();
-    let latin = line
-        .chars()
-        .filter(|c| c.is_ascii_alphabetic())
-        .count();
+    let latin = line.chars().filter(|c| c.is_ascii_alphabetic()).count();
     if cjk == 0 && latin == 0 {
         None
     } else if cjk >= latin {
@@ -287,9 +284,7 @@ fn walk_block_into(
     }
 
     if !orphans.is_empty() {
-        if splice_orphans_to_prev_block
-            && let Some(prev) = raws.last_mut()
-        {
+        if splice_orphans_to_prev_block && let Some(prev) = raws.last_mut() {
             for o in &orphans {
                 prev.body.push(o.clone());
             }
@@ -342,11 +337,7 @@ impl Stage for WalkAnchorsPerLang {
                     &mut unmatched,
                 ),
                 None => {
-                    unmatched += block
-                        .lines
-                        .iter()
-                        .filter(|l| !l.trim().is_empty())
-                        .count();
+                    unmatched += block.lines.iter().filter(|l| !l.trim().is_empty()).count();
                 }
             }
         }
@@ -487,10 +478,7 @@ mod tests {
                    relating to philosophy"
                 .to_string(),
         };
-        let (out, ctx) = run_stage(
-            split_bilingual_blocks(),
-            StageData::Pages(vec![page]),
-        );
+        let (out, ctx) = run_stage(split_bilingual_blocks(), StageData::Pages(vec![page]));
         let blocks = match out {
             StageData::Blocks(b) => b,
             other => panic!("expected Blocks, got {other:?}"),
@@ -549,10 +537,7 @@ mod tests {
 
     #[test]
     fn walk_anchors_drops_lone_letter_dividers_when_enabled() {
-        let blocks = vec![block(
-            vec!["A", "Smith", "biographical"],
-            Some("latin"),
-        )];
+        let blocks = vec![block(vec!["A", "Smith", "biographical"], Some("latin"))];
         let (out, _) = run_stage(
             walk_anchors(AnchorRule::LatinHeadword, vec![], true, false),
             StageData::Blocks(blocks),
@@ -648,10 +633,7 @@ mod tests {
                 splice_orphans_to_prev_block: false,
             },
         ];
-        let (out, _) = run_stage(
-            walk_anchors_per_lang(rules),
-            StageData::Blocks(blocks),
-        );
+        let (out, _) = run_stage(walk_anchors_per_lang(rules), StageData::Blocks(blocks));
         let raws = match out {
             StageData::Raws(r) => r,
             other => panic!("expected Raws, got {other:?}"),

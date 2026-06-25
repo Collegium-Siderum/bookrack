@@ -1683,13 +1683,9 @@ impl BookrackServer {
         let refs = bookrack_refs::Refs::open(&refs_path)
             .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
         let edited_at = chrono::Utc::now().to_rfc3339();
-        let receipt = reference::reference_overlay_set_logic(
-            &refs,
-            reference::catalogs(),
-            &args,
-            edited_at,
-        )
-        .map_err(reference_error_to_mcp)?;
+        let receipt =
+            reference::reference_overlay_set_logic(&refs, reference::catalogs(), &args, edited_at)
+                .map_err(reference_error_to_mcp)?;
         respond_with(&receipt)
     }
 }

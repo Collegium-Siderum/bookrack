@@ -95,9 +95,8 @@ impl BookToml {
 
     /// Read and parse `book.toml` from disk.
     pub fn load(path: &Path) -> Result<Self, ParseError> {
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            ParseError::TomlParse(format!("read {}: {e}", path.display()))
-        })?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| ParseError::TomlParse(format!("read {}: {e}", path.display())))?;
         Self::parse_str(&text)
     }
 
@@ -258,10 +257,7 @@ field = "year_span.birth"
         // The catalog validator can't catch this — the anchor param
         // is opaque at validate time — so this surfaces during
         // dispatch.
-        let toml = LEGAL_BOOK.replace(
-            "anchor = \"latin_headword\"",
-            "anchor = \"made_up_rule\"",
-        );
+        let toml = LEGAL_BOOK.replace("anchor = \"latin_headword\"", "anchor = \"made_up_rule\"");
         let book = BookToml::parse_str(&toml).unwrap();
         match book.into_pipeline(&catalogs()).unwrap_err() {
             ParseError::CatalogViolation(msg) => {
@@ -285,8 +281,7 @@ field = "year_span.birth"
         // Smoke a minimal source through the assembled pipeline; the
         // shape of the output is exercised more thoroughly in phase 8.
         let source = "<!-- page 1 (sheet 1) -->\nSmith\n1900-2000\nan american baseball player\n";
-        let (drafts, coverage) =
-            pipeline.run(source.to_string()).expect("pipeline run");
+        let (drafts, coverage) = pipeline.run(source.to_string()).expect("pipeline run");
         let _ = writeln!(
             std::io::sink(),
             "synthetic pipeline drafted {} entries / pages={}",

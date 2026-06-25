@@ -108,7 +108,8 @@ fn concat_dir(dir: &Path) -> String {
 }
 
 fn glob_prefix(dir: &Path, prefix: &str) -> Option<String> {
-    let mut matches: Vec<PathBuf> = fs::read_dir(dir).ok()?
+    let mut matches: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.is_file()
@@ -154,10 +155,7 @@ fn assert_name_translation(slug: &str) {
     let Some((drafts, coverage)) = run_book(slug) else {
         return;
     };
-    assert!(
-        !drafts.is_empty(),
-        "{slug}: pipeline produced zero drafts"
-    );
+    assert!(!drafts.is_empty(), "{slug}: pipeline produced zero drafts");
     assert_eq!(coverage.entries, drafts.len());
     // The name-translation pipeline writes `country` whenever
     // `partition_body_around_match` finds a bracketed-tag region.
@@ -211,7 +209,10 @@ fn it_philosophy_xifang() {
     let Some((drafts, coverage)) = run_book("philosophy_xifang") else {
         return;
     };
-    assert!(!drafts.is_empty(), "philosophy: pipeline produced zero drafts");
+    assert!(
+        !drafts.is_empty(),
+        "philosophy: pipeline produced zero drafts"
+    );
     assert_eq!(coverage.entries, drafts.len());
 
     // `pair_bilingual_entries` is expected to stamp `pair_mismatch`

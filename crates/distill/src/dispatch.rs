@@ -23,15 +23,15 @@ use toml::Value as TomlValue;
 use crate::anchors::{AnchorRule, LangAnchorRule};
 use crate::error::ParseError;
 use crate::extractor::{
-    SearchTarget, extract_bracketed_tag, extract_gender_tag, extract_quotes,
-    extract_year_span, partition_body_around_match, split_variants, unpack_paired_body,
+    SearchTarget, extract_bracketed_tag, extract_gender_tag, extract_quotes, extract_year_span,
+    partition_body_around_match, split_variants, unpack_paired_body,
 };
 use crate::finalize::{KeyNormalizer, to_entry_draft};
 use crate::patterns::{BracketKind, PatternRef};
 use crate::pipeline::Stage;
 use crate::segment::{
-    one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages,
-    walk_anchors, walk_anchors_per_lang,
+    one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages, walk_anchors,
+    walk_anchors_per_lang,
 };
 use crate::splitter::{split_at_first_cjk, split_headline_only};
 
@@ -55,10 +55,8 @@ pub fn dispatch_stage(
                 .map(decode_anchor_rules)
                 .transpose()?
                 .unwrap_or_default();
-            let drop_lone = get_bool(params, "drop_lone_letter_dividers", false)?
-                .unwrap_or(false);
-            let splice = get_bool(params, "splice_orphans_to_prev_block", false)?
-                .unwrap_or(true);
+            let drop_lone = get_bool(params, "drop_lone_letter_dividers", false)?.unwrap_or(false);
+            let splice = get_bool(params, "splice_orphans_to_prev_block", false)?.unwrap_or(true);
             Ok(walk_anchors(anchor, reject, drop_lone, splice))
         }
         "walk_anchors_per_lang" => {
@@ -102,8 +100,8 @@ pub fn dispatch_stage(
         }
         "split_variants" => {
             // `payload_key` is optional; the catalog default is `variants`.
-            let key = get_string(params, "payload_key", false)?
-                .unwrap_or_else(|| "variants".to_string());
+            let key =
+                get_string(params, "payload_key", false)?.unwrap_or_else(|| "variants".to_string());
             let sep = require_string(params, "sep")?;
             Ok(split_variants(key, sep))
         }
@@ -139,10 +137,8 @@ pub fn dispatch_stage(
         // ---- finalize ----
         "to_entry_draft" => {
             let normalizer = decode_key_normalizer(require_value(params, "key_normalizer")?)?;
-            let carry =
-                get_string_array(params, "carry_payload_keys")?.unwrap_or_default();
-            let aliases =
-                get_string_array(params, "aliases_from_payload")?.unwrap_or_default();
+            let carry = get_string_array(params, "carry_payload_keys")?.unwrap_or_default();
+            let aliases = get_string_array(params, "aliases_from_payload")?.unwrap_or_default();
             Ok(to_entry_draft(normalizer, carry, aliases, None))
         }
 
@@ -232,9 +228,9 @@ fn get_string_array(
         .ok_or_else(|| violation(format!("param {key:?} must be an array")))?;
     let mut out = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
-        let s = item.as_str().ok_or_else(|| {
-            violation(format!("param {key:?}[{idx}] must be a string"))
-        })?;
+        let s = item
+            .as_str()
+            .ok_or_else(|| violation(format!("param {key:?}[{idx}] must be a string")))?;
         out.push(s.to_string());
     }
     Ok(Some(out))
@@ -258,25 +254,26 @@ fn decode_anchor_rule(value: &TomlValue) -> Result<AnchorRule, ParseError> {
             let max_chars = inner
                 .get("max_chars")
                 .and_then(TomlValue::as_integer)
-                .ok_or_else(|| {
-                    violation("cjk_short_headword needs a max_chars integer")
-                })? as usize;
+                .ok_or_else(|| violation("cjk_short_headword needs a max_chars integer"))?
+                as usize;
             return Ok(AnchorRule::CjkShortHeadword { max_chars });
         }
         if let Some(inner) = tbl.get("english_short_headword") {
             let max_words = inner
                 .get("max_words")
                 .and_then(TomlValue::as_integer)
-                .ok_or_else(|| {
-                    violation("english_short_headword needs a max_words integer")
-                })? as usize;
+                .ok_or_else(|| violation("english_short_headword needs a max_words integer"))?
+                as usize;
             return Ok(AnchorRule::EnglishShortHeadword { max_words });
         }
         if let Some(inner) = tbl.get("any_of") {
-            let arr = inner.as_array().ok_or_else(|| {
-                violation("any_of value must be an array of anchor rules")
-            })?;
-            let rules = arr.iter().map(decode_anchor_rule).collect::<Result<_, _>>()?;
+            let arr = inner
+                .as_array()
+                .ok_or_else(|| violation("any_of value must be an array of anchor rules"))?;
+            let rules = arr
+                .iter()
+                .map(decode_anchor_rule)
+                .collect::<Result<_, _>>()?;
             return Ok(AnchorRule::AnyOf(rules));
         }
     }

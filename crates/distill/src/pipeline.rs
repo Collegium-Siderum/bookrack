@@ -38,11 +38,7 @@ impl std::fmt::Debug for Pipeline {
             .field("name", &self.name)
             .field(
                 "stages",
-                &self
-                    .stages
-                    .iter()
-                    .map(|s| s.name())
-                    .collect::<Vec<&str>>(),
+                &self.stages.iter().map(|s| s.name()).collect::<Vec<&str>>(),
             )
             .finish()
     }
