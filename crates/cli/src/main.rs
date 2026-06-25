@@ -159,20 +159,6 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
     },
-    /// Open an interactive REPL against the running daemon.
-    ///
-    /// Connects to the daemon over its control socket and dispatches each
-    /// command as a control-plane RPC; the REPL process does not hold the
-    /// session lock and does not read the data root directly. In non-TTY
-    /// mode (stdin piped) every line is parsed and dispatched in sequence,
-    /// and the process exits non-zero on the first failure.
-    Repl {
-        /// Override the runtime directory used to discover the
-        /// daemon's control socket. Falls back to
-        /// `BOOKRACK_RUNTIME_DIR` or the platform default.
-        #[arg(long, value_name = "PATH")]
-        runtime_dir: Option<PathBuf>,
-    },
     /// Call MCP tools against the running session.
     ///
     /// Subcommands:
@@ -551,14 +537,6 @@ async fn run() -> Result<()> {
         .await;
     }
 
-    // `repl` is the standalone control-socket client. It needs the
-    // session-lock directory to discover the daemon address but does
-    // not open any local database, so it dispatches before
-    // `Config::resolve` like `run` and `exec`.
-    if let Command::Repl { runtime_dir } = &cli.command {
-        return cmd::repl_client::run(runtime_dir.clone()).await;
-    }
-
     // `exec` is the discovery surface for an already-running daemon.
     // It must NOT open a database — the "no DB handle outside the
     // scheduler" invariant is what gives the daemon-REPL session its
@@ -599,7 +577,6 @@ async fn run() -> Result<()> {
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
-        Command::Repl { .. } => unreachable!("Repl is dispatched above"),
         Command::Exec { .. } => unreachable!("Exec is dispatched above"),
     }
 }
@@ -640,8 +617,17 @@ mod tests {
             vec!["bookrack", "metadata", "clear", "1", "title"],
             vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
             vec!["bookrack", "metadata", "approve", "1"],
-            vec!["bookrack", "metadata", "approve", "1", "--reason", "verified"],
-            vec!["bookrack", "metadata", "reject", "1", "--reason", "wrong file"],
+            vec![
+                "bookrack", "metadata", "approve", "1", "--reason", "verified",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "reject",
+                "1",
+                "--reason",
+                "wrong file",
+            ],
             vec!["bookrack", "metadata", "advance", "1"],
         ] {
             Cli::try_parse_from(argv.iter().copied())

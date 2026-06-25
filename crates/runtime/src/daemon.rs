@@ -167,9 +167,9 @@ pub struct DaemonRuntime {
     /// reach the control plane.
     pub control_sock: ControlSocketPath,
     /// Set by the platform signal aggregator before forwarding the
-    /// broadcast; daemon-REPL callers read it to decide whether to
-    /// fast-path through `std::process::exit` (signal-driven shutdown
-    /// leaves the synchronous reedline thread parked).
+    /// broadcast; callers read it to decide whether to fast-path
+    /// through `std::process::exit` instead of waiting for the
+    /// foreground future to drain.
     pub signal_triggered: Arc<AtomicBool>,
     /// Notification handle the GUI tray (if any) waits on. The
     /// `tray.focus` control-plane method signals one waiter per call.

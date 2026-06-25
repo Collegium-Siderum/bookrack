@@ -11,9 +11,9 @@
 //! produce).
 //!
 //! The daemon-running path needs an Ollama-backed library bootstrap
-//! and lives behind `#[ignore]` in [`repl_e2e`] / [`control_writes`];
-//! Phase 4 adds nothing new there, so this test stays focused on the
-//! cheap-to-verify exit-code contract.
+//! and lives behind `#[ignore]` in `control_writes`; Phase 4 adds
+//! nothing new there, so this test stays focused on the cheap-to-verify
+//! exit-code contract.
 
 #![cfg(unix)]
 

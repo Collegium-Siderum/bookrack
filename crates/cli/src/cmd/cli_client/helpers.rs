@@ -11,13 +11,12 @@ use serde_json::Value;
 use tokio::sync::broadcast;
 
 /// Exit code the binary returns when the daemon is unreachable, or
-/// when a clap parse fails. Matches `bookrack repl`.
+/// when a clap parse fails.
 pub const EXIT_NOT_RUNNING: i32 = 2;
 
 /// Discover the daemon and open a control-plane connection. On
 /// `ControlError::NotRunning` the process exits with code 2 after
-/// printing a stable stderr message — matches the contract in
-/// `bookrack repl`.
+/// printing a stable stderr message.
 pub async fn connect_or_exit(runtime_dir: Option<&Path>) -> Arc<ControlClient> {
     let socket = match bookrack_control_client::discover(runtime_dir) {
         Ok(socket) => socket,

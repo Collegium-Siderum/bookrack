@@ -155,15 +155,6 @@ flate2 = "1"
 # run, so two `bookrack ingest` processes pointed at the same library
 # refuse rather than race. License: MIT OR Apache-2.0.
 fs2 = "0.4"
-# Line editor with history, syntax-aware prompt rendering, and ANSI
-# colouring, used by the `cli` crate's interactive REPL. Synchronous
-# stdin: the REPL task runs under `tokio::task::spawn_blocking` so
-# it never parks the async runtime. License: MIT.
-reedline = "0.48"
-# POSIX-style shell tokenizer for the `cli` crate's REPL: splits one
-# user-typed line into argv tokens before handing them to clap.
-# License: MIT OR Apache-2.0; RUSTSEC-2024-0006 fixed in >= 1.3.0.
-shlex = "2"
 # Stream adapters for tokio primitives. The `sync` feature pulls in
 # `tokio-stream::wrappers::BroadcastStream`, which the `mcp` crate
 # wraps around a `LogStreamHandle::subscribe()` receiver to expose the

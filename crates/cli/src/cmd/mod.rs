@@ -4,4 +4,3 @@
 //! socket instead.
 
 pub mod cli_client;
-pub mod repl_client;
