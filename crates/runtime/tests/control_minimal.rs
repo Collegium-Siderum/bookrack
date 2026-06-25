@@ -21,9 +21,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::Result;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -52,7 +52,7 @@ async fn recv_line(
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow::anyhow!("eof while expecting response"))?;
+        .ok_or_else(|| eyre::eyre!("eof while expecting response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -128,7 +128,7 @@ async fn full_loop_subscribe_doctor_shutdown() -> Result<()> {
             let stopping = recv_line(&mut reader).await?;
             assert_eq!(stopping["params"]["channel"], "daemon.state");
             assert_eq!(stopping["params"]["value"], "stopping");
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), eyre::Report>(())
         })
     };
 

@@ -15,8 +15,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_embed::ProbeReport as EmbedProbeReport;
+use eyre::Result;
 
 mod cli_driver;
 mod runner;

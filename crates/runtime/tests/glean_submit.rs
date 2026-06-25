@@ -15,9 +15,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::{ContextCompat, Result, eyre};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -45,7 +45,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow!("connection closed before response"))?;
+        .ok_or_else(|| eyre!("connection closed before response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -138,7 +138,7 @@ async fn glean_submit_enqueues_paper_jobs_and_ingest_cancel_covers_them() -> Res
         )
         .await?;
         let _ = recv(&mut reader).await?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;

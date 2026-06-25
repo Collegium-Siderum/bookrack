@@ -19,7 +19,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use eyre::{Context, Result, eyre};
 use fs2::FileExt;
 
 /// Environment variable naming the session runtime directory (lock
@@ -63,7 +63,7 @@ fn platform_runtime_dir() -> Result<PathBuf> {
         }
     }
     let cache = dirs::cache_dir().ok_or_else(|| {
-        anyhow!(
+        eyre!(
             "cannot find a platform cache directory for the bookrack runtime dir; \
              set {RUNTIME_DIR_ENV} to an absolute path"
         )
@@ -82,7 +82,7 @@ const LOCK_CONFLICT_MARKER: &str = "bookrack session already running";
 /// error produced by [`TtyLock::acquire`] when another process holds
 /// the session lock. Launchers use this to branch into their
 /// second-instance handoff instead of failing outright.
-pub fn is_lock_conflict(err: &anyhow::Error) -> bool {
+pub fn is_lock_conflict(err: &eyre::Report) -> bool {
     err.chain()
         .any(|cause| cause.to_string().contains(LOCK_CONFLICT_MARKER))
 }
@@ -132,12 +132,12 @@ impl TtyLock {
             let existing = std::fs::read_to_string(path).unwrap_or_default();
             let detail = existing.trim();
             if detail.is_empty() {
-                anyhow!(
+                eyre!(
                     "{LOCK_CONFLICT_MARKER}, lock held at {}: {err}",
                     path.display()
                 )
             } else {
-                anyhow!(
+                eyre!(
                     "{LOCK_CONFLICT_MARKER} ({}), lock held at {}: {err}",
                     detail.replace('\n', ", "),
                     path.display()
@@ -193,7 +193,7 @@ pub fn peek_lock(path: &Path) -> Result<Option<LockInfo>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             return Err(
-                anyhow::Error::new(e).context(format!("read session lock at {}", path.display()))
+                eyre::Report::new(e).wrap_err(format!("read session lock at {}", path.display()))
             );
         }
     };
@@ -219,13 +219,13 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
         }
     }
     let pid = pid.ok_or_else(|| {
-        anyhow!(
+        eyre!(
             "session lock at {} missing required `pid=` line",
             source.display()
         )
     })?;
     let mcp = mcp.ok_or_else(|| {
-        anyhow!(
+        eyre!(
             "session lock at {} missing required `mcp=` line",
             source.display()
         )
@@ -268,7 +268,7 @@ mod tests {
         };
         assert!(is_lock_conflict(&err));
 
-        let unrelated = anyhow!("disk full");
+        let unrelated = eyre!("disk full");
         assert!(!is_lock_conflict(&unrelated));
     }
 

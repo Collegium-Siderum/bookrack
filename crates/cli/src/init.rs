@@ -12,8 +12,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_runtime::wizard::{CliWizardDriver, Wizard, WizardOpts};
+use eyre::Result;
 
 /// CLI-shape parameters for [`run`]. The clap layer in `main.rs` builds
 /// one of these from the parsed flags.

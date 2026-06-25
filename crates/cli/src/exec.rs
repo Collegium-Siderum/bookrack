@@ -25,8 +25,8 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
 use bookrack_session::{peek_lock, resolve_runtime_dir, tty_lock_name};
+use eyre::{Context, Result, bail};
 use serde_json::Value;
 use tokio::sync::broadcast;
 

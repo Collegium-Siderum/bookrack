@@ -10,8 +10,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
 use bookrack_config::Config;
+use eyre::{Context, ContextCompat, Result, bail, eyre};
 
 use crate::render;
 
@@ -225,7 +225,7 @@ fn registry_target_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     bookrack_config::default_registry_path().ok_or_else(|| {
-        anyhow!(
+        eyre!(
             "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform config directory is available"
         )
     })

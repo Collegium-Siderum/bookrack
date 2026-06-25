@@ -19,7 +19,7 @@
 
 use std::process::Stdio;
 
-use anyhow::Result;
+use eyre::Result;
 
 fn bookrack_bin() -> &'static str {
     env!("CARGO_BIN_EXE_bookrack")

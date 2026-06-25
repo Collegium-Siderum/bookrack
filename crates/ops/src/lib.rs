@@ -142,7 +142,7 @@ pub enum OpsError {
 
     /// Catch-all for ad-hoc errors that have no dedicated variant.
     #[error(transparent)]
-    Other(anyhow::Error),
+    Other(eyre::Report),
 }
 
 /// A fallible op.

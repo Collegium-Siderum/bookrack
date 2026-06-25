@@ -4,9 +4,9 @@
 //! every `cmd/*` module that needs an embedder builds it the same way
 //! from the same `Config` + `EmbedConfig` pair.
 
-use anyhow::{Context, Result};
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_embed::OllamaEmbedClient;
+use eyre::{Context, Result};
 
 /// Build the embedding client from the environment-resolved knobs.
 pub fn embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedClient> {

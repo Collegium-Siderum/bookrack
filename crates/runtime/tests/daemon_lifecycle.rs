@@ -16,10 +16,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_session::{TtyLock, tty_lock_name};
+use eyre::Result;
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);

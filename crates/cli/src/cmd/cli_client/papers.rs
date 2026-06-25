@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
+use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
@@ -242,7 +242,7 @@ async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<
     let value = helpers::call_with_progress_value(client, "papers.dryrun", params).await?;
     let outcome: bookrack_runtime::cmd::papers_dryrun::PapersDryrunRunOutcome =
         serde_json::from_value(value)
-            .map_err(|e| anyhow::anyhow!("papers.dryrun response did not match: {e}"))?;
+            .map_err(|e| eyre::eyre!("papers.dryrun response did not match: {e}"))?;
     bookrack_runtime::cmd::papers_dryrun::render_outcome(&outcome, args.stdout)
 }
 
@@ -374,14 +374,14 @@ async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<
 async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let paths = if args.path.is_dir() {
         if !args.recursive {
-            anyhow::bail!(
+            eyre::bail!(
                 "{} is a directory; pass --recursive to enqueue every .pdf under it",
                 args.path.display(),
             );
         }
         let mut collected = crate::util::collect_pdf_files(&args.path);
         if collected.is_empty() {
-            anyhow::bail!(
+            eyre::bail!(
                 "no supported paper files found under {}",
                 args.path.display()
             );

@@ -23,11 +23,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow, bail};
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, EntryDraft, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
 use clap::Subcommand;
+use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
 /// One `bookrack distill <action>` invocation.
@@ -213,7 +213,7 @@ fn read_source(book_dir: &Path) -> Result<String> {
         }
         return Ok(acc);
     }
-    Err(anyhow!(
+    Err(eyre!(
         "neither {} nor {} exists",
         single.display(),
         dir.display()
@@ -254,7 +254,7 @@ fn register_book_indexes(refs: &mut Refs, slug: &str, book_toml: &BookToml) -> R
 fn parse_index_kind(raw: &str) -> Result<IndexKind> {
     match raw {
         "btree" => Ok(IndexKind::Btree),
-        other => Err(anyhow!("unsupported index kind {other:?}")),
+        other => Err(eyre!("unsupported index kind {other:?}")),
     }
 }
 

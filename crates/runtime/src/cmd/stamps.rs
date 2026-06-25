@@ -3,9 +3,9 @@
 //! `bookrack stamps reconcile` — write the binary's current index
 //! stamps onto the corpus, useful after a model swap.
 
-use anyhow::{Context, Result};
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
+use eyre::{Context, ContextCompat, Result};
 
 use crate::embed_helpers::embedder;
 

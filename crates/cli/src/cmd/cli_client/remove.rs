@@ -8,8 +8,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_cli_grammar::RemoveArgs;
+use eyre::Result;
 use serde_json::json;
 
 use super::helpers;

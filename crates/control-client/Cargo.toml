@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
+eyre.workspace = true
 bookrack-session = { path = "../session" }
 serde.workspace = true
 serde_json.workspace = true

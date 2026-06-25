@@ -13,9 +13,9 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
 use bookrack_config::{pdfium_library_filename, pdfium_managed_dir};
 use bookrack_extract::pdfium_pin::{pdfium_download_url, pinned_pdfium_binary};
+use eyre::{Context, ContextCompat, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Download, verify, and unpack the pinned PDFium library into the

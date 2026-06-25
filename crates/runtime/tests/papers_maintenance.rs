@@ -20,9 +20,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::{Result, eyre};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -50,7 +50,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow!("connection closed before response"))?;
+        .ok_or_else(|| eyre!("connection closed before response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -82,7 +82,7 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
         let resp = recv(&mut reader).await?;
         let names: BTreeSet<String> = resp["result"]["methods"]
             .as_array()
-            .ok_or_else(|| anyhow!("daemon.methods missing array: {resp}"))?
+            .ok_or_else(|| eyre!("daemon.methods missing array: {resp}"))?
             .iter()
             .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
             .collect();
@@ -123,7 +123,7 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
         )
         .await?;
         let _ = recv(&mut reader).await?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;

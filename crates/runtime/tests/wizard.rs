@@ -10,13 +10,13 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::Result;
 use async_trait::async_trait;
 use bookrack_config::ROOT_CONFIG_NAME;
 use bookrack_runtime::wizard::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
     SmokeOutcome, Wizard, WizardDriver, WizardOpts,
 };
+use eyre::Result;
 
 static HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
 

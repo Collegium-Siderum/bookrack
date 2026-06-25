@@ -5,7 +5,7 @@
 //! compiled into the binary by `bookrack_audit_profile`, so this is a
 //! pure reflection surface.
 
-use anyhow::{Context, Result};
+use eyre::{ContextCompat, Result};
 
 use crate::render;
 

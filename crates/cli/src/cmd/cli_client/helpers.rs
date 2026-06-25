@@ -5,8 +5,8 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use bookrack_control_client::{ControlClient, ControlError, Event};
+use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -70,7 +70,7 @@ pub async fn call_with_progress(
         client_for_call
             .call_raw(&method_owned, params)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(eyre::Report::from)
     };
     tokio::pin!(call_future);
     let value = loop {
@@ -111,7 +111,7 @@ pub async fn call_with_progress_value(
         client_for_call
             .call_raw(&method_owned, params)
             .await
-            .map_err(anyhow::Error::from)
+            .map_err(eyre::Report::from)
     };
     tokio::pin!(call_future);
     let value = loop {
@@ -206,7 +206,7 @@ pub async fn run_pinned_destructive(
         .and_then(Value::as_str)
         .map(String::from)
         .ok_or_else(|| {
-            anyhow::anyhow!("{method}: daemon dry-run response did not include a plan_id")
+            eyre::eyre!("{method}: daemon dry-run response did not include a plan_id")
         })?;
 
     if !user_yes && !crate::util::confirm(confirm_prompt)? {

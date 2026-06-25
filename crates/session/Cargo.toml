@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
+eyre.workspace = true
 dirs.workspace = true
 fs2.workspace = true
 

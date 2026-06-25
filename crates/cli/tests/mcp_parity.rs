@@ -16,9 +16,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::Result;
 use serde_json::Value;
 
 fn build_opts_with_queue_worker(

@@ -18,9 +18,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::{Context, Result, eyre};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -47,7 +47,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow!("connection closed before response"))?;
+        .ok_or_else(|| eyre!("connection closed before response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -60,9 +60,9 @@ async fn await_channel(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            _ = &mut deadline => return Err(anyhow!("timed out waiting for channel {channel}")),
+            _ = &mut deadline => return Err(eyre!("timed out waiting for channel {channel}")),
             frame = reader.next_line() => {
-                let line = frame?.ok_or_else(|| anyhow!("eof while awaiting {channel}"))?;
+                let line = frame?.ok_or_else(|| eyre!("eof while awaiting {channel}"))?;
                 let v: Value = serde_json::from_str(&line)?;
                 if v.get("method").is_some()
                     && v["params"]["channel"].as_str() == Some(channel)
@@ -127,7 +127,7 @@ async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
         )
         .await?;
         let _ = recv(&mut obs_reader).await?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;
@@ -190,7 +190,7 @@ async fn second_write_returns_busy_error() -> Result<()> {
         .await?;
         let _ = recv(&mut fr_reader).await?;
         let _ = (resp_a, resp_b, json!(null));
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;

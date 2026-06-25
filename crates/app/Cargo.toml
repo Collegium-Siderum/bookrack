@@ -22,7 +22,7 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build.workspace = true
 
 [dependencies]
-anyhow.workspace = true
+eyre.workspace = true
 bookrack-config = { path = "../config" }
 bookrack-control-client = { path = "../control-client" }
 bookrack-mcp = { path = "../mcp" }

@@ -19,13 +19,13 @@
 //! install still produces a row stating that — rather than the resolver
 //! short-circuiting the very diagnosis the user needs.
 
-use anyhow::{Context, Result};
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
     LibrarySelection, ResolutionSource, default_registry_path, locate_pdfium,
     pdfium_library_filename,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
+use eyre::{Context, Result};
 use serde::Serialize;
 
 /// One row of the health report.
@@ -94,7 +94,7 @@ pub async fn run(selection: &LibrarySelection, json: bool) -> Result<()> {
         render_text(&report);
     }
     if report.has_failures() {
-        anyhow::bail!(
+        eyre::bail!(
             "bookrack is not ready: {} problem(s)",
             report.failure_count()
         );
@@ -115,7 +115,7 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<()> {
         render_text(&report);
     }
     if report.has_failures() {
-        anyhow::bail!(
+        eyre::bail!(
             "bookrack is not ready: {} problem(s)",
             report.failure_count()
         );

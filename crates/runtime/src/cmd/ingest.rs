@@ -6,11 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
 use bookrack_ingest::{IngestParams, ingest_book};
+use eyre::{Context, Result};
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::embed_helpers::embedder;
@@ -44,7 +44,7 @@ pub async fn run(
 
     if !recursive {
         if path.is_dir() {
-            anyhow::bail!(
+            eyre::bail!(
                 "{} is a directory; pass --recursive to walk it instead",
                 path.display(),
             );
@@ -65,7 +65,7 @@ pub async fn run(
     }
 
     if !path.is_dir() {
-        anyhow::bail!(
+        eyre::bail!(
             "--recursive requires a directory; {} is not one",
             path.display()
         );
@@ -155,7 +155,7 @@ pub async fn run(
         println!("  (Pass --force to re-extract and re-embed up-to-date intakes.)");
     }
     if !failed.is_empty() {
-        anyhow::bail!("{} file(s) failed during recursive ingest", failed.len());
+        eyre::bail!("{} file(s) failed during recursive ingest", failed.len());
     }
     Ok(())
 }

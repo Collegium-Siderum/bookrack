@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use eyre::{Context, Result, eyre};
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -61,7 +61,7 @@ pub fn save_atomic(state: &QueueState, path: &Path) -> Result<()> {
         .sync_all()
         .with_context(|| format!("fsync queue state temp under {}", parent.display()))?;
     tmp.persist(path)
-        .map_err(|e| anyhow::anyhow!(e.error))
+        .map_err(|e| eyre::eyre!(e.error))
         .with_context(|| format!("persist queue state to {}", path.display()))?;
     Ok(())
 }
@@ -187,7 +187,7 @@ impl JobError {
 /// Classify a failed ingest into a [`JobError`]. File-descriptor
 /// exhaustion anywhere in the chain is process-level: every later job
 /// would fail the same way until the process gets descriptors back.
-pub fn classify_ingest_error(err: &anyhow::Error) -> JobError {
+pub fn classify_ingest_error(err: &eyre::Report) -> JobError {
     let message = format!("ingest: {err:#}");
     if is_fd_exhaustion(err) {
         JobError::Process(message)
@@ -196,7 +196,7 @@ pub fn classify_ingest_error(err: &anyhow::Error) -> JobError {
     }
 }
 
-fn is_fd_exhaustion(err: &anyhow::Error) -> bool {
+fn is_fd_exhaustion(err: &eyre::Report) -> bool {
     let errno_hit = err.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -324,7 +324,7 @@ pub fn enqueue_ocr_intake(
 /// rejected so a typo does not cancel the next-in-line by accident.
 pub fn cancel_with_prefix(state: &mut QueueState, prefix: &str) -> Result<String> {
     if prefix.is_empty() {
-        return Err(anyhow!("queue cancel: id prefix must not be empty"));
+        return Err(eyre!("queue cancel: id prefix must not be empty"));
     }
     let candidates: Vec<usize> = state
         .jobs
@@ -336,7 +336,7 @@ pub fn cancel_with_prefix(state: &mut QueueState, prefix: &str) -> Result<String
         .map(|(i, _)| i)
         .collect();
     match candidates.len() {
-        0 => Err(anyhow!(
+        0 => Err(eyre!(
             "queue cancel: no pending or running job matches prefix {prefix:?}"
         )),
         1 => {
@@ -346,7 +346,7 @@ pub fn cancel_with_prefix(state: &mut QueueState, prefix: &str) -> Result<String
             job.finished_at = Some(Utc::now());
             Ok(job.id.clone())
         }
-        n => Err(anyhow!(
+        n => Err(eyre!(
             "queue cancel: prefix {prefix:?} is ambiguous, matches {n} jobs"
         )),
     }
@@ -1079,19 +1079,19 @@ mod tests {
     #[test]
     fn classify_marks_fd_exhaustion_errno_as_process_level() {
         let io = std::io::Error::from_raw_os_error(24);
-        let err = anyhow::Error::new(io).context("open vector store");
+        let err = eyre::Report::new(io).wrap_err("open vector store");
         assert!(matches!(classify_ingest_error(&err), JobError::Process(_)));
     }
 
     #[test]
     fn classify_marks_fd_exhaustion_message_as_process_level() {
-        let err = anyhow::anyhow!("lance: IO error: Too many open files");
+        let err = eyre::eyre!("lance: IO error: Too many open files");
         assert!(matches!(classify_ingest_error(&err), JobError::Process(_)));
     }
 
     #[test]
     fn classify_marks_ordinary_failures_as_book_level() {
-        let err = anyhow::anyhow!("source needs OCR and cannot be ingested as text");
+        let err = eyre::eyre!("source needs OCR and cannot be ingested as text");
         let classified = classify_ingest_error(&err);
         assert!(matches!(classified, JobError::Book(_)));
         let JobError::Book(message) = classified else {

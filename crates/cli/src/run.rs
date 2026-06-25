@@ -18,11 +18,11 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use bookrack_config::{LibrarySelection, LogConfig};
 use bookrack_ops::Caller;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
+use eyre::{Context, Result};
 use serde_json::Value;
 
 /// CLI inputs for [`run_daemon`]. Parsed from the `Run` clap variant.
@@ -89,7 +89,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     let mut shutdown_rx = runtime.shutdown_tx.subscribe();
     let fg_handle = tokio::spawn(async move {
         let _ = shutdown_rx.recv().await;
-        anyhow::Ok(())
+        eyre::Ok(())
     });
 
     runtime.run_until_shutdown(mcp_handle, fg_handle).await
@@ -104,11 +104,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 /// a dead daemon exits with status 3; an unprobeable lock (no
 /// `control_sock=` recorded) falls back to surfacing the original
 /// acquire error.
-async fn handle_lock_conflict(
-    err: anyhow::Error,
-    lock_path: &Path,
-    mode: LaunchMode,
-) -> Result<()> {
+async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchMode) -> Result<()> {
     let info = match bookrack_session::peek_lock(lock_path) {
         Ok(Some(i)) => i,
         Ok(None) | Err(_) => {

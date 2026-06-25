@@ -9,8 +9,8 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use bookrack_embed::ProbeReport as EmbedProbeReport;
+use eyre::{Context, ContextCompat, Result};
 
 use super::runner::validate_unused_or_force;
 use super::{
@@ -44,7 +44,7 @@ impl WizardDriver for CliWizardDriver {
             return Ok(abs);
         }
         if hint.non_interactive {
-            anyhow::bail!("--data-dir is required in --non-interactive mode");
+            eyre::bail!("--data-dir is required in --non-interactive mode");
         }
         let typed = match &hint.portable {
             Some(p) => {
@@ -128,13 +128,13 @@ impl WizardDriver for CliWizardDriver {
             eprintln!("            pull the model:");
             eprintln!("              ollama pull {embed_model}");
             eprintln!("            then rerun `bookrack init`.");
-            anyhow::bail!("Ollama unreachable");
+            eyre::bail!("Ollama unreachable");
         }
         if !report_has_model(step.report, embed_model) {
             eprintln!("      FAIL: Ollama is up but {embed_model} is not pulled.");
             eprintln!("            Run:  ollama pull {embed_model}");
             eprintln!("            then rerun `bookrack init`.");
-            anyhow::bail!("embed model not pulled");
+            eyre::bail!("embed model not pulled");
         }
         println!(
             "      OK ({} model(s) pulled, {embed_model} present)",
@@ -159,7 +159,7 @@ impl WizardDriver for CliWizardDriver {
                 );
                 if report.hits == 0 {
                     let marker = report.marker_query;
-                    anyhow::bail!(
+                    eyre::bail!(
                         "smoke search returned no hits for `{marker}` -- the embed or search pipeline is broken"
                     );
                 }

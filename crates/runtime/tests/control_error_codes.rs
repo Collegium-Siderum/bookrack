@@ -19,9 +19,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::{Result, eyre};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -51,7 +51,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow!("eof while expecting response"))?;
+        .ok_or_else(|| eyre!("eof while expecting response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -72,7 +72,7 @@ async fn rpc_code(
     let resp = recv(reader).await?;
     let code = resp["error"]["code"]
         .as_i64()
-        .ok_or_else(|| anyhow!("expected error payload, got {resp}"))?;
+        .ok_or_else(|| eyre!("expected error payload, got {resp}"))?;
     let message = resp["error"]["message"].as_str().unwrap_or("").to_string();
     Ok((code, message))
 }
@@ -178,7 +178,7 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         )
         .await?;
         let _ = recv(&mut reader).await?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;

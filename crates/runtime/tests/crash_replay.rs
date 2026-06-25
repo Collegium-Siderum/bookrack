@@ -18,10 +18,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
 use bookrack_config::LibrarySelection;
 use bookrack_core::queue::QueueState;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::{Context, Result, eyre};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -49,7 +49,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
     let line = reader
         .next_line()
         .await?
-        .ok_or_else(|| anyhow!("connection closed before response"))?;
+        .ok_or_else(|| eyre!("connection closed before response"))?;
     Ok(serde_json::from_str(&line)?)
 }
 
@@ -88,7 +88,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
             )
             .await?;
             let _ = recv(&mut reader).await?;
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), eyre::Report>(())
         });
         runtime.run_until_shutdown(None, repl_handle).await?;
         driver.await??;
@@ -139,7 +139,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
         )
         .await?;
         let _ = recv(&mut reader).await?;
-        Ok::<(), anyhow::Error>(())
+        Ok::<(), eyre::Report>(())
     });
     runtime.run_until_shutdown(None, repl_handle).await?;
     driver.await??;

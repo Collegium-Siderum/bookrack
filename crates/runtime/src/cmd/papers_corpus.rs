@@ -6,10 +6,10 @@
 //! [`plan_rebuild`] + [`execute_rebuild_from_plan`]; mirrors
 //! [`crate::cmd::corpus`] for the paper pipeline.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
+use eyre::{Context, Result};
 
 use crate::embed_helpers::embedder;
 

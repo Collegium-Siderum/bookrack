@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use anyhow::Context;
 use bookrack_catalog::Catalog;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
 use bookrack_ingest::ocr::{OcrIngestParams, OcrIngestReport, ingest_ocr_intake};
 use bookrack_ingest::{IngestParams, IngestReport};
+use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Ops;
@@ -137,11 +137,11 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         &self,
         path: &Path,
         params: &IngestParams,
-    ) -> anyhow::Result<IngestReport> {
+    ) -> eyre::Result<IngestReport> {
         let embedder = self
             .ops
             .embedder()
-            .ok_or_else(|| anyhow::anyhow!("ingest requires a library handle with an embedder"))?;
+            .ok_or_else(|| eyre::eyre!("ingest requires a library handle with an embedder"))?;
         let _guard = self.ingest_lock.lock().await;
         let mut corpus =
             Corpus::open(self.ops.corpus_db()).context("open corpus for ingest write")?;
@@ -194,10 +194,11 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         from_pdf: &Path,
         ocr_params: &OcrIngestParams,
         params: &IngestParams,
-    ) -> anyhow::Result<OcrIngestReport> {
-        let embedder = self.ops.embedder().ok_or_else(|| {
-            anyhow::anyhow!("OCR intake requires a library handle with an embedder")
-        })?;
+    ) -> eyre::Result<OcrIngestReport> {
+        let embedder = self
+            .ops
+            .embedder()
+            .ok_or_else(|| eyre::eyre!("OCR intake requires a library handle with an embedder"))?;
         let _guard = self.ingest_lock.lock().await;
         let mut corpus =
             Corpus::open(self.ops.corpus_db()).context("open corpus for OCR intake write")?;
@@ -244,27 +245,27 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         &self,
         path: &Path,
         params: &GleanParams,
-    ) -> anyhow::Result<GleanReport> {
+    ) -> eyre::Result<GleanReport> {
         let embedder = self
             .ops
             .papers_embedder()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let corpus_db = self
             .ops
             .papers_corpus_db()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let catalog_db = self
             .ops
             .papers_catalog_db()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let lancedb_dir = self
             .ops
             .papers_lancedb_dir()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let papers_dir = self
             .ops
             .papers_dir()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let _guard = self.glean_lock.lock().await;
         let mut corpus = Corpus::open(corpus_db).context("open papers corpus for glean write")?;
         let mut catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
@@ -291,11 +292,11 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
 
     /// Open the paper catalog for synchronous read/write. Returns an
     /// error when this handle has no papers backend attached.
-    pub fn open_paper_catalog(&self) -> anyhow::Result<Catalog> {
+    pub fn open_paper_catalog(&self) -> eyre::Result<Catalog> {
         let catalog_db = self
             .ops
             .papers_catalog_db()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         Catalog::open_with_backup(catalog_db, self.ops.backup_dir()).context("open papers catalog")
     }
 
@@ -308,16 +309,16 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         intake_id: i64,
         profile: &bookrack_glean::audit::PaperAuditProfile,
         data: &bookrack_glean::audit::PaperAuditData,
-    ) -> anyhow::Result<bookrack_glean::reaudit::ReauditOutcome> {
+    ) -> eyre::Result<bookrack_glean::reaudit::ReauditOutcome> {
         let catalog_db = self
             .ops
             .papers_catalog_db()
-            .ok_or_else(|| anyhow::anyhow!("library handle has no papers backend"))?;
+            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
         let _guard = self.glean_lock.lock().await;
         let catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
             .context("open papers catalog for reaudit")?;
         bookrack_glean::reaudit::reaudit_paper(&catalog, intake_id, profile, data)
-            .map_err(|e| anyhow::Error::from(e).context("registry-mediated paper reaudit"))
+            .map_err(|e| eyre::Report::from(e).wrap_err("registry-mediated paper reaudit"))
     }
 }
 

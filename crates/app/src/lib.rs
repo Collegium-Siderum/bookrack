@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use eyre::Result;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 mod launch;
@@ -73,7 +73,7 @@ pub fn run() -> Result<()> {
                 let mut shutdown_rx = runtime.shutdown_tx.subscribe();
                 let fg_handle = tokio::spawn(async move {
                     let _ = shutdown_rx.recv().await;
-                    anyhow::Ok(())
+                    eyre::Ok(())
                 });
                 if let Err(err) = runtime.run_until_shutdown(mcp_handle, fg_handle).await {
                     eprintln!("bookrack-app: daemon exited with error: {err:#}");

@@ -10,9 +10,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_config::McpConfig;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::Result;
 
 #[derive(clap::Parser)]
 #[command(

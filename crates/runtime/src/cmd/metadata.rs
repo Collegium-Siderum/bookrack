@@ -4,7 +4,6 @@
 //! Reads have moved to `bookrack exec library.show_metadata_audit` and
 //! siblings; this module covers only the write surface.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_core::PartitionIdx;
@@ -12,6 +11,7 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::{IngestParams, resume_from_chunk};
 use bookrack_ops::Ops;
+use eyre::{Context, ContextCompat, Result};
 
 use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
@@ -121,12 +121,12 @@ fn set(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
         Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            anyhow::bail!("{e}");
+            eyre::bail!("{e}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("set metadata field via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("set metadata field via ops")),
     }
 }
 
@@ -151,12 +151,12 @@ fn clear(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
         Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            anyhow::bail!("{e}");
+            eyre::bail!("{e}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("clear metadata field via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("clear metadata field via ops")),
     }
 }
 
@@ -183,12 +183,12 @@ fn void(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
         Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            anyhow::bail!("{e}");
+            eyre::bail!("{e}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("void metadata field via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("void metadata field via ops")),
     }
 }
 
@@ -213,9 +213,9 @@ fn reaudit(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("reaudit metadata via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("reaudit metadata via ops")),
     }
 }
 
@@ -243,12 +243,12 @@ fn contributor_add(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
         Err(e @ bookrack_ops::OpsError::UnknownContributorRole { .. }) => {
-            anyhow::bail!("{e}");
+            eyre::bail!("{e}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("add contributor via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("add contributor via ops")),
     }
 }
 
@@ -269,12 +269,12 @@ fn contributor_remove(
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
         Err(e @ bookrack_ops::OpsError::ContributorNotFound { .. }) => {
-            anyhow::bail!("{e}");
+            eyre::bail!("{e}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("remove contributor via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("remove contributor via ops")),
     }
 }
 
@@ -289,9 +289,9 @@ fn ack(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("acknowledge metadata gap via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("acknowledge metadata gap via ops")),
     }
 }
 
@@ -309,9 +309,9 @@ fn approve(ops: &Ops<OllamaEmbedClient>, book: i64, reason: Option<&str>) -> Res
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("approve metadata via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("approve metadata via ops")),
     }
 }
 
@@ -329,9 +329,9 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
             Ok(())
         }
         Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            anyhow::bail!("no intake registered for book {intake_id}");
+            eyre::bail!("no intake registered for book {intake_id}");
         }
-        Err(e) => Err(anyhow::Error::from(e).context("reject metadata via ops")),
+        Err(e) => Err(eyre::Report::from(e).wrap_err("reject metadata via ops")),
     }
 }
 

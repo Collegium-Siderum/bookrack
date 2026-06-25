@@ -9,7 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig, OLLAMA_URL_ENV,
@@ -21,6 +20,7 @@ use bookrack_embed::{OllamaEmbedClient, probe_ollama};
 use bookrack_ingest::{IngestParams, ingest_book};
 use bookrack_ops::{Caller, Ops, SearchOptions, reads};
 use bookrack_query::Library;
+use eyre::{Context, Result};
 
 use super::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
@@ -143,10 +143,10 @@ fn resolve_ollama_target() -> (String, String) {
 /// that already holds a library must not be silently re-init'd.
 pub(super) fn validate_unused_or_force(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !path.is_dir() {
-        anyhow::bail!("{} exists but is not a directory", path.display());
+        eyre::bail!("{} exists but is not a directory", path.display());
     }
     if path.join("catalog.db").exists() && !force {
-        anyhow::bail!(
+        eyre::bail!(
             "{} looks like an existing bookrack data root (catalog.db present); \
              pass --force to use it",
             path.display(),
@@ -179,7 +179,7 @@ async fn run_smoke(ollama_url: &str, embed_model: &str) -> Result<SmokeReport> {
 
     let report = smoke_ingest(&cfg, &embed_cfg, &fixture_path).await?;
     if report.chunks_written == 0 {
-        anyhow::bail!("smoke ingest produced zero chunks");
+        eyre::bail!("smoke ingest produced zero chunks");
     }
 
     let hits = smoke_search(&cfg, &embed_cfg).await?;

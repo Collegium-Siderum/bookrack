@@ -33,7 +33,7 @@ pub async fn status<E: Embedder>(ops: &Ops<E>) -> Result<VectorsStatus> {
             return Ok(empty_status());
         };
         let dim: usize = dim_str.parse().map_err(|e| {
-            crate::OpsError::Other(anyhow::anyhow!("parse vector_dim stamp {dim_str:?}: {e}"))
+            crate::OpsError::Other(eyre::eyre!("parse vector_dim stamp {dim_str:?}: {e}"))
         })?;
         drop(corpus);
 

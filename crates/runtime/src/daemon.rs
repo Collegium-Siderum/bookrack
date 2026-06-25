@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
@@ -39,6 +38,7 @@ use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
+use eyre::{Context, Result};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 

@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_control_client::ControlError;
+use eyre::Result;
 use serde_json::Value;
 
 pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -27,7 +27,7 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
             return Ok(());
         }
         Err(err) => {
-            anyhow::bail!("connect to {}: {err}", socket.path().display());
+            eyre::bail!("connect to {}: {err}", socket.path().display());
         }
     };
     // Best-effort shutdown: the daemon writes its final response,

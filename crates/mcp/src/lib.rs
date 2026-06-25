@@ -13,7 +13,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::Context;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
@@ -23,6 +22,7 @@ use bookrack_ops::dto::{BookFilter, PaperFilter};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
+use eyre::WrapErr;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
@@ -1820,7 +1820,7 @@ pub async fn serve(
     shutdown_tx: broadcast::Sender<()>,
     addr: &str,
     mut shutdown_rx: broadcast::Receiver<()>,
-) -> anyhow::Result<()> {
+) -> eyre::Result<()> {
     let log_stream_for_sse = log_stream.clone();
     let service = StreamableHttpService::new(
         move || {
@@ -1891,7 +1891,7 @@ async fn sse_logs_handler(
 /// every daemon host (CLI, GUI) so the listener wiring has one source.
 pub fn spawn_listener(
     runtime: &bookrack_runtime::DaemonRuntime,
-) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
+) -> Option<tokio::task::JoinHandle<eyre::Result<()>>> {
     if runtime.mcp_label == "disabled" {
         tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
         return None;

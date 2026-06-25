@@ -6,11 +6,11 @@
 //! pipeline; status reads live at
 //! `bookrack exec library.vectors_status`.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
+use eyre::{Context, Result};
 
 use crate::embed_helpers::embedder;
 
@@ -34,9 +34,7 @@ pub async fn rebuild(
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "papers library has no ingested chunks yet; glean a paper before rebuild"
-            )
+            eyre::eyre!("papers library has no ingested chunks yet; glean a paper before rebuild")
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
@@ -91,9 +89,7 @@ pub async fn drop(cfg: &Config) -> Result<()> {
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| {
-            anyhow::anyhow!("papers library has no ingested chunks yet; nothing to drop")
-        })?
+        .ok_or_else(|| eyre::eyre!("papers library has no ingested chunks yet; nothing to drop"))?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
     let store = ChunkStore::open(&lancedb_dir, dim)

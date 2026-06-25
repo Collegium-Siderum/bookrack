@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use bookrack_config::Config;
+use eyre::{Context, Result};
 
 pub fn run(cfg: &Config, out: Option<PathBuf>, days: u32, no_scrub: bool) -> Result<()> {
     let opts = bookrack_diagnose::Options {

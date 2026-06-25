@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use eyre::Result;
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
@@ -146,7 +146,7 @@ async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
         let socket = bookrack_control_client::ControlSocket::from_path(sock_path);
         let client = bookrack_control_client::connect(&socket).await?;
         client.shutdown().await?;
-        anyhow::Ok(())
+        eyre::Ok(())
     });
 
     runtime.run_until_shutdown(None, repl_handle).await?;

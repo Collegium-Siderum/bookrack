@@ -13,11 +13,11 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use bookrack_config::Config;
 use bookrack_ingest::{
     DryrunBookReport, DryrunParams, DryrunSummary, collect_files, dryrun_book, summarize,
 };
+use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
 /// How many dryrun JSONL artifacts to keep under `<data_root>/dryruns/`
@@ -49,7 +49,7 @@ pub fn run(
     let audit_data = crate::audit_helpers::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
-        anyhow::bail!("no supported files found under {}", path.display());
+        eyre::bail!("no supported files found under {}", path.display());
     }
     eprintln!(
         "bookrack dryrun: {} files under {}",

@@ -2,10 +2,10 @@
 
 //! `bookrack verify` — per-store schema and on-disk file checks.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_config::Config;
 use bookrack_corpus::Corpus;
+use eyre::{Context, Result};
 
 use crate::render;
 
@@ -13,7 +13,7 @@ pub fn run(cfg: &Config) -> Result<()> {
     let report = build_verify_report(cfg);
     render::verify(&report);
     if report.catalog_schema_error.is_some() || report.corpus_schema_error.is_some() {
-        anyhow::bail!("one or more stores failed verification");
+        eyre::bail!("one or more stores failed verification");
     }
     Ok(())
 }

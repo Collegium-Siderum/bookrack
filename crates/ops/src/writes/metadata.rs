@@ -200,7 +200,7 @@ pub fn add_contributor<E: Embedder>(
         }
         let name = req.name.trim();
         if name.is_empty() {
-            return Err(OpsError::Other(anyhow::anyhow!(
+            return Err(OpsError::Other(eyre::eyre!(
                 "contributor name must not be empty"
             )));
         }
@@ -320,7 +320,7 @@ pub fn reaudit_metadata<E: Embedder>(
             bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
                 OpsError::IntakeNotFound { intake_id }
             }
-            other => OpsError::Other(anyhow::Error::new(other)),
+            other => OpsError::Other(eyre::Report::new(other)),
         })?;
         Ok(ReauditOutcome {
             intake_id: outcome.intake_id,

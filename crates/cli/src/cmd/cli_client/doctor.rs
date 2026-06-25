@@ -7,9 +7,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
 use bookrack_config::LibrarySelection;
 use bookrack_control_client::ControlError;
+use eyre::Result;
 use serde_json::Value;
 
 pub async fn run(
@@ -37,7 +37,7 @@ pub async fn run(
         let report = bookrack_runtime::doctor::rename_envelopes(selection, dry_run).await?;
         bookrack_runtime::doctor::render_rename_report(&report, json);
         if report.has_failures() {
-            anyhow::bail!("envelope rename: {} failure(s)", report.failures.len());
+            eyre::bail!("envelope rename: {} failure(s)", report.failures.len());
         }
         return Ok(());
     }
@@ -47,7 +47,7 @@ pub async fn run(
                 let value = client
                     .call_raw("doctor.gather", Value::Null)
                     .await
-                    .map_err(anyhow::Error::from)?;
+                    .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)
             }
             Err(ControlError::NotRunning) => bookrack_runtime::doctor::run(selection, json).await,

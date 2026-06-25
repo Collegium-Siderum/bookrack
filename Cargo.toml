@@ -11,7 +11,14 @@ repository = "https://github.com/Collegium-Siderum/bookrack"
 
 # Shared dependency versions. Member crates opt in with `<dep>.workspace = true`.
 [workspace.dependencies]
-anyhow = "1"
+# Flexible error reporting type, drop-in replacement for `anyhow` at the
+# API level. Paired with `color-eyre` at the CLI entry point to render
+# cause chains with rustc-style colored prefixes.
+eyre = "0.6"
+# Terminal error report renderer for `eyre::Report`. Installed at the
+# CLI entry point; provides the colored multi-line `Debug` view used by
+# `eprintln!("{err:?}")` and a panic hook with the same theming.
+color-eyre = "0.6"
 # Dyn-safe async methods on the `WizardDriver` trait in `runtime`, so
 # the CLI and GUI front ends can implement the first-run wizard's
 # interactive surface behind one object-safe interface.

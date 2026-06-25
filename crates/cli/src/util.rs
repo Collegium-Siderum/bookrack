@@ -2,7 +2,7 @@
 
 //! Cross-cutting helpers shared by the `cmd/*` modules.
 
-use anyhow::{Context, Result};
+use eyre::{Context, Result};
 
 /// Read a confirmation token from stdin: only the literal "yes"
 /// (case-insensitive, trimmed) passes.
@@ -45,7 +45,7 @@ pub fn confirm_vectors_reset(yes: bool, resume: bool) -> Result<bool> {
         return Ok(true);
     }
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("vectors reset drops the existing vectors; pass --yes to confirm");
+        eyre::bail!("vectors reset drops the existing vectors; pass --yes to confirm");
     }
     println!("This drops the chunks table and re-embeds every book from the corpus tree.");
     println!("The old vectors are unrecoverable.");

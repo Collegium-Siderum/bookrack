@@ -4,9 +4,9 @@
 //! name and vector dimension into `papers_corpus.db`'s `index_meta`
 //! table. Peer of [`crate::cmd::stamps`] for the paper pipeline.
 
-use anyhow::{Context, Result};
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
+use eyre::{Context, ContextCompat, Result};
 
 use crate::embed_helpers::embedder;
 

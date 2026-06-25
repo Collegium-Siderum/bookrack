@@ -19,7 +19,6 @@ mod util;
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
 use bookrack_cli_grammar::{
     CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, QueueAction, RemoveArgs,
     StampsAction, WriteMetadataAction, WriteVectorsAction,
@@ -27,6 +26,7 @@ use bookrack_cli_grammar::{
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
+use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
 /// variables that select the library and the embed backend, and the
@@ -423,7 +423,7 @@ async fn offer_init_or_exit(err: ConfigError) -> Result<()> {
     if !std::io::stdin().is_terminal() {
         eprintln!("No library configured.");
         eprintln!("Run `bookrack init` from an interactive terminal first.");
-        return Err(anyhow::Error::new(err));
+        return Err(eyre::Report::new(err));
     }
     eprintln!("No library configured.");
     print!("Launch the setup wizard now? [Y/n]: ");
@@ -439,7 +439,7 @@ async fn offer_init_or_exit(err: ConfigError) -> Result<()> {
         || answer.eq_ignore_ascii_case("yes"))
     {
         eprintln!("Aborted. Run `bookrack init` to configure, then `bookrack run`.");
-        return Err(anyhow::Error::new(err));
+        return Err(eyre::Report::new(err));
     }
     init::run(init::Args {
         data_dir: None,
@@ -453,10 +453,18 @@ async fn offer_init_or_exit(err: ConfigError) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // Install the color-eyre report and panic hooks. The hooks render
+    // `eyre::Report` cause chains and panics with rustc-style colored
+    // prefixes when stderr is a TTY, and as plain text when it is not.
+    // A failure to install is fatal only for the reporter itself — the
+    // program still runs, just with the default `Debug` formatting.
+    if let Err(e) = color_eyre::install() {
+        eprintln!("bookrack: failed to install error reporter: {e}");
+    }
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("Error: {err:#}");
+            eprintln!("{err:?}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -525,7 +533,7 @@ async fn run() -> Result<()> {
                 ConfigError::MissingDataDir | ConfigError::DataDirNotFound(_) => {
                     offer_init_or_exit(err).await?;
                 }
-                other => return Err(anyhow::Error::new(other).context("resolve configuration")),
+                other => return Err(eyre::Report::new(other).wrap_err("resolve configuration")),
             }
         }
         return run::run_daemon(run::RunOpts {

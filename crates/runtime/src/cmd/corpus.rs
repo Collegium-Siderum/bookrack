@@ -7,10 +7,10 @@
 //! set, so drift between the dry-run and the execute leg cannot leak
 //! into the destructive operation.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
+use eyre::{Context, Result};
 
 use crate::embed_helpers::embedder;
 

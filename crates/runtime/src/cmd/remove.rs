@@ -21,12 +21,12 @@
 //! pinned intake id. Strict: the intake must still resolve when the
 //! execute leg runs, else the call aborts without writing.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
+use eyre::{Context, ContextCompat, Result};
 use sha2::{Digest, Sha256};
 
 /// Inputs `Cli` collects for a `bookrack remove` invocation.
@@ -47,7 +47,7 @@ pub struct RemoveArgs {
 /// dry-run leg.
 pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
-        anyhow::bail!("pass an intake id (positional) or --sha <hex>");
+        eyre::bail!("pass an intake id (positional) or --sha <hex>");
     }
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
@@ -140,7 +140,7 @@ pub async fn execute_remove_from_plan(
         let current = derive_remove_plan(cfg, intake.clone()).await?;
         let actual = current.fingerprint();
         if actual != expected {
-            anyhow::bail!(
+            eyre::bail!(
                 "remove plan stale: target state for intake {intake_id} drifted since dry-run \
                  (expected fingerprint {expected}, current {actual}). Re-run dry_run=true and \
                  confirm again."

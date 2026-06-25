@@ -27,7 +27,7 @@ bookrack-query = { path = "../query" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
-anyhow.workspace = true
+eyre.workspace = true
 # `wizard::WizardDriver` exposes async methods behind a dyn-safe trait.
 async-trait.workspace = true
 chrono.workspace = true

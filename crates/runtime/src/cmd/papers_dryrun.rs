@@ -9,12 +9,12 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use bookrack_config::Config;
 use bookrack_glean::dryrun::{
     DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, collect_files, dryrun_paper,
     summarize,
 };
+use eyre::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -44,7 +44,7 @@ pub fn run(
 ) -> Result<PapersDryrunRunOutcome> {
     let files = collect_files(path);
     if files.is_empty() {
-        anyhow::bail!("no supported paper files found under {}", path.display());
+        eyre::bail!("no supported paper files found under {}", path.display());
     }
     eprintln!(
         "bookrack papers dryrun: {} files under {}",

@@ -15,12 +15,12 @@
 //! partition, envelope file, source PDF, intake row. Audit tables
 //! (`metadata_audit`, `item_pipeline_audit`) are preserved.
 
-use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
 use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
+use eyre::{Context, ContextCompat, Result};
 use sha2::{Digest, Sha256};
 
 use crate::cmd::remove::ExpectedFingerprint;
@@ -43,7 +43,7 @@ pub struct RemovePaperArgs {
 /// control-plane handler's dry-run leg.
 pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemovePaperPlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
-        anyhow::bail!("pass an intake id (positional) or --sha <hex>");
+        eyre::bail!("pass an intake id (positional) or --sha <hex>");
     }
     let catalog = Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
         .context("open papers catalog")?;
@@ -133,7 +133,7 @@ pub async fn execute_remove_from_plan(
         let current = derive_remove_plan(cfg, intake.clone()).await?;
         let actual = current.fingerprint();
         if actual != expected {
-            anyhow::bail!(
+            eyre::bail!(
                 "papers.remove plan stale: target state for paper intake {intake_id} drifted \
                  since dry-run (expected fingerprint {expected}, current {actual}). Re-run \
                  dry_run=true and confirm again."

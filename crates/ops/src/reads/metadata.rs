@@ -78,7 +78,7 @@ pub fn show_metadata_report<E: Embedder>(
                 bookrack_ingest::IngestError::UnknownIntake(intake_id) => {
                     OpsError::IntakeNotFound { intake_id }
                 }
-                other => OpsError::Other(anyhow::Error::new(other)),
+                other => OpsError::Other(eyre::Report::new(other)),
             })?;
             let overrides = catalog.overrides_for_address(intake_id, ItemKind::Book)?;
             let attrs = catalog.publication_attrs(intake_id, ItemKind::Book)?;

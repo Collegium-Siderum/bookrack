@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use anyhow::{Context, anyhow};
+use eyre::{Context, eyre};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -309,7 +309,7 @@ enum Frame {
     Event(Event),
 }
 
-fn parse_frame(line: &str) -> anyhow::Result<Frame> {
+fn parse_frame(line: &str) -> eyre::Result<Frame> {
     let parsed: Value = serde_json::from_str(line).context("decode frame")?;
     if parsed
         .get("method")
@@ -318,11 +318,11 @@ fn parse_frame(line: &str) -> anyhow::Result<Frame> {
     {
         let params = parsed
             .get("params")
-            .ok_or_else(|| anyhow!("event missing params"))?;
+            .ok_or_else(|| eyre!("event missing params"))?;
         let channel = params
             .get("channel")
             .and_then(|c| c.as_str())
-            .ok_or_else(|| anyhow!("event missing channel"))?
+            .ok_or_else(|| eyre!("event missing channel"))?
             .to_string();
         let value = params.get("value").cloned().unwrap_or(Value::Null);
         let lag = params.get("lag").and_then(|l| l.as_bool()).unwrap_or(false);
@@ -335,12 +335,12 @@ fn parse_frame(line: &str) -> anyhow::Result<Frame> {
     let id = parsed
         .get("id")
         .and_then(|i| i.as_u64())
-        .ok_or_else(|| anyhow!("response missing numeric id"))?;
+        .ok_or_else(|| eyre!("response missing numeric id"))?;
     if let Some(err) = parsed.get("error").and_then(|e| e.as_object()) {
         let code = err
             .get("code")
             .and_then(|c| c.as_i64())
-            .ok_or_else(|| anyhow!("rpc error missing code"))? as i32;
+            .ok_or_else(|| eyre!("rpc error missing code"))? as i32;
         let message = err
             .get("message")
             .and_then(|m| m.as_str())

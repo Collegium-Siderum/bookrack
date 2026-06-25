@@ -6,12 +6,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
 use bookrack_catalog::Catalog;
 use bookrack_config::{Config, EmbedConfig};
 use bookrack_corpus::Corpus;
 use bookrack_ingest::IngestParams;
 use bookrack_ingest::ocr::{OcrIngestParams, ingest_ocr_intake};
+use eyre::{Context, Result};
 
 use crate::audit_helpers::{load_audit_data, load_audit_profile, load_heading_patterns};
 use crate::embed_helpers::embedder;
