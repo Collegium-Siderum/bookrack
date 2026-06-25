@@ -456,9 +456,21 @@ async fn main() -> std::process::ExitCode {
     // Install the color-eyre report and panic hooks. The hooks render
     // `eyre::Report` cause chains and panics with rustc-style colored
     // prefixes when stderr is a TTY, and as plain text when it is not.
-    // A failure to install is fatal only for the reporter itself — the
+    //
+    // Two default sections are suppressed because they are noise on a
+    // CLI tool's predictable user-input failures (missing file, bad
+    // arg, unreachable network endpoint): the `Location:` source line
+    // and the `EnvSection` (which carries the `Backtrace omitted. Run
+    // with RUST_BACKTRACE=1 ...` hint). These remain available on
+    // panics through the panic hook itself.
+    //
+    // A failure to install is fatal only for the reporter — the
     // program still runs, just with the default `Debug` formatting.
-    if let Err(e) = color_eyre::install() {
+    if let Err(e) = color_eyre::config::HookBuilder::default()
+        .display_location_section(false)
+        .display_env_section(false)
+        .install()
+    {
         eprintln!("bookrack: failed to install error reporter: {e}");
     }
     match run().await {
@@ -485,7 +497,7 @@ async fn run() -> Result<()> {
         dry_run,
     } = &cli.command
     {
-        return cmd::cli_client::doctor::run(
+        let healthy = cmd::cli_client::doctor::run(
             &cli.selection(),
             *json,
             *install_pdfium,
@@ -493,7 +505,15 @@ async fn run() -> Result<()> {
             *dry_run,
             None,
         )
-        .await;
+        .await?;
+        // The doctor renderer has already drawn the per-check table
+        // plus the summary line, so an unhealthy report exits with a
+        // non-zero status without going through `Err(Report)` and
+        // adding an extra colored error line on top of the table.
+        if !healthy {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     if let Command::Init {
         data_dir,

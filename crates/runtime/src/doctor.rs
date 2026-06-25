@@ -84,29 +84,27 @@ impl Report {
 }
 
 /// CLI entry point. Resolves config without erroring on a missing one,
-/// gathers every check, renders, and sets a non-zero exit code on any
-/// FAIL by `bail!`ing.
-pub async fn run(selection: &LibrarySelection, json: bool) -> Result<()> {
+/// gathers every check, and renders the report. Returns `true` when
+/// every check passes and `false` when at least one row is FAIL.
+/// The boolean is returned, not bailed, so the call site can map an
+/// expected "not ready" health outcome to a non-zero exit code
+/// without adding an extra error line on top of the table the
+/// renderer already wrote.
+pub async fn run(selection: &LibrarySelection, json: bool) -> Result<bool> {
     let report = gather(selection).await;
     if json {
         render_json(&report);
     } else {
         render_text(&report);
     }
-    if report.has_failures() {
-        eyre::bail!(
-            "bookrack is not ready: {} problem(s)",
-            report.failure_count()
-        );
-    }
-    Ok(())
+    Ok(!report.has_failures())
 }
 
 /// Render a [`Report`] previously returned by the control-plane
 /// `doctor.gather` RPC. The CLI-side `bookrack doctor` client calls
 /// this to keep the text/JSON output identical between the
 /// daemon-running and daemon-not-running paths.
-pub fn render_value(value: &serde_json::Value, json: bool) -> Result<()> {
+pub fn render_value(value: &serde_json::Value, json: bool) -> Result<bool> {
     let report: Report =
         serde_json::from_value(value.clone()).context("decode doctor.gather response")?;
     if json {
@@ -114,13 +112,7 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<()> {
     } else {
         render_text(&report);
     }
-    if report.has_failures() {
-        eyre::bail!(
-            "bookrack is not ready: {} problem(s)",
-            report.failure_count()
-        );
-    }
-    Ok(())
+    Ok(!report.has_failures())
 }
 
 /// Build a [`Report`] for the given selection. Pure over its inputs in

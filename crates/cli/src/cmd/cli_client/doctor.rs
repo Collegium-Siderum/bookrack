@@ -12,6 +12,11 @@ use bookrack_control_client::ControlError;
 use eyre::Result;
 use serde_json::Value;
 
+/// Returns `true` when the doctor report (or the envelope rename
+/// summary) is clean, and `false` when at least one row is FAIL. The
+/// caller maps the boolean onto a process exit code so the colored
+/// table the renderer already wrote is the sole human-facing signal of
+/// failure.
 pub async fn run(
     selection: &LibrarySelection,
     json: bool,
@@ -19,7 +24,7 @@ pub async fn run(
     rename_envelopes: bool,
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     // The install is a host-level action: it lands in the per-user
     // managed directory regardless of whether a daemon is running, so
     // it happens before the report path forks. A running daemon picks
@@ -36,10 +41,7 @@ pub async fn run(
     if rename_envelopes {
         let report = bookrack_runtime::doctor::rename_envelopes(selection, dry_run).await?;
         bookrack_runtime::doctor::render_rename_report(&report, json);
-        if report.has_failures() {
-            eyre::bail!("envelope rename: {} failure(s)", report.failures.len());
-        }
-        return Ok(());
+        return Ok(!report.has_failures());
     }
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
