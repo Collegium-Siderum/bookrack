@@ -551,7 +551,7 @@ async fn run() -> Result<()> {
     // root from this process. The `AuditProfile` reflection runner
     // is the lone exception — it reads compiled-in profiles and
     // needs no config.
-    let _profile_name = cli.audit_profile.clone();
+    let audit_profile = cli.audit_profile.clone();
     let selection = cli.selection();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
@@ -570,7 +570,9 @@ async fn run() -> Result<()> {
         Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,
         Command::Stamps { action } => cmd::cli_client::stamps::run(action, None).await,
         Command::Remove(args) => cmd::cli_client::remove::run(args, None).await,
-        Command::Papers { action } => cmd::cli_client::papers::run(action, None).await,
+        Command::Papers { action } => {
+            cmd::cli_client::papers::run(action, None, audit_profile).await
+        }
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,

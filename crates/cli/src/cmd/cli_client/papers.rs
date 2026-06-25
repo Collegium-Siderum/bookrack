@@ -17,7 +17,11 @@ use serde_json::{Value, json};
 
 use super::helpers;
 
-pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    action: PapersAction,
+    runtime_dir: Option<PathBuf>,
+    default_audit_profile: Option<String>,
+) -> Result<()> {
     match action {
         PapersAction::Ingest(args) => ingest(args, runtime_dir).await,
         PapersAction::List(args) => list(args, runtime_dir).await,
@@ -31,13 +35,16 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
         PapersAction::Vectors { action } => vectors(action, runtime_dir).await,
         PapersAction::Stamps { action } => stamps(action, runtime_dir).await,
         PapersAction::Dryrun(args) => dryrun(args, runtime_dir).await,
-        PapersAction::Metadata { action } => metadata(action, runtime_dir).await,
+        PapersAction::Metadata { action } => {
+            metadata(action, runtime_dir, default_audit_profile).await
+        }
     }
 }
 
 async fn metadata(
     action: bookrack_cli_grammar::PapersMetadataAction,
     runtime_dir: Option<PathBuf>,
+    default_audit_profile: Option<String>,
 ) -> Result<()> {
     use bookrack_cli_grammar::PapersMetadataAction;
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
@@ -47,7 +54,7 @@ async fn metadata(
             audit_profile,
         } => {
             let mut params = json!({ "intake_id": intake_id });
-            if let Some(name) = audit_profile {
+            if let Some(name) = audit_profile.or(default_audit_profile) {
                 params["audit_profile"] = Value::String(name);
             }
             let value =
