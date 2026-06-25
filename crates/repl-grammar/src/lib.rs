@@ -1,74 +1,9 @@
-//! Shared `clap` grammar for the in-process REPL fallback inside
-//! `bookrack run` and the standalone `bookrack repl` control-socket
-//! client. Lives in its own crate so the client process can parse the
-//! same command syntax without depending on the daemon stack.
+//! Shared `clap::Subcommand` definitions consumed by the top-level
+//! `bookrack` CLI. Each subcommand and its argument struct lives here
+//! so the binary crate and the daemon-side runner reach the same
+//! grammar without a runtime dependency on the daemon stack.
 
 use std::path::PathBuf;
-
-/// Top-level parser for one REPL line. Behaves like a binary with no
-/// program name: the first token is the subcommand.
-#[derive(clap::Parser, Debug)]
-#[command(name = "", no_binary_name = true)]
-pub struct ReplCli {
-    #[command(subcommand)]
-    pub command: ReplCommand,
-}
-
-/// Every write command available from a REPL line. Dispatch maps each
-/// variant to the matching control-plane RPC (in the standalone client)
-/// or the matching `bookrack_runtime::cmd::*` runner (in the in-process
-/// fallback path).
-#[derive(clap::Subcommand, Debug)]
-pub enum ReplCommand {
-    /// Ingest and embed a single file (or, with `--recursive`, every
-    /// supported file under a directory) into the library. Inside the
-    /// REPL this runs synchronously; queue an entire directory through
-    /// the queue worker with `queue add <path>` instead.
-    Ingest(IngestArgs),
-    /// Drive an intake from a derived source manifestation.
-    Intake {
-        #[command(subcommand)]
-        action: IntakeAction,
-    },
-    /// Edit one book's metadata: set / clear / ack / approve / reject
-    /// / advance.
-    Metadata {
-        #[command(subcommand)]
-        action: WriteMetadataAction,
-    },
-    /// Vector-store writes: ANN rebuild, brute-force drop, re-embed.
-    Vectors {
-        #[command(subcommand)]
-        action: WriteVectorsAction,
-    },
-    /// Corpus rebuild from the opaque envelopes.
-    Corpus {
-        #[command(subcommand)]
-        action: CorpusAction,
-    },
-    /// Reconcile `corpus.db` index_meta stamps.
-    Stamps {
-        #[command(subcommand)]
-        action: StampsAction,
-    },
-    /// Drop a book from every store.
-    Remove(RemoveArgs),
-    /// Simulate an ingest up to (but not including) embedding, and write
-    /// a JSON report of what the metadata audit would have produced. The
-    /// real catalog, corpus, and vector store are not touched.
-    Dryrun(DryrunArgs),
-    /// Queue lifecycle: pause / resume / clear pending rows.
-    Queue {
-        #[command(subcommand)]
-        action: QueueAction,
-    },
-    /// Paper-side surface: ingest a paper, browse the paper catalog,
-    /// export one paper's bibliographic record as CSL-JSON.
-    Papers {
-        #[command(subcommand)]
-        action: PapersAction,
-    },
-}
 
 /// Lifecycle actions on the persistent ingest queue. Dispatch maps
 /// each variant to the matching control-plane RPC.
@@ -96,9 +31,8 @@ pub enum QueueAction {
 }
 
 /// Positional + flag bundle for `ingest`. Lives in a standalone struct
-/// so the same type can be embedded in `ReplCommand::Ingest` (parsed
-/// from inside the REPL) and `Command::Ingest` (parsed from the
-/// top-level CLI) without duplicating attributes.
+/// so the same type can be embedded in the top-level `Command::Ingest`
+/// variant without duplicating attributes.
 #[derive(clap::Args, Debug, Clone)]
 pub struct IngestArgs {
     /// Source file, or a directory the ingest walks recursively (with
@@ -859,8 +793,27 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    fn parse(tokens: &[&str]) -> ReplCommand {
-        ReplCli::try_parse_from(tokens).expect("parse").command
+    /// Test-only wrapper so the leaf `PapersAction` enum can be parsed
+    /// from a raw token list without depending on the top-level CLI.
+    #[derive(clap::Parser, Debug)]
+    #[command(name = "", no_binary_name = true)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(clap::Subcommand, Debug)]
+    enum TestCommand {
+        Papers {
+            #[command(subcommand)]
+            action: PapersAction,
+        },
+    }
+
+    fn parse(tokens: &[&str]) -> PapersAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Papers { action } => action,
+        }
     }
 
     #[test]
@@ -874,9 +827,7 @@ mod tests {
             "high",
         ]);
         match cmd {
-            ReplCommand::Papers {
-                action: PapersAction::Ingest(args),
-            } => {
+            PapersAction::Ingest(args) => {
                 assert_eq!(args.path.to_string_lossy(), "/tmp/p.pdf");
                 assert!(args.force);
                 assert_eq!(args.priority.as_deref(), Some("high"));
@@ -899,9 +850,7 @@ mod tests {
             "NeurIPS",
         ]);
         match cmd {
-            ReplCommand::Papers {
-                action: PapersAction::Find(args),
-            } => {
+            PapersAction::Find(args) => {
                 assert_eq!(args.title.as_deref(), Some("attention"));
                 assert_eq!(args.year.as_deref(), Some("2017"));
                 assert_eq!(args.venue.as_deref(), Some("NeurIPS"));
@@ -915,9 +864,7 @@ mod tests {
     fn papers_export_csl_takes_intake_id() {
         let cmd = parse(&["papers", "export-csl", "42"]);
         match cmd {
-            ReplCommand::Papers {
-                action: PapersAction::ExportCsl { intake_id },
-            } => assert_eq!(intake_id, 42),
+            PapersAction::ExportCsl { intake_id } => assert_eq!(intake_id, 42),
             other => panic!("expected papers export-csl, got {other:?}"),
         }
     }
@@ -936,17 +883,14 @@ mod tests {
             "--yes",
         ]);
         match cmd {
-            ReplCommand::Papers {
+            PapersAction::Corpus {
                 action:
-                    PapersAction::Corpus {
-                        action:
-                            PapersCorpusAction::Rebuild {
-                                include_vectors,
-                                paper,
-                                stale_only,
-                                dry_run,
-                                yes,
-                            },
+                    PapersCorpusAction::Rebuild {
+                        include_vectors,
+                        paper,
+                        stale_only,
+                        dry_run,
+                        yes,
                     },
             } => {
                 assert!(include_vectors);
@@ -972,16 +916,13 @@ mod tests {
             "--yes",
         ]);
         match cmd {
-            ReplCommand::Papers {
+            PapersAction::Vectors {
                 action:
-                    PapersAction::Vectors {
-                        action:
-                            PapersVectorsAction::Reembed {
-                                paper,
-                                stale_only,
-                                dry_run,
-                                yes,
-                            },
+                    PapersVectorsAction::Reembed {
+                        paper,
+                        stale_only,
+                        dry_run,
+                        yes,
                     },
             } => {
                 assert_eq!(paper, Some(9));
@@ -997,11 +938,8 @@ mod tests {
     fn papers_vectors_reset_carries_resume_flag() {
         let cmd = parse(&["papers", "vectors", "reset", "--yes", "--resume"]);
         match cmd {
-            ReplCommand::Papers {
-                action:
-                    PapersAction::Vectors {
-                        action: PapersVectorsAction::Reset { yes, resume },
-                    },
+            PapersAction::Vectors {
+                action: PapersVectorsAction::Reset { yes, resume },
             } => {
                 assert!(yes);
                 assert!(resume);
@@ -1014,11 +952,8 @@ mod tests {
     fn papers_stamps_reconcile_takes_no_args() {
         let cmd = parse(&["papers", "stamps", "reconcile"]);
         match cmd {
-            ReplCommand::Papers {
-                action:
-                    PapersAction::Stamps {
-                        action: PapersStampsAction::Reconcile,
-                    },
+            PapersAction::Stamps {
+                action: PapersStampsAction::Reconcile,
             } => {}
             other => panic!("expected papers stamps reconcile, got {other:?}"),
         }
@@ -1036,9 +971,7 @@ mod tests {
             "--stdout",
         ]);
         match cmd {
-            ReplCommand::Papers {
-                action: PapersAction::Dryrun(args),
-            } => {
+            PapersAction::Dryrun(args) => {
                 assert_eq!(args.path.to_string_lossy(), "/papers");
                 assert_eq!(
                     args.out.as_ref().map(|p| p.to_string_lossy().into_owned()),
