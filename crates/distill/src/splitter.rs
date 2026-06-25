@@ -79,7 +79,7 @@ fn raw_to_split_at_first_cjk(raw: RawEntry) -> SplitEntry {
         body: join_body(&body_lines),
         lang: raw.lang,
         payload: Map::new(),
-        quality_flags: vec![],
+        quality_flags: raw.quality_flags,
     }
 }
 
@@ -91,7 +91,7 @@ fn raw_to_split_headline_only(raw: RawEntry) -> SplitEntry {
         body: join_body(&raw.body),
         lang: raw.lang,
         payload: Map::new(),
-        quality_flags: vec![],
+        quality_flags: raw.quality_flags,
     }
 }
 
@@ -127,6 +127,7 @@ mod tests {
             anchor: anchor.to_string(),
             body: body.into_iter().map(String::from).collect(),
             lang: Some("latin".to_string()),
+            quality_flags: vec![],
         }
     }
 

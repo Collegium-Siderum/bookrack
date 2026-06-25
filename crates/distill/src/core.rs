@@ -39,6 +39,11 @@ pub struct Block {
 
 /// One headword-anchored run cut out of a block: the anchor line plus
 /// the body lines that follow it up to the next anchor or block end.
+///
+/// `quality_flags` carries flags stamped at the raw level (e.g.
+/// `pair_mismatch` from `pair_bilingual_entries`,
+/// `spliced_from_orphan` from `walk_anchors`) and is forwarded onto
+/// the `SplitEntry` by both splitter stages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawEntry {
     pub page: u32,
@@ -46,6 +51,7 @@ pub struct RawEntry {
     pub anchor: String,
     pub body: Vec<String>,
     pub lang: Option<String>,
+    pub quality_flags: Vec<String>,
 }
 
 /// One entry after head / body separation and any payload-field

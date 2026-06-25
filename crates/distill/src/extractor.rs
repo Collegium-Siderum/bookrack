@@ -277,9 +277,9 @@ impl Stage for ExtractQuotes {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        // Recognize ASCII double quotes and the CJK 「」 pair. The
-        // attribution slot is left empty in this minimal extractor;
-        // a future hop can fill it in.
+        // Recognize ASCII double quotes and the CJK corner-bracket
+        // pair (U+300C / U+300D). The attribution slot is left empty
+        // in this minimal extractor; a future hop can fill it in.
         let re = Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex");
         let key = self.payload_key.clone();
         let out = map_splits(splits, |mut s| {

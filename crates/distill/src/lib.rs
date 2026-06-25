@@ -11,6 +11,7 @@
 //! the controlled vocabularies, the builtin stages, and the
 //! dispatcher.
 
+pub mod anchors;
 pub mod book_toml;
 pub mod catalogs;
 pub mod core;
@@ -19,6 +20,7 @@ pub mod extractor;
 pub mod finalize;
 pub mod patterns;
 pub mod pipeline;
+pub mod segment;
 pub mod splitter;
 
 pub use book_toml::{BookToml, IndexEntry, ParserSection, StageConfig, StageRef};
@@ -33,6 +35,11 @@ pub use extractor::{
     partition_body_around_match, split_variants, unpack_paired_body,
 };
 pub use finalize::{FtsComposer, KeyNormalizer, to_entry_draft};
+pub use anchors::{AnchorRule, LangAnchorRule};
 pub use patterns::{BracketKind, PatternMatch, PatternRef, match_pattern};
 pub use pipeline::{Pipeline, Stage};
+pub use segment::{
+    one_block_per_page, pair_bilingual_entries, split_bilingual_blocks, split_pages,
+    walk_anchors, walk_anchors_per_lang,
+};
 pub use splitter::{split_at_first_cjk, split_headline_only};
