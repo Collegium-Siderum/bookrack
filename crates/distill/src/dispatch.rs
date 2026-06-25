@@ -103,7 +103,7 @@ pub fn dispatch_stage(
             let key =
                 get_string(params, "payload_key", false)?.unwrap_or_else(|| "variants".to_string());
             let sep = require_string(params, "sep")?;
-            Ok(split_variants(key, sep))
+            split_variants(key, sep)
         }
         "extract_quotes" => {
             let key = require_string(params, "payload_key")?;
@@ -116,14 +116,14 @@ pub fn dispatch_stage(
             let first_to = get_string(params, "first_to", false)?;
             let rest_to = get_string(params, "rest_to", false)?;
             let tail_to = get_string(params, "tail_to", false)?;
-            Ok(partition_body_around_match(
+            partition_body_around_match(
                 pattern,
                 head_key,
                 head_split_by,
                 first_to,
                 rest_to,
                 tail_to,
-            ))
+            )
         }
         "unpack_paired_body" => {
             let hm = require_string(params, "head_marker")?;
@@ -251,19 +251,27 @@ fn decode_anchor_rule(value: &TomlValue) -> Result<AnchorRule, ParseError> {
     }
     if let Some(tbl) = value.as_table() {
         if let Some(inner) = tbl.get("cjk_short_headword") {
-            let max_chars = inner
+            let raw = inner
                 .get("max_chars")
                 .and_then(TomlValue::as_integer)
-                .ok_or_else(|| violation("cjk_short_headword needs a max_chars integer"))?
-                as usize;
+                .ok_or_else(|| violation("cjk_short_headword needs a max_chars integer"))?;
+            let max_chars = usize::try_from(raw).map_err(|_| {
+                violation(format!(
+                    "cjk_short_headword.max_chars must be a non-negative integer, got {raw}"
+                ))
+            })?;
             return Ok(AnchorRule::CjkShortHeadword { max_chars });
         }
         if let Some(inner) = tbl.get("english_short_headword") {
-            let max_words = inner
+            let raw = inner
                 .get("max_words")
                 .and_then(TomlValue::as_integer)
-                .ok_or_else(|| violation("english_short_headword needs a max_words integer"))?
-                as usize;
+                .ok_or_else(|| violation("english_short_headword needs a max_words integer"))?;
+            let max_words = usize::try_from(raw).map_err(|_| {
+                violation(format!(
+                    "english_short_headword.max_words must be a non-negative integer, got {raw}"
+                ))
+            })?;
             return Ok(AnchorRule::EnglishShortHeadword { max_words });
         }
         if let Some(inner) = tbl.get("any_of") {
@@ -397,4 +405,44 @@ fn decode_lang_anchor_rule(value: &TomlValue) -> Result<LangAnchorRule, ParseErr
 
 fn violation<S: Into<String>>(msg: S) -> ParseError {
     ParseError::CatalogViolation(msg.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn anchor_table(toml_src: &str) -> TomlValue {
+        let table: toml::Table = toml_src.parse().expect("test toml parses");
+        TomlValue::Table(table)
+    }
+
+    #[test]
+    fn cjk_short_headword_rejects_negative_max_chars() {
+        let v = anchor_table("cjk_short_headword = { max_chars = -1 }");
+        let err = decode_anchor_rule(&v).expect_err("negative max_chars must error");
+        match err {
+            ParseError::CatalogViolation(msg) => {
+                assert!(
+                    msg.contains("cjk_short_headword.max_chars") && msg.contains("-1"),
+                    "message was {msg:?}"
+                );
+            }
+            other => panic!("expected CatalogViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn english_short_headword_rejects_negative_max_words() {
+        let v = anchor_table("english_short_headword = { max_words = -2 }");
+        let err = decode_anchor_rule(&v).expect_err("negative max_words must error");
+        match err {
+            ParseError::CatalogViolation(msg) => {
+                assert!(
+                    msg.contains("english_short_headword.max_words") && msg.contains("-2"),
+                    "message was {msg:?}"
+                );
+            }
+            other => panic!("expected CatalogViolation, got {other:?}"),
+        }
+    }
 }

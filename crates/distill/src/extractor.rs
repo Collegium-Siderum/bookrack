@@ -37,8 +37,14 @@ pub fn extract_gender_tag(payload_key: String) -> Box<dyn Stage> {
     Box::new(ExtractGenderTag { payload_key })
 }
 
-pub fn split_variants(payload_key: String, sep: String) -> Box<dyn Stage> {
-    Box::new(SplitVariants { payload_key, sep })
+pub fn split_variants(payload_key: String, sep: String) -> Result<Box<dyn Stage>, ParseError> {
+    let sep_re = Regex::new(&sep).map_err(|e| {
+        ParseError::CatalogViolation(format!("split_variants.sep is not a valid regex: {e}"))
+    })?;
+    Ok(Box::new(SplitVariants {
+        payload_key,
+        sep: sep_re,
+    }))
 }
 
 pub fn extract_quotes(payload_key: String) -> Box<dyn Stage> {
@@ -52,15 +58,23 @@ pub fn partition_body_around_match(
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
-) -> Box<dyn Stage> {
-    Box::new(PartitionBodyAroundMatch {
+) -> Result<Box<dyn Stage>, ParseError> {
+    let head_split_by = match head_split_by.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => Some(Regex::new(p).map_err(|e| {
+            ParseError::CatalogViolation(format!(
+                "partition_body_around_match.head_split_by is not a valid regex: {e}"
+            ))
+        })?),
+        None => None,
+    };
+    Ok(Box::new(PartitionBodyAroundMatch {
         pattern,
         head_payload_key,
         head_split_by,
         first_to,
         rest_to,
         tail_to,
-    })
+    }))
 }
 
 pub fn unpack_paired_body(
@@ -101,7 +115,7 @@ struct ExtractGenderTag {
 }
 struct SplitVariants {
     payload_key: String,
-    sep: String,
+    sep: Regex,
 }
 struct ExtractQuotes {
     payload_key: String,
@@ -109,7 +123,7 @@ struct ExtractQuotes {
 struct PartitionBodyAroundMatch {
     pattern: PatternRef,
     head_payload_key: String,
-    head_split_by: Option<String>,
+    head_split_by: Option<Regex>,
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
@@ -248,11 +262,11 @@ impl Stage for SplitVariants {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        let sep_re = Regex::new(&self.sep).expect("sep regex");
         let key = self.payload_key.clone();
         let out = map_splits(splits, |mut s| {
             if let Some(JsonValue::String(orig)) = s.payload.get(&key).cloned() {
-                let parts: Vec<JsonValue> = sep_re
+                let parts: Vec<JsonValue> = self
+                    .sep
                     .split(&orig)
                     .map(str::trim)
                     .filter(|p| !p.is_empty())
@@ -317,12 +331,6 @@ impl Stage for PartitionBodyAroundMatch {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        let split_re = self
-            .head_split_by
-            .as_deref()
-            .filter(|p| !p.is_empty())
-            .map(|p| Regex::new(p).expect("head_split_by regex"));
-
         let out = map_splits(splits, |mut s| {
             if let Some(m) = match_pattern(&self.pattern, &s.body) {
                 let head = s.body[..m.start].trim().to_string();
@@ -331,7 +339,7 @@ impl Stage for PartitionBodyAroundMatch {
                 s.payload
                     .insert(self.head_payload_key.clone(), JsonValue::String(m.inner));
 
-                if let Some(re) = &split_re {
+                if let Some(re) = &self.head_split_by {
                     let parts: Vec<String> = re
                         .split(&head)
                         .map(str::trim)
@@ -545,7 +553,7 @@ mod tests {
             JsonValue::String("foo; bar; baz".to_string()),
         );
         let out = run(
-            split_variants("variants".to_string(), "[;]".to_string()),
+            split_variants("variants".to_string(), "[;]".to_string()).expect("compile sep"),
             vec![s],
         );
         assert_eq!(
@@ -560,13 +568,24 @@ mod tests {
         s.payload
             .insert("variants".to_string(), JsonValue::String("foo".to_string()));
         let out = run(
-            split_variants("variants".to_string(), "[;]".to_string()),
+            split_variants("variants".to_string(), "[;]".to_string()).expect("compile sep"),
             vec![s],
         );
         assert_eq!(
             out[0].payload.get("variants").unwrap(),
             &JsonValue::String("foo".to_string())
         );
+    }
+
+    #[test]
+    fn split_variants_rejects_invalid_regex_at_construction() {
+        match split_variants("variants".to_string(), "[unterminated".to_string()) {
+            Err(ParseError::CatalogViolation(msg)) => {
+                assert!(msg.contains("split_variants.sep"), "message was {msg:?}");
+            }
+            Err(other) => panic!("expected CatalogViolation, got {other:?}"),
+            Ok(_) => panic!("invalid regex must surface as Err"),
+        }
     }
 
     // ---- ExtractQuotes ----
@@ -609,7 +628,8 @@ mod tests {
                 Some("chinese_name".to_string()),
                 Some("variants".to_string()),
                 Some("bio_annotation".to_string()),
-            ),
+            )
+            .expect("compile head_split_by"),
             inputs,
         );
         let payload = &out[0].payload;
@@ -639,11 +659,36 @@ mod tests {
                 None,
                 None,
                 None,
-            ),
+            )
+            .expect("compile head_split_by"),
             inputs,
         );
         assert!(out[0].payload.is_empty());
         assert_eq!(out[0].body, "no brackets here");
+    }
+
+    #[test]
+    fn partition_body_around_match_rejects_invalid_head_split_by() {
+        let result = partition_body_around_match(
+            PatternRef::BracketedTag {
+                brackets: vec![BracketKind::Angle],
+            },
+            "country".to_string(),
+            Some("[unterminated".to_string()),
+            None,
+            None,
+            None,
+        );
+        match result {
+            Err(ParseError::CatalogViolation(msg)) => {
+                assert!(
+                    msg.contains("partition_body_around_match.head_split_by"),
+                    "message was {msg:?}"
+                );
+            }
+            Err(other) => panic!("expected CatalogViolation, got {other:?}"),
+            Ok(_) => panic!("invalid head_split_by regex must surface as Err"),
+        }
     }
 
     // ---- UnpackPairedBody ----
