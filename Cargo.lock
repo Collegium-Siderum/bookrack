@@ -1124,6 +1124,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-refs"
+version = "0.7.0-dev"
+dependencies = [
+ "rusqlite",
+ "rusqlite_migration",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bookrack-repl-grammar"
 version = "0.7.0-dev"
 dependencies = [

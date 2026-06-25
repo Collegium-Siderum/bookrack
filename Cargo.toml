@@ -131,6 +131,10 @@ rustix = { version = "1.1", features = ["process"] }
 # the same surface. Houses the toggle and threshold set the metadata
 # audit and upstream half-rules read at evaluation time.
 bookrack-audit-profile = { path = "crates/audit-profile" }
+# The reference-book read store. Pinned at the workspace level so the
+# distill, mcp, and cli crates downstream consume the same surface
+# (the `Refs` handle and the `reference.db` migration target version).
+bookrack-refs = { path = "crates/refs" }
 # Builds throwaway EPUB archives from unzipped fixtures in `extract`
 # tests, so the fixtures stay reviewable as plain files in the repo.
 zip = "8"
