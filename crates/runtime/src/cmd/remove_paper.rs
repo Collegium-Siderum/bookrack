@@ -37,37 +37,10 @@ pub struct RemovePaperArgs {
     pub yes: bool,
 }
 
-pub async fn run(cfg: &Config, args: RemovePaperArgs) -> Result<()> {
-    let plan = plan_remove(cfg, &args).await?;
-    print_plan(
-        &plan.intake,
-        &plan.counts,
-        plan.vector_rows,
-        plan.corpus_nodes,
-        plan.envelope_path.as_deref(),
-        plan.envelope_exists,
-        plan.source_pdf_path.as_deref(),
-        plan.source_pdf_exists,
-    );
-
-    if args.dry_run {
-        return Ok(());
-    }
-    if !args.yes && !confirm()? {
-        println!("aborted; no changes written");
-        return Ok(());
-    }
-
-    let outcome =
-        execute_remove_from_plan(cfg, plan.intake.intake_id, ExpectedFingerprint::None).await?;
-    print_outcome(&outcome);
-    Ok(())
-}
-
 /// Plan a paper remove without writing: resolve the intake, count
 /// everything the execute step would delete, and report whether the
-/// envelope file and source PDF are on disk. Used by both [`run`]
-/// and the control-plane handler's dry-run leg.
+/// envelope file and source PDF are on disk. Consumed by the
+/// control-plane handler's dry-run leg.
 pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemovePaperPlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
         anyhow::bail!("pass an intake id (positional) or --sha <hex>");
@@ -221,8 +194,8 @@ pub async fn execute_remove_from_plan(
     })
 }
 
-/// Plan side of [`run`] / the dry-run leg: what the execute step
-/// would delete.
+/// What the execute step would delete: returned by [`plan_remove`]
+/// and consumed by the control-plane dry-run leg.
 #[derive(Debug, Clone)]
 pub struct RemovePaperPlan {
     pub intake: Intake,
@@ -292,35 +265,6 @@ pub struct RemovePaperOutcome {
     pub intake_row_existed: bool,
 }
 
-fn print_outcome(o: &RemovePaperOutcome) {
-    println!(
-        "removed: intake_id={}, source_sha256={}",
-        o.intake_id, o.source_sha256
-    );
-    println!(
-        "  catalog rows: {} (item_state={}, publication_attrs={}, overrides={}, \
-         contributors={}, categories={}, reviews={}, role_takeovers={}, toc_edits={})",
-        o.catalog_deleted.total(),
-        o.catalog_deleted.book_state,
-        o.catalog_deleted.node_publication_attrs,
-        o.catalog_deleted.node_overrides,
-        o.catalog_deleted.node_contributors,
-        o.catalog_deleted.node_categories,
-        o.catalog_deleted.node_reviews,
-        o.catalog_deleted.node_role_takeovers,
-        o.catalog_deleted.toc_edits,
-    );
-    if !o.intake_row_existed {
-        println!(
-            "  note: intake row was already absent — likely a resumed removal cleaned the rest."
-        );
-    }
-    println!(
-        "  audit rows preserved (metadata_audit, item_pipeline_audit). \
-         Vector tombstones will compact on the next glean's optimize pass."
-    );
-}
-
 fn resolve_intake(catalog: &Catalog, args: &RemovePaperArgs) -> Result<Intake> {
     if let Some(id) = args.intake_id {
         catalog
@@ -328,7 +272,7 @@ fn resolve_intake(catalog: &Catalog, args: &RemovePaperArgs) -> Result<Intake> {
             .context("look up intake")?
             .with_context(|| format!("no paper intake registered for id {id}"))
     } else {
-        let sha = args.sha.as_deref().expect("checked by run()");
+        let sha = args.sha.as_deref().expect("checked by plan_remove");
         catalog
             .intake_by_sha(sha)
             .context("look up intake by sha")?
@@ -356,64 +300,4 @@ fn read_corpus_node_count(cfg: &Config, paper_root_id: NodeId) -> Result<u64> {
     corpus
         .count_book_nodes(paper_root_id)
         .context("count corpus nodes")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_plan(
-    intake: &Intake,
-    counts: &ItemRemovalCounts,
-    vector_rows: Option<usize>,
-    corpus_nodes: u64,
-    envelope_path: Option<&str>,
-    envelope_exists: bool,
-    source_pdf_path: Option<&str>,
-    source_pdf_exists: bool,
-) {
-    println!(
-        "remove plan for paper intake {} (source_sha256={}, status={}):",
-        intake.intake_id,
-        intake.source_sha256,
-        intake.status.as_str(),
-    );
-    println!("  corpus nodes:    {corpus_nodes}");
-    match vector_rows {
-        Some(n) => println!("  vector rows:     {n}"),
-        None => println!("  vector rows:     n/a (no embed stamp)"),
-    }
-    println!(
-        "  catalog rows:    {} (item_state={}, publication_attrs={}, overrides={}, \
-         contributors={}, categories={}, reviews={}, role_takeovers={}, toc_edits={})",
-        counts.total(),
-        counts.book_state,
-        counts.node_publication_attrs,
-        counts.node_overrides,
-        counts.node_contributors,
-        counts.node_categories,
-        counts.node_reviews,
-        counts.node_role_takeovers,
-        counts.toc_edits,
-    );
-    match envelope_path {
-        Some(p) if envelope_exists => println!("  envelope file:   {p}"),
-        Some(p) => println!("  envelope file:   {p} (missing on disk; will be skipped)"),
-        None => println!("  envelope file:   (none recorded)"),
-    }
-    match source_pdf_path {
-        Some(p) if source_pdf_exists => println!("  source PDF:      {p}"),
-        Some(p) => println!("  source PDF:      {p} (missing on disk; will be skipped)"),
-        None => println!("  source PDF:      (none recorded)"),
-    }
-    println!("  audit trail:     metadata_audit and item_pipeline_audit rows are preserved.");
-}
-
-fn confirm() -> Result<bool> {
-    use std::io::{Write, stdin, stdout};
-    let prompt = "About to delete this paper from every store. This is\n\
-                  irreversible (vector tombstones are not recoverable).\n\
-                  Audit rows are preserved. Type 'yes' to continue: ";
-    print!("{prompt}");
-    stdout().flush().context("flush stdout")?;
-    let mut buf = String::new();
-    stdin().read_line(&mut buf).context("read confirmation")?;
-    Ok(buf.trim().eq_ignore_ascii_case("yes"))
 }

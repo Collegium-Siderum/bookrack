@@ -16,16 +16,10 @@
 //! left to the existing `optimize` path that the ingest and reembed
 //! flows run on their next pass — `remove` does not run it inline.
 //!
-//! Two entry-point shapes coexist:
-//!
-//! - [`run`] is the in-process path used by the local REPL: plan,
-//!   print, confirm, execute. The execute step looks the intake up
-//!   again to honour the resumption invariant.
-//! - [`plan_remove`] + [`execute_remove_from_plan`] are the
-//!   two-step path the control-plane handler drives: the operator
-//!   confirms a registered plan, and the execute leg acts on the
-//!   pinned intake id. Strict: the intake must still resolve when
-//!   the execute leg runs, else the call aborts without writing.
+//! [`plan_remove`] computes the dry-run plan and
+//! [`execute_remove_from_plan`] runs the destructive step against the
+//! pinned intake id. Strict: the intake must still resolve when the
+//! execute leg runs, else the call aborts without writing.
 
 use anyhow::{Context, Result};
 use bookrack_catalog::{Catalog, Intake, ItemRemovalCounts};
@@ -47,35 +41,10 @@ pub struct RemoveArgs {
     pub yes: bool,
 }
 
-pub async fn run(cfg: &Config, args: RemoveArgs) -> Result<()> {
-    let plan = plan_remove(cfg, &args).await?;
-    print_plan(
-        &plan.intake,
-        &plan.counts,
-        plan.vector_rows,
-        plan.corpus_nodes,
-        plan.envelope_path.as_deref(),
-        plan.envelope_exists,
-    );
-
-    if args.dry_run {
-        return Ok(());
-    }
-    if !args.yes && !confirm()? {
-        println!("aborted; no changes written");
-        return Ok(());
-    }
-
-    let outcome =
-        execute_remove_from_plan(cfg, plan.intake.intake_id, ExpectedFingerprint::None).await?;
-    print_outcome(&outcome);
-    Ok(())
-}
-
 /// Plan a remove without writing: resolve the intake, count
 /// everything the execute step would delete, and report whether the
-/// envelope file is on disk. Used by both [`run`] and the
-/// control-plane handler's dry-run leg.
+/// envelope file is on disk. Consumed by the control-plane handler's
+/// dry-run leg.
 pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
         anyhow::bail!("pass an intake id (positional) or --sha <hex>");
@@ -229,8 +198,8 @@ pub async fn execute_remove_from_plan(
     })
 }
 
-/// Plan side of [`run`] / the dry-run leg: what the execute step
-/// would delete.
+/// What the execute step would delete: returned by [`plan_remove`]
+/// and consumed by the control-plane dry-run leg.
 #[derive(Debug, Clone)]
 pub struct RemovePlan {
     pub intake: Intake,
@@ -300,35 +269,6 @@ pub struct RemoveOutcome {
     pub intake_row_existed: bool,
 }
 
-fn print_outcome(o: &RemoveOutcome) {
-    println!(
-        "removed: intake_id={}, source_sha256={}",
-        o.intake_id, o.source_sha256
-    );
-    println!(
-        "  catalog rows: {} (book_state={}, publication_attrs={}, overrides={}, \
-         contributors={}, categories={}, reviews={}, role_takeovers={}, toc_edits={})",
-        o.catalog_deleted.total(),
-        o.catalog_deleted.book_state,
-        o.catalog_deleted.node_publication_attrs,
-        o.catalog_deleted.node_overrides,
-        o.catalog_deleted.node_contributors,
-        o.catalog_deleted.node_categories,
-        o.catalog_deleted.node_reviews,
-        o.catalog_deleted.node_role_takeovers,
-        o.catalog_deleted.toc_edits,
-    );
-    if !o.intake_row_existed {
-        println!(
-            "  note: intake row was already absent — likely a resumed removal cleaned the rest."
-        );
-    }
-    println!(
-        "  audit rows preserved (metadata_audit, book_pipeline_audit). \
-         Vector tombstones will compact on the next ingest's optimize pass."
-    );
-}
-
 fn resolve_intake(catalog: &Catalog, args: &RemoveArgs) -> Result<Intake> {
     if let Some(id) = args.intake_id {
         catalog
@@ -366,61 +306,6 @@ fn read_corpus_node_count(cfg: &Config, book_root_id: NodeId) -> Result<u64> {
     corpus
         .count_book_nodes(book_root_id)
         .context("count corpus nodes")
-}
-
-#[allow(clippy::too_many_arguments)]
-fn print_plan(
-    intake: &Intake,
-    counts: &ItemRemovalCounts,
-    vector_rows: Option<usize>,
-    corpus_nodes: u64,
-    envelope_path: Option<&str>,
-    envelope_exists: bool,
-) {
-    println!(
-        "remove plan for intake {} (source_sha256={}, status={}):",
-        intake.intake_id,
-        intake.source_sha256,
-        intake.status.as_str(),
-    );
-    println!("  corpus nodes:    {corpus_nodes}");
-    match vector_rows {
-        Some(n) => println!("  vector rows:     {n}"),
-        None => println!("  vector rows:     n/a (no embed stamp)"),
-    }
-    println!(
-        "  catalog rows:    {} (book_state={}, publication_attrs={}, overrides={}, \
-         contributors={}, categories={}, reviews={}, role_takeovers={}, toc_edits={})",
-        counts.total(),
-        counts.book_state,
-        counts.node_publication_attrs,
-        counts.node_overrides,
-        counts.node_contributors,
-        counts.node_categories,
-        counts.node_reviews,
-        counts.node_role_takeovers,
-        counts.toc_edits,
-    );
-    match envelope_path {
-        Some(p) if envelope_exists => println!("  envelope file:   {p}"),
-        Some(p) => println!("  envelope file:   {p} (missing on disk; will be skipped)"),
-        None => println!("  envelope file:   (none recorded)"),
-    }
-    println!("  audit trail:     metadata_audit and book_pipeline_audit rows are preserved.");
-}
-
-/// Read the destructive-action confirmation. The literal `yes`
-/// (case-insensitive, trimmed) passes; anything else aborts.
-fn confirm() -> Result<bool> {
-    use std::io::{Write, stdin, stdout};
-    let prompt = "About to delete this book from every store. This is\n\
-                  irreversible (vector tombstones are not recoverable).\n\
-                  Audit rows are preserved. Type 'yes' to continue: ";
-    print!("{prompt}");
-    stdout().flush().context("flush stdout")?;
-    let mut buf = String::new();
-    stdin().read_line(&mut buf).context("read confirmation")?;
-    Ok(buf.trim().eq_ignore_ascii_case("yes"))
 }
 
 #[cfg(test)]
@@ -475,8 +360,16 @@ mod tests {
         (dir, cfg)
     }
 
+    /// Drive the plan+execute pair the control-plane handler runs,
+    /// without the drift check. Mirrors what the dry-run / execute
+    /// RPC sequence does end-to-end for an in-process test.
+    async fn plan_and_execute(cfg: &Config, args: &RemoveArgs) -> Result<RemoveOutcome> {
+        let plan = plan_remove(cfg, args).await?;
+        execute_remove_from_plan(cfg, plan.intake.intake_id, ExpectedFingerprint::None).await
+    }
+
     #[tokio::test]
-    async fn dry_run_reports_counts_and_writes_nothing() {
+    async fn plan_reports_counts_and_writes_nothing() {
         let (_tmp, cfg) = temp_cfg();
         let intake_id = {
             let mut catalog = Catalog::open(&cfg.catalog_db()).expect("catalog");
@@ -484,9 +377,9 @@ mod tests {
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-dry").0
         };
 
-        run(
+        let _plan = plan_remove(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: Some(intake_id),
                 sha: None,
                 dry_run: true,
@@ -494,12 +387,12 @@ mod tests {
             },
         )
         .await
-        .expect("dry-run succeeds");
+        .expect("plan succeeds");
 
         let catalog = Catalog::open_read_only(&cfg.catalog_db()).expect("reopen");
         assert!(
             catalog.intake_by_id(intake_id).expect("lookup").is_some(),
-            "dry-run must not delete the intake row",
+            "plan-only must not delete the intake row",
         );
     }
 
@@ -513,9 +406,9 @@ mod tests {
         };
         assert!(envelope_path.exists());
 
-        run(
+        plan_and_execute(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: Some(intake_id),
                 sha: None,
                 dry_run: false,
@@ -561,9 +454,9 @@ mod tests {
             id
         };
 
-        run(
+        plan_and_execute(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: Some(intake_id),
                 sha: None,
                 dry_run: false,
@@ -585,9 +478,9 @@ mod tests {
             let mut corpus = Corpus::open(&cfg.corpus_db()).expect("corpus");
             seed_book(&cfg, &mut catalog, &mut corpus, "sha-by-hash").0
         };
-        run(
+        plan_and_execute(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: None,
                 sha: Some("sha-by-hash".to_string()),
                 dry_run: false,
@@ -601,11 +494,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_errors_when_neither_id_nor_sha_is_supplied() {
+    async fn plan_errors_when_neither_id_nor_sha_is_supplied() {
         let (_tmp, cfg) = temp_cfg();
-        let err = run(
+        let err = plan_remove(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: None,
                 sha: None,
                 dry_run: true,
@@ -618,16 +511,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_errors_on_unknown_intake_id() {
+    async fn plan_errors_on_unknown_intake_id() {
         let (_tmp, cfg) = temp_cfg();
         // Open and close to materialize empty catalog + corpus.
         {
             Catalog::open(&cfg.catalog_db()).expect("init catalog");
             Corpus::open(&cfg.corpus_db()).expect("init corpus");
         }
-        let err = run(
+        let err = plan_remove(
             &cfg,
-            RemoveArgs {
+            &RemoveArgs {
                 intake_id: Some(999),
                 sha: None,
                 dry_run: true,
