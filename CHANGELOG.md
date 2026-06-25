@@ -8,6 +8,32 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Removed
+
+- `bookrack repl` standalone control-socket REPL client and the
+  in-process reedline REPL hosted by `bookrack run` (including its
+  `--legacy-repl` transition flag). Operators reach the daemon
+  through one-shot subcommands, `bookrack exec <method> '<json>'`
+  for ad-hoc control-plane RPCs, the desktop tray, or MCP. The
+  `cmd::repl_client` module, the `tests/repl_e2e.rs` integration
+  test, the `reedline` and `shlex` workspace dependencies, and the
+  `ReplCli` / `ReplCommand` wrapper types from
+  `bookrack-repl-grammar` are deleted; the crate keeps its leaf
+  `clap::Subcommand` types (`IngestArgs`, `WriteMetadataAction`,
+  `WriteVectorsAction`, `CorpusAction`, `StampsAction`,
+  `QueueAction`, `RemoveArgs`, `DryrunArgs`, `IntakeAction`,
+  `Papers*`) for the top-level CLI to consume.
+
+### Changed (breaking)
+
+- `corpus.rebuild`, `vectors.reembed`, `remove`, and their
+  `papers.*` peers now require `plan_id` on the execute leg. The
+  transitional unpinned fallback that ran the legacy path with a
+  deprecation warning is removed; a missing `plan_id` returns
+  `-32602 INVALID_PARAMS` pointing at the dry-run leg. All
+  in-tree clients (one-shot CLI subcommands, the tray) already
+  drive the two-step pinned protocol.
+
 ### Added
 
 - `intake.ocr` control-plane method and the matching `bookrack intake

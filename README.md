@@ -11,10 +11,10 @@ clients like Claude Code can search the library as a tool.
 
 Pre-release. The end-to-end pipeline — extract, ingest, embed, and
 cited search — runs through the `bookrack run` daemon, driven by
-one-shot subcommands, the `bookrack repl` client, and MCP. Books
-and academic papers live in two parallel stores under one data
-root and share the same MCP surface; `library.search` accepts a
-`kind` switch to query one store or both. The vector store ships
+one-shot subcommands, `bookrack exec` for ad-hoc control-plane RPCs,
+and MCP. Books and academic papers live in two parallel stores under
+one data root and share the same MCP surface; `library.search`
+accepts a `kind` switch to query one store or both. The vector store ships
 with an IVF index family (flat / SQ / PQ and the IVF-HNSW
 variants) selectable through `vectors rebuild`.
 Schema migrations and metadata workflows are still being hardened
@@ -75,8 +75,8 @@ for production use.
    `127.0.0.1:8765/mcp` and a local control socket where the write
    commands arrive. From a second shell, submit work with the
    one-shot subcommands — `bookrack ingest` streams the queue
-   worker's progress until the job lands — or open the interactive
-   `bookrack repl` client.
+   worker's progress until the job lands — or drive arbitrary
+   control-plane RPCs with `bookrack exec`.
 
    macOS / Linux:
 
@@ -189,10 +189,9 @@ window read as far slower than it really was.
 
 On every desktop platform the default idle-sleep policy will suspend
 a backgrounded shell. The natural unit to wrap is the `bookrack run`
-daemon itself: submit work with `bookrack ingest <path>` — or
-`queue add <path>` from `bookrack repl`, which walks a whole
-directory — then leave the daemon running while the queue worker
-grinds away.
+daemon itself: submit work with `bookrack ingest <path>` (a single
+file or a directory walked recursively) and leave the daemon running
+while the queue worker grinds away.
 
 macOS — `caffeinate` blocks idle sleep without blocking display sleep:
 
@@ -280,7 +279,7 @@ trigger is whether the upgrade bumps a behaviour-sensitive
 dependency or a stamp constant. Three commands cover every refresh
 case; all dispatch over the running daemon's control plane because
 they take its write scheduler — invoke them as one-shot subcommands
-or from `bookrack repl`:
+against a running `bookrack run` daemon:
 
 - `corpus rebuild` — regenerate `corpus.db` from the v1 extraction
   envelopes. Use this after a corpus schema bump, or to recover

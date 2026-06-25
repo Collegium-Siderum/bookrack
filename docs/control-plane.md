@@ -1,10 +1,10 @@
 # bookrack control plane
 
 The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
-alongside its MCP HTTP listener. Operator tooling, the in-process
-REPL, and (in later phases) one-shot CLI subcommands reach the
-running daemon through this surface; the MCP listener stays read-only
-and tool-scoped.
+alongside its MCP HTTP listener. Operator tooling — one-shot CLI
+subcommands, `bookrack exec` for ad-hoc RPCs, and the desktop tray —
+reaches the running daemon through this surface; the MCP listener
+stays read-only and tool-scoped.
 
 ## Transport
 
@@ -291,32 +291,17 @@ catalog and corpus handles the daemon already holds.
   codes: `-32010 invalid_library`, `-32011 job_not_found`. The MCP
   tool set is still read-only and unchanged; the REPL still runs
   in-process; the on-disk queue document keeps its v1 schema.
-- **Phase 3** — REPL extracted into the standalone `bookrack repl`
-  client process. New crate `bookrack-repl-grammar` hosts the shared
-  `clap` derive types (`ReplCli`, `ReplCommand`, `IntakeAction`,
-  `WriteMetadataAction`, `WriteVectorsAction`, `CorpusAction`,
-  `StampsAction`), so the daemon-side runner and the client-side
-  parser stay in lockstep without a runtime dependency. New crate
-  `bookrack-control-client` hosts `discover` / `connect` and the
-  multiplexed JSON-RPC client (`ControlClient::call` /
-  `ControlClient::subscribe` / `ControlClient::shutdown`) reused by
-  the repl client and (Phase 4) the one-shot subcommand clients.
-  `bookrack run` defaults to the silent daemon: it no longer reads
-  stdin, no longer spawns reedline, and emits no banner. The
-  hidden one-release transition flag `--legacy-repl` re-enables the
-  in-process reedline REPL for CI scripts that fed it via stdin;
-  it will be removed in the next release after this one. The
-  `bookrack repl` client reads `<runtime_dir>/bookrack.tty.lock`'s
-  `control_sock` line, opens the socket, subscribes to the event
-  stream for a live `[<state-indicator>bookrack:<library>/queue:<n>] >`
-  status line, and dispatches every command as the matching RPC.
-  When stdin is not a TTY the client runs a batch loop: each line is
-  parsed via the same grammar and dispatched in sequence, and the
-  process exits non-zero on the first RPC failure. The MCP tool set,
-  the session-lock schema, the on-disk queue schema, and the
-  one-shot CLI dispatch path are unchanged. The reedline history
-  file path (`<runtime_dir>/.bookrack-history`) is preserved across
-  the client move.
+- **Phase 3 (superseded)** — REPL was extracted into a standalone
+  `bookrack repl` client process and a new `bookrack-control-client`
+  crate hosted the multiplexed JSON-RPC client. The REPL surface was
+  later removed entirely: operators reach the daemon through one-shot
+  CLI subcommands, `bookrack exec <method>` for ad-hoc RPCs, the
+  desktop tray, or MCP. `bookrack-control-client` survives and is the
+  shared transport for the remaining one-shot and tray clients.
+  `bookrack-repl-grammar` survives as the shared `clap::Subcommand`
+  definitions imported by the top-level `bookrack` CLI; the crate
+  name is preserved for now and the `ReplCli` / `ReplCommand` wrapper
+  has been removed.
 - **Phase 4** — one-shot CLI subcommands rewired as control-plane
   clients. New top-level subcommands `bookrack ingest`,
   `bookrack metadata {set,clear,ack,approve,reject}`,
