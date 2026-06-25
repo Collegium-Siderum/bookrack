@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::IngestArgs;
+use bookrack_cli_grammar::IngestArgs;
 use serde_json::json;
 
 use super::helpers;

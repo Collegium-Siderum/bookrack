@@ -838,6 +838,7 @@ name = "bookrack-cli"
 version = "0.7.0-dev"
 dependencies = [
  "anyhow",
+ "bookrack-cli-grammar",
  "bookrack-config",
  "bookrack-control-client",
  "bookrack-core",
@@ -848,7 +849,6 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-refs",
- "bookrack-repl-grammar",
  "bookrack-runtime",
  "bookrack-session",
  "chrono",
@@ -859,6 +859,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bookrack-cli-grammar"
+version = "0.7.0-dev"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -1152,13 +1159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bookrack-repl-grammar"
-version = "0.7.0-dev"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "bookrack-runtime"
 version = "0.7.0-dev"
 dependencies = [
@@ -1166,6 +1166,7 @@ dependencies = [
  "async-trait",
  "bookrack-audit-profile",
  "bookrack-catalog",
+ "bookrack-cli-grammar",
  "bookrack-config",
  "bookrack-control-client",
  "bookrack-core",
@@ -1180,7 +1181,6 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
- "bookrack-repl-grammar",
  "bookrack-session",
  "bookrack-vectors",
  "chrono",

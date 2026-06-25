@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::StampsAction;
+use bookrack_cli_grammar::StampsAction;
 use serde_json::Value;
 
 use super::helpers;

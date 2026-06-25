@@ -20,11 +20,11 @@ mod util;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bookrack_config::{Config, ConfigError, LibrarySelection};
-use bookrack_repl_grammar::{
+use bookrack_cli_grammar::{
     CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, QueueAction, RemoveArgs,
     StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
+use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
 

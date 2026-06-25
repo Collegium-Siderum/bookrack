@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::WriteMetadataAction;
+use bookrack_cli_grammar::WriteMetadataAction;
 use serde_json::json;
 
 use super::helpers;

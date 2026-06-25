@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::QueueAction;
+use bookrack_cli_grammar::QueueAction;
 use serde_json::{Value, json};
 
 use super::helpers;

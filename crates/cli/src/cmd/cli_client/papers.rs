@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::{
+use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
@@ -36,10 +36,10 @@ pub async fn run(action: PapersAction, runtime_dir: Option<PathBuf>) -> Result<(
 }
 
 async fn metadata(
-    action: bookrack_repl_grammar::PapersMetadataAction,
+    action: bookrack_cli_grammar::PapersMetadataAction,
     runtime_dir: Option<PathBuf>,
 ) -> Result<()> {
-    use bookrack_repl_grammar::PapersMetadataAction;
+    use bookrack_cli_grammar::PapersMetadataAction;
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
     match action {
         PapersMetadataAction::Reaudit {

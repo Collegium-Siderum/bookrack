@@ -1,5 +1,5 @@
 [package]
-name = "bookrack-repl-grammar"
+name = "bookrack-cli-grammar"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

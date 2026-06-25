@@ -18,7 +18,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-mcp = { path = "../mcp" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
-bookrack-repl-grammar = { path = "../repl-grammar" }
+bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-runtime = { path = "../runtime" }
 bookrack-session = { path = "../session" }
 # v2 distill rollout (phase 10): the local `bookrack distill` family

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::WriteVectorsAction;
+use bookrack_cli_grammar::WriteVectorsAction;
 use serde_json::{Value, json};
 
 use super::helpers;

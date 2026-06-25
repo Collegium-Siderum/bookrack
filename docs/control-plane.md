@@ -298,10 +298,10 @@ catalog and corpus handles the daemon already holds.
   CLI subcommands, `bookrack exec <method>` for ad-hoc RPCs, the
   desktop tray, or MCP. `bookrack-control-client` survives and is the
   shared transport for the remaining one-shot and tray clients.
-  `bookrack-repl-grammar` survives as the shared `clap::Subcommand`
-  definitions imported by the top-level `bookrack` CLI; the crate
-  name is preserved for now and the `ReplCli` / `ReplCommand` wrapper
-  has been removed.
+  The `bookrack-repl-grammar` crate is renamed to
+  `bookrack-cli-grammar` and survives as the shared
+  `clap::Subcommand` definitions imported by the top-level `bookrack`
+  CLI; the `ReplCli` / `ReplCommand` wrapper has been removed.
 - **Phase 4** — one-shot CLI subcommands rewired as control-plane
   clients. New top-level subcommands `bookrack ingest`,
   `bookrack metadata {set,clear,ack,approve,reject}`,

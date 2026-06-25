@@ -17,7 +17,7 @@ use crate::audit_helpers::load_audit_profile;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 
-pub use bookrack_repl_grammar::WriteMetadataAction;
+pub use bookrack_cli_grammar::WriteMetadataAction;
 
 /// REPL-side dispatch for the write actions. Triggers a pending
 /// migration once via `open_with_backup` before each write so the

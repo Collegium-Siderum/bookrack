@@ -17,8 +17,9 @@ release workflow extracts the matching section verbatim from this file.
   for ad-hoc control-plane RPCs, the desktop tray, or MCP. The
   `cmd::repl_client` module, the `tests/repl_e2e.rs` integration
   test, the `reedline` and `shlex` workspace dependencies, and the
-  `ReplCli` / `ReplCommand` wrapper types from
-  `bookrack-repl-grammar` are deleted; the crate keeps its leaf
+  `ReplCli` / `ReplCommand` wrapper types from the former
+  `bookrack-repl-grammar` are deleted; the surviving crate is
+  renamed to `bookrack-cli-grammar` and keeps its leaf
   `clap::Subcommand` types (`IngestArgs`, `WriteMetadataAction`,
   `WriteVectorsAction`, `CorpusAction`, `StampsAction`,
   `QueueAction`, `RemoveArgs`, `DryrunArgs`, `IntakeAction`,

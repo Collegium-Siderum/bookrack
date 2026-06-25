@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use bookrack_repl_grammar::DryrunArgs;
+use bookrack_cli_grammar::DryrunArgs;
 use serde_json::json;
 
 use super::helpers;

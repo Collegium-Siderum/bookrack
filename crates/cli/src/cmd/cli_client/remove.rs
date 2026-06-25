@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bookrack_repl_grammar::RemoveArgs;
+use bookrack_cli_grammar::RemoveArgs;
 use serde_json::json;
 
 use super::helpers;
