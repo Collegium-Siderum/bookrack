@@ -941,6 +941,7 @@ dependencies = [
 name = "bookrack-distill"
 version = "0.7.0-dev"
 dependencies = [
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

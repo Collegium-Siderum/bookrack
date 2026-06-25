@@ -27,8 +27,7 @@ const STAGE_CATALOG_TOML: &str = include_str!("../data/stage_catalog.toml");
 
 /// Recognized `StageData` variant names. Cross-checked against
 /// `stage_catalog.toml`'s `input` / `output` fields at startup.
-const STAGE_DATA_KINDS: &[&str] =
-    &["source", "pages", "blocks", "raws", "splits", "drafts"];
+const STAGE_DATA_KINDS: &[&str] = &["source", "pages", "blocks", "raws", "splits", "drafts"];
 
 // ---------------------------------------------------------------------------
 // Public, ergonomic catalog types
@@ -298,9 +297,9 @@ impl Catalogs {
 
     // ----- per-book validation ------------------------------------------
 
-    /// Run every book-level rule against a parsed `book.toml`.
-    /// The rule numbering mirrors the seven listed in
-    /// `drafts/手册/参考书管线-v2 重构落地-执行手册.md` §3 phase 4.
+    /// Run every book-level rule against a parsed `book.toml`. The
+    /// rule numbering mirrors the seven listed in §3 phase 4 of the
+    /// v2 distill execution manual.
     pub fn validate_book(&self, book: &BookToml) -> Result<(), ParseError> {
         // Rule 4: declared writes_properties ⊆ property_catalog.
         for prop in &book.parser.writes_properties {
@@ -630,17 +629,12 @@ input  = "source"
 output = "drafts"
 writes_properties = ["non_existent_property"]
 "#;
-        let err = Catalogs::load_from(
-            PROPERTY_CATALOG_TOML,
-            QUALITY_FLAGS_TOML,
-            bad_stage_catalog,
-        )
-        .unwrap_err();
+        let err = Catalogs::load_from(PROPERTY_CATALOG_TOML, QUALITY_FLAGS_TOML, bad_stage_catalog)
+            .unwrap_err();
         match err {
             ParseError::CatalogViolation(msg) => {
                 assert!(
-                    msg.contains("non_existent_property")
-                        && msg.contains("property_catalog.toml"),
+                    msg.contains("non_existent_property") && msg.contains("property_catalog.toml"),
                     "self-check must name the bad key and the catalog: {msg}"
                 );
             }
