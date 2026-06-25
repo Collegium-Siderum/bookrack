@@ -73,8 +73,7 @@ pub struct PapersVectorsReembedParams {
     yes: bool,
     /// Returned by the dry-run leg and presented by the execute leg
     /// to commit the exact plan the operator confirmed. Required on
-    /// execute; the legacy unpinned fallback fires when this is
-    /// absent and logs a deprecation warning.
+    /// execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
 }
@@ -94,7 +93,11 @@ pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     }
     match parsed.plan_id.as_deref() {
         Some(id) => reembed_execute_from_plan(id.to_string(), ctx).await,
-        None => reembed_legacy_execute(parsed, ctx).await,
+        None => Err(RpcError::new(
+            INVALID_PARAMS,
+            "papers.vectors_reembed: plan_id required on execute; call with dry_run=true \
+             first and present the returned plan_id",
+        )),
     }
 }
 
@@ -158,31 +161,6 @@ async fn reembed_execute_from_plan(
             "reembedded_chunks": chunks_written,
             "skipped_empty": report.skipped_empty,
         }))
-    })
-    .await
-}
-
-async fn reembed_legacy_execute(
-    parsed: PapersVectorsReembedParams,
-    ctx: &MethodContext,
-) -> Result<Value, RpcError> {
-    tracing::warn!(
-        "papers.vectors_reembed: execute without plan_id; falling back to legacy unpinned path. \
-         Clients should run dry_run=true first and present the returned plan_id."
-    );
-    let cfg = ctx.cfg.clone();
-    run_write(ctx, move || async move {
-        papers_vectors::reembed(
-            &cfg,
-            parsed.paper,
-            parsed.stale_only,
-            parsed.dry_run,
-            parsed.yes,
-            deny_destructive,
-        )
-        .await
-        .map_err(|e| write_err("papers.vectors_reembed", e))?;
-        Ok(json!({ "ok": true }))
     })
     .await
 }

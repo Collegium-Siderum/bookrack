@@ -9,9 +9,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::remove::ExpectedFingerprint;
-use crate::cmd::remove_paper::{
-    RemovePaperArgs, execute_remove_from_plan, plan_remove, run as run_remove_paper,
-};
+use crate::cmd::remove_paper::{RemovePaperArgs, execute_remove_from_plan, plan_remove};
 use crate::control::error_map::{plan_lookup_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
@@ -30,8 +28,7 @@ pub struct PapersRemoveParams {
     yes: bool,
     /// Returned by the dry-run leg and presented by the execute leg
     /// to commit the exact intake the operator confirmed. Required
-    /// on execute; the legacy unpinned fallback fires when this is
-    /// absent and logs a deprecation warning.
+    /// on execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
 }
@@ -70,7 +67,11 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     }
     match parsed.plan_id.as_deref() {
         Some(id) => remove_execute_from_plan(id.to_string(), ctx).await,
-        None => remove_legacy_execute(parsed, ctx).await,
+        None => Err(RpcError::new(
+            INVALID_PARAMS,
+            "papers.remove: plan_id required on execute; call with dry_run=true first \
+             and present the returned plan_id",
+        )),
     }
 }
 
@@ -142,36 +143,6 @@ async fn remove_execute_from_plan(plan_id: String, ctx: &MethodContext) -> Resul
             "intake_row_existed": outcome.intake_row_existed,
             "catalog_deleted": serialize_counts(&outcome.catalog_deleted),
         }))
-    })
-    .await
-}
-
-async fn remove_legacy_execute(
-    parsed: PapersRemoveParams,
-    ctx: &MethodContext,
-) -> Result<Value, RpcError> {
-    if parsed.intake_id.is_none() && parsed.sha.is_none() {
-        return Err(RpcError::new(
-            INVALID_PARAMS,
-            "papers.remove: pass intake_id or sha",
-        ));
-    }
-    tracing::warn!(
-        "papers.remove: execute without plan_id; falling back to legacy unpinned path. \
-         Clients should run dry_run=true first and present the returned plan_id."
-    );
-    let cfg = ctx.cfg.clone();
-    let args = RemovePaperArgs {
-        intake_id: parsed.intake_id,
-        sha: parsed.sha,
-        dry_run: parsed.dry_run,
-        yes: parsed.yes,
-    };
-    run_write(ctx, move || async move {
-        run_remove_paper(&cfg, args)
-            .await
-            .map_err(|e| write_err("papers.remove", e))?;
-        Ok(json!({ "ok": true }))
     })
     .await
 }

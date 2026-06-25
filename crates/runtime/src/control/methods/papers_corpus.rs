@@ -3,9 +3,7 @@
 //! `papers.corpus_rebuild` JSON-RPC handler.
 //!
 //! Peer of [`super::corpus::rebuild`] for the paper pipeline: same
-//! two-step pinned protocol, with a transitional fallback for
-//! execute-without-plan_id so existing clients keep working until
-//! the CLI migrates.
+//! two-step pinned protocol.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,8 +32,7 @@ pub struct PapersCorpusRebuildParams {
     yes: bool,
     /// Returned by the dry-run leg and presented by the execute leg
     /// to commit the exact plan the operator confirmed. Required on
-    /// execute; the legacy unpinned fallback fires when this is
-    /// absent and logs a deprecation warning.
+    /// execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
 }
@@ -64,7 +61,11 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     }
     match parsed.plan_id.as_deref() {
         Some(id) => run_execute_from_plan(id.to_string(), ctx).await,
-        None => run_legacy_execute(parsed, ctx).await,
+        None => Err(RpcError::new(
+            INVALID_PARAMS,
+            "papers.corpus_rebuild: plan_id required on execute; call with dry_run=true \
+             first and present the returned plan_id",
+        )),
     }
 }
 
@@ -125,32 +126,6 @@ async fn run_execute_from_plan(plan_id: String, ctx: &MethodContext) -> Result<V
     .await
 }
 
-async fn run_legacy_execute(
-    parsed: PapersCorpusRebuildParams,
-    ctx: &MethodContext,
-) -> Result<Value, RpcError> {
-    tracing::warn!(
-        "papers.corpus_rebuild: execute without plan_id; falling back to legacy unpinned path. \
-         Clients should run dry_run=true first and present the returned plan_id."
-    );
-    let cfg = ctx.cfg.clone();
-    run_write(ctx, move || async move {
-        papers_corpus::rebuild(
-            &cfg,
-            parsed.include_vectors,
-            parsed.paper,
-            parsed.stale_only,
-            parsed.dry_run,
-            parsed.yes,
-            deny_destructive,
-        )
-        .await
-        .map_err(|e| write_err("papers.corpus_rebuild", e))?;
-        Ok(json!({ "ok": true }))
-    })
-    .await
-}
-
 fn serialize_execute_outcome(o: &papers_corpus::ExecutePapersRebuildOutcome) -> Value {
     let mut v = json!({
         "rebuilt": o.report.rebuilt,
@@ -170,8 +145,4 @@ fn serialize_execute_outcome(o: &papers_corpus::ExecutePapersRebuildOutcome) -> 
         v["reembedded_chunks"] = json!(re.chunks_written);
     }
     v
-}
-
-fn deny_destructive(_prompt: &str) -> anyhow::Result<bool> {
-    Ok(false)
 }

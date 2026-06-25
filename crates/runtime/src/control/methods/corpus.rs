@@ -10,12 +10,6 @@
 //! and `plan_id = <id>`, the daemon consumes the registered plan,
 //! and the execute leg acts on the exact pinned target set —
 //! independent of any catalog drift between the two RPCs.
-//!
-//! A transitional fallback path accepts `yes = true` with no
-//! `plan_id` and falls back to the legacy unpinned execute. It is
-//! present so existing clients keep working while the CLI migrates
-//! to the two-step protocol; the warning logged on every such call
-//! is the migration signal.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -44,8 +38,7 @@ pub struct CorpusRebuildParams {
     yes: bool,
     /// Returned by the dry-run leg and presented by the execute leg
     /// to commit the exact plan the operator confirmed. Required on
-    /// execute; the legacy unpinned fallback fires when this is
-    /// absent and logs a deprecation warning.
+    /// execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
 }
@@ -78,7 +71,11 @@ pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     }
     match parsed.plan_id.as_deref() {
         Some(id) => run_execute_from_plan(id.to_string(), ctx).await,
-        None => run_legacy_execute(parsed, ctx).await,
+        None => Err(RpcError::new(
+            INVALID_PARAMS,
+            "corpus.rebuild: plan_id required on execute; call with dry_run=true first \
+             and present the returned plan_id",
+        )),
     }
 }
 
@@ -136,33 +133,6 @@ async fn run_execute_from_plan(plan_id: String, ctx: &MethodContext) -> Result<V
     .await
 }
 
-async fn run_legacy_execute(
-    parsed: CorpusRebuildParams,
-    ctx: &MethodContext,
-) -> Result<Value, RpcError> {
-    tracing::warn!(
-        "corpus.rebuild: execute without plan_id; falling back to legacy unpinned path. \
-         Clients should run dry_run=true first and present the returned plan_id."
-    );
-    let cfg = ctx.cfg.clone();
-    run_write(ctx, move || async move {
-        corpus::rebuild(
-            &cfg,
-            parsed.include_vectors,
-            parsed.book,
-            parsed.stale_only,
-            parsed.dry_run,
-            parsed.yes,
-            None,
-            deny_destructive,
-        )
-        .await
-        .map_err(|e| write_err("corpus.rebuild", e))?;
-        Ok(json!({ "ok": true }))
-    })
-    .await
-}
-
 fn serialize_execute_outcome(o: &corpus::ExecuteRebuildOutcome) -> Value {
     let mut v = json!({
         "rebuilt": o.report.rebuilt,
@@ -182,10 +152,6 @@ fn serialize_execute_outcome(o: &corpus::ExecuteRebuildOutcome) -> Value {
         v["reembedded_chunks"] = json!(re.chunks_written);
     }
     v
-}
-
-fn deny_destructive(_prompt: &str) -> anyhow::Result<bool> {
-    Ok(false)
 }
 
 #[cfg(test)]
