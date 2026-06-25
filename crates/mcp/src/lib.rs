@@ -1659,7 +1659,8 @@ impl BookrackServer {
         let refs_path = handle.ops().reference_db_path();
         let refs = bookrack_refs::Refs::open(&refs_path)
             .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
-        let result = reference::reference_lookup_logic(&refs, reference::catalogs(), &args)
+        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
+        let result = reference::reference_lookup_logic(&refs, catalogs, &args)
             .map_err(reference_error_to_mcp)?;
         respond_with(&result)
     }
@@ -1683,9 +1684,9 @@ impl BookrackServer {
         let refs = bookrack_refs::Refs::open(&refs_path)
             .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
         let edited_at = chrono::Utc::now().to_rfc3339();
-        let receipt =
-            reference::reference_overlay_set_logic(&refs, reference::catalogs(), &args, edited_at)
-                .map_err(reference_error_to_mcp)?;
+        let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
+        let receipt = reference::reference_overlay_set_logic(&refs, catalogs, &args, edited_at)
+            .map_err(reference_error_to_mcp)?;
         respond_with(&receipt)
     }
 }

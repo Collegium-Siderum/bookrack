@@ -83,10 +83,17 @@ pub enum ReferenceError {
 }
 
 /// The process-wide controlled vocabulary triad. Loaded lazily on
-/// first MCP request that needs it.
-pub(crate) fn catalogs() -> &'static Catalogs {
+/// first MCP request that needs it. A load failure is returned as
+/// `ReferenceError::Catalog` rather than panicking, and is not
+/// cached: a subsequent request retries the load so a corrected
+/// `property_catalog.toml` can recover without a daemon restart.
+pub(crate) fn catalogs() -> Result<&'static Catalogs, ReferenceError> {
     static CELL: OnceLock<Catalogs> = OnceLock::new();
-    CELL.get_or_init(|| Catalogs::load_all().expect("load distill catalogs"))
+    if let Some(c) = CELL.get() {
+        return Ok(c);
+    }
+    let loaded = Catalogs::load_all()?;
+    Ok(CELL.get_or_init(|| loaded))
 }
 
 // ---------------------------------------------------------------------------
