@@ -234,16 +234,28 @@ fn register_book_indexes(refs: &mut Refs, slug: &str, book_toml: &BookToml) -> R
     let specs: Vec<IndexSpec> = book_toml
         .indexes
         .iter()
-        .map(|i| IndexSpec {
-            field: i.field.clone(),
-            kind: match i.kind.as_str() {
-                "btree" => IndexKind::Btree,
-                _ => IndexKind::Btree,
-            },
+        .map(|i| {
+            let kind = parse_index_kind(&i.kind).with_context(|| {
+                format!(
+                    "book.toml for {slug}: unknown index kind {:?} on field {:?}",
+                    i.kind, i.field
+                )
+            })?;
+            Ok(IndexSpec {
+                field: i.field.clone(),
+                kind,
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     refs.register_book(slug, &specs)?;
     Ok(())
+}
+
+fn parse_index_kind(raw: &str) -> Result<IndexKind> {
+    match raw {
+        "btree" => Ok(IndexKind::Btree),
+        other => Err(anyhow!("unsupported index kind {other:?}")),
+    }
 }
 
 fn upsert_book_row(refs: &Refs, book_toml: &BookToml, built_at: &str) -> Result<()> {
