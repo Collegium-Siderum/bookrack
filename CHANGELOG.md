@@ -8,6 +8,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **refs: physical index names no longer collide across `.` / `_`.**
+  `crates/refs/src/indexes.rs` previously built the per-book generated
+  column and partial index names by flattening `.` to `_`, so an
+  `IndexSpec` with `field = "a.b"` produced the same physical name as
+  `field = "a_b"`, and `slug = "a"` + `field = "b_c"` collided with
+  `slug = "a_b"` + `field = "c"`; the second declaration was masked by
+  the `duplicate column name` no-op branch and silently never built.
+  The encoding now passes each slug and field through an injective
+  char-level map (`_` to `_u`, `.` to `_d`) joined with `__`, and a
+  spec list that declares the same `field` twice is rejected with a
+  new `RefsError::DuplicateIndex` instead of being silently coalesced.
+
 ## [0.7.0] - 2026-06-26
 
 ### Added

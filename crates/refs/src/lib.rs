@@ -46,6 +46,14 @@ pub enum RefsError {
     /// interpolated into a DDL statement.
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
+
+    /// The same `IndexSpec::field` appeared twice in the spec list
+    /// passed to `register_book` / `indexes::apply`. The previous
+    /// implementation silently dropped one of the two; this is now
+    /// surfaced explicitly so the book.toml authoring mistake is
+    /// visible at registration time.
+    #[error("duplicate index field: {0:?}")]
+    DuplicateIndex(String),
 }
 
 /// The crate's `Result` alias.
@@ -456,25 +464,25 @@ mod refs_tests {
 
         let conn = refs.connection();
         assert!(
-            column_exists(conn, "reference_entries", "gencol_fake_book_country"),
-            "gencol_fake_book_country must exist"
+            column_exists(conn, "reference_entries", "gencol__fake_ubook__country"),
+            "gencol__fake_ubook__country must exist"
         );
         assert!(
             column_exists(
                 conn,
                 "reference_entries",
-                "gencol_fake_book_year_span_birth"
+                "gencol__fake_ubook__year_uspan_dbirth"
             ),
-            "gencol_fake_book_year_span_birth must exist (. -> _)"
+            "gencol__fake_ubook__year_uspan_dbirth must exist (. -> _d, _ -> _u)"
         );
-        assert!(index_exists(conn, "ix_ref_fake_book_country"));
-        assert!(index_exists(conn, "ix_ref_fake_book_year_span_birth"));
+        assert!(index_exists(conn, "ix_ref__fake_ubook__country"));
+        assert!(index_exists(conn, "ix_ref__fake_ubook__year_uspan_dbirth"));
 
         // The partial WHERE clause persists into sqlite_master.
         let idx_sql: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master \
-                 WHERE type = 'index' AND name = 'ix_ref_fake_book_country'",
+                 WHERE type = 'index' AND name = 'ix_ref__fake_ubook__country'",
                 [],
                 |row| row.get(0),
             )
@@ -494,7 +502,7 @@ mod refs_tests {
         .expect("upsert entry");
         let country: String = conn
             .query_row(
-                "SELECT gencol_fake_book_country FROM reference_entries \
+                "SELECT gencol__fake_ubook__country FROM reference_entries \
                  WHERE book_slug = 'fake_book' AND entry_key = 'smith'",
                 [],
                 |row| row.get(0),
@@ -503,7 +511,7 @@ mod refs_tests {
         assert_eq!(country, "USA");
         let birth: i64 = conn
             .query_row(
-                "SELECT gencol_fake_book_year_span_birth FROM reference_entries \
+                "SELECT gencol__fake_ubook__year_uspan_dbirth FROM reference_entries \
                  WHERE book_slug = 'fake_book' AND entry_key = 'smith'",
                 [],
                 |row| row.get(0),
@@ -561,10 +569,10 @@ mod refs_tests {
 
         let conn = refs.connection();
         for col in [
-            "gencol_book_a_country",
-            "gencol_book_a_year_span_birth",
-            "gencol_book_b_gender",
-            "gencol_book_b_variants",
+            "gencol__book_ua__country",
+            "gencol__book_ua__year_uspan_dbirth",
+            "gencol__book_ub__gender",
+            "gencol__book_ub__variants",
         ] {
             assert!(
                 column_exists(conn, "reference_entries", col),
@@ -572,10 +580,10 @@ mod refs_tests {
             );
         }
         for ix in [
-            "ix_ref_book_a_country",
-            "ix_ref_book_a_year_span_birth",
-            "ix_ref_book_b_gender",
-            "ix_ref_book_b_variants",
+            "ix_ref__book_ua__country",
+            "ix_ref__book_ua__year_uspan_dbirth",
+            "ix_ref__book_ub__gender",
+            "ix_ref__book_ub__variants",
         ] {
             assert!(
                 index_exists(conn, ix),
