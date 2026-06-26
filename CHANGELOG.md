@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: paper-side `contributor_add` no longer collides on a
+  reused ordinal.** `papers.metadata.contributor_add` computed the
+  ordinal for a new curator-added contributor as `existing.len()`,
+  which becomes wrong as soon as any earlier row has been removed: a
+  series `add(0) → add(1) → add(2) → remove(0) → add` would try to
+  insert `ordinal = 2` even though that ordinal still exists on the
+  surviving row, and SQLite refused the insert on the
+  `(intake_id, scope, role, ordinal, origin)` UNIQUE key. The handler
+  now picks `max(existing.ordinal where role = req.role) + 1`,
+  matching the book-side writer surface.
+
 - **refs: physical index names no longer collide across `.` / `_`.**
   `crates/refs/src/indexes.rs` previously built the per-book generated
   column and partial index names by flattening `.` to `_`, so an
