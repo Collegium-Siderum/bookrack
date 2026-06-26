@@ -21,8 +21,8 @@ mod util;
 use std::path::PathBuf;
 
 use bookrack_cli_grammar::{
-    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, PapersAction, QueueAction, RemoveArgs,
-    StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction, QueueAction,
+    RemoveArgs, StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -318,6 +318,16 @@ enum Command {
         #[command(subcommand)]
         action: bookrack_cli::distill_cmd::DistillAction,
     },
+    /// Stream or snapshot the running daemon's logs.
+    ///
+    /// `--follow` (the default with no other flags) subscribes to the
+    /// broadcast for as long as the command runs. `--tail N` snapshots
+    /// the last N events from the daemon's in-memory ring through the
+    /// `logs.tail` RPC and exits. Combine both for `tail | follow`
+    /// semantics. Human mode renders each event as
+    /// `HH:MM:SS LEVEL target | message`; `--json` emits the
+    /// underlying `LogEvent` payload as newline-delimited JSON.
+    Logs(LogsArgs),
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -677,6 +687,7 @@ async fn run() -> Result<()> {
         }
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
+        Command::Logs(args) => cmd::cli_client::logs::run(args, None).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),

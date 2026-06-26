@@ -19,6 +19,7 @@ pub mod helpers;
 pub mod ingest;
 pub mod intake;
 pub mod libraries;
+pub mod logs;
 pub mod metadata;
 pub mod papers;
 pub mod queue;

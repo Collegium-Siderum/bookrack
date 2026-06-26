@@ -796,6 +796,30 @@ pub struct PapersFindArgs {
     pub offset: Option<u32>,
 }
 
+/// Flag bundle for the top-level `bookrack logs` command. `--tail N`
+/// snapshots the most recent N events from the daemon's in-memory
+/// ring (capped server-side at 1024); `--follow` streams new events
+/// from the broadcast as they arrive; with neither flag the command
+/// defaults to follow. `--level LEVEL` filters to events at or above
+/// the given severity.
+#[derive(clap::Args, Debug, Clone)]
+pub struct LogsArgs {
+    /// Snapshot the most recent N events from the daemon's ring and
+    /// print them. When combined with `--follow`, the snapshot is
+    /// emitted before the live stream begins.
+    #[arg(long, value_name = "N")]
+    pub tail: Option<u64>,
+    /// Stream events as they arrive from the daemon's broadcast.
+    /// Defaults to true when neither this flag nor `--tail` is set.
+    #[arg(long)]
+    pub follow: bool,
+    /// Drop every event below this severity. Case-insensitive;
+    /// accepted values are `TRACE`, `DEBUG`, `INFO`, `WARN`, and
+    /// `ERROR`. Without this flag every level passes through.
+    #[arg(long, value_name = "LEVEL")]
+    pub level: Option<String>,
+}
+
 /// Positional + flag bundle for `papers remove`. Mirrors
 /// [`RemoveArgs`] for the paper pipeline. Either a positional intake
 /// id or `--sha <hex>` is required.

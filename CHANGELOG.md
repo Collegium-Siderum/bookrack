@@ -60,6 +60,19 @@ release workflow extracts the matching section verbatim from this file.
   this lifts them out of the `bookrack exec library.*` catch-all into
   first-class top-level commands.
 
+- `bookrack logs` is now a top-level subcommand for the daemon's
+  log stream. `--tail N` snapshots the most recent N events via
+  the `logs.tail` RPC and exits; `--follow` (the default with no
+  other flag) subscribes to the broadcast and streams new events
+  as they arrive; both together emit the snapshot first and then
+  switch to the live stream. `--level TRACE|DEBUG|INFO|WARN|ERROR`
+  (case-insensitive) drops every event below the given severity.
+  Human mode renders each event as `HH:MM:SS LEVEL target | message`;
+  the top-level `--json` flag emits newline-delimited `LogEvent`
+  records so `jq -c` pipelines stay clean. The existing
+  `bookrack exec logs follow|tail [<n>]` keeps working as an
+  unsurfaced compatibility alias.
+
 ### Changed
 
 - Every predictable CLI failure now flows through a typed
