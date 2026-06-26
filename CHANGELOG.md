@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: `distill verify` no longer fabricates an empty `reference.db`
+  on a typo.** Passing a path that did not exist (or pointed at a
+  directory) handed control through to `Refs::open`, which silently
+  created an empty SQLite file at the bad location; the diff loop
+  then compared every freshly drafted entry against an empty
+  `reference_entries` table and the report tagged the entire book
+  as `added`. The verify path now guards the location up front, in
+  the same shape as `list`, and surfaces `not found` / `expected a
+  file` errors with the original path embedded.
+
 - **runtime: wizard writes `config.toml` through the canonical TOML
   serializer.** `wizard::runner::write_root_config` previously
   interpolated `ollama_url` and `embed_model` into a hand-rolled

@@ -398,6 +398,26 @@ fn draft_to_new_entry(draft: &EntryDraft) -> NewEntry {
 fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<()> {
     let books = resolve_paths(&args.paths, args.recursive)?;
 
+    // Guard the `reference.db` location at the entry point rather than
+    // letting `Refs::open` create an empty SQLite file at any path it
+    // is handed: a typo or wrong directory would otherwise produce a
+    // brand-new empty database, the diff would compare every drafted
+    // entry against an empty `reference_entries` table, and the report
+    // would mislabel the whole book as `added`. Mirrors the no-DB
+    // branch in `list`.
+    if !paths.refs_path.exists() {
+        bail!(
+            "verify: reference.db not found at {}",
+            paths.refs_path.display()
+        );
+    }
+    if !paths.refs_path.is_file() {
+        bail!(
+            "verify: expected a file at {}, found a directory or other non-file entry",
+            paths.refs_path.display()
+        );
+    }
+
     let prod_refs = Refs::open(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
 
@@ -765,6 +785,58 @@ stages = [
             found_change,
             "verify must catch the manual payload mutation"
         );
+    }
+
+    /// `verify` against a path that does not exist must surface a
+    /// `not found` error and leave the path untouched. Previously
+    /// `Refs::open` would silently create an empty SQLite file there
+    /// and the diff would tag every drafted entry as `added`.
+    #[test]
+    fn verify_errors_when_refs_db_does_not_exist() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = DistillPaths {
+            refs_path: tmp.path().join("missing").join("reference.db"),
+        };
+
+        let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not found"), "error text was: {msg}");
+        assert!(
+            msg.contains(&paths.refs_path.display().to_string()),
+            "error text was: {msg}"
+        );
+        assert!(
+            !paths.refs_path.exists(),
+            "verify must not create the missing reference.db"
+        );
+        assert!(
+            !paths.refs_path.parent().unwrap().exists(),
+            "verify must not create any directories on the missing path"
+        );
+    }
+
+    /// `verify` against a path that points at a directory must report
+    /// the type mismatch instead of letting `Refs::open` fall over the
+    /// SQLite error mid-pipeline.
+    #[test]
+    fn verify_errors_when_refs_path_is_a_directory() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let dir_path = tmp.path().join("reference.db");
+        fs::create_dir_all(&dir_path).expect("create dir at refs path");
+        let paths = DistillPaths {
+            refs_path: dir_path.clone(),
+        };
+
+        let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expected a file"), "error text was: {msg}");
+        assert!(
+            msg.contains(&dir_path.display().to_string()),
+            "error text was: {msg}"
+        );
+        assert!(dir_path.is_dir(), "verify must not touch the directory");
     }
 
     #[test]
