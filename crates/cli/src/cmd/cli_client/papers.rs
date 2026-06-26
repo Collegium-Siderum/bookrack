@@ -8,6 +8,9 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::render::ctx;
+use bookrack_cli::render::human::truncate_to;
+use bookrack_cli::render::table::{KvTable, RowTable};
 use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
@@ -435,7 +438,9 @@ async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
         "limit": args.limit,
         "offset": args.offset,
     });
-    helpers::call_and_print(&client, "library.list_papers", params).await
+    let response = helpers::dispatch(&client, "library.list_papers", params).await?;
+    emit_paper_list(&response);
+    Ok(())
 }
 
 async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -449,17 +454,125 @@ async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
         "limit": args.limit,
         "offset": args.offset,
     });
-    helpers::call_and_print(&client, "library.find_papers", params).await
+    let response = helpers::dispatch(&client, "library.find_papers", params).await?;
+    emit_paper_list(&response);
+    Ok(())
 }
 
 async fn show(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
-    helpers::call_and_print(
+    let response = helpers::dispatch(
         &client,
         "library.show_paper",
         json!({ "intake_id": intake_id }),
     )
-    .await
+    .await?;
+    if ctx().is_json() {
+        helpers::print_value(&response);
+        return Ok(());
+    }
+    if ctx().is_quiet() {
+        return Ok(());
+    }
+    render_paper_detail(&response);
+    Ok(())
+}
+
+fn emit_paper_list(response: &Value) {
+    if ctx().is_json() {
+        helpers::print_value(response);
+        return;
+    }
+    if ctx().is_quiet() {
+        return;
+    }
+    render_paper_list(response);
+}
+
+fn render_paper_list(response: &Value) {
+    let papers = response.get("papers").and_then(Value::as_array);
+    let rows = match papers {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => {
+            println!("no papers match");
+            return;
+        }
+    };
+    let mut table = RowTable::new(["id", "title", "author", "year", "container"]);
+    for row in rows {
+        let id = row
+            .get("intake_id")
+            .and_then(Value::as_i64)
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let title = row
+            .get("title")
+            .and_then(Value::as_str)
+            .map(|s| truncate_to(s, 48))
+            .unwrap_or_else(|| "-".to_string());
+        let author = row
+            .get("top_contributor")
+            .and_then(Value::as_str)
+            .map(|s| truncate_to(s, 24))
+            .unwrap_or_else(|| "-".to_string());
+        let year = row
+            .get("year")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string();
+        let container = row
+            .get("container_title")
+            .and_then(Value::as_str)
+            .map(|s| truncate_to(s, 24))
+            .unwrap_or_else(|| "-".to_string());
+        table.push_row([id, title, author, year, container]);
+    }
+    println!("{}", table.render());
+    let total = response.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let truncated = response
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if truncated {
+        println!(
+            "(showing {} of {total}; pass --limit to see more)",
+            rows.len()
+        );
+    } else if total as usize != rows.len() {
+        println!("({} of {total})", rows.len());
+    }
+}
+
+fn render_paper_detail(response: &Value) {
+    let mut t = KvTable::new();
+    if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
+        t.push("intake_id", id.to_string());
+    }
+    for key in ["title", "status", "format"] {
+        if let Some(val) = response.get(key).and_then(Value::as_str) {
+            t.push(key, val);
+        }
+    }
+    if let Some(biblio) = response.get("effective_biblio").and_then(Value::as_object) {
+        for (k, v) in biblio {
+            let s = v
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| v.to_string());
+            t.push(format!("biblio.{k}"), s);
+        }
+    }
+    if let Some(arr) = response.get("contributors").and_then(Value::as_array) {
+        t.push("contributors", arr.len().to_string());
+    }
+    if let Some(arr) = response.get("overrides").and_then(Value::as_array) {
+        t.push("overrides", arr.len().to_string());
+    }
+    if let Some(abs) = response.get("abstract_text").and_then(Value::as_str) {
+        let first_line = abs.lines().next().unwrap_or("");
+        t.push("abstract", truncate_to(first_line, 80));
+    }
+    println!("{}", t.render());
 }
 
 async fn toc(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {

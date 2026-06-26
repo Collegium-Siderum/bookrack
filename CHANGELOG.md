@@ -62,6 +62,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- `bookrack queue list`, `bookrack libraries list`, `bookrack libraries
+  info`, `bookrack papers list`, `bookrack papers find`, and
+  `bookrack papers show` render a human table or key-value card by
+  default instead of the daemon's raw JSON. The top-level `--json`
+  flag restores the legacy pretty-printed payload for scripts.
+  `queue list` shows an 8-character UUID prefix in the `id` column;
+  `queue list --long` prints the full UUIDv7 for copy-paste.
+  `papers list` / `papers find` collapse to columns `id`, `title`,
+  `author`, `year`, `container` with `…` truncation, and append a
+  `(showing N of TOTAL; ...)` hint when the result set is truncated.
 - `bookrack ingest <path>`, `bookrack papers ingest <path>`, and
   `bookrack intake ocr <ocr_md> --from-pdf <pdf>` wait for the
   enqueued job(s) to reach a terminal state by default and print a

@@ -10,7 +10,12 @@ use std::path::PathBuf;
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
     /// List every row in the queue document, oldest first.
-    List,
+    List {
+        /// Print full UUIDv7 job ids instead of the 8-character
+        /// prefix the table shows by default.
+        #[arg(long)]
+        long: bool,
+    },
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
     Pause,

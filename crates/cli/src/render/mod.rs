@@ -21,6 +21,7 @@ pub mod human;
 pub mod job_report;
 pub mod progress;
 pub mod table;
+pub mod time;
 
 /// Operator-visible output mode chosen at startup from the global
 /// `--json` / `--quiet` flags. The default is `Human`.

@@ -18,6 +18,19 @@ pub fn short_id(id: &str) -> &str {
     &id[..end]
 }
 
+/// Trims `s` to at most `max_chars` Unicode scalar values, swapping
+/// the last one for `…` when truncation occurred. Inputs short
+/// enough pass through unchanged.
+pub fn truncate_to(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut buf: String = s.chars().take(keep).collect();
+    buf.push('…');
+    buf
+}
+
 /// Formats `Some(path)` as the file's basename or the path itself
 /// when no basename can be extracted, and `None` as a dash.
 pub fn basename_or_dash(path: Option<&str>) -> &str {
@@ -53,5 +66,22 @@ mod tests {
     #[test]
     fn basename_none_is_dash() {
         assert_eq!(basename_or_dash(None), "-");
+    }
+
+    #[test]
+    fn truncate_to_keeps_short_strings() {
+        assert_eq!(truncate_to("hello", 10), "hello");
+        assert_eq!(truncate_to("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_to_appends_ellipsis() {
+        assert_eq!(truncate_to("helloworld", 6), "hello…");
+    }
+
+    #[test]
+    fn truncate_to_handles_multibyte_chars() {
+        let s = "αβγδε";
+        assert_eq!(truncate_to(s, 3), "αβ…");
     }
 }
