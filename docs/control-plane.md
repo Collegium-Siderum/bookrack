@@ -291,17 +291,14 @@ catalog and corpus handles the daemon already holds.
   codes: `-32010 invalid_library`, `-32011 job_not_found`. The MCP
   tool set is still read-only and unchanged; the REPL still runs
   in-process; the on-disk queue document keeps its v1 schema.
-- **Phase 3 (superseded)** — REPL was extracted into a standalone
-  `bookrack repl` client process and a new `bookrack-control-client`
-  crate hosted the multiplexed JSON-RPC client. The REPL surface was
-  later removed entirely: operators reach the daemon through one-shot
-  CLI subcommands, `bookrack exec <method>` for ad-hoc RPCs, the
-  desktop tray, or MCP. `bookrack-control-client` survives and is the
-  shared transport for the remaining one-shot and tray clients.
-  The `bookrack-repl-grammar` crate is renamed to
-  `bookrack-cli-grammar` and survives as the shared
-  `clap::Subcommand` definitions imported by the top-level `bookrack`
-  CLI; the `ReplCli` / `ReplCommand` wrapper has been removed.
+- **Phase 3 (superseded)** — split the REPL into a standalone
+  client and stood up the `bookrack-control-client` transport.
+  The REPL surface was later removed entirely in 0.7.0; see
+  `CHANGELOG.md`. `bookrack-control-client` survives as the
+  shared transport for the one-shot CLI clients and the tray,
+  and `bookrack-cli-grammar` (renamed from `bookrack-repl-grammar`)
+  holds the leaf `clap::Subcommand` definitions the top-level
+  CLI consumes.
 - **Phase 4** — one-shot CLI subcommands rewired as control-plane
   clients. New top-level subcommands `bookrack ingest`,
   `bookrack metadata {set,clear,ack,approve,reject}`,

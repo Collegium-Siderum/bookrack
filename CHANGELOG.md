@@ -8,6 +8,104 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Reference-book pipeline (preview).** A new `bookrack-distill`
+  stage runner and `bookrack-refs` read store land the third
+  bookrack item kind alongside books and papers: a `Reference`
+  variant on `core::ItemKind`, a `reference.db` per library with the
+  baseline schema (`reference_books`, `reference_entries`,
+  `reference_entry_overlays`, a `reference_entries_resolved` view
+  that merges payloads through `json_patch`, and an FTS5 trigram
+  sidecar), the staged transform `Source → Pages → Blocks → Raws →
+  Splits → Drafts` built from segment / splitter / extractor /
+  finalize stages, and the three controlled vocabularies (property,
+  quality-flag, stage catalogs) with a cross-catalog validator. The
+  surface lands as three `bookrack distill {build,verify,list}` CLI
+  subcommands and two MCP tools `reference.lookup` and
+  `reference.overlay_set`.
+
+  **This is a preview.** The feature is not finished:
+
+  - **OCR Markdown is the only supported input.** The distill
+    pipeline reads the polyocr Markdown product of one reference
+    book; born-digital sources are not yet wired in.
+  - **Operators must author a `book.toml` per book.** The pipeline
+    is config-driven: anchor rules, stage chain, property writes,
+    and lookup indexes are all declared in a per-book TOML file.
+    There is no auto-detection. The expected schema is documented
+    by the controlled vocabularies shipped under
+    `crates/distill/data/`; mis-shaped configs surface as
+    `ParseError::CatalogViolation` at load time.
+  - **No queue integration.** A `Reference` job submitted to the
+    queue worker today panics the spawn-blocking task with
+    `unreachable!`; the CLI runs distill locally in-process
+    instead.
+
+  Treat the surface as unstable until a follow-up release lifts the
+  preview marker.
+
+- CLI shared render layer behind three new top-level flags:
+  `--json` switches every reading subcommand from the default
+  human renderer (tables, key-value cards, one-line summaries) to
+  the daemon's structured payload; `--quiet` suppresses progress
+  spinners and confirmation chrome for non-interactive use; and
+  `--no-color` disables ANSI styling even when stdout is a tty. The
+  flags resolve once into a process-wide `RenderCtx` so individual
+  subcommands stay free of mode plumbing. Reading subcommands that
+  previously dumped JSON only now branch on the context; writing
+  subcommands respect `--quiet` on their progress and confirmation
+  surfaces.
+
+- The session lock records the data-root path the daemon is
+  serving as a new `library_root=<abs path>` line. The line is
+  append-only (Phase 1's "unknown keys ignored" rule still
+  applies), so an older client reads the file unchanged. The CLI
+  warns on stderr when the shell's intended library selection
+  (`--data-dir` / `--library` / `BOOKRACK_DATA_DIR`) disagrees with
+  the running daemon's recorded root, so an operator does not
+  silently send writes against the wrong library.
+
+- CLI subcommand help is filled out across the surface: every
+  `bookrack <subcommand>` carries a one-line summary and a long
+  help body, and the global flags (`--data-dir`, `--library`,
+  `--audit-profile`) move under a shared **Common Options** group
+  so they no longer scroll past the subcommand's own arguments.
+  Argument-level help is filled in on `ingest`, `remove`,
+  `vectors`, and the `papers` action arms.
+
+- `intake.ocr` control-plane method and the matching `bookrack intake
+  ocr <ocr_md> --from-pdf <pdf>` top-level CLI subcommand. The handler
+  enqueues a single OCR-intake job onto the persistent ingest queue;
+  the worker dispatches it as a book ingest whose source is the OCR
+  markdown product paired with the scan PDF anchor, by way of a new
+  `LibraryHandle::ingest_ocr` runner.
+- `bookrack queue` top-level CLI subcommand covering the existing
+  control-plane methods that previously had no one-shot entry point:
+  `queue list` (→ `queue.list`), `queue pause` / `queue resume` /
+  `queue clear` (→ the matching `queue.*` RPC), and `queue cancel
+  <job-id-prefix>` (→ `ingest.cancel`). The shared `QueueAction`
+  grammar gains `List` and `Cancel` variants.
+- `bookrack libraries info [--name <NAME>]` and `bookrack libraries
+  default <NAME>` round out the `libraries` subcommand: `info` prints
+  the per-library status card the daemon serves via `library.info`,
+  `default` moves the registry's default-library pointer through
+  `library.set_default`. Both RPCs were already on the control plane;
+  this lifts them out of the `bookrack exec library.*` catch-all into
+  first-class top-level commands.
+- `bookrack logs` is now a top-level subcommand for the daemon's
+  log stream. `--tail N` snapshots the most recent N events via
+  the `logs.tail` RPC and exits; `--follow` (the default with no
+  other flag) subscribes to the broadcast and streams new events
+  as they arrive; both together emit the snapshot first and then
+  switch to the live stream. `--level TRACE|DEBUG|INFO|WARN|ERROR`
+  (case-insensitive) drops every event below the given severity.
+  Human mode renders each event as `HH:MM:SS LEVEL target | message`;
+  the top-level `--json` flag emits newline-delimited `LogEvent`
+  records so `jq -c` pipelines stay clean. The existing
+  `bookrack exec logs follow|tail [<n>]` keeps working as an
+  unsurfaced compatibility alias.
+
 ### Removed
 
 - `bookrack repl` standalone control-socket REPL client and the
@@ -34,44 +132,6 @@ release workflow extracts the matching section verbatim from this file.
   `-32602 INVALID_PARAMS` pointing at the dry-run leg. All
   in-tree clients (one-shot CLI subcommands, the tray) already
   drive the two-step pinned protocol.
-
-### Added
-
-- `intake.ocr` control-plane method and the matching `bookrack intake
-  ocr <ocr_md> --from-pdf <pdf>` top-level CLI subcommand. The handler
-  enqueues a single OCR-intake job onto the persistent ingest queue;
-  the worker dispatches it as a book ingest whose source is the OCR
-  markdown product paired with the scan PDF anchor, by way of a new
-  `LibraryHandle::ingest_ocr` runner. The standalone REPL's
-  `intake ocr ...` command now routes through the same RPC, replacing
-  the placeholder stub the previous release shipped.
-- `bookrack queue` top-level CLI subcommand covering the existing
-  control-plane methods that previously had no one-shot entry point:
-  `queue list` (→ `queue.list`), `queue pause` / `queue resume` /
-  `queue clear` (→ the matching `queue.*` RPC), and `queue cancel
-  <job-id-prefix>` (→ `ingest.cancel`). The shared `QueueAction`
-  grammar gains `List` and `Cancel` variants, so the batch-mode REPL
-  dispatcher exposes the same surface.
-- `bookrack libraries info [--name <NAME>]` and `bookrack libraries
-  default <NAME>` round out the `libraries` subcommand: `info` prints
-  the per-library status card the daemon serves via `library.info`,
-  `default` moves the registry's default-library pointer through
-  `library.set_default`. Both RPCs were already on the control plane;
-  this lifts them out of the `bookrack exec library.*` catch-all into
-  first-class top-level commands.
-
-- `bookrack logs` is now a top-level subcommand for the daemon's
-  log stream. `--tail N` snapshots the most recent N events via
-  the `logs.tail` RPC and exits; `--follow` (the default with no
-  other flag) subscribes to the broadcast and streams new events
-  as they arrive; both together emit the snapshot first and then
-  switch to the live stream. `--level TRACE|DEBUG|INFO|WARN|ERROR`
-  (case-insensitive) drops every event below the given severity.
-  Human mode renders each event as `HH:MM:SS LEVEL target | message`;
-  the top-level `--json` flag emits newline-delimited `LogEvent`
-  records so `jq -c` pipelines stay clean. The existing
-  `bookrack exec logs follow|tail [<n>]` keeps working as an
-  unsurfaced compatibility alias.
 
 ### Changed
 
@@ -130,6 +190,88 @@ release workflow extracts the matching section verbatim from this file.
   optional and defaults to absent, so a `v3` document loads unchanged
   and reads as a plain book ingest. The upgrade is one-way — an older
   daemon will not understand a `v4` document.
+- The workspace migrates its flexible error-reporting type from
+  `anyhow` to `eyre`, paired with `color-eyre` at the CLI entry
+  point. Every `anyhow::Result` becomes `eyre::Result` and every
+  `anyhow!` / `bail!` is the `eyre` equivalent; the CLI binary
+  installs `color-eyre`'s report renderer and panic hook so cause
+  chains render with rustc-style coloured prefixes. The wire
+  surfaces (JSON-RPC error codes, MCP error payloads) are
+  unchanged.
+
+### Fixed
+
+- `crates/runtime`: destructive plan registry pins a fingerprint
+  of the target set at dry-run time and re-checks it on execute,
+  so catalog drift between the two legs aborts with a typed error
+  instead of silently acting on a different set of intakes.
+- `crates/runtime`: `queue.clear` rolls the in-memory queue back
+  to its pre-clear state when the on-disk `save_atomic` fails,
+  matching the ordering the worker loop and `pause` / `resume`
+  paths already use.
+- `crates/runtime`: `events.subscribe` subscribes to the broadcast
+  channel before assembling the initial snapshot bundle, closing
+  the window where a state change between snapshot and subscribe
+  was never delivered.
+- `crates/runtime`: `library.fork` canonicalizes the requested
+  target path before its self-clone guard runs, so a target that
+  resolves to the source library is caught regardless of how the
+  operator spelled the path.
+- `crates/runtime`: library forks use SQLite `VACUUM INTO` for the
+  catalog / corpus snapshots so the clone is a consistent
+  point-in-time copy even when the source database has open
+  writers.
+- `crates/runtime` (Windows): the control-plane accept loop keeps
+  running after a named-pipe rebind failure instead of exiting,
+  and the first `NamedPipeServer` is held through the
+  `BoundListener` so a fast first connection cannot race the
+  second pipe's bind.
+- `crates/corpus`: the four `index_meta` stamps
+  (`embed_model`, `vector_dim`, `chunk_version`, `normalize_version`)
+  are written in one SQLite transaction, so an interrupted update
+  no longer leaves the stamps mutually inconsistent.
+- `crates/ingest`: the no-op fast path now considers `chunk_version`
+  and `normalize_version` in addition to the embed model and
+  `extractor_version`, so a bumped chunk or normalize constant no
+  longer reads as "already up to date".
+- `crates/ingest`: ANN-index rebuild is skipped when the
+  post-embed-loop `OPTIMIZE` call fails, so a transient LanceDB
+  failure cannot leave the chunks table with a stale index marked
+  as fresh.
+- `crates/extract`: ISBN, Roman-numeral, and PDF `/Info`
+  `CreationDate` parsing tightened to reject the obvious
+  false-positive shapes that surfaced from the first corpus sweep.
+- `crates/extract` (TXT adapter): UTF-16 decode failures record
+  `had_errors` on the `Provenance` block, so a partially decoded
+  TXT source no longer reports clean extraction.
+- `crates/audit-profile` and `crates/glean`: ratio overlays whose
+  values fall outside the documented `0.0..=1.0` range are
+  rejected at load time instead of silently clamping at use.
+- `crates/glean`: a paper with no extracted author keeps its
+  extraction-quality signals on the audit verdict rather than
+  collapsing to a single `MissingAuthor` flag.
+- `crates/mcp` (reference tools): a `reference.db` open failure on
+  startup surfaces as a tool-side error instead of panicking the
+  request handler.
+- `crates/distill`: `book.toml` validation surfaces malformed
+  regexes and negative bounds at load time, before the pipeline
+  runs, instead of letting them degrade to silent "no match".
+- `crates/cli/distill`: `book.toml` `[[indexes]]` rows whose
+  `kind` does not match a known index variant are rejected at
+  load time.
+- `crates/cli`: the global `--audit-profile` flag is now plumbed
+  into `papers.metadata.reaudit`, so the override actually reaches
+  the paper-side audit (the book-side path was already correct).
+- `crates/diagnose`: the book-basename scrubber is bounded to one
+  path component, so it cannot accidentally rewrite an unrelated
+  prefix of a longer path string in a log line.
+- `crates/ops`: the data-root directory-size walk is best-effort
+  across unreadable subdirectories instead of returning `None` for
+  the whole library when one child is permission-denied.
+- `crates/cli` (doctor): the redundant `bail!` on the daemon path
+  is dropped and the error reporter quieted, so a failing
+  `bookrack doctor` shows the underlying check failure once rather
+  than wrapping it in a generic envelope.
 
 ## [0.6.1] - 2026-06-16
 
