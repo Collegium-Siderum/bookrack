@@ -14,6 +14,7 @@
 mod cmd;
 mod exec;
 mod init;
+mod preflight;
 mod run;
 mod util;
 
@@ -484,6 +485,14 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<()> {
     let cli = parse_cli_with_natural_name_hints();
+
+    // Warn before any subcommand dispatch when the invoking shell's
+    // explicit library selection (`--data-dir` / `--library` /
+    // `BOOKRACK_DATA_DIR`) disagrees with the library a running
+    // daemon is serving. Silent when no daemon is running, when no
+    // selection was given, or when the lock predates the identity
+    // fields that make the comparison possible.
+    preflight::warn_on_selection_mismatch(&cli.selection());
 
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes
