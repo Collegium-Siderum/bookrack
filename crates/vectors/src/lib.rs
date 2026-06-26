@@ -659,10 +659,9 @@ impl ChunkStore {
         }
 
         // Drop any pre-existing index of the canonical name. Missing-
-        // index errors are tolerated; other failures bubble up.
-        if let Err(e) = self.table.drop_index(DEFAULT_INDEX_NAME).await {
-            tracing::debug!(error = ?e, "drop_index before rebuild reported");
-        }
+        // index errors are tolerated; other failures bubble up before
+        // the sidecar gets rewritten in `meta::store` below.
+        drop_index_tolerating_absence(&self.table).await?;
 
         let started = std::time::Instant::now();
         let index = match cfg.kind {
@@ -743,11 +742,12 @@ impl ChunkStore {
 
     /// Drop the ANN index attached to the chunks table (if any) and
     /// mark `vectors_meta.json` as `kind = "brute-force"`. Idempotent —
-    /// a missing index is not an error.
+    /// a missing index is not an error, but a real failure (I/O,
+    /// permission, dataset corruption) bubbles up before the sidecar
+    /// metadata is rewritten so it cannot end up reporting
+    /// `brute-force` while the on-disk index is still partially there.
     pub async fn drop_ann_index(&self, lancedb_dir: &Path, built_at: String) -> Result<()> {
-        if let Err(e) = self.table.drop_index(DEFAULT_INDEX_NAME).await {
-            tracing::debug!(error = ?e, "drop_index in drop_ann_index reported");
-        }
+        drop_index_tolerating_absence(&self.table).await?;
         let row_count = self.count_rows().await? as u64;
         let cfg = AnnConfig::default_for(AnnKind::BruteForce);
         let meta = cfg.to_meta(built_at, row_count, 0, DEFAULT_INDEX_NAME.to_string());
@@ -908,6 +908,46 @@ impl ChunkStore {
         }
         Ok(hits)
     }
+}
+
+/// Drop the canonical ANN index off `table`, treating
+/// "index isn't there" as a no-op while propagating every other
+/// failure. Previously both call sites swallowed every error with
+/// `tracing::debug!` and continued on to rewrite the sidecar, leaving
+/// `vectors_meta.json` claiming a successful rebuild even when the
+/// drop had actually failed.
+async fn drop_index_tolerating_absence(table: &lancedb::Table) -> Result<()> {
+    match table.drop_index(DEFAULT_INDEX_NAME).await {
+        Ok(()) => Ok(()),
+        Err(err) if is_index_not_found(&err) => {
+            tracing::debug!(
+                index = DEFAULT_INDEX_NAME,
+                "drop_index: no pre-existing index (no-op)"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// True when the failure is the tolerated "index does not exist"
+/// shape. `lancedb 0.30`'s `drop_index` returns the wrapped
+/// `lance-core` variant rather than the top-level
+/// `lancedb::Error::IndexNotFound`, so both shapes are accepted —
+/// the typed match for forward compatibility, and a tight string
+/// check against lance-core's Display format (`Lance index not
+/// found: ...`) for the wrapped form. Every other variant —
+/// `ObjectStore`, `CreateDir`, `Schema`, `Runtime`, a `Lance` with a
+/// non-`IndexNotFound` source — falls through so the caller never
+/// rewrites the sidecar metadata under an unhealthy index.
+fn is_index_not_found(err: &lancedb::Error) -> bool {
+    if matches!(err, lancedb::Error::IndexNotFound { .. }) {
+        return true;
+    }
+    if let lancedb::Error::Lance { source } = err {
+        return source.to_string().starts_with("Lance index not found:");
+    }
+    false
 }
 
 /// Read the fixed-size list width of the `vector` column from a
@@ -1317,6 +1357,31 @@ mod tests {
             .expect("second drop");
         let meta = meta::load(dir.path()).expect("load").expect("meta present");
         assert_eq!(meta.kind, "brute-force");
+    }
+
+    /// `IndexNotFound` is the only tolerated failure shape from
+    /// `Table::drop_index`. Other lancedb error variants must propagate
+    /// so the caller does not rewrite `vectors_meta.json` while the
+    /// on-disk index is still unhealthy. The first build of a fresh
+    /// table exercises the wrapped `Lance(Lance { source:
+    /// IndexNotFound { .. } })` shape end-to-end through `drop_is_
+    /// idempotent`; this test pins the surrounding cases.
+    #[test]
+    fn is_index_not_found_only_matches_the_missing_index_variants() {
+        let missing = lancedb::Error::IndexNotFound {
+            name: "ann".to_string(),
+        };
+        assert!(is_index_not_found(&missing));
+
+        let other = lancedb::Error::InvalidInput {
+            message: "anything else".to_string(),
+        };
+        assert!(!is_index_not_found(&other));
+
+        let runtime = lancedb::Error::Runtime {
+            message: "io failure".to_string(),
+        };
+        assert!(!is_index_not_found(&runtime));
     }
 
     #[tokio::test]

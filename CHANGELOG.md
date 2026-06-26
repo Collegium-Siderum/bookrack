@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **vectors: a failed `drop_index` no longer poisons the sidecar.**
+  Both `drop_ann_index` and the pre-rebuild drop in `build_ann_index`
+  used to log every `Table::drop_index` failure at `debug` and
+  continue on to rewrite `vectors_meta.json`, so a real I/O,
+  permission, or dataset failure would leave the sidecar advertising
+  `brute-force` or a fresh `built_at` while the on-disk index was
+  still partially there. The drop now routes through a single helper
+  that tolerates only the "index does not exist" shape (both
+  lancedb's direct variant and the wrapped lance-core form lancedb
+  0.30 returns) and bubbles every other error, so the sidecar update
+  never lands without a successful drop.
+
 - **control-client: per-RPC timeout protects the CLI against a hung
   daemon.** Every `ControlClient::call_raw` and `await_jobs` used to
   wait forever, so a daemon that wedged after accepting a request
