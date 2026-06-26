@@ -58,6 +58,14 @@ pub enum ControlError {
     /// Malformed line from the server.
     #[error("control-plane protocol: {0}")]
     Protocol(String),
+    /// The daemon accepted the request but did not respond within
+    /// the configured per-call timeout. The pending slot is reclaimed
+    /// before this error is returned so a late reply does not leak.
+    #[error("control-plane rpc {method:?} timed out after {after:?}")]
+    Timeout {
+        method: String,
+        after: std::time::Duration,
+    },
 }
 
 /// Resolved socket address for the daemon's control plane.
@@ -107,10 +115,25 @@ pub fn discover(runtime_dir_override: Option<&Path>) -> Result<ControlSocket, Co
 }
 
 /// Open a connection to the daemon and spawn the reader task that
-/// demuxes responses and events.
+/// demuxes responses and events. The returned client has no default
+/// timeout; every `call_raw` waits indefinitely. CLI consumers should
+/// prefer [`connect_with_default_timeout`] so a hung daemon surfaces
+/// as [`ControlError::Timeout`] instead of an unkillable foreground.
 pub async fn connect(socket: &ControlSocket) -> Result<ControlClient, ControlError> {
     let stream = open_stream(socket).await?;
     Ok(ControlClient::spawn(stream))
+}
+
+/// Same as [`connect`] but applies `default_timeout` to every
+/// `call_raw` issued on the returned client.
+pub async fn connect_with_default_timeout(
+    socket: &ControlSocket,
+    default_timeout: std::time::Duration,
+) -> Result<ControlClient, ControlError> {
+    let stream = open_stream(socket).await?;
+    let client = ControlClient::spawn(stream);
+    client.set_default_timeout(Some(default_timeout));
+    Ok(client)
 }
 
 #[cfg(unix)]
@@ -150,6 +173,10 @@ struct Inner<W> {
     next_id: AtomicU64,
     subscribed: AtomicBool,
     closed: Arc<AtomicBool>,
+    /// Applied to every `call_raw` when set. `None` keeps the historical
+    /// wait-forever behaviour so direct library consumers that opt in
+    /// to bounded waits do so explicitly.
+    default_timeout: std::sync::Mutex<Option<std::time::Duration>>,
 }
 
 /// Multiplexed JSON-RPC client over one daemon connection.
@@ -182,6 +209,7 @@ impl ControlClient {
             next_id: AtomicU64::new(1),
             subscribed: AtomicBool::new(false),
             closed: closed.clone(),
+            default_timeout: std::sync::Mutex::new(None),
         });
 
         tokio::spawn(reader_loop(read_half, pending, event_tx, closed));
@@ -190,7 +218,27 @@ impl ControlClient {
     }
 
     /// Send a `method`/`params` JSON-RPC request and await the response.
+    /// Honours the per-client default timeout set through
+    /// [`set_default_timeout`] / [`connect_with_default_timeout`]; a
+    /// `None` default keeps the historical wait-forever behaviour.
     pub async fn call_raw(&self, method: &str, params: Value) -> Result<Value, ControlError> {
+        let timeout = *self
+            .inner
+            .default_timeout
+            .lock()
+            .expect("default_timeout mutex poisoned");
+        self.call_raw_with_timeout(method, params, timeout).await
+    }
+
+    /// Like [`call_raw`] but with an explicit per-call timeout. A
+    /// `None` value means "wait forever" — useful for genuinely
+    /// long-running RPCs that should escape the client default.
+    pub async fn call_raw_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Value, ControlError> {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Err(ControlError::Closed);
         }
@@ -213,9 +261,29 @@ impl ControlClient {
             pending.remove(&id);
             return Err(err);
         }
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => Err(ControlError::Closed),
+        let recv = async {
+            match rx.await {
+                Ok(result) => result,
+                Err(_) => Err(ControlError::Closed),
+            }
+        };
+        match timeout {
+            Some(deadline) => match tokio::time::timeout(deadline, recv).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // Reclaim the pending slot so a late reply does
+                    // not leak. The reader_loop's `send` on the
+                    // already-dropped `oneshot::Sender` then drops
+                    // harmlessly.
+                    let mut pending = self.inner.pending.lock().await;
+                    pending.remove(&id);
+                    Err(ControlError::Timeout {
+                        method: method.to_string(),
+                        after: deadline,
+                    })
+                }
+            },
+            None => recv.await,
         }
     }
 
@@ -250,6 +318,16 @@ impl ControlClient {
     pub async fn shutdown(&self) -> Result<(), ControlError> {
         let _ = self.call_raw("daemon.shutdown", Value::Null).await?;
         Ok(())
+    }
+
+    /// Update the default per-RPC timeout. `None` reverts to the
+    /// wait-forever historical behaviour.
+    pub fn set_default_timeout(&self, timeout: Option<std::time::Duration>) {
+        *self
+            .inner
+            .default_timeout
+            .lock()
+            .expect("default_timeout mutex poisoned") = timeout;
     }
 
     async fn write_frame(&self, bytes: &[u8]) -> Result<(), ControlError> {
@@ -446,5 +524,83 @@ mod tests {
         std::fs::write(&lock, "pid=42\nmcp=127.0.0.1:1\ncontrol_sock=/tmp/x.sock\n").unwrap();
         let socket = discover(Some(dir.path())).unwrap();
         assert_eq!(socket.path(), Path::new("/tmp/x.sock"));
+    }
+
+    /// Drive a client over the local end of a `tokio::io::duplex`
+    /// pair. The remote side is exposed to the test so it can decide
+    /// whether to reply, hang, or close.
+    fn paired_client() -> (ControlClient, tokio::io::DuplexStream) {
+        let (local, remote) = tokio::io::duplex(4096);
+        let client = ControlClient::spawn(local);
+        (client, remote)
+    }
+
+    /// With a default timeout set, a `call_raw` against a peer that
+    /// never replies must surface as `ControlError::Timeout` rather
+    /// than hanging forever. The pending registry is also drained so
+    /// the slot does not leak.
+    #[tokio::test]
+    async fn call_raw_times_out_when_peer_never_responds() {
+        let (client, _remote) = paired_client();
+        client.set_default_timeout(Some(std::time::Duration::from_millis(50)));
+
+        let start = std::time::Instant::now();
+        let err = client
+            .call_raw("daemon.methods", Value::Null)
+            .await
+            .expect_err("must time out");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "timeout took {:?}",
+            start.elapsed()
+        );
+        match err {
+            ControlError::Timeout { method, after } => {
+                assert_eq!(method, "daemon.methods");
+                assert_eq!(after, std::time::Duration::from_millis(50));
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        let pending = client.inner.pending.lock().await;
+        assert!(pending.is_empty(), "pending slot must be reclaimed");
+    }
+
+    /// Without a default timeout, a per-call `Some(...)` still applies.
+    #[tokio::test]
+    async fn call_raw_with_timeout_overrides_a_missing_default() {
+        let (client, _remote) = paired_client();
+        let err = client
+            .call_raw_with_timeout(
+                "daemon.methods",
+                Value::Null,
+                Some(std::time::Duration::from_millis(20)),
+            )
+            .await
+            .expect_err("must time out");
+        assert!(matches!(err, ControlError::Timeout { .. }));
+    }
+
+    /// A `None` per-call timeout reverts to wait-forever even when a
+    /// default is set, so long-running RPCs can opt out explicitly.
+    /// Closing the remote half makes the wait return promptly with
+    /// `Closed` instead of hanging the test runner.
+    #[tokio::test]
+    async fn call_raw_with_timeout_none_ignores_the_default() {
+        let (client, remote) = paired_client();
+        client.set_default_timeout(Some(std::time::Duration::from_millis(20)));
+        drop(remote);
+
+        let err = client
+            .call_raw_with_timeout("daemon.methods", Value::Null, None)
+            .await
+            .expect_err("must error on dropped peer, not time out");
+        // Either the write itself fails with the OS broken-pipe shape
+        // or the response wait sees the reader loop close — both are
+        // valid "peer is gone" outcomes; the contract here is just
+        // "did not collapse into Timeout despite the 20ms default".
+        assert!(
+            matches!(err, ControlError::Closed | ControlError::Transport(_)),
+            "expected Closed or Transport, got {err:?}"
+        );
     }
 }

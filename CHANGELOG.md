@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **control-client: per-RPC timeout protects the CLI against a hung
+  daemon.** Every `ControlClient::call_raw` and `await_jobs` used to
+  wait forever, so a daemon that wedged after accepting a request
+  left the operator with only Ctrl-C as a way out. The client now
+  carries an optional default timeout, set by `connect_with_default
+  _timeout` (CLI default: 60s); on elapse it reclaims the pending
+  slot and returns the new `ControlError::Timeout`. `await_jobs`
+  gains a matching stall timeout that resets on every event, so a
+  daemon that stops emitting progress fails the wait instead of
+  hanging it.
+
 - **cli: `distill verify` no longer fabricates an empty `reference.db`
   on a typo.** Passing a path that did not exist (or pointed at a
   directory) handed control through to `Refs::open`, which silently

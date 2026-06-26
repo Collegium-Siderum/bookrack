@@ -5,7 +5,21 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Default per-RPC timeout applied to every [`ControlClient`] the CLI
+/// builds through [`connect`]. Sized generously so steady-state ops
+/// never trip it on a healthy daemon while still catching a daemon
+/// that has wedged. Adjust through the matching env knob in the next
+/// pass.
+const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Default stall timeout for [`await_jobs`]: how long the wait loop
+/// will tolerate zero events before reporting that the daemon has
+/// stopped progressing. The timer resets on every event seen, so
+/// long-running jobs that keep emitting `worker.progress` survive
+/// regardless of total elapsed time.
+const DEFAULT_AWAIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::ctx;
@@ -21,13 +35,18 @@ use tokio::sync::broadcast;
 /// transport failure, so the top-level reporter in `main` can render
 /// a uniform "bookrack: …" prefix and map to the right exit code
 /// instead of every call site re-rolling its own `eprintln!`.
+///
+/// Sets a default per-RPC timeout of [`DEFAULT_CALL_TIMEOUT`] on the
+/// returned client so a hung daemon surfaces as
+/// [`ControlError::Timeout`] instead of an unkillable foreground.
 pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
     let socket = match bookrack_control_client::discover(runtime_dir) {
         Ok(socket) => socket,
         Err(ControlError::NotRunning) => return Err(BookrackCliError::DaemonNotRunning.into()),
         Err(source) => return Err(BookrackCliError::DaemonUnreachable { source }.into()),
     };
-    match bookrack_control_client::connect(&socket).await {
+    match bookrack_control_client::connect_with_default_timeout(&socket, DEFAULT_CALL_TIMEOUT).await
+    {
         Ok(client) => Ok(Arc::new(client)),
         Err(ControlError::NotRunning) => Err(BookrackCliError::DaemonNotRunning.into()),
         Err(source) => Err(BookrackCliError::DaemonUnreachable { source }.into()),
@@ -118,21 +137,36 @@ pub async fn call_with_progress_value(
 ///
 /// `worker.progress` events are still rendered while the wait is in
 /// flight, so the operator sees per-stage progress on stderr.
+///
+/// Bounded by a stall timeout equal to [`DEFAULT_AWAIT_STALL_TIMEOUT`]
+/// so a daemon that silently stops emitting events does not leave the
+/// CLI hanging forever; the timer resets on every event seen.
 pub async fn await_jobs(
     rx: broadcast::Receiver<Event>,
     job_ids: &[String],
 ) -> Result<JobOutcomeReport> {
-    let report = await_jobs_from_rx(rx, job_ids.to_vec(), Instant::now()).await?;
+    let report = await_jobs_from_rx(
+        rx,
+        job_ids.to_vec(),
+        Instant::now(),
+        DEFAULT_AWAIT_STALL_TIMEOUT,
+    )
+    .await?;
     finish_progress_line();
     Ok(report)
 }
 
 /// Test-friendly core of [`await_jobs`]: drains the receiver until
 /// every awaited id has appeared in a `queue.tick`'s `last_finished`.
+///
+/// `stall_timeout` bounds the wait between consecutive events. The
+/// timer resets every time an event lands; a stretch with no events
+/// at all surfaces as an error instead of hanging the CLI.
 async fn await_jobs_from_rx(
     mut rx: broadcast::Receiver<Event>,
     job_ids: Vec<String>,
     started_at: Instant,
+    stall_timeout: Duration,
 ) -> Result<JobOutcomeReport> {
     if job_ids.is_empty() {
         return Ok(JobOutcomeReport::new(Vec::new(), started_at.elapsed()));
@@ -140,8 +174,16 @@ async fn await_jobs_from_rx(
     let mut pending: HashSet<String> = job_ids.into_iter().collect();
     let mut jobs: Vec<JobOutcomeRecord> = Vec::with_capacity(pending.len());
     while !pending.is_empty() {
-        match rx.recv().await {
-            Ok(event) => {
+        match tokio::time::timeout(stall_timeout, rx.recv()).await {
+            Err(_elapsed) => {
+                return Err(eyre::eyre!(
+                    "control event stream stalled for {}s with {} job(s) still pending; \
+                     daemon may be unresponsive",
+                    stall_timeout.as_secs(),
+                    pending.len()
+                ));
+            }
+            Ok(Ok(event)) => {
                 if event.lag {
                     eprintln!("\nbookrack: event stream lagged; waiting on remaining jobs");
                     continue;
@@ -154,8 +196,8 @@ async fn await_jobs_from_rx(
                     jobs.push(record);
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => {
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => {
                 return Err(eyre::eyre!(
                     "control event stream closed before {} job(s) finished",
                     pending.len()
@@ -382,10 +424,15 @@ mod tests {
         }
     }
 
+    /// Loose default for in-test waits: long enough that the event
+    /// loop can't race the timer in CI, short enough that the stall
+    /// test still finishes promptly.
+    const TEST_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
     #[tokio::test]
     async fn await_jobs_returns_immediately_when_empty() {
         let (_tx, rx) = broadcast::channel::<Event>(4);
-        let report = await_jobs_from_rx(rx, Vec::new(), Instant::now())
+        let report = await_jobs_from_rx(rx, Vec::new(), Instant::now(), TEST_STALL_TIMEOUT)
             .await
             .unwrap();
         assert!(report.jobs.is_empty());
@@ -396,7 +443,9 @@ mod tests {
     async fn await_jobs_collects_all_three_terminal_states() {
         let (tx, rx) = broadcast::channel::<Event>(16);
         let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let handle = tokio::spawn(async move { await_jobs_from_rx(rx, ids, Instant::now()).await });
+        let handle = tokio::spawn(async move {
+            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+        });
         tx.send(tick("a", "done", 2, 1)).unwrap();
         tx.send(tick("b", "failed", 1, 1)).unwrap();
         tx.send(tick("c", "cancelled", 0, 0)).unwrap();
@@ -412,7 +461,9 @@ mod tests {
     async fn await_jobs_ignores_ticks_for_other_ids_and_empty_finished() {
         let (tx, rx) = broadcast::channel::<Event>(16);
         let ids = vec!["target".to_string()];
-        let handle = tokio::spawn(async move { await_jobs_from_rx(rx, ids, Instant::now()).await });
+        let handle = tokio::spawn(async move {
+            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+        });
         tx.send(tick_without_finished()).unwrap();
         tx.send(tick("other", "done", 1, 0)).unwrap();
         tx.send(tick("target", "done", 0, 0)).unwrap();
@@ -422,11 +473,34 @@ mod tests {
         assert!(report.all_succeeded());
     }
 
+    /// A daemon that accepts the job but then stops emitting any
+    /// events at all must not leave the CLI hanging: the stall timer
+    /// elapses and the wait returns an actionable error.
+    #[tokio::test]
+    async fn await_jobs_errors_when_stream_stalls_with_no_events() {
+        let (tx, rx) = broadcast::channel::<Event>(4);
+        let ids = vec!["a".to_string()];
+        let started = Instant::now();
+        let err = await_jobs_from_rx(rx, ids, started, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        drop(tx);
+        let msg = err.to_string();
+        assert!(msg.contains("stalled"), "error text: {msg}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stall fired after {:?}",
+            started.elapsed()
+        );
+    }
+
     #[tokio::test]
     async fn await_jobs_errors_when_stream_closes_with_pending() {
         let (tx, rx) = broadcast::channel::<Event>(4);
         let ids = vec!["a".to_string()];
-        let handle = tokio::spawn(async move { await_jobs_from_rx(rx, ids, Instant::now()).await });
+        let handle = tokio::spawn(async move {
+            await_jobs_from_rx(rx, ids, Instant::now(), TEST_STALL_TIMEOUT).await
+        });
         drop(tx);
         let err = handle.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("1 job"));
