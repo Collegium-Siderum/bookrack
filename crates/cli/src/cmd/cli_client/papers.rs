@@ -50,7 +50,7 @@ async fn metadata(
     default_audit_profile: Option<String>,
 ) -> Result<()> {
     use bookrack_cli_grammar::PapersMetadataAction;
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersMetadataAction::Reaudit {
             intake_id,
@@ -236,7 +236,7 @@ async fn review_status_call(
 }
 
 async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let params = json!({
         "path": args.path,
         "out": args.out,
@@ -250,7 +250,7 @@ async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<
 }
 
 async fn corpus(action: PapersCorpusAction, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersCorpusAction::Rebuild {
             include_vectors,
@@ -293,7 +293,7 @@ async fn corpus(action: PapersCorpusAction, runtime_dir: Option<PathBuf>) -> Res
 }
 
 async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersVectorsAction::Rebuild {
             kind,
@@ -347,7 +347,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
 }
 
 async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         PapersStampsAction::Reconcile => {
             helpers::call_and_print(&client, "papers.stamps_reconcile", json!({})).await
@@ -356,7 +356,7 @@ async fn stamps(action: PapersStampsAction, runtime_dir: Option<PathBuf>) -> Res
 }
 
 async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let selectors = json!({
         "intake_id": args.intake_id,
         "sha": args.sha,
@@ -401,7 +401,7 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
     } else {
         vec![args.path]
     };
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
 
     // Subscribe before issuing the RPC so `queue.tick` events fired
     // by the worker between submit-ack and the wait loop's first
@@ -433,7 +433,7 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
 }
 
 async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let params = json!({
         "limit": args.limit,
         "offset": args.offset,
@@ -444,7 +444,7 @@ async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
 }
 
 async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let params = json!({
         "title_substring": args.title,
         "contributor_name": args.contributor,
@@ -460,7 +460,7 @@ async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
 }
 
 async fn show(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let response = helpers::dispatch(
         &client,
         "library.show_paper",
@@ -576,7 +576,7 @@ fn render_paper_detail(response: &Value) {
 }
 
 async fn toc(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     helpers::call_and_print(
         &client,
         "library.show_paper_toc",
@@ -586,7 +586,7 @@ async fn toc(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
 }
 
 async fn export_csl(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     helpers::call_and_print(
         &client,
         "papers.export_csl",
@@ -596,7 +596,7 @@ async fn export_csl(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> 
 }
 
 async fn source(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     helpers::call_and_print(
         &client,
         "papers.fetch_source",

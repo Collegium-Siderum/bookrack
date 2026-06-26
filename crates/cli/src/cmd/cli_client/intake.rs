@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::helpers;
 
 pub async fn run(action: IntakeAction, runtime_dir: Option<PathBuf>) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         IntakeAction::Ocr {
             ocr_md,

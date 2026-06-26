@@ -59,7 +59,7 @@ async fn call_method(method: &str, params: &[String]) -> Result<()> {
             .with_context(|| format!("parse params for `{method}` as JSON"))?,
         None => Value::Null,
     };
-    let client = helpers::connect_or_exit(None).await;
+    let client = helpers::connect(None).await?;
     let value = client
         .call_raw(method, payload)
         .await
@@ -92,7 +92,7 @@ fn print_info(lock_path: &Path) -> Result<()> {
 }
 
 async fn print_tools() -> Result<()> {
-    let client = helpers::connect_or_exit(None).await;
+    let client = helpers::connect(None).await?;
     let methods = client
         .call_raw("daemon.methods", Value::Null)
         .await
@@ -145,7 +145,7 @@ async fn run_logs(args: &[String]) -> Result<()> {
 }
 
 async fn follow_logs() -> Result<()> {
-    let client = helpers::connect_or_exit(None).await;
+    let client = helpers::connect(None).await?;
     let mut events = client
         .subscribe()
         .await
@@ -165,7 +165,7 @@ async fn follow_logs() -> Result<()> {
 }
 
 async fn tail_logs(limit: u64) -> Result<()> {
-    let client = helpers::connect_or_exit(None).await;
+    let client = helpers::connect(None).await?;
     let mut events = client
         .subscribe()
         .await

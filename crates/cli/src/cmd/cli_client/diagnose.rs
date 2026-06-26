@@ -13,7 +13,7 @@ pub async fn run(
     no_scrub: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<()> {
-    let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
     let params = json!({
         "out": out,
         "days": days,

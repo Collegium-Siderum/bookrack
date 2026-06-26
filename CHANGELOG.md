@@ -62,6 +62,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- Every predictable CLI failure now flows through a typed
+  `bookrack_cli::error::BookrackCliError` enum and the same
+  `color-eyre` reporter, ending the old split between
+  `eprintln!`+`std::process::exit(2)` for daemon-not-running, an
+  ad-hoc lock-conflict path in `bookrack run`, and `doctor`'s
+  hand-rolled `std::process::exit(1)`. Variants
+  (`DaemonNotRunning`, `DaemonUnreachable`, `StaleSessionLock`,
+  `SessionLockUnreadable`, `DoctorUnhealthy`) each carry their
+  own exit code and one-line message; unexpected errors still
+  fall through to the full `color-eyre` cause chain so internal
+  bugs stay debuggable. `helpers::connect_or_exit` is renamed to
+  `helpers::connect` and returns `Result<Arc<ControlClient>>`;
+  every call site uses `?` for propagation. The
+  `oneshot_subcommands_consistent_no_daemon` integration test
+  continues to expect exit 2 and a `bookrack daemon not running`
+  hint on stderr.
 - Destructive-action confirmation runs through a single
   `bookrack_cli::render::confirm::confirm_destructive` helper with
   two strengths: `Soft` accepts a case-insensitive `yes` / `y`

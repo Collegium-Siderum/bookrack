@@ -493,8 +493,20 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{err:?}");
-            std::process::ExitCode::FAILURE
+            // Typed user-error variants render as a single
+            // operator-facing line and pick their own exit code, so
+            // predictable failures stay quiet. Everything else falls
+            // through to color-eyre's full `Debug` cause chain so
+            // unexpected errors stay debuggable.
+            if let Some(cli_err) = err.downcast_ref::<bookrack_cli::error::BookrackCliError>() {
+                if !cli_err.is_self_reported() {
+                    eprintln!("bookrack: {cli_err}");
+                }
+                std::process::ExitCode::from(cli_err.exit_code())
+            } else {
+                eprintln!("{err:?}");
+                std::process::ExitCode::FAILURE
+            }
         }
     }
 }
@@ -562,12 +574,13 @@ async fn run() -> Result<()> {
             None,
         )
         .await?;
-        // The doctor renderer has already drawn the per-check table
-        // plus the summary line, so an unhealthy report exits with a
-        // non-zero status without going through `Err(Report)` and
-        // adding an extra colored error line on top of the table.
+        // The doctor renderer already drew the per-check table plus
+        // the summary line. Surface the failure through a typed
+        // `BookrackCliError::DoctorUnhealthy` so the top-level reporter
+        // maps it to exit code 1 without printing a redundant
+        // `bookrack: …` prefix on top of the table.
         if !healthy {
-            std::process::exit(1);
+            return Err(bookrack_cli::error::BookrackCliError::DoctorUnhealthy.into());
         }
         return Ok(());
     }

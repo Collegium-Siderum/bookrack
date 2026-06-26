@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
 use bookrack_ops::Caller;
 use bookrack_runtime::control::HealthProbe;
@@ -97,19 +98,21 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
 
 /// Resolve a session-lock conflict by probing the running daemon and
 /// taking the action that matches the entry point. `LaunchMode::Cli`
-/// prints the recorded pid and control socket and exits zero so a
+/// prints the recorded pid and control socket and returns `Ok` so a
 /// second `bookrack run` invocation is a no-op; `LaunchMode::Gui`
-/// routes a `tray.focus` RPC at the live daemon and exits zero so a
-/// double-launched GUI raises its existing window. A lock pointing at
-/// a dead daemon exits with status 3; an unprobeable lock (no
-/// `control_sock=` recorded) falls back to surfacing the original
-/// acquire error.
+/// routes a `tray.focus` RPC at the live daemon and likewise returns
+/// `Ok` so a double-launched GUI raises its existing window. A lock
+/// pointing at a dead daemon returns
+/// [`BookrackCliError::StaleSessionLock`] (exit 3); an unprobeable
+/// lock returns [`BookrackCliError::SessionLockUnreadable`] (exit 1).
 async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchMode) -> Result<()> {
     let info = match bookrack_session::peek_lock(lock_path) {
         Ok(Some(i)) => i,
         Ok(None) | Err(_) => {
-            eprintln!("{err:#}");
-            std::process::exit(1);
+            return Err(BookrackCliError::SessionLockUnreadable {
+                message: format!("{err:#}"),
+            }
+            .into());
         }
     };
     let probe = bookrack_runtime::control::probe(&info, Duration::from_secs(2)).await;
@@ -119,7 +122,7 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchM
                 "bookrack daemon already running: pid={pid} control_sock={}",
                 sock.display()
             );
-            std::process::exit(0);
+            Ok(())
         }
         (LaunchMode::Gui, HealthProbe::Healthy(_pid, sock)) => {
             let socket = bookrack_control_client::ControlSocket::from_path(sock);
@@ -130,22 +133,15 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchM
                 .call("tray.focus", Value::Null)
                 .await
                 .context("tray.focus rpc")?;
-            std::process::exit(0);
+            Ok(())
         }
-        (_, HealthProbe::Stale) => {
-            eprintln!(
-                "bookrack session lock at {} is stale (no live daemon answered within 2s).",
-                lock_path.display()
-            );
-            eprintln!(
-                "Remove the lock file manually and re-run bookrack: rm {}",
-                lock_path.display()
-            );
-            std::process::exit(3);
+        (_, HealthProbe::Stale) => Err(BookrackCliError::StaleSessionLock {
+            path: lock_path.to_path_buf(),
         }
-        (_, HealthProbe::Unprobeable) => {
-            eprintln!("{err:#}");
-            std::process::exit(1);
+        .into()),
+        (_, HealthProbe::Unprobeable) => Err(BookrackCliError::SessionLockUnreadable {
+            message: format!("{err:#}"),
         }
+        .into()),
     }
 }

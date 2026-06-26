@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
 use bookrack_control_client::{ControlClient, ControlError, Event};
@@ -14,35 +15,23 @@ use eyre::{Context, Result};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// Exit code the binary returns when the daemon is unreachable, or
-/// when a clap parse fails.
-pub const EXIT_NOT_RUNNING: i32 = 2;
-
-/// Discover the daemon and open a control-plane connection. On
-/// `ControlError::NotRunning` the process exits with code 2 after
-/// printing a stable stderr message.
-pub async fn connect_or_exit(runtime_dir: Option<&Path>) -> Arc<ControlClient> {
+/// Discover the daemon and open a control-plane connection. Returns
+/// [`BookrackCliError::DaemonNotRunning`] when no daemon is listening
+/// and [`BookrackCliError::DaemonUnreachable`] for every other
+/// transport failure, so the top-level reporter in `main` can render
+/// a uniform "bookrack: …" prefix and map to the right exit code
+/// instead of every call site re-rolling its own `eprintln!`.
+pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
     let socket = match bookrack_control_client::discover(runtime_dir) {
         Ok(socket) => socket,
-        Err(ControlError::NotRunning) => not_running_exit(),
-        Err(err) => {
-            eprintln!("bookrack: resolve daemon address: {err}");
-            std::process::exit(EXIT_NOT_RUNNING);
-        }
+        Err(ControlError::NotRunning) => return Err(BookrackCliError::DaemonNotRunning.into()),
+        Err(source) => return Err(BookrackCliError::DaemonUnreachable { source }.into()),
     };
     match bookrack_control_client::connect(&socket).await {
-        Ok(client) => Arc::new(client),
-        Err(ControlError::NotRunning) => not_running_exit(),
-        Err(err) => {
-            eprintln!("bookrack: connect to {}: {err}", socket.path().display());
-            std::process::exit(EXIT_NOT_RUNNING);
-        }
+        Ok(client) => Ok(Arc::new(client)),
+        Err(ControlError::NotRunning) => Err(BookrackCliError::DaemonNotRunning.into()),
+        Err(source) => Err(BookrackCliError::DaemonUnreachable { source }.into()),
     }
-}
-
-fn not_running_exit() -> ! {
-    eprintln!("bookrack daemon not running; start it with: bookrack run");
-    std::process::exit(EXIT_NOT_RUNNING);
 }
 
 /// Send one JSON-RPC request and return the `result` payload.
