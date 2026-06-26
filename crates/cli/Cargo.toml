@@ -35,6 +35,9 @@ color-eyre.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+comfy-table.workspace = true
+indicatif.workspace = true
+anstyle.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true

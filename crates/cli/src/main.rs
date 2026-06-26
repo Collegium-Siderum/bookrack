@@ -82,6 +82,22 @@ struct Cli {
         help_heading = "Common Options"
     )]
     audit_profile: Option<String>,
+    /// Emit machine-parseable JSON instead of the human renderer.
+    /// Mutually exclusive with `--quiet`.
+    #[arg(
+        long,
+        global = true,
+        conflicts_with = "quiet",
+        help_heading = "Output Options"
+    )]
+    json: bool,
+    /// Suppress non-essential stdout on success. Errors still
+    /// surface through the reporter.
+    #[arg(long, global = true, help_heading = "Output Options")]
+    quiet: bool,
+    /// Strip ANSI styling from output even when stderr is a TTY.
+    #[arg(long, global = true, help_heading = "Output Options")]
+    no_color: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -188,8 +204,8 @@ enum Command {
     /// embed model is pulled. Exits with a non-zero status when any row
     /// fails, so a script can branch on the result.
     Doctor {
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
+        /// Deprecated: use the top-level `--json` instead.
+        #[arg(long, hide = true)]
         json: bool,
         /// Download the pinned PDFium build into the per-user managed
         /// directory before gathering the report. PDF ingest needs the
@@ -310,8 +326,8 @@ pub(crate) enum LibrariesAction {
     ///
     /// Marks the `default = "..."` fallback when one is set.
     List {
-        /// Emit machine-readable JSON instead of the human listing.
-        #[arg(long)]
+        /// Deprecated: use the top-level `--json` instead.
+        #[arg(long, hide = true)]
         json: bool,
     },
     /// Print the per-library status card.
@@ -486,6 +502,37 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<()> {
     let cli = parse_cli_with_natural_name_hints();
 
+    // Install the process-wide render context from the global output
+    // flags. Subcommand renderers read from `bookrack_cli::render::ctx()`
+    // to decide between human and JSON formatting; legacy per-command
+    // `--json` flags (kept as hidden aliases on `doctor` and
+    // `libraries list`) merge into the global view at their dispatch
+    // arms below.
+    {
+        use bookrack_cli::render::{ColorMode, OutputMode, RenderCtx};
+        let output = if cli.json {
+            OutputMode::Json
+        } else if cli.quiet {
+            OutputMode::Quiet
+        } else {
+            OutputMode::Human
+        };
+        let color = if cli.no_color {
+            ColorMode::Never
+        } else {
+            ColorMode::Auto
+        };
+        if cli.no_color {
+            // SAFETY: run() executes on the single startup task before
+            // any subcommand spawns its own work; `set_var` is sound
+            // here and propagates `NO_COLOR` to color-eyre's error
+            // formatter for the remainder of the process.
+            unsafe { std::env::set_var("NO_COLOR", "1") };
+        }
+        bookrack_cli::render::init(RenderCtx::new(output, color));
+    }
+    let json_global = cli.json;
+
     // Warn before any subcommand dispatch when the invoking shell's
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
@@ -508,7 +555,7 @@ async fn run() -> Result<()> {
     {
         let healthy = cmd::cli_client::doctor::run(
             &cli.selection(),
-            *json,
+            *json || json_global,
             *install_pdfium,
             *rename_envelopes,
             *dry_run,
@@ -593,7 +640,12 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::Verify => cmd::cli_client::verify::run(None).await,
-        Command::Libraries { action } => cmd::cli_client::libraries::run(action, None).await,
+        Command::Libraries { mut action } => {
+            if let LibrariesAction::List { json } = &mut action {
+                *json = *json || json_global;
+            }
+            cmd::cli_client::libraries::run(action, None).await
+        }
         Command::Diagnose {
             out,
             days,

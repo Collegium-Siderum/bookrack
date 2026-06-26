@@ -5,3 +5,4 @@
 //! daemon-side primitives now live in `bookrack-runtime`.
 
 pub mod distill_cmd;
+pub mod render;

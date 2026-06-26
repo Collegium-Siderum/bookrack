@@ -186,6 +186,20 @@ tauri-build = "2"
 # Routes a second launch of the same app into the running instance's
 # callback instead of a second event loop. License: MIT OR Apache-2.0.
 tauri-plugin-single-instance = "2"
+# Tabular output renderer for the CLI's read-side commands (queue
+# list, libraries list, papers find/list/show). The render layer
+# wraps it behind `KvTable` / `RowTable` so subcommands compose
+# tables without learning the crate's API. License: MIT.
+comfy-table = "7"
+# Spinner and progress-bar primitive for the CLI's async-job
+# renderers (ingest, vectors, intake ocr, ...). The render layer's
+# `SpinnerWithStage` wraps it so the carriage-return rewrites do
+# not bleed into individual subcommand code. License: MIT.
+indicatif = "0.18"
+# ANSI style tokens shared with `clap`'s built-in styling. The
+# render layer uses it to derive a `ColorMode`-aware palette without
+# pulling in a heavier color library. License: MIT OR Apache-2.0.
+anstyle = "1"
 
 # Test binaries link the full lance / datafusion / arrow / rustls
 # dependency tree once per crate under test. Full debug info pushes the
