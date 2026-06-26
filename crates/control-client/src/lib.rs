@@ -171,7 +171,13 @@ struct Inner<W> {
     pending: Arc<PendingMap>,
     event_tx: broadcast::Sender<Event>,
     next_id: AtomicU64,
-    subscribed: AtomicBool,
+    /// Serializes the server-side `events.subscribe` request so a
+    /// failing first attempt cannot leave concurrent subscribers
+    /// holding receivers against a server that was never told to
+    /// broadcast. The lock is held across the RPC; subsequent
+    /// subscribers wait for the outcome and either reuse the
+    /// subscription or retry it on failure.
+    subscribed: tokio::sync::Mutex<bool>,
     closed: Arc<AtomicBool>,
     /// Applied to every `call_raw` when set. `None` keeps the historical
     /// wait-forever behaviour so direct library consumers that opt in
@@ -207,7 +213,7 @@ impl ControlClient {
             pending: pending.clone(),
             event_tx: event_tx.clone(),
             next_id: AtomicU64::new(1),
-            subscribed: AtomicBool::new(false),
+            subscribed: tokio::sync::Mutex::new(false),
             closed: closed.clone(),
             default_timeout: std::sync::Mutex::new(None),
         });
@@ -301,14 +307,21 @@ impl ControlClient {
     /// the same underlying subscription (the server only needs to be
     /// told once); each receiver sees the same events from this point
     /// forward.
+    ///
+    /// Concurrent subscribers serialize on `inner.subscribed`: the
+    /// first caller through holds the lock across the
+    /// `events.subscribe` RPC, and any other caller arriving in that
+    /// window waits for the outcome rather than racing ahead with a
+    /// receiver against a server that may yet refuse the subscription.
+    /// A failed first attempt leaves the state at `false` so the next
+    /// caller re-issues the RPC instead of inheriting a phantom
+    /// subscription.
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Event>, ControlError> {
-        if !self.inner.subscribed.swap(true, Ordering::SeqCst)
-            && let Err(err) = self
-                .call_raw("events.subscribe", json!({"channels": ["*"]}))
-                .await
-        {
-            self.inner.subscribed.store(false, Ordering::SeqCst);
-            return Err(err);
+        let mut subscribed = self.inner.subscribed.lock().await;
+        if !*subscribed {
+            self.call_raw("events.subscribe", json!({"channels": ["*"]}))
+                .await?;
+            *subscribed = true;
         }
         Ok(self.inner.event_tx.subscribe())
     }
@@ -602,5 +615,108 @@ mod tests {
             matches!(err, ControlError::Closed | ControlError::Transport(_)),
             "expected Closed or Transport, got {err:?}"
         );
+    }
+
+    /// 32 concurrent subscribers must each end up with a receiver
+    /// that observes events posted after the subscription
+    /// handshake. The previous `check-then-swap` shape let later
+    /// subscribers slip past the in-flight `events.subscribe` RPC and
+    /// hold receivers against a server that — if the first attempt
+    /// errored — was never told to broadcast.
+    #[tokio::test]
+    async fn concurrent_subscribers_all_receive_events_after_one_handshake() {
+        let (local, remote) = tokio::io::duplex(8192);
+        let client = Arc::new(ControlClient::spawn(local));
+
+        // Fake server: respond `result: null` to every JSON-RPC
+        // request and broadcast a single `chunk` event once it has
+        // seen any subscribe handshake. Records the number of
+        // `events.subscribe` requests it observed.
+        let (mut read, mut write) = tokio::io::split(remote);
+        let subscribe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = subscribe_count.clone();
+        let server = tokio::spawn(async move {
+            let mut buf = String::new();
+            let mut reader = BufReader::new(&mut read);
+            loop {
+                buf.clear();
+                let n = reader.read_line(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let frame: Value = match serde_json::from_str(buf.trim()) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let id = frame.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
+                let method = frame
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if method == "events.subscribe" {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                let response =
+                    json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}).to_string();
+                write.write_all(response.as_bytes()).await.unwrap();
+                write.write_all(b"\n").await.unwrap();
+                if method == "events.subscribe" {
+                    // Spawn a side task that keeps emitting events
+                    // every 5 ms after the first handshake, so even
+                    // the latest subscriber to register its
+                    // `broadcast::Receiver` still sees one. A single
+                    // one-shot event would race subscribers that
+                    // finish acquiring the mutex after it has fired.
+                    let mut shared = write;
+                    tokio::spawn(async move {
+                        for _ in 0..400 {
+                            let event = json!({
+                                "jsonrpc": "2.0",
+                                "method": "event",
+                                "params": {"channel": "chunk", "value": {"hello": true}},
+                            })
+                            .to_string();
+                            if shared.write_all(event.as_bytes()).await.is_err() {
+                                return;
+                            }
+                            if shared.write_all(b"\n").await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                    });
+                    return;
+                }
+            }
+        });
+
+        let mut handles = Vec::with_capacity(32);
+        for _ in 0..32 {
+            let client = client.clone();
+            handles.push(tokio::spawn(async move {
+                let mut rx = client.subscribe().await.expect("subscribe");
+                tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("receive event")
+                    .expect("event payload")
+            }));
+        }
+
+        let mut received = 0;
+        for handle in handles {
+            let event = handle.await.expect("subscriber task");
+            assert_eq!(event.channel, "chunk");
+            received += 1;
+        }
+        assert_eq!(received, 32, "every subscriber must receive the event");
+        assert_eq!(
+            subscribe_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only one events.subscribe RPC must reach the server"
+        );
+
+        drop(client);
+        let _ = server.await;
     }
 }

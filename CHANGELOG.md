@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **control-client: `subscribe` now serializes concurrent callers.**
+  The previous check-then-swap on an `AtomicBool` let a second
+  subscriber slip past while the first was still issuing the
+  `events.subscribe` RPC; if the first attempt then errored, the
+  second already held a `broadcast::Receiver` against a server that
+  had never been told to broadcast. The flag is now a
+  `tokio::sync::Mutex<bool>` held across the RPC, so the second
+  caller waits on the outcome and either reuses the established
+  subscription or retries the handshake.
+
 - **distill: an unparseable page marker now errors instead of
   collapsing to page 0.** `SplitPages` used `parse::<u32>().unwrap_or(0)`
   on the page and sheet captures, so a digit run that overflowed `u32`
