@@ -57,9 +57,28 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
             .await
         }
         WriteVectorsAction::Reset { yes, resume } => {
-            if !crate::util::confirm_vectors_reset(yes, resume)? {
-                println!("aborted; no changes written");
-                return Ok(());
+            use std::io::IsTerminal;
+
+            use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
+
+            if !yes && !resume {
+                if !std::io::stdin().is_terminal() {
+                    eyre::bail!("vectors reset drops the existing vectors; pass --yes to confirm");
+                }
+                eprintln!(
+                    "This drops the chunks table and re-embeds every book from the corpus tree."
+                );
+                eprintln!("The old vectors are unrecoverable.");
+                let confirmed = confirm_destructive(
+                    "Type RESET (exact, uppercase) to continue:",
+                    ConfirmMode::Hard { token: "RESET" },
+                    false,
+                )
+                .map_err(|e| eyre::eyre!("read RESET confirmation: {e}"))?;
+                if !confirmed {
+                    println!("aborted; no changes written");
+                    return Ok(());
+                }
             }
             let params = json!({"yes": true, "resume": resume});
             helpers::call_with_progress(client, "vectors.reset", params).await

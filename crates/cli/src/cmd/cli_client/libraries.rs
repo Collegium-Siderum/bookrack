@@ -52,12 +52,15 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             copy_mode,
             yes,
         } => {
-            if !yes
-                && !crate::util::confirm(&format!(
-                    "Fork library to '{new_name}' at {}? [yes/no]: ",
-                    data_dir.display(),
-                ))?
-            {
+            use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
+
+            let prompt = format!(
+                "Fork library to '{new_name}' at {}? Type 'yes' to continue:",
+                data_dir.display(),
+            );
+            let confirmed = confirm_destructive(&prompt, ConfirmMode::Soft, yes)
+                .map_err(|e| eyre::eyre!("read fork confirmation: {e}"))?;
+            if !confirmed {
                 eprintln!("aborted; no changes written");
                 return Ok(());
             }
@@ -66,12 +69,24 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
                 CopyMode::Copy => "copy",
             };
             let params = json!({
-                "new_name": new_name,
-                "data_dir": data_dir,
+                "new_name": new_name.clone(),
+                "data_dir": data_dir.clone(),
                 "copy_mode": mode,
                 "yes": true,
             });
-            helpers::call_and_print(&client, "library.fork", params).await
+            let response = helpers::dispatch(&client, "library.fork", params).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            println!(
+                "Forked library to '{new_name}' at {} ({mode}).",
+                data_dir.display()
+            );
+            Ok(())
         }
     }
 }

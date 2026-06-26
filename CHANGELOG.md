@@ -62,6 +62,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- Destructive-action confirmation runs through a single
+  `bookrack_cli::render::confirm::confirm_destructive` helper with
+  two strengths: `Soft` accepts a case-insensitive `yes` / `y`
+  (used by `corpus rebuild`, `remove`, `vectors reembed`, the
+  `papers.*` peers, and `libraries fork`); `Hard { token }`
+  requires the operator to retype the literal sentinel (used by
+  `vectors reset` for the `RESET` token). Prompts move from stdout
+  to stderr so a piped stdout stays clean, and `libraries fork`
+  now prints `Forked library to '<name>' at <path> (<mode>).` on
+  success instead of dumping the daemon's JSON response. The
+  legacy `crate::util::confirm` / `confirm_token` /
+  `confirm_vectors_reset` are removed.
 - `bookrack queue list`, `bookrack libraries list`, `bookrack libraries
   info`, `bookrack papers list`, `bookrack papers find`, and
   `bookrack papers show` render a human table or key-value card by

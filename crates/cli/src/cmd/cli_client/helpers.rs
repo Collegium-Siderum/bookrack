@@ -318,8 +318,9 @@ pub fn print_value(value: &Value) {
 /// `{ yes = true, plan_id = … }` for the second.
 ///
 /// When `user_yes` is `false` the helper prompts via
-/// [`crate::util::confirm`]; an empty / declined answer aborts
-/// before the execute leg runs.
+/// [`bookrack_cli::render::confirm::confirm_destructive`] in `Soft`
+/// mode; an empty / declined answer aborts before the execute leg
+/// runs.
 pub async fn run_pinned_destructive(
     client: std::sync::Arc<ControlClient>,
     method: &str,
@@ -328,6 +329,8 @@ pub async fn run_pinned_destructive(
     user_yes: bool,
     confirm_prompt: &str,
 ) -> Result<()> {
+    use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
+
     selectors["dry_run"] = Value::Bool(true);
     let plan = call_with_progress_value(client.clone(), method, selectors).await?;
     print_value(&plan);
@@ -344,7 +347,9 @@ pub async fn run_pinned_destructive(
             eyre::eyre!("{method}: daemon dry-run response did not include a plan_id")
         })?;
 
-    if !user_yes && !crate::util::confirm(confirm_prompt)? {
+    let confirmed = confirm_destructive(confirm_prompt, ConfirmMode::Soft, user_yes)
+        .context("read destructive-action confirmation")?;
+    if !confirmed {
         println!("aborted; no changes written");
         return Ok(());
     }
