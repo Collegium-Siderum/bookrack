@@ -372,6 +372,13 @@ async fn remove(args: PapersRemoveArgs, runtime_dir: Option<PathBuf>) -> Result<
 }
 
 async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let label_owned = args
+        .path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .map(String::from)
+        .unwrap_or_else(|| args.path.display().to_string());
+
     let paths = if args.path.is_dir() {
         if !args.recursive {
             eyre::bail!(
@@ -392,6 +399,16 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
         vec![args.path]
     };
     let client = helpers::connect_or_exit(runtime_dir.as_deref()).await;
+
+    // Subscribe before issuing the RPC so `queue.tick` events fired
+    // by the worker between submit-ack and the wait loop's first
+    // `recv` cannot slip past us.
+    let rx = client
+        .subscribe()
+        .await
+        .map_err(eyre::Report::from)
+        .map_err(|e| e.wrap_err("subscribe to control-plane events"))?;
+
     let mut params = json!({
         "paths": paths,
         "force": args.force,
@@ -399,7 +416,17 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
     if let Some(level) = args.priority {
         params["priority"] = Value::String(level);
     }
-    helpers::call_with_progress(client, "glean.submit", params).await
+    let response = helpers::dispatch(&client, "glean.submit", params).await?;
+    let job_ids = helpers::extract_job_ids(&response);
+
+    if args.no_wait || job_ids.is_empty() {
+        helpers::print_value(&response);
+        return Ok(());
+    }
+
+    let report = helpers::await_jobs(rx, &job_ids).await?;
+    helpers::emit_job_summary(&report, "Ingested", &label_owned);
+    Ok(())
 }
 
 async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {

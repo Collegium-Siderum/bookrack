@@ -62,9 +62,11 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
-- `bookrack ingest <path>` waits for the enqueued job(s) to reach a
-  terminal state by default and prints a one-line human summary on
-  stdout (`Ingested <basename> as <id8> in 12.4s (done)`) instead of
+- `bookrack ingest <path>`, `bookrack papers ingest <path>`, and
+  `bookrack intake ocr <ocr_md> --from-pdf <pdf>` wait for the
+  enqueued job(s) to reach a terminal state by default and print a
+  one-line human summary on stdout (`Ingested <basename> as <id8>
+  in 12.4s (done)`, `OCR-ingested <basename> ...`) instead of
   exiting at queue-ack with a JSON job-id list. The historical
   immediate-return behaviour is available under `--no-wait`, and the
   top-level `--json` flag switches the wait-summary to a

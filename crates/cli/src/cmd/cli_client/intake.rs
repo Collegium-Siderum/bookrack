@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::render::human::basename_or_dash;
 use bookrack_cli_grammar::IntakeAction;
 use eyre::Result;
 use serde_json::{Value, json};
@@ -22,7 +23,18 @@ pub async fn run(action: IntakeAction, runtime_dir: Option<PathBuf>) -> Result<(
             from_pdf,
             expected_pages,
             allow_partial,
+            no_wait,
         } => {
+            // Subscribe before issuing the RPC so a fast worker's
+            // `queue.tick` cannot fire between submit-ack and the
+            // wait loop's first `recv`.
+            let rx = client
+                .subscribe()
+                .await
+                .map_err(eyre::Report::from)
+                .map_err(|e| e.wrap_err("subscribe to control-plane events"))?;
+
+            let label = basename_or_dash(ocr_md.to_str()).to_string();
             let mut params = json!({
                 "ocr_md": ocr_md,
                 "from_pdf": from_pdf,
@@ -31,7 +43,18 @@ pub async fn run(action: IntakeAction, runtime_dir: Option<PathBuf>) -> Result<(
             if let Some(pages) = expected_pages {
                 params["expected_pages"] = Value::from(pages);
             }
-            helpers::call_with_progress(client, "intake.ocr", params).await
+
+            let response = helpers::dispatch(&client, "intake.ocr", params).await?;
+            let job_ids = helpers::extract_job_ids(&response);
+
+            if no_wait || job_ids.is_empty() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+
+            let report = helpers::await_jobs(rx, &job_ids).await?;
+            helpers::emit_job_summary(&report, "OCR-ingested", &label);
+            Ok(())
         }
     }
 }

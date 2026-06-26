@@ -257,6 +257,43 @@ pub fn finish_progress_line() {
     eprintln!();
 }
 
+/// Extract `job_ids` (an array of strings) or `job_id` (a single
+/// string) from an enqueue-style RPC response, returning the empty
+/// vector when neither shape is present.
+pub fn extract_job_ids(value: &Value) -> Vec<String> {
+    if let Some(arr) = value.get("job_ids").and_then(Value::as_array) {
+        return arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+    }
+    if let Some(s) = value.get("job_id").and_then(Value::as_str) {
+        return vec![s.to_string()];
+    }
+    Vec::new()
+}
+
+/// Print a one-shot summary for a finished batch of async jobs.
+///
+/// Mode-aware: silent in `Quiet`; a pretty-printed
+/// [`JobOutcomeReport`] in `Json`; the single-line
+/// `format_one_line` rendering in `Human`. `action` is the verb stem
+/// (`"Ingested"`, `"OCR-ingested"`, ...) and `label` is the noun the
+/// operator can recognise (typically a file basename).
+pub fn emit_job_summary(report: &JobOutcomeReport, action: &str, label: &str) {
+    if ctx().is_quiet() {
+        return;
+    }
+    if ctx().is_json() {
+        match serde_json::to_string_pretty(report) {
+            Ok(text) => println!("{text}"),
+            Err(_) => println!("{{}}"),
+        }
+        return;
+    }
+    println!("{}", report.format_one_line(action, label));
+}
+
 /// Pretty-print a JSON value on stdout.
 pub fn print_value(value: &Value) {
     if ctx().is_quiet() {
