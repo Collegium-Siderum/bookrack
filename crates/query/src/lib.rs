@@ -421,15 +421,15 @@ impl<E: Embedder> Library<E> {
     }
 
     /// List books matching `filter`, paginated. The limit is clamped to
-    /// [`dto::MAX_LIST_LIMIT`]; `truncated` is set when the clamp took
-    /// effect or when `total > offset + books.len()`.
+    /// [`dto::MAX_LIST_LIMIT`]; `truncated` is set when the page does
+    /// not cover the full filter result.
     pub fn find_books(
         &self,
         filter: BookFilter,
         limit: u32,
         offset: u32,
     ) -> Result<ListBooksResult> {
-        let (effective_limit, clamp_triggered) = clamp_limit(limit);
+        let (effective_limit, _) = clamp_limit(limit);
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
 
         let catalog_filter = IntakeFilter {
@@ -440,21 +440,27 @@ impl<E: Embedder> Library<E> {
             format: filter.format.as_deref(),
             ..IntakeFilter::default()
         };
-        let intakes = catalog.find_intakes(&catalog_filter, effective_limit, offset)?;
-        let total = catalog.count_find_intakes(&catalog_filter)?;
-
-        let mut books = Vec::with_capacity(intakes.len());
-        for intake in intakes {
-            let effective =
-                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
-            let title = effective.get("title").map(str::to_string);
-            let contributors =
-                catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
-            let top_contributor = contributors.first().map(|c| c.name.clone());
-            books.push(BookSummary::from_intake(&intake, title, top_contributor));
-        }
+        let (intakes, total) =
+            catalog.find_intakes_page(&catalog_filter, effective_limit, offset)?;
+        let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
+        let effective =
+            catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
+        let contributors = catalog.contributors_for_addresses(&intake_ids, ItemKind::Book)?;
+        let books: Vec<BookSummary> = intakes
+            .iter()
+            .map(|intake| {
+                let title = effective
+                    .get(&intake.intake_id)
+                    .and_then(|e| e.get("title").map(str::to_string));
+                let top_contributor = contributors
+                    .get(&intake.intake_id)
+                    .and_then(|cs| cs.first())
+                    .map(|c| c.name.clone());
+                BookSummary::from_intake(intake, title, top_contributor)
+            })
+            .collect();
         let returned = books.len() as u64;
-        let truncated = clamp_triggered || u64::from(offset) + returned < total;
+        let truncated = u64::from(offset) + returned < total;
         Ok(ListBooksResult {
             books,
             total,

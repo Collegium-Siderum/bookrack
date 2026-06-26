@@ -33,8 +33,8 @@ pub fn list_papers<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result
 }
 
 /// List papers matching `filter`, paginated. The limit is clamped to
-/// [`crate::dto::MAX_LIST_LIMIT`]; `truncated` is set when the clamp
-/// took effect or when `total > offset + papers.len()`.
+/// [`crate::dto::MAX_LIST_LIMIT`]; `truncated` is set when the page
+/// does not cover the full filter result.
 pub fn find_papers<E: Embedder>(
     ops: &Ops<E>,
     filter: PaperFilter,
@@ -54,7 +54,7 @@ pub fn find_papers<E: Embedder>(
         let papers_db = ops
             .papers_catalog_db()
             .ok_or(OpsError::PapersBackendNotConfigured)?;
-        let (effective_limit, clamp_triggered) = clamp_limit(limit);
+        let (effective_limit, _) = clamp_limit(limit);
         let catalog = Catalog::open_read_only(papers_db)?;
         let catalog_filter = IntakeFilter {
             kind: ItemKind::Paper,
@@ -65,32 +65,39 @@ pub fn find_papers<E: Embedder>(
             doi: filter.doi.as_deref(),
             ..IntakeFilter::default()
         };
-        let intakes = catalog.find_intakes(&catalog_filter, effective_limit, offset)?;
-        let total = catalog.count_find_intakes(&catalog_filter)?;
-        let mut papers = Vec::with_capacity(intakes.len());
-        for intake in intakes {
-            let effective =
-                catalog.effective_publication_attrs(intake.intake_id, ItemKind::Paper)?;
-            let title = effective.get("title").map(str::to_string);
-            let doi = effective.get("doi").map(str::to_string);
-            let arxiv_id = effective.get("arxiv_id").map(str::to_string);
-            let container_title = effective.get("container_title").map(str::to_string);
-            let year = effective.get("year").map(str::to_string);
-            let contributors =
-                catalog.contributors_for_address(intake.intake_id, ItemKind::Paper)?;
-            let top_contributor = contributors.first().map(|c| c.name.clone());
-            papers.push(PaperSummary::from_intake(
-                &intake,
-                title,
-                top_contributor,
-                doi,
-                arxiv_id,
-                container_title,
-                year,
-            ));
-        }
+        let (intakes, total) =
+            catalog.find_intakes_page(&catalog_filter, effective_limit, offset)?;
+        let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
+        let effective =
+            catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Paper)?;
+        let contributors = catalog.contributors_for_addresses(&intake_ids, ItemKind::Paper)?;
+        let papers: Vec<PaperSummary> = intakes
+            .iter()
+            .map(|intake| {
+                let attrs = effective.get(&intake.intake_id);
+                let title = attrs.and_then(|e| e.get("title").map(str::to_string));
+                let doi = attrs.and_then(|e| e.get("doi").map(str::to_string));
+                let arxiv_id = attrs.and_then(|e| e.get("arxiv_id").map(str::to_string));
+                let container_title =
+                    attrs.and_then(|e| e.get("container_title").map(str::to_string));
+                let year = attrs.and_then(|e| e.get("year").map(str::to_string));
+                let top_contributor = contributors
+                    .get(&intake.intake_id)
+                    .and_then(|cs| cs.first())
+                    .map(|c| c.name.clone());
+                PaperSummary::from_intake(
+                    intake,
+                    title,
+                    top_contributor,
+                    doi,
+                    arxiv_id,
+                    container_title,
+                    year,
+                )
+            })
+            .collect();
         let returned = papers.len() as u64;
-        let truncated = clamp_triggered || u64::from(offset) + returned < total;
+        let truncated = u64::from(offset) + returned < total;
         Ok(ListPapersResult {
             papers,
             total,

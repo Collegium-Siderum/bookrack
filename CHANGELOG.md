@@ -8,6 +8,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **catalog browse: paginated lists assemble each page in a constant
+  number of catalog queries, and the `truncated` flag drops a stale
+  signal.** The `find_books` / `find_papers` / `list_metadata` reads
+  ran one `find_intakes` plus one `count_find_intakes` and then issued
+  two or three per-row catalog queries inside the page loop, so a page
+  of N rows cost `2N+2` to `3N+2` round trips. Each call now opens
+  one snapshot through a new `find_intakes_page` (page rows and total
+  observed under the same SQLite transaction so a concurrent insert
+  cannot desync them) and assembles the page through the new batched
+  `effective_publication_attrs_for_intakes` /
+  `contributors_for_addresses` / `publication_attrs_for_intakes` /
+  `reviews_for_addresses` accessors. The `truncated` flag also stops
+  reporting "the limit clamp engaged" on its own: it is now `true` iff
+  `offset + returned < total`, which clears the misreport where a
+  caller's over-large limit was clamped but the result still covered
+  every matching row.
+
 ### Fixed
 
 - **distill: a broken regex pattern fails the book.toml load

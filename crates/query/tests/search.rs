@@ -329,9 +329,18 @@ async fn list_books_clamps_to_max_list_limit() {
 
     {
         let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
-        catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-1").format("epub"))
-            .expect("register");
+        // Two intakes: one row fits even under the clamp, so the clamp
+        // engaging is not enough to mark the page as truncated; another
+        // row is needed to overflow the clamped page.
+        let limit_plus_one = MAX_LIST_LIMIT as usize + 1;
+        for n in 0..limit_plus_one {
+            catalog
+                .register_intake(
+                    ItemKind::Book,
+                    &NewIntake::new(format!("sha-{n}")).format("epub"),
+                )
+                .expect("register");
+        }
     }
 
     let library = Library::open(
@@ -348,9 +357,20 @@ async fn list_books_clamps_to_max_list_limit() {
     let page = library
         .list_books(MAX_LIST_LIMIT + 100, 0)
         .expect("list books");
-    assert!(page.truncated, "overrun must mark the page as truncated");
-    assert_eq!(page.total, 1);
-    assert_eq!(page.books.len(), 1);
+    assert_eq!(page.total, MAX_LIST_LIMIT as u64 + 1);
+    assert_eq!(page.books.len(), MAX_LIST_LIMIT as usize);
+    assert!(
+        page.truncated,
+        "the clamped page does not cover the full total"
+    );
+
+    // Second page picks up the row the clamp held back.
+    let tail = library
+        .list_books(MAX_LIST_LIMIT, MAX_LIST_LIMIT)
+        .expect("list tail");
+    assert_eq!(tail.total, MAX_LIST_LIMIT as u64 + 1);
+    assert_eq!(tail.books.len(), 1);
+    assert!(!tail.truncated, "the second page exhausts the filter");
 }
 
 /// Walk `root` and remove the first regular file under any `*.lance/data/`

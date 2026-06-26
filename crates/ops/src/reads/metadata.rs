@@ -144,28 +144,33 @@ fn list_metadata_inner<E: Embedder>(
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
-    let (effective_limit, clamp_triggered) = clamp_limit(limit);
+    let (effective_limit, _) = clamp_limit(limit);
     let catalog = Catalog::open_read_only(ops.catalog_db())?;
-    let intakes = catalog.find_intakes(&filter, effective_limit, offset)?;
-    let total = catalog.count_find_intakes(&filter)?;
-    let mut rows = Vec::with_capacity(intakes.len());
-    for intake in intakes {
-        let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
-        let title = effective.get("title").map(str::to_string);
-        let attrs = catalog.publication_attrs(intake.intake_id, ItemKind::Book)?;
-        let confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-        let review_status = catalog
-            .review(intake.intake_id, ItemKind::Book)?
-            .map(|r| r.status);
-        rows.push(MetadataListRow {
-            intake_id: intake.intake_id,
-            title,
-            confidence,
-            review_status,
-        });
-    }
+    let (intakes, total) = catalog.find_intakes_page(&filter, effective_limit, offset)?;
+    let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
+    let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
+    let attrs = catalog.publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
+    let reviews = catalog.reviews_for_addresses(&intake_ids, ItemKind::Book)?;
+    let rows: Vec<MetadataListRow> = intakes
+        .iter()
+        .map(|intake| {
+            let title = effective
+                .get(&intake.intake_id)
+                .and_then(|e| e.get("title").map(str::to_string));
+            let confidence = attrs
+                .get(&intake.intake_id)
+                .and_then(|a| a.confidence.clone());
+            let review_status = reviews.get(&intake.intake_id).map(|r| r.status.clone());
+            MetadataListRow {
+                intake_id: intake.intake_id,
+                title,
+                confidence,
+                review_status,
+            }
+        })
+        .collect();
     let returned = rows.len() as u64;
-    let truncated = clamp_triggered || u64::from(offset) + returned < total;
+    let truncated = u64::from(offset) + returned < total;
     Ok(MetadataListPage {
         rows,
         total,

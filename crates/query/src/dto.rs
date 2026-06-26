@@ -11,8 +11,8 @@
 //!
 //! - List endpoints return [`ListBooksResult`] with the slice already
 //!   clamped to [`MAX_LIST_LIMIT`]. The `truncated` flag is true when
-//!   either the requested limit was clamped or `total > offset +
-//!   books.len()`.
+//!   `total > offset + books.len()` — i.e. the page does not cover the
+//!   full filter result.
 //! - `intake_id` (the catalog's surrogate key) is the universal book
 //!   identifier on the wire. Vector partitions are derived from it via
 //!   invariant I2; consumers never see the partition index.
@@ -27,8 +27,9 @@ use bookrack_catalog::{EffectiveAttrs, Intake, IntakeStatus, NodeContributor, No
 use bookrack_corpus::Node;
 
 /// Server-side ceiling on a single list page. Larger requests are
-/// silently clamped and the response carries `truncated = true` so the
-/// caller can tell.
+/// silently clamped; the response then carries `truncated = true` if
+/// and only if the clamped page still does not cover the full filter
+/// result.
 pub const MAX_LIST_LIMIT: u32 = 100;
 
 /// Default page size when the caller does not specify one.
