@@ -121,21 +121,18 @@ pub async fn call_with_progress_value(
 /// (`Done`, `Failed`, or `Cancelled`) and return the aggregated
 /// [`JobOutcomeReport`].
 ///
-/// Subscribes to the broadcast and folds incoming `queue.tick` events:
-/// each tick may carry a `last_finished` summary, and the helper
-/// records the summary when the id matches one of the awaited jobs.
-/// Returns as soon as the awaited set is empty.
+/// The caller passes in a `broadcast::Receiver` obtained from
+/// [`ControlClient::subscribe`] **before** the request that produced
+/// the job ids was issued. Subscribing first avoids the race where
+/// a `queue.tick` carrying `last_finished` fires between the RPC
+/// returning and the wait loop starting.
 ///
 /// `worker.progress` events are still rendered while the wait is in
 /// flight, so the operator sees per-stage progress on stderr.
-// Wired into ingest/papers/intake/vectors/corpus/remove call sites
-// in the next commit; the dead-code lint covers the gap.
-#[allow(dead_code)]
-pub async fn await_jobs(client: &ControlClient, job_ids: &[String]) -> Result<JobOutcomeReport> {
-    let rx = client
-        .subscribe()
-        .await
-        .context("subscribe to control-plane events")?;
+pub async fn await_jobs(
+    rx: broadcast::Receiver<Event>,
+    job_ids: &[String],
+) -> Result<JobOutcomeReport> {
     let report = await_jobs_from_rx(rx, job_ids.to_vec(), Instant::now()).await?;
     finish_progress_line();
     Ok(report)

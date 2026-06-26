@@ -62,6 +62,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- `bookrack ingest <path>` waits for the enqueued job(s) to reach a
+  terminal state by default and prints a one-line human summary on
+  stdout (`Ingested <basename> as <id8> in 12.4s (done)`) instead of
+  exiting at queue-ack with a JSON job-id list. The historical
+  immediate-return behaviour is available under `--no-wait`, and the
+  top-level `--json` flag switches the wait-summary to a
+  `JobOutcomeReport` payload for scripts. The CLI subscribes to the
+  event stream before submitting the RPC so a fast worker cannot
+  race past the wait loop's first `recv`.
 - The persistent queue document schema bumps to `v4`: `QueueJob` grows
   an `intake_ocr` sidecar that carries the `from_pdf`, `expected_pages`,
   and `allow_partial` fields the OCR ingest path needs. The field is

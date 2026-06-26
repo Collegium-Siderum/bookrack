@@ -51,6 +51,13 @@ pub struct IngestArgs {
     /// catalog. Without this flag, duplicate sources are skipped.
     #[arg(long)]
     pub force: bool,
+    /// Skip waiting for the enqueued job(s) to finish. Without this
+    /// flag, the command stays attached until every job reaches a
+    /// terminal state (`Done` / `Failed` / `Cancelled`) and then
+    /// prints a one-line human summary; the historical behaviour
+    /// returned as soon as the daemon had the job in its queue.
+    #[arg(long = "no-wait")]
+    pub no_wait: bool,
 }
 
 /// Positional + flag bundle for `remove`.
