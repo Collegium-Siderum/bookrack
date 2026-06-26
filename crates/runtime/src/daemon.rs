@@ -273,6 +273,13 @@ impl DaemonRuntime {
 
         // 4. Config::resolve + obs init
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
+        // Now that the data root and (optional) registry name are
+        // known, append them to the session lock so other tools can
+        // identify which library this session serves without paying
+        // for an RPC. Mirrors the `record_control_sock` append above.
+        tty_lock
+            .record_library_root(cfg.data_dir(), cfg.library())
+            .context("record library root in session lock")?;
         let (_obs_guard, log_stream) = bookrack_obs::init(&cfg, &opts.log_config);
         // The obs guard's lifetime ends with `DaemonRuntime`; leak the
         // guard so the subscriber stays installed until the process
