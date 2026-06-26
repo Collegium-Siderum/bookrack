@@ -668,6 +668,62 @@ impl Catalog {
         count_as_u64(n)
     }
 
+    /// Fetch one page of intake rows matching `filter` together with the
+    /// total count over the same filter, in a single deferred read
+    /// transaction so both observations come from one SQLite snapshot.
+    ///
+    /// The two queries on their own — [`Catalog::find_intakes`] then
+    /// [`Catalog::count_find_intakes`] — can interleave with a concurrent
+    /// writer and disagree about how many rows the filter matches; the
+    /// caller would then compute a stale `truncated` flag. Combining them
+    /// here removes that race.
+    ///
+    /// A `limit` of zero returns an empty page and the still-consistent
+    /// total. The page shape (ordering, GROUP BY) matches
+    /// [`Catalog::find_intakes`] exactly.
+    pub fn find_intakes_page(
+        &self,
+        filter: &IntakeFilter<'_>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<Intake>, u64)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let (where_clause, joins, params) = build_filter_fragments(filter);
+        let count_sql =
+            format!("SELECT COUNT(DISTINCT i.intake_id) FROM intake i{joins}{where_clause}");
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let total_n: i64 = tx.query_row(&count_sql, refs.as_slice(), |row| row.get(0))?;
+        let total = count_as_u64(total_n)?;
+
+        let intakes = if limit == 0 {
+            Vec::new()
+        } else {
+            let group_by = if filter.contributor_name.is_some() {
+                " GROUP BY i.intake_id"
+            } else {
+                ""
+            };
+            let page_sql = format!(
+                "SELECT {cols} FROM intake i{joins}{where_clause}{group_by} \
+                 ORDER BY i.intake_id LIMIT ? OFFSET ?",
+                cols = intake_columns_qualified(),
+            );
+            let mut page_params = params;
+            page_params.push(Box::new(limit as i64));
+            page_params.push(Box::new(offset as i64));
+            let mut stmt = tx.prepare(&page_sql)?;
+            let refs: Vec<&dyn ToSql> = page_params.iter().map(|b| b.as_ref()).collect();
+            let rows = stmt.query_map(refs.as_slice(), Intake::from_row)?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            out
+        };
+        tx.commit()?;
+        Ok((intakes, total))
+    }
+
     /// Total number of intake rows.
     pub fn count_intakes(&self) -> Result<u64> {
         let n: i64 = self
@@ -1916,5 +1972,83 @@ mod tests {
             assert_eq!(IntakeStatus::from_db_str(status.as_str()), Some(status));
         }
         assert_eq!(IntakeStatus::from_db_str("not_a_status"), None);
+    }
+
+    #[test]
+    fn find_intakes_page_matches_find_plus_count_on_a_quiet_database() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha Bravo", "Ann");
+        seed_book(&mut catalog, "sha-b", "Bravo Charlie", "Ben");
+        seed_book(&mut catalog, "sha-c", "Charlie Delta", "Cal");
+        let filter = IntakeFilter {
+            title_substring: Some("Bravo"),
+            ..IntakeFilter::default()
+        };
+
+        let (rows, total) = catalog.find_intakes_page(&filter, 10, 0).expect("page");
+        assert_eq!(total, 2);
+        assert_eq!(rows.len(), 2);
+
+        // The combined call must agree with the separate find+count it
+        // replaces — same filter, same limit, same offset.
+        let separate_rows = catalog.find_intakes(&filter, 10, 0).expect("find");
+        let separate_total = catalog.count_find_intakes(&filter).expect("count");
+        assert_eq!(
+            rows.iter().map(|i| i.intake_id).collect::<Vec<_>>(),
+            separate_rows
+                .iter()
+                .map(|i| i.intake_id)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(total, separate_total);
+
+        // A page past the end returns no rows but the same total.
+        let (tail_rows, tail_total) = catalog.find_intakes_page(&filter, 10, 99).expect("tail");
+        assert!(tail_rows.is_empty());
+        assert_eq!(tail_total, 2);
+    }
+
+    #[test]
+    fn find_intakes_page_with_zero_limit_returns_count_only() {
+        let mut catalog = catalog();
+        seed_book(&mut catalog, "sha-a", "Alpha", "Ann");
+        seed_book(&mut catalog, "sha-b", "Beta", "Ben");
+        let (rows, total) = catalog
+            .find_intakes_page(&IntakeFilter::default(), 0, 0)
+            .expect("page");
+        assert!(rows.is_empty());
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn find_intakes_page_pagination_matches_the_filter_total() {
+        let mut catalog = catalog();
+        for n in 0..5 {
+            seed_book(
+                &mut catalog,
+                &format!("sha-{n}"),
+                &format!("Title {n}"),
+                "A",
+            );
+        }
+        let filter = IntakeFilter::default();
+        let (page1, total1) = catalog.find_intakes_page(&filter, 2, 0).expect("page1");
+        let (page2, total2) = catalog.find_intakes_page(&filter, 2, 2).expect("page2");
+        let (page3, total3) = catalog.find_intakes_page(&filter, 2, 4).expect("page3");
+        assert_eq!(total1, 5);
+        assert_eq!(total2, 5);
+        assert_eq!(total3, 5);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+        let mut ids: Vec<i64> = page1
+            .iter()
+            .chain(page2.iter())
+            .chain(page3.iter())
+            .map(|i| i.intake_id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 5);
     }
 }
