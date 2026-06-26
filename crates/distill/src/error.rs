@@ -66,4 +66,13 @@ pub enum ParseError {
     /// into a phantom first page.
     #[error("invalid page marker at byte {byte_offset}: {marker:?}")]
     InvalidPageMarker { marker: String, byte_offset: usize },
+
+    /// A `book.toml` `regex` pattern reference failed to compile.
+    /// Surfaced by the dispatcher at load time so the operator sees
+    /// the broken rule before the pipeline silently collapses every
+    /// match to "no match" — the historical `Regex::new(...).ok()?`
+    /// shape used at runtime would render a bad pattern as a
+    /// quiet skip.
+    #[error("invalid regex pattern {pattern:?}: {reason}")]
+    InvalidPattern { pattern: String, reason: String },
 }

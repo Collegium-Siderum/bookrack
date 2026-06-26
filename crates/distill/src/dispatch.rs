@@ -335,6 +335,16 @@ fn decode_pattern_ref(value: &TomlValue) -> Result<PatternRef, ParseError> {
         let s = regex_val
             .as_str()
             .ok_or_else(|| violation("regex pattern must be a string"))?;
+        // Compile here so a syntactically broken pattern surfaces at
+        // book.toml load time instead of being silently demoted to
+        // "no match" by the `Regex::new(...).ok()?` at the stage call
+        // site.
+        if let Err(err) = regex::Regex::new(s) {
+            return Err(ParseError::InvalidPattern {
+                pattern: s.to_string(),
+                reason: err.to_string(),
+            });
+        }
         return Ok(PatternRef::Regex(s.to_string()));
     }
     Err(violation(
@@ -443,6 +453,44 @@ mod tests {
                 );
             }
             other => panic!("expected CatalogViolation, got {other:?}"),
+        }
+    }
+
+    /// A `regex` pattern that does not compile must fail the
+    /// book.toml load with `InvalidPattern`, not slip through as a
+    /// `PatternRef::Regex` that the stage call site would silently
+    /// demote to "no match" via the historical `Regex::new(...).ok()?`.
+    #[test]
+    fn decode_pattern_ref_errors_on_a_broken_regex() {
+        let mut tbl = toml::value::Table::new();
+        tbl.insert(
+            "regex".to_string(),
+            TomlValue::String("(unclosed".to_string()),
+        );
+        let value = TomlValue::Table(tbl);
+        let err = decode_pattern_ref(&value).expect_err("broken regex must error at load time");
+        match err {
+            ParseError::InvalidPattern { pattern, reason } => {
+                assert_eq!(pattern, "(unclosed");
+                assert!(!reason.is_empty(), "reason must carry compile diagnostic");
+            }
+            other => panic!("expected InvalidPattern, got {other:?}"),
+        }
+    }
+
+    /// A well-formed `regex` still round-trips into a `PatternRef::Regex`.
+    #[test]
+    fn decode_pattern_ref_accepts_a_well_formed_regex() {
+        let mut tbl = toml::value::Table::new();
+        tbl.insert(
+            "regex".to_string(),
+            TomlValue::String(r"\b\d{4}\b".to_string()),
+        );
+        let value = TomlValue::Table(tbl);
+        let pattern = decode_pattern_ref(&value).expect("ok");
+        match pattern {
+            PatternRef::Regex(s) => assert_eq!(s, r"\b\d{4}\b"),
+            other => panic!("expected Regex, got {other:?}"),
         }
     }
 }

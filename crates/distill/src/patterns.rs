@@ -55,12 +55,21 @@ pub struct PatternMatch {
 
 /// Find the leftmost match of `pattern` in `text`, or `None` if no
 /// shape in the reference matches.
+///
+/// Both branches `expect` the regex compile to succeed:
+/// [`BracketKind::capture_regex`] returns a static known-good string,
+/// and [`PatternRef::Regex`] is validated by the dispatcher at
+/// book.toml load time, so a compile failure here would mean someone
+/// constructed an unchecked `PatternRef::Regex` outside the loader.
+/// The previous `Regex::new(...).ok()?` silently demoted such a value
+/// to "no match", which made stage-level regex bugs invisible.
 pub fn match_pattern(pattern: &PatternRef, text: &str) -> Option<PatternMatch> {
     match pattern {
         PatternRef::BracketedTag { brackets } => {
             let mut best: Option<PatternMatch> = None;
             for kind in brackets {
-                let re = Regex::new(kind.capture_regex()).ok()?;
+                let re = Regex::new(kind.capture_regex())
+                    .expect("BracketKind::capture_regex is a static known-good regex");
                 if let Some(cap) = re.captures(text) {
                     let m = cap.get(0)?;
                     let candidate = PatternMatch {
@@ -80,7 +89,8 @@ pub fn match_pattern(pattern: &PatternRef, text: &str) -> Option<PatternMatch> {
             best
         }
         PatternRef::Regex(src) => {
-            let re = Regex::new(src).ok()?;
+            let re = Regex::new(src)
+                .expect("PatternRef::Regex must be validated by the book.toml loader");
             re.captures(text).and_then(|cap| {
                 let m = cap.get(0)?;
                 Some(PatternMatch {

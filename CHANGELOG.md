@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **distill: a broken regex pattern fails the book.toml load
+  instead of slipping through as silent no-matches.** The runtime
+  `match_pattern` used `Regex::new(...).ok()?`, so a syntactically
+  bad `[pattern.regex]` in book.toml turned into a stage that
+  matched nothing and the operator never saw a diagnostic. The
+  dispatcher now compiles the regex eagerly while decoding the
+  `pattern` table and surfaces the failure as a new
+  `ParseError::InvalidPattern { pattern, reason }`; `match_pattern`
+  switches to `.expect` since the loader vouches for compile
+  success.
+
 - **embed: retry backoff is panic-free across the full attempt
   range.** `embed_batch` computed the per-attempt sleep as
   `backoff_base * 2u32.pow(attempt)`. `2u32.pow` panics on
