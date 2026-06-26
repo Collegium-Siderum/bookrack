@@ -9,9 +9,11 @@
 //! nullify). The effective-metadata merge applies these on top of
 //! `node_publication_attrs`.
 
+use std::collections::BTreeMap;
+
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
-use rusqlite::{Row, named_params};
+use rusqlite::{Row, ToSql, named_params, params_from_iter};
 
 use crate::{Catalog, Result};
 
@@ -185,6 +187,45 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Every override on the nodes at `(intake_id, scope)` for each
+    /// `intake_id` in `intake_ids`, in one query. Within each intake the
+    /// rows keep the same `ORDER BY field` shape as
+    /// [`Catalog::overrides_for_address`]. Intakes with no overrides are
+    /// absent from the returned map.
+    ///
+    /// An empty `intake_ids` slice returns an empty map without
+    /// touching the database.
+    pub fn overrides_for_addresses(
+        &self,
+        intake_ids: &[i64],
+        kind: ItemKind,
+    ) -> Result<BTreeMap<i64, Vec<NodeOverride>>> {
+        if intake_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; intake_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM node_overrides \
+             WHERE scope = ? AND intake_id IN ({placeholders}) \
+             ORDER BY intake_id, field",
+            cols = SPEC.select_list(),
+        );
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(intake_ids.len() + 1);
+        params.push(Box::new(kind.as_scope_str().to_string()));
+        for id in intake_ids {
+            params.push(Box::new(*id));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_from_iter(refs), NodeOverride::from_row)?;
+        let mut out: BTreeMap<i64, Vec<NodeOverride>> = BTreeMap::new();
+        for row in rows {
+            let row = row?;
+            out.entry(row.intake_id).or_default().push(row);
+        }
+        Ok(out)
+    }
+
     /// Remove an override, returning the field to its *absent* state.
     /// Returns whether a row existed.
     pub fn clear_override(&self, intake_id: i64, kind: ItemKind, field: &str) -> Result<bool> {
@@ -281,5 +322,67 @@ mod tests {
         );
         // Clearing an absent override is a harmless miss.
         assert!(!catalog.clear_override(1, KIND, "title").expect("miss"));
+    }
+
+    #[test]
+    fn overrides_for_addresses_empty_input_skips_the_query() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let map = catalog.overrides_for_addresses(&[], KIND).expect("read");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn overrides_for_addresses_groups_by_intake_and_orders_by_field() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .set_override(&NewOverride::new(
+                1,
+                KIND,
+                "title",
+                Some("T1".into()),
+                "human",
+            ))
+            .expect("write 1.title");
+        catalog
+            .set_override(&NewOverride::new(
+                1,
+                KIND,
+                "publisher",
+                Some("P1".into()),
+                "human",
+            ))
+            .expect("write 1.publisher");
+        catalog
+            .set_override(&NewOverride::new(
+                2,
+                KIND,
+                "title",
+                Some("T2".into()),
+                "human",
+            ))
+            .expect("write 2.title");
+        // A row at another scope must not leak into a book-scope batch.
+        catalog
+            .set_override(&NewOverride::new(
+                2,
+                ItemKind::Paper,
+                "title",
+                Some("ignored".into()),
+                "human",
+            ))
+            .expect("write 2.paper");
+
+        let map = catalog
+            .overrides_for_addresses(&[1, 2, 404], KIND)
+            .expect("read");
+        assert_eq!(map.len(), 2);
+        let one = &map[&1];
+        assert_eq!(one.len(), 2);
+        assert_eq!(one[0].field, "publisher");
+        assert_eq!(one[1].field, "title");
+        let two = &map[&2];
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].field, "title");
+        assert_eq!(two[0].value.as_deref(), Some("T2"));
     }
 }

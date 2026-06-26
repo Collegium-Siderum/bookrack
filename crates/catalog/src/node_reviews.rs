@@ -34,9 +34,11 @@
 //! - [`STATUS_REJECTED`] `rejected` — a human/LLM rejected the book
 //!   outright.
 
+use std::collections::BTreeMap;
+
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
-use rusqlite::{OptionalExtension, Row, named_params, params_from_iter};
+use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
 use crate::{Catalog, Result, count_as_u64};
 
@@ -221,6 +223,42 @@ impl Catalog {
             .optional()?;
         Ok(review)
     }
+
+    /// Fetch the review of each node at `(intake_id, scope)` for every
+    /// `intake_id` in `intake_ids`, in one query. Intakes with no review
+    /// row are absent from the returned map.
+    ///
+    /// An empty `intake_ids` slice returns an empty map without
+    /// touching the database.
+    pub fn reviews_for_addresses(
+        &self,
+        intake_ids: &[i64],
+        kind: ItemKind,
+    ) -> Result<BTreeMap<i64, NodeReview>> {
+        if intake_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; intake_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM node_reviews \
+             WHERE scope = ? AND intake_id IN ({placeholders})",
+            cols = SPEC.select_list(),
+        );
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(intake_ids.len() + 1);
+        params.push(Box::new(kind.as_scope_str().to_string()));
+        for id in intake_ids {
+            params.push(Box::new(*id));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_from_iter(refs), NodeReview::from_row)?;
+        let mut out: BTreeMap<i64, NodeReview> = BTreeMap::new();
+        for row in rows {
+            let row = row?;
+            out.insert(row.intake_id, row);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +363,39 @@ mod tests {
             .expect("notes replace");
         let read = catalog.review(1, KIND).expect("read").expect("present");
         assert_eq!(read.notes.as_deref(), Some("replacement"));
+    }
+
+    #[test]
+    fn reviews_for_addresses_empty_input_skips_the_query() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let map = catalog.reviews_for_addresses(&[], KIND).expect("read");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn reviews_for_addresses_returns_only_matching_rows() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_review(&NewReview::new(1, KIND, "human", STATUS_APPROVED))
+            .expect("write 1");
+        catalog
+            .upsert_review(&NewReview::new(2, KIND, "human", STATUS_PENDING))
+            .expect("write 2");
+        // A row at another scope must not leak into a book-scope batch.
+        catalog
+            .upsert_review(&NewReview::new(
+                3,
+                ItemKind::Paper,
+                "human",
+                STATUS_APPROVED,
+            ))
+            .expect("write 3.paper");
+
+        let map = catalog
+            .reviews_for_addresses(&[1, 2, 3, 404], KIND)
+            .expect("read");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&1].status, STATUS_APPROVED);
+        assert_eq!(map[&2].status, STATUS_PENDING);
     }
 }

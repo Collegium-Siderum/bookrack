@@ -8,9 +8,11 @@
 //! `contributor_id` is a surrogate key so a later per-contributor edit
 //! can address a single row; the natural key stays `UNIQUE`.
 
+use std::collections::BTreeMap;
+
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
-use rusqlite::{Row, named_params};
+use rusqlite::{Row, ToSql, named_params, params_from_iter};
 
 use crate::{Catalog, Result};
 
@@ -243,6 +245,45 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// Every contributor on the nodes at `(intake_id, scope)` for each
+    /// `intake_id` in `intake_ids`, in one query. Within each intake the
+    /// rows keep the same `ORDER BY role, ordinal` shape as
+    /// [`Catalog::contributors_for_address`]. Intakes with no
+    /// contributors are absent from the returned map.
+    ///
+    /// An empty `intake_ids` slice returns an empty map without
+    /// touching the database.
+    pub fn contributors_for_addresses(
+        &self,
+        intake_ids: &[i64],
+        kind: ItemKind,
+    ) -> Result<BTreeMap<i64, Vec<NodeContributor>>> {
+        if intake_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; intake_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM node_contributors \
+             WHERE scope = ? AND intake_id IN ({placeholders}) \
+             ORDER BY intake_id, role, ordinal",
+            cols = SPEC.select_list(),
+        );
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(intake_ids.len() + 1);
+        params.push(Box::new(kind.as_scope_str().to_string()));
+        for id in intake_ids {
+            params.push(Box::new(*id));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_from_iter(refs), NodeContributor::from_row)?;
+        let mut out: BTreeMap<i64, Vec<NodeContributor>> = BTreeMap::new();
+        for row in rows {
+            let row = row?;
+            out.entry(row.intake_id).or_default().push(row);
+        }
+        Ok(out)
+    }
+
     /// Remove one contributor by its surrogate id. Returns whether a row
     /// existed.
     pub fn remove_contributor(&self, contributor_id: i64) -> Result<bool> {
@@ -411,5 +452,54 @@ mod tests {
                 .is_empty()
         );
         assert!(!catalog.remove_contributor(id).expect("miss"));
+    }
+
+    #[test]
+    fn contributors_for_addresses_empty_input_skips_the_query() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let map = catalog.contributors_for_addresses(&[], KIND).expect("read");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn contributors_for_addresses_groups_by_intake_and_orders_by_role_ordinal() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .add_contributor(&NewContributor::new(1, KIND, "translator", 0, "user", "Tr"))
+            .expect("write 1.tr");
+        catalog
+            .add_contributor(&NewContributor::new(1, KIND, "author", 1, "user", "A2"))
+            .expect("write 1.a2");
+        catalog
+            .add_contributor(&NewContributor::new(1, KIND, "author", 0, "user", "A1"))
+            .expect("write 1.a1");
+        catalog
+            .add_contributor(&NewContributor::new(2, KIND, "author", 0, "user", "B"))
+            .expect("write 2.a");
+        // A row at another scope must not leak into a book-scope batch.
+        catalog
+            .add_contributor(&NewContributor::new(
+                2,
+                ItemKind::Paper,
+                "author",
+                0,
+                "user",
+                "ignored",
+            ))
+            .expect("write 2.paper");
+
+        let map = catalog
+            .contributors_for_addresses(&[1, 2, 404], KIND)
+            .expect("read");
+        assert_eq!(map.len(), 2);
+        let one = &map[&1];
+        // role ascending then ordinal ascending: author/0, author/1, translator/0.
+        assert_eq!(
+            one.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["A1", "A2", "Tr"],
+        );
+        let two = &map[&2];
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].name, "B");
     }
 }

@@ -226,6 +226,58 @@ impl Catalog {
             fields,
         })
     }
+
+    /// Compute the effective metadata of many nodes at `scope = kind` in
+    /// two queries — one over the base layer, one over the overrides —
+    /// then merge each pair in memory with the same rule as
+    /// [`Catalog::effective_publication_attrs`]. Each id in `intake_ids`
+    /// appears in the returned map even if its base layer and overrides
+    /// are both absent, mapped to an `EffectiveAttrs` with no fields.
+    ///
+    /// An empty `intake_ids` slice returns an empty map without
+    /// touching the database.
+    pub fn effective_publication_attrs_for_intakes(
+        &self,
+        intake_ids: &[i64],
+        kind: ItemKind,
+    ) -> Result<BTreeMap<i64, EffectiveAttrs>> {
+        if intake_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let bases = self.publication_attrs_for_intakes(intake_ids, kind)?;
+        let mut overrides = self.overrides_for_addresses(intake_ids, kind)?;
+        let scope = kind.as_scope_str().to_string();
+        let mut out: BTreeMap<i64, EffectiveAttrs> = BTreeMap::new();
+        for &intake_id in intake_ids {
+            let mut fields: BTreeMap<String, String> = BTreeMap::new();
+            if let Some(base) = bases.get(&intake_id) {
+                for (name, value) in base_pairs(base) {
+                    fields.insert(name.to_string(), value);
+                }
+            }
+            if let Some(overs) = overrides.remove(&intake_id) {
+                for over in overs {
+                    match over.value {
+                        Some(value) => {
+                            fields.insert(over.field, value);
+                        }
+                        None => {
+                            fields.remove(&over.field);
+                        }
+                    }
+                }
+            }
+            out.insert(
+                intake_id,
+                EffectiveAttrs {
+                    intake_id,
+                    scope: scope.clone(),
+                    fields,
+                },
+            );
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -530,5 +582,57 @@ mod tests {
         assert_eq!(after.get("container_title"), Some("Overridden Container"));
         assert_eq!(after.get("abstract_text"), Some("Overridden abstract."));
         assert_eq!(after.get("csl_type"), Some("book"));
+    }
+
+    #[test]
+    fn effective_publication_attrs_for_intakes_empty_input_skips_the_query() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let map = catalog
+            .effective_publication_attrs_for_intakes(&[], KIND_A)
+            .expect("read");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn effective_publication_attrs_for_intakes_matches_single_row_per_intake() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        seed_base(&catalog, 1, KIND_A);
+        seed_base(&catalog, 2, KIND_A);
+        catalog
+            .set_override(&NewOverride::new(
+                1,
+                KIND_A,
+                "title",
+                Some("Override One".into()),
+                "human",
+            ))
+            .expect("override 1.title");
+        catalog
+            .set_override(&NewOverride::new(2, KIND_A, "publisher", None, "human"))
+            .expect("override 2.publisher nullify");
+        // Intake 3 has neither base nor overrides on this scope.
+        // Intake 4 lives only on the other scope.
+        seed_base(&catalog, 4, KIND_B);
+
+        let map = catalog
+            .effective_publication_attrs_for_intakes(&[1, 2, 3, 4], KIND_A)
+            .expect("read");
+        assert_eq!(map.len(), 4);
+        let one = map.get(&1).expect("present");
+        let single = catalog
+            .effective_publication_attrs(1, KIND_A)
+            .expect("single");
+        assert_eq!(one, &single);
+        assert_eq!(one.get("title"), Some("Override One"));
+        let two = map.get(&2).expect("present");
+        assert_eq!(two.get("publisher"), None, "explicit nullify removes field");
+        let three = map.get(&3).expect("present");
+        assert_eq!(three.iter().count(), 0);
+        let four = map.get(&4).expect("present");
+        assert_eq!(
+            four.iter().count(),
+            0,
+            "base lives on the other scope; book-scope batch reads it as empty"
+        );
     }
 }

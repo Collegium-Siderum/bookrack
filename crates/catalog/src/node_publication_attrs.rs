@@ -8,9 +8,11 @@
 //! merge. The row is keyed by the logical address `(intake_id, scope)`
 //! and rewritten as a unit.
 
+use std::collections::BTreeMap;
+
 use bookrack_core::ItemKind;
 use bookrack_dbkit::{ColumnSpec, TableSpec};
-use rusqlite::{OptionalExtension, Row, named_params};
+use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
 use crate::{Catalog, Result};
 
@@ -416,6 +418,43 @@ impl Catalog {
             .optional()?;
         Ok(attrs)
     }
+
+    /// Fetch the base-layer attributes for many intakes at `scope = kind`
+    /// in one query, keyed by `intake_id`. Intakes with no row at this
+    /// scope are absent from the returned map.
+    ///
+    /// An empty `intake_ids` slice returns an empty map without
+    /// touching the database. Duplicate ids in the input are folded;
+    /// each surviving id maps to its single row.
+    pub fn publication_attrs_for_intakes(
+        &self,
+        intake_ids: &[i64],
+        kind: ItemKind,
+    ) -> Result<BTreeMap<i64, PublicationAttrs>> {
+        if intake_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; intake_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT {cols} FROM node_publication_attrs \
+             WHERE scope = ? AND intake_id IN ({placeholders})",
+            cols = SPEC.select_list(),
+        );
+        let mut params: Vec<Box<dyn ToSql>> = Vec::with_capacity(intake_ids.len() + 1);
+        params.push(Box::new(kind.as_scope_str().to_string()));
+        for id in intake_ids {
+            params.push(Box::new(*id));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn ToSql> = params.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(params_from_iter(refs), PublicationAttrs::from_row)?;
+        let mut out: BTreeMap<i64, PublicationAttrs> = BTreeMap::new();
+        for row in rows {
+            let attrs = row?;
+            out.insert(attrs.intake_id, attrs);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -537,5 +576,39 @@ mod tests {
         assert_eq!(read.title.as_deref(), Some("Revised"));
         // A field absent in the second write is cleared, not retained.
         assert_eq!(read.publisher, None);
+    }
+
+    #[test]
+    fn publication_attrs_for_intakes_empty_input_skips_the_query() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let map = catalog
+            .publication_attrs_for_intakes(&[], KIND)
+            .expect("read");
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn publication_attrs_for_intakes_returns_only_matching_rows() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut a = NewPublicationAttrs::new(1, KIND);
+        a.title = Some("A".into());
+        let mut b = NewPublicationAttrs::new(2, KIND);
+        b.title = Some("B".into());
+        let mut other_scope = NewPublicationAttrs::new(3, ItemKind::Paper);
+        other_scope.title = Some("C".into());
+        catalog.upsert_publication_attrs(&a).expect("write a");
+        catalog.upsert_publication_attrs(&b).expect("write b");
+        catalog
+            .upsert_publication_attrs(&other_scope)
+            .expect("write c");
+
+        let map = catalog
+            .publication_attrs_for_intakes(&[1, 2, 3, 404], KIND)
+            .expect("read");
+        // Intake 3's only row is on the paper scope, so a book-scope batch
+        // does not see it; 404 has no row at all.
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&1].title.as_deref(), Some("A"));
+        assert_eq!(map[&2].title.as_deref(), Some("B"));
     }
 }
