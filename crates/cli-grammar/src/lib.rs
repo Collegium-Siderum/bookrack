@@ -143,6 +143,55 @@ pub enum IntakeAction {
     },
 }
 
+/// Distill-side commands. The CLI runs these in-process against
+/// `<data>/reference.db`; no daemon RPC is involved. The positional
+/// `<PATH>` arguments mirror the ingest / glean / intake surface: a
+/// path can be a `book.toml` file, a directory holding one, or a
+/// source file with a co-located `book.toml`.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum DistillAction {
+    /// Build distilled entries for the books reachable from `<PATHS>`.
+    Build(DistillBuildArgs),
+    /// Re-run distill in memory and diff against the live database.
+    Verify(DistillVerifyArgs),
+    /// List the registered reference books and their entry counts.
+    List(DistillListArgs),
+}
+
+/// Positional + flag bundle for `distill build`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DistillBuildArgs {
+    /// One or more `book.toml` files, source files, or directories.
+    /// A directory is expanded under `--recursive`; multiple paths run
+    /// independently. Mirrors the `bookrack ingest <PATH>...` shape.
+    #[arg(required = true, value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+    /// Walk directories recursively when discovering `book.toml`.
+    #[arg(long)]
+    pub recursive: bool,
+    /// Run the pipeline but do not write to `reference.db`; print the
+    /// coverage summary instead.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Positional + flag bundle for `distill verify`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DistillVerifyArgs {
+    /// One or more `book.toml` files, source files, or directories.
+    /// Resolved the same way as `distill build`.
+    #[arg(required = true, value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+    /// Walk directories recursively when discovering `book.toml`.
+    #[arg(long)]
+    pub recursive: bool,
+}
+
+/// Flag bundle for `distill list`. Currently empty; rendering mode is
+/// controlled by the global `--json` flag through `render::ctx`.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct DistillListArgs {}
+
 /// Metadata-side write commands. Lives in the grammar crate so both
 /// the daemon-side runner (`bookrack_runtime::cmd::metadata::run_write`)
 /// and the REPL client can parse them.

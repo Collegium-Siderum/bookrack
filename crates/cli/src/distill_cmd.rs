@@ -4,66 +4,44 @@
 //!
 //! Owns the operator-facing surface for the v2 distill rollout:
 //!
-//! * `bookrack distill build` — scan `<data>/reference/*/book.toml`,
-//!   run each book's pipeline against its OCR source, and upsert
-//!   the resulting drafts into `<data>/reference.db`. `--dry-run`
-//!   prints coverage without touching the database.
-//! * `bookrack distill verify` — re-run distill into a throwaway
-//!   in-memory `Refs` and diff the entry set against the persistent
-//!   one. Surfaces added / removed / changed `entry_key`s without
-//!   mutating either side.
+//! * `bookrack distill build <PATH>...` — resolve each path to a
+//!   `(book.toml, source, slug)` triple, run the book's pipeline, and
+//!   upsert the resulting drafts into `<data>/reference.db`. The path
+//!   shape mirrors `bookrack ingest`: a `book.toml` file, a directory
+//!   holding one, a source file with a co-located `book.toml`, or a
+//!   list of any of these. `--recursive` walks directories the same
+//!   way ingest does; `--dry-run` prints coverage without touching
+//!   the database.
+//! * `bookrack distill verify <PATH>...` — re-run distill into a
+//!   throwaway in-memory map and diff the entry set against the
+//!   persistent one. Surfaces added / removed / changed `entry_key`s
+//!   without mutating either side.
 //! * `bookrack distill list` — list `reference_books` rows with
-//!   per-book entry counts and the most recent `built_at`.
+//!   per-book entry counts and the most recent `built_at`. Renders a
+//!   table by default; emits raw JSON under the global `--json` flag.
 //!
-//! These commands open `Refs` directly rather than going through
-//! the daemon's control plane. SQLite's WAL mode makes the local
-//! handle safe alongside the daemon's reads; the daemon itself does
-//! not write to `reference.db` today.
+//! These commands open `Refs` directly rather than going through the
+//! daemon's control plane. SQLite's WAL mode makes the local handle
+//! safe alongside the daemon's reads; the daemon itself does not
+//! write to `reference.db` today.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use bookrack_cli_grammar::{DistillAction, DistillBuildArgs, DistillListArgs, DistillVerifyArgs};
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, EntryDraft, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
-use clap::Subcommand;
 use eyre::{Context as _, Result, bail, eyre};
-use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
-/// One `bookrack distill <action>` invocation.
-#[derive(Debug, Clone, Subcommand)]
-pub enum DistillAction {
-    /// Build distilled entries for one or every reference book.
-    Build {
-        /// Specific book slug to build. When omitted, every book
-        /// under `<data>/reference/` is built.
-        #[arg(long, value_name = "SLUG")]
-        book: Option<String>,
-        /// Build every reference book under the data root. Mutually
-        /// exclusive with `--book`.
-        #[arg(long, conflicts_with = "book")]
-        all: bool,
-        /// Run the pipeline but do not write to `reference.db`; print
-        /// the coverage summary instead.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Re-run distill in memory and diff against the live database.
-    Verify {
-        /// Specific book slug to verify. When omitted, every book is
-        /// diffed.
-        #[arg(long, value_name = "SLUG")]
-        book: Option<String>,
-    },
-    /// List the registered reference books and their entry counts.
-    List,
-}
+use crate::render::ctx;
+use crate::render::table::RowTable;
 
 /// One-shot resolver for the data root paths the distill commands
 /// share.
 struct DistillPaths {
     refs_path: PathBuf,
-    reference_root: PathBuf,
 }
 
 impl DistillPaths {
@@ -72,7 +50,6 @@ impl DistillPaths {
         let data_dir = cfg.data_dir().to_path_buf();
         Ok(Self {
             refs_path: data_dir.join("reference.db"),
-            reference_root: data_dir.join("reference"),
         })
     }
 }
@@ -84,9 +61,180 @@ pub async fn run(
 ) -> Result<()> {
     let paths = DistillPaths::resolve(selection)?;
     match action {
-        DistillAction::Build { book, all, dry_run } => build(&paths, book, all, dry_run),
-        DistillAction::Verify { book } => verify(&paths, book),
-        DistillAction::List => list(&paths),
+        DistillAction::Build(args) => build(&paths, args),
+        DistillAction::Verify(args) => verify(&paths, args),
+        DistillAction::List(args) => list(&paths, args),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// path resolution
+// ---------------------------------------------------------------------------
+
+/// One book reachable from a `<PATH>` argument, normalised so the
+/// pipeline runner does not have to re-derive any of the three fields.
+#[derive(Debug, Clone)]
+struct ResolvedBook {
+    book_toml: PathBuf,
+    source: PathBuf,
+    slug: String,
+}
+
+/// Resolve every `<PATH>` argument into a flat list of `ResolvedBook`
+/// triples. Duplicate slugs across paths are rejected; an unreachable
+/// `book.toml` or missing co-located declaration surfaces as an error.
+fn resolve_paths(paths: &[PathBuf], recursive: bool) -> Result<Vec<ResolvedBook>> {
+    let mut out: Vec<ResolvedBook> = Vec::new();
+    let mut seen: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for path in paths {
+        if !path.exists() {
+            bail!("path does not exist: {}", path.display());
+        }
+        let resolved = if path.is_dir() {
+            resolve_directory(path, recursive)?
+        } else if is_book_toml(path) {
+            vec![load_resolved_from_toml(path, None)?]
+        } else {
+            vec![resolve_source_file(path)?]
+        };
+        for book in resolved {
+            if let Some(prev) = seen.get(&book.slug) {
+                bail!(
+                    "duplicate slug {:?} resolved from {} and {}",
+                    book.slug,
+                    prev.display(),
+                    book.book_toml.display()
+                );
+            }
+            seen.insert(book.slug.clone(), book.book_toml.clone());
+            out.push(book);
+        }
+    }
+    if out.is_empty() {
+        bail!("no distillable books resolved from the given paths");
+    }
+    Ok(out)
+}
+
+fn resolve_directory(dir: &Path, recursive: bool) -> Result<Vec<ResolvedBook>> {
+    let tomls = collect_book_tomls(dir, recursive);
+    if tomls.is_empty() {
+        bail!("no book.toml under {}", dir.display());
+    }
+    let mut out = Vec::with_capacity(tomls.len());
+    for toml in tomls {
+        out.push(load_resolved_from_toml(&toml, None)?);
+    }
+    Ok(out)
+}
+
+fn resolve_source_file(source: &Path) -> Result<ResolvedBook> {
+    let dir = source
+        .parent()
+        .ok_or_else(|| eyre!("source path {} has no parent", source.display()))?;
+    let stem_toml = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|stem| dir.join(format!("{stem}.book.toml")));
+    if let Some(candidate) = &stem_toml
+        && candidate.is_file()
+    {
+        return load_resolved_from_toml(candidate, Some(source.to_path_buf()));
+    }
+    let neighbour = dir.join("book.toml");
+    if neighbour.is_file() {
+        return load_resolved_from_toml(&neighbour, Some(source.to_path_buf()));
+    }
+    bail!(
+        "no book.toml co-located with {}; distill requires a stage declaration",
+        source.display()
+    );
+}
+
+fn load_resolved_from_toml(
+    book_toml: &Path,
+    explicit_source: Option<PathBuf>,
+) -> Result<ResolvedBook> {
+    let parsed =
+        BookToml::load(book_toml).with_context(|| format!("load {}", book_toml.display()))?;
+    let source = match explicit_source {
+        Some(p) => p,
+        None => locate_source(book_toml)?,
+    };
+    Ok(ResolvedBook {
+        book_toml: book_toml.to_path_buf(),
+        source,
+        slug: parsed.book_slug,
+    })
+}
+
+/// Locate the OCR Markdown source given the path to its `book.toml`.
+/// Accepts either a single `source.md` next to the toml or a
+/// `sources/` directory of `*.md` fragments. The directory form is
+/// returned verbatim; `read_source` concatenates fragments on demand.
+fn locate_source(book_toml: &Path) -> Result<PathBuf> {
+    let dir = book_toml
+        .parent()
+        .ok_or_else(|| eyre!("book.toml path {} has no parent", book_toml.display()))?;
+    let single = dir.join("source.md");
+    if single.is_file() {
+        return Ok(single);
+    }
+    let multi = dir.join("sources");
+    if multi.is_dir() {
+        return Ok(multi);
+    }
+    Err(eyre!(
+        "neither {} nor {} exists",
+        single.display(),
+        multi.display()
+    ))
+}
+
+fn is_book_toml(path: &Path) -> bool {
+    path.file_name().and_then(|s| s.to_str()) == Some("book.toml")
+        || path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| n.ends_with(".book.toml"))
+            .unwrap_or(false)
+}
+
+/// Collect every `book.toml` file reachable under `dir`. When
+/// `recursive` is false, only the immediate subdirectories' tomls are
+/// considered; with `recursive`, the walk descends fully.
+fn collect_book_tomls(dir: &Path, recursive: bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let direct = dir.join("book.toml");
+    if direct.is_file() {
+        out.push(direct);
+        return out;
+    }
+    visit_book_tomls(dir, recursive, &mut out);
+    out.sort();
+    out
+}
+
+fn visit_book_tomls(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let nested = path.join("book.toml");
+            if nested.is_file() {
+                out.push(nested);
+            } else if recursive {
+                subdirs.push(path);
+            }
+        }
+    }
+    if recursive {
+        for sub in subdirs {
+            visit_book_tomls(&sub, recursive, out);
+        }
     }
 }
 
@@ -94,27 +242,26 @@ pub async fn run(
 // build
 // ---------------------------------------------------------------------------
 
-fn build(paths: &DistillPaths, book: Option<String>, all: bool, dry_run: bool) -> Result<()> {
-    let scope = build_scope(paths, book, all)?;
+fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
+    let books = resolve_paths(&args.paths, args.recursive)?;
     let distill_run_id = chrono::Utc::now().to_rfc3339();
 
-    for slug in scope {
-        let book_dir = paths.reference_root.join(&slug);
-        let book_toml_path = book_dir.join("book.toml");
-        let book_toml = BookToml::load(&book_toml_path)
-            .with_context(|| format!("load {}", book_toml_path.display()))?;
-        let pipeline = load_pipeline(&book_toml_path)
-            .with_context(|| format!("assemble pipeline for {slug}"))?;
-        let source =
-            read_source(&book_dir).with_context(|| format!("read OCR source for {slug}"))?;
-        let extras = compose_extras(&slug, &distill_run_id);
+    for book in &books {
+        let parsed = BookToml::load(&book.book_toml)
+            .with_context(|| format!("load {}", book.book_toml.display()))?;
+        let pipeline = load_pipeline(&book.book_toml)
+            .with_context(|| format!("assemble pipeline for {}", book.slug))?;
+        let source = read_source(&book.source)
+            .with_context(|| format!("read OCR source for {}", book.slug))?;
+        let extras = compose_extras(&book.slug, &distill_run_id);
         let (drafts, coverage) = pipeline
             .run_with_extras(source, extras)
-            .with_context(|| format!("run pipeline for {slug}"))?;
+            .with_context(|| format!("run pipeline for {}", book.slug))?;
 
-        if dry_run {
+        if args.dry_run {
             println!(
-                "[dry-run] {slug}: entries={} coverage_pct={:.1}",
+                "[dry-run] {}: entries={} coverage_pct={:.1}",
+                book.slug,
                 drafts.len(),
                 coverage.coverage_pct()
             );
@@ -123,81 +270,35 @@ fn build(paths: &DistillPaths, book: Option<String>, all: bool, dry_run: bool) -
 
         let mut refs = Refs::open(&paths.refs_path)
             .with_context(|| format!("open {}", paths.refs_path.display()))?;
-        register_book_indexes(&mut refs, &slug, &book_toml)?;
-        upsert_book_row(&refs, &book_toml, &distill_run_id)?;
+        register_book_indexes(&mut refs, &book.slug, &parsed)?;
+        upsert_book_row(&refs, &parsed, &distill_run_id)?;
         for draft in &drafts {
             let entry = draft_to_new_entry(draft);
             refs.upsert_entry(&entry)?;
         }
         println!(
-            "{slug}: entries={} coverage_pct={:.1} written to {}",
+            "{}: entries={} coverage_pct={:.1} written to {}",
+            book.slug,
             drafts.len(),
             coverage.coverage_pct(),
             paths.refs_path.display(),
         );
-        let _ = coverage; // currently unused once written; retained for future stats
     }
 
     Ok(())
 }
 
-fn build_scope(paths: &DistillPaths, book: Option<String>, all: bool) -> Result<Vec<String>> {
-    let mut on_disk = list_book_slugs(&paths.reference_root)?;
-    on_disk.sort();
-    if let Some(slug) = book {
-        if !on_disk.iter().any(|s| s == &slug) {
-            bail!(
-                "no book.toml found for slug {slug:?} under {}",
-                paths.reference_root.display()
-            );
-        }
-        return Ok(vec![slug]);
+/// Read the OCR Markdown payload behind a resolved source path.
+/// Files are loaded verbatim; directories are treated as a fragment
+/// set and concatenated in sorted filename order.
+fn read_source(source: &Path) -> Result<String> {
+    if source.is_file() {
+        return std::fs::read_to_string(source)
+            .with_context(|| format!("read {}", source.display()));
     }
-    if !all && on_disk.len() > 1 {
-        bail!(
-            "more than one reference book is present; pass `--book <slug>` to \
-             pick one or `--all` to build every book"
-        );
-    }
-    Ok(on_disk)
-}
-
-fn list_book_slugs(reference_root: &Path) -> Result<Vec<String>> {
-    if !reference_root.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(reference_root)
-        .with_context(|| format!("read_dir {}", reference_root.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if !path.join("book.toml").is_file() {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            out.push(name.to_string());
-        }
-    }
-    Ok(out)
-}
-
-/// Resolve OCR Markdown for a reference book. Accepts either a single
-/// `source.md` or a `sources/` directory of `*.md` fragments
-/// concatenated in sorted name order.
-fn read_source(book_dir: &Path) -> Result<String> {
-    let single = book_dir.join("source.md");
-    if single.is_file() {
-        return std::fs::read_to_string(&single)
-            .with_context(|| format!("read {}", single.display()));
-    }
-    let dir = book_dir.join("sources");
-    if dir.is_dir() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .with_context(|| format!("read_dir {}", dir.display()))?
+    if source.is_dir() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(source)
+            .with_context(|| format!("read_dir {}", source.display()))?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
             .collect();
@@ -213,11 +314,7 @@ fn read_source(book_dir: &Path) -> Result<String> {
         }
         return Ok(acc);
     }
-    Err(eyre!(
-        "neither {} nor {} exists",
-        single.display(),
-        dir.display()
-    ))
+    Err(eyre!("source path does not exist: {}", source.display()))
 }
 
 fn compose_extras(slug: &str, distill_run_id: &str) -> JsonMap<String, JsonValue> {
@@ -298,41 +395,26 @@ fn draft_to_new_entry(draft: &EntryDraft) -> NewEntry {
 // verify
 // ---------------------------------------------------------------------------
 
-fn verify(paths: &DistillPaths, book: Option<String>) -> Result<()> {
-    let mut on_disk = list_book_slugs(&paths.reference_root)?;
-    on_disk.sort();
-    let scope: Vec<String> = match book {
-        Some(slug) => {
-            if !on_disk.iter().any(|s| s == &slug) {
-                bail!(
-                    "no book.toml found for slug {slug:?} under {}",
-                    paths.reference_root.display()
-                );
-            }
-            vec![slug]
-        }
-        None => on_disk,
-    };
+fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<()> {
+    let books = resolve_paths(&args.paths, args.recursive)?;
 
     let prod_refs = Refs::open(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
 
     let distill_run_id = chrono::Utc::now().to_rfc3339();
-    for slug in scope {
-        let book_dir = paths.reference_root.join(&slug);
-        let book_toml_path = book_dir.join("book.toml");
-        let pipeline = load_pipeline(&book_toml_path)?;
-        let source = read_source(&book_dir)?;
-        let extras = compose_extras(&slug, &distill_run_id);
+    for book in &books {
+        let pipeline = load_pipeline(&book.book_toml)?;
+        let source = read_source(&book.source)?;
+        let extras = compose_extras(&book.slug, &distill_run_id);
         let (drafts, _coverage) = pipeline.run_with_extras(source, extras)?;
 
         let proposed: BTreeMap<String, EntryDraft> = drafts
             .into_iter()
             .map(|d| (d.entry_key.clone(), d))
             .collect();
-        let live = read_live_entries(&prod_refs, &slug)?;
+        let live = read_live_entries(&prod_refs, &book.slug)?;
 
-        diff_and_report(&slug, &proposed, &live);
+        diff_and_report(&book.slug, &proposed, &live);
     }
 
     Ok(())
@@ -410,9 +492,16 @@ fn print_list(label: &str, keys: &[&str]) {
 // list
 // ---------------------------------------------------------------------------
 
-fn list(paths: &DistillPaths) -> Result<()> {
+fn list(paths: &DistillPaths, _args: DistillListArgs) -> Result<()> {
     if !paths.refs_path.is_file() {
-        println!("no reference.db at {}", paths.refs_path.display());
+        if ctx().is_quiet() {
+            return Ok(());
+        }
+        if ctx().is_json() {
+            println!("{}", json!({"books": []}));
+        } else {
+            println!("no reference.db at {}", paths.refs_path.display());
+        }
         return Ok(());
     }
     let refs = Refs::open(&paths.refs_path)
@@ -427,22 +516,66 @@ fn list(paths: &DistillPaths) -> Result<()> {
        GROUP BY b.book_slug \
        ORDER BY b.authority_rank DESC, b.built_at ASC",
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-        ))
+    let row_iter = stmt.query_map([], |row| {
+        Ok(ListRow {
+            slug: row.get::<_, String>(0)?,
+            title: row.get::<_, String>(1)?,
+            authority_rank: row.get::<_, i64>(2)?,
+            built_at: row.get::<_, String>(3)?,
+            entry_count: row.get::<_, i64>(4)?,
+        })
     })?;
-
-    println!("slug\ttitle\tauthority_rank\tentry_count\tbuilt_at");
-    for row in rows {
-        let (slug, title, rank, built_at, count) = row?;
-        println!("{slug}\t{title}\t{rank}\t{count}\t{built_at}");
+    let mut rows: Vec<ListRow> = Vec::new();
+    for row in row_iter {
+        rows.push(row?);
     }
+
+    if ctx().is_quiet() {
+        return Ok(());
+    }
+    if ctx().is_json() {
+        let payload = json!({
+            "books": rows.iter().map(ListRow::to_json).collect::<Vec<_>>(),
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(text) => println!("{text}"),
+            Err(_) => println!("{payload}"),
+        }
+        return Ok(());
+    }
+    let mut table = RowTable::new(["slug", "title", "authority_rank", "entry_count", "built_at"]);
+    for r in &rows {
+        table.push_row([
+            r.slug.clone(),
+            r.title.clone(),
+            r.authority_rank.to_string(),
+            r.entry_count.to_string(),
+            r.built_at.clone(),
+        ]);
+    }
+    println!("{}", table.render());
     Ok(())
+}
+
+#[derive(Debug)]
+struct ListRow {
+    slug: String,
+    title: String,
+    authority_rank: i64,
+    built_at: String,
+    entry_count: i64,
+}
+
+impl ListRow {
+    fn to_json(&self) -> JsonValue {
+        json!({
+            "slug": self.slug,
+            "title": self.title,
+            "authority_rank": self.authority_rank,
+            "entry_count": self.entry_count,
+            "built_at": self.built_at,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -474,27 +607,43 @@ stages = [
 
     const TINY_SOURCE: &str = "<!-- page 1 (sheet 1) -->\nSmith\nJones\n";
 
-    fn seed_data_dir(root: &Path) {
-        let book_dir = root.join("reference").join("tiny");
+    fn seed_book_dir(root: &Path, slug: &str) -> PathBuf {
+        let book_dir = root.join("reference").join(slug);
         fs::create_dir_all(&book_dir).expect("mkdir");
-        fs::write(book_dir.join("book.toml"), TINY_BOOK_TOML).expect("write book.toml");
+        let toml = TINY_BOOK_TOML.replace("\"tiny\"", &format!("\"{slug}\""));
+        fs::write(book_dir.join("book.toml"), toml).expect("write book.toml");
         fs::write(book_dir.join("source.md"), TINY_SOURCE).expect("write source.md");
+        book_dir
     }
 
     fn make_paths(root: &Path) -> DistillPaths {
         DistillPaths {
             refs_path: root.join("reference.db"),
-            reference_root: root.join("reference"),
+        }
+    }
+
+    fn build_args(paths: Vec<PathBuf>, dry_run: bool, recursive: bool) -> DistillBuildArgs {
+        DistillBuildArgs {
+            paths,
+            recursive,
+            dry_run,
+        }
+    }
+
+    fn verify_args(paths: Vec<PathBuf>) -> DistillVerifyArgs {
+        DistillVerifyArgs {
+            paths,
+            recursive: false,
         }
     }
 
     #[test]
     fn build_writes_book_and_entries_into_reference_db() {
         let tmp = TempDir::new().expect("tmp");
-        seed_data_dir(tmp.path());
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
 
-        build(&paths, None, false, false).expect("build");
+        build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
         let refs = Refs::open(&paths.refs_path).expect("open refs");
         let conn = refs.connection();
@@ -519,10 +668,10 @@ stages = [
     #[test]
     fn build_dry_run_does_not_create_reference_db() {
         let tmp = TempDir::new().expect("tmp");
-        seed_data_dir(tmp.path());
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
 
-        build(&paths, None, false, true).expect("dry-run build");
+        build(&paths, build_args(vec![book_dir], true, false)).expect("dry-run build");
 
         assert!(
             !paths.refs_path.exists(),
@@ -531,16 +680,18 @@ stages = [
     }
 
     #[test]
-    fn build_by_slug_and_build_all_are_equivalent_for_a_single_book() {
+    fn build_one_dir_and_recursive_root_are_equivalent_for_a_single_book() {
         let tmp_a = TempDir::new().expect("tmp a");
-        seed_data_dir(tmp_a.path());
+        let book_dir = seed_book_dir(tmp_a.path(), "tiny");
         let paths_a = make_paths(tmp_a.path());
-        build(&paths_a, Some("tiny".to_string()), false, false).expect("build --book tiny");
+        build(&paths_a, build_args(vec![book_dir], false, false)).expect("build single dir");
 
         let tmp_b = TempDir::new().expect("tmp b");
-        seed_data_dir(tmp_b.path());
+        let _ = seed_book_dir(tmp_b.path(), "tiny");
         let paths_b = make_paths(tmp_b.path());
-        build(&paths_b, None, true, false).expect("build --all");
+        let reference_root = tmp_b.path().join("reference");
+        build(&paths_b, build_args(vec![reference_root], false, true))
+            .expect("build recursive root");
 
         let count = |paths: &DistillPaths| -> i64 {
             let refs = Refs::open(&paths.refs_path).expect("open");
@@ -558,13 +709,11 @@ stages = [
     #[test]
     fn verify_reports_no_diff_when_db_matches_book_toml() {
         let tmp = TempDir::new().expect("tmp");
-        seed_data_dir(tmp.path());
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
-        build(&paths, None, false, false).expect("build");
+        build(&paths, build_args(vec![book_dir.clone()], false, false)).expect("build");
 
-        // Re-run verify; it should not panic and the database must
-        // remain readable afterward.
-        verify(&paths, None).expect("verify");
+        verify(&paths, verify_args(vec![book_dir])).expect("verify");
         let refs = Refs::open(&paths.refs_path).expect("open after verify");
         let _ = refs
             .lookup_resolved(None, "smith")
@@ -574,11 +723,10 @@ stages = [
     #[test]
     fn verify_detects_a_manual_payload_change() {
         let tmp = TempDir::new().expect("tmp");
-        seed_data_dir(tmp.path());
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
-        build(&paths, None, false, false).expect("build");
+        build(&paths, build_args(vec![book_dir.clone()], false, false)).expect("build");
 
-        // Mutate one row's payload behind the pipeline's back.
         let refs = Refs::open(&paths.refs_path).expect("open");
         refs.connection()
             .execute(
@@ -593,10 +741,9 @@ stages = [
             let refs = Refs::open(&paths.refs_path).expect("re-open");
             read_live_entries(&refs, "tiny").expect("live")
         };
-        // Re-distill and diff in-process.
-        let book_toml_path = paths.reference_root.join("tiny").join("book.toml");
+        let book_toml_path = book_dir.join("book.toml");
         let pipeline = load_pipeline(&book_toml_path).expect("pipeline");
-        let source = read_source(&paths.reference_root.join("tiny")).expect("source");
+        let source = read_source(&book_dir.join("source.md")).expect("source");
         let extras = compose_extras("tiny", "2026-06-25T00:00:00Z");
         let (drafts, _) = pipeline.run_with_extras(source, extras).expect("run");
         let proposed: BTreeMap<String, EntryDraft> = drafts
@@ -623,14 +770,93 @@ stages = [
     #[test]
     fn list_prints_each_registered_book_with_its_entry_count() {
         let tmp = TempDir::new().expect("tmp");
-        seed_data_dir(tmp.path());
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
-        build(&paths, None, false, false).expect("build");
+        build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
-        // `list` writes to stdout; assert it returns Ok and is
-        // re-runnable. Stdout content is not captured here; the
-        // assertion that `reference_books` carries the row is in
-        // build_writes_book_and_entries_into_reference_db.
-        list(&paths).expect("list");
+        list(&paths, DistillListArgs::default()).expect("list");
+    }
+
+    #[test]
+    fn resolve_accepts_book_toml_directly() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let book_toml = book_dir.join("book.toml");
+
+        let resolved = resolve_paths(std::slice::from_ref(&book_toml), false).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].slug, "tiny");
+        assert_eq!(resolved[0].book_toml, book_toml);
+        assert_eq!(resolved[0].source, book_dir.join("source.md"));
+    }
+
+    #[test]
+    fn resolve_accepts_directory_with_book_toml() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+
+        let resolved = resolve_paths(std::slice::from_ref(&book_dir), false).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].slug, "tiny");
+        assert_eq!(resolved[0].book_toml, book_dir.join("book.toml"));
+    }
+
+    #[test]
+    fn resolve_walks_recursive_root() {
+        let tmp = TempDir::new().expect("tmp");
+        let _ = seed_book_dir(tmp.path(), "alpha");
+        let _ = seed_book_dir(tmp.path(), "beta");
+        let reference_root = tmp.path().join("reference");
+
+        let resolved = resolve_paths(&[reference_root], true).expect("resolve");
+        let slugs: BTreeSet<&str> = resolved.iter().map(|r| r.slug.as_str()).collect();
+        assert!(slugs.contains("alpha"));
+        assert!(slugs.contains("beta"));
+        assert_eq!(slugs.len(), 2);
+    }
+
+    #[test]
+    fn resolve_errors_when_md_has_no_book_toml() {
+        let tmp = TempDir::new().expect("tmp");
+        let lonely = tmp.path().join("lonely.md");
+        fs::write(&lonely, TINY_SOURCE).expect("write");
+
+        let err = resolve_paths(std::slice::from_ref(&lonely), false).expect_err("must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("no book.toml co-located"), "got error: {msg}");
+    }
+
+    #[test]
+    fn resolve_accepts_md_with_stem_book_toml() {
+        let tmp = TempDir::new().expect("tmp");
+        let dir = tmp.path().join("custom");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let source = dir.join("entries.md");
+        fs::write(&source, TINY_SOURCE).expect("source");
+        let toml = TINY_BOOK_TOML.replace("\"tiny\"", "\"custom\"");
+        fs::write(dir.join("entries.book.toml"), toml).expect("toml");
+
+        let resolved = resolve_paths(std::slice::from_ref(&source), false).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].slug, "custom");
+        assert_eq!(resolved[0].source, source);
+        assert_eq!(resolved[0].book_toml, dir.join("entries.book.toml"));
+    }
+
+    #[test]
+    fn resolve_errors_on_duplicate_slug() {
+        let tmp = TempDir::new().expect("tmp");
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        fs::create_dir_all(&dir_a).expect("mkdir a");
+        fs::create_dir_all(&dir_b).expect("mkdir b");
+        fs::write(dir_a.join("book.toml"), TINY_BOOK_TOML).expect("toml a");
+        fs::write(dir_a.join("source.md"), TINY_SOURCE).expect("source a");
+        fs::write(dir_b.join("book.toml"), TINY_BOOK_TOML).expect("toml b");
+        fs::write(dir_b.join("source.md"), TINY_SOURCE).expect("source b");
+
+        let err = resolve_paths(&[dir_a, dir_b], false).expect_err("must error");
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate slug"), "got error: {msg}");
     }
 }

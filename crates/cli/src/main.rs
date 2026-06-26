@@ -21,8 +21,8 @@ mod util;
 use std::path::PathBuf;
 
 use bookrack_cli_grammar::{
-    CorpusAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction, QueueAction,
-    RemoveArgs, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction,
+    QueueAction, RemoveArgs, StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -316,7 +316,7 @@ enum Command {
     /// through the daemon's control plane.
     Distill {
         #[command(subcommand)]
-        action: bookrack_cli::distill_cmd::DistillAction,
+        action: DistillAction,
     },
     /// Stream or snapshot the running daemon's logs.
     ///
