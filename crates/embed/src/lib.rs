@@ -175,7 +175,7 @@ impl OllamaEmbedClient {
                     if !e.is_transient() || attempt >= self.max_retries {
                         return Err(e);
                     }
-                    let backoff = (self.backoff_base * 2u32.pow(attempt)).min(MAX_BACKOFF);
+                    let backoff = capped_backoff(self.backoff_base, attempt);
                     tokio::time::sleep(backoff).await;
                     attempt += 1;
                 }
@@ -222,6 +222,19 @@ impl OllamaEmbedClient {
             }
         }
     }
+}
+
+/// Exponential backoff for `embed_batch`'s retry loop, with two
+/// guards against the previous `base * 2u32.pow(attempt)` shape:
+/// `saturating_pow` keeps the `2^attempt` factor from panicking on
+/// `attempt >= 32`, and `Duration::saturating_mul` keeps the
+/// per-step multiplication from overflowing `Duration` even when
+/// `base` is non-trivial. The final `.min(MAX_BACKOFF)` clamps to
+/// the configured cap so the retry cadence stays predictable
+/// regardless of how many attempts the loop has already burned.
+fn capped_backoff(base: std::time::Duration, attempt: u32) -> std::time::Duration {
+    base.saturating_mul(2u32.saturating_pow(attempt))
+        .min(MAX_BACKOFF)
 }
 
 /// Something that embeds a batch of texts into vectors.
@@ -398,6 +411,38 @@ mod tests {
         let wrapped = build_query_input("dragons");
         assert!(wrapped.starts_with("Instruct:"));
         assert!(wrapped.ends_with("Query: dragons"));
+    }
+
+    /// The retry loop's exponential backoff must stay panic-free
+    /// across the whole `u32` range and never exceed `MAX_BACKOFF`,
+    /// so a retry pool that has accumulated dozens of failures does
+    /// not abort the worker on overflow.
+    #[test]
+    fn capped_backoff_is_panic_free_and_bounded_above() {
+        for attempt in [0u32, 1, 2, 16, 31, 32, 64, u32::MAX] {
+            let backoff = capped_backoff(std::time::Duration::from_millis(100), attempt);
+            assert!(
+                backoff <= MAX_BACKOFF,
+                "attempt {attempt}: backoff {backoff:?} exceeds {MAX_BACKOFF:?}"
+            );
+        }
+    }
+
+    /// A non-trivial `base` saturates `Duration` rather than wrapping
+    /// when multiplied by a large `2^attempt`, and still respects the
+    /// `MAX_BACKOFF` ceiling.
+    #[test]
+    fn capped_backoff_clamps_a_large_base() {
+        let backoff = capped_backoff(std::time::Duration::from_secs(60), 32);
+        assert_eq!(backoff, MAX_BACKOFF);
+    }
+
+    /// The first attempt with the historical default base returns
+    /// `base` itself: the cap is never hit on the very first retry.
+    #[test]
+    fn capped_backoff_returns_base_at_attempt_zero() {
+        let base = std::time::Duration::from_millis(125);
+        assert_eq!(capped_backoff(base, 0), base);
     }
 
     #[tokio::test]

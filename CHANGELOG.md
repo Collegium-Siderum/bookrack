@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **embed: retry backoff is panic-free across the full attempt
+  range.** `embed_batch` computed the per-attempt sleep as
+  `backoff_base * 2u32.pow(attempt)`. `2u32.pow` panics on
+  `attempt >= 32`, and `Duration::Mul<u32>` panics even earlier
+  when `backoff_base` is non-trivial; a worker that accumulated
+  enough transient failures could be killed by overflow on the
+  retry path itself. The factor is now `saturating_pow` and the
+  multiplication is `Duration::saturating_mul`, with the existing
+  `.min(MAX_BACKOFF)` clamp keeping the cadence bounded.
+
 - **control-client: `subscribe` now serializes concurrent callers.**
   The previous check-then-swap on an `AtomicBool` let a second
   subscriber slip past while the first was still issuing the
