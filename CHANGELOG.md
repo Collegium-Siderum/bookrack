@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: wizard writes `config.toml` through the canonical TOML
+  serializer.** `wizard::runner::write_root_config` previously
+  interpolated `ollama_url` and `embed_model` into a hand-rolled
+  `format!` body. A `"` / newline / backslash / U+2028 inside either
+  value escaped the basic string and the next daemon start failed
+  with `RootConfigMalformed`, leaving the user with a wizard that
+  reported success and a daemon that refused to boot. The wizard now
+  goes through `bookrack_config::render_root_config_toml`, which
+  derives `Serialize` on `RootConfig` and serializes via the `toml`
+  crate so every escape is handled by the same writer that
+  `load_root_config` already parses.
+
 - **runtime: paper-side `contributor_add` no longer collides on a
   reused ordinal.** `papers.metadata.contributor_add` computed the
   ordinal for a new curator-added contributor as `existing.len()`,

@@ -387,16 +387,20 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 /// (where one exists) overrides this layer, and the hardcoded default
 /// wins when both are absent. Written by `bookrack init`; safe to edit
 /// by hand.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RootConfig {
     /// Ollama HTTP endpoint for embeddings.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
     /// Embedding model tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
     /// Address the MCP server binds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_addr: Option<String>,
     /// `EnvFilter` directive for tracing verbosity.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub log_directive: Option<String>,
 }
 
@@ -415,6 +419,28 @@ pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
         }
     };
     toml::from_str(&text).map_err(|source| ConfigError::RootConfigMalformed { path, source })
+}
+
+/// Render a `<data_root>/config.toml` body for a freshly initialized
+/// library, using the canonical TOML serializer so the URL and model
+/// strings are escaped correctly regardless of which characters they
+/// carry.
+///
+/// The previous wizard hand-rolled the file with `format!`, which let
+/// a `"` or a `\n` inside `ollama_url` break the file: `toml::from_str`
+/// then refused the document on the next daemon start. The serializer
+/// emits a TOML basic string with the right escapes (`\"`, `\n`, `\\`,
+/// `\u{...}` for U+2028 and friends) so the same input round-trips
+/// through `load_root_config`.
+pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
+    let cfg = RootConfig {
+        ollama_url: Some(ollama_url.to_string()),
+        embed_model: Some(embed_model.to_string()),
+        mcp_addr: None,
+        log_directive: None,
+    };
+    let body = toml::to_string(&cfg).expect("RootConfig serialization is infallible");
+    format!("# bookrack root config. Written by `bookrack init`; safe to edit.\n{body}")
 }
 
 /// Embedding model served by the local Ollama daemon, used when

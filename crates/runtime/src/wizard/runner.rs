@@ -13,8 +13,9 @@ use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig, OLLAMA_URL_ENV,
     ROOT_CONFIG_NAME, default_registry_path, locate_pdfium, merge_library_into_registry,
-    pdfium_library_filename, portable_data_dir,
+    pdfium_library_filename, portable_data_dir, render_root_config_toml,
 };
+
 use bookrack_corpus::Corpus;
 use bookrack_embed::{OllamaEmbedClient, probe_ollama};
 use bookrack_ingest::{IngestParams, ingest_book};
@@ -298,11 +299,7 @@ fn write_root_config(
     if path.exists() && !force {
         return Ok((path, true));
     }
-    let contents = format!(
-        "# bookrack root config. Written by `bookrack init`; safe to edit.\n\
-         ollama_url = \"{ollama_url}\"\n\
-         embed_model = \"{embed_model}\"\n"
-    );
+    let contents = render_root_config_toml(ollama_url, embed_model);
     std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))?;
     Ok((path, false))
 }
@@ -408,6 +405,38 @@ mod tests {
         assert!(kept, "existing config should be kept");
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(text, "hand-edited content");
+    }
+
+    /// `ollama_url` carrying TOML-significant characters used to slip
+    /// through `format!` unescaped: a `"` closed the basic string and
+    /// the rest of the line became invalid TOML, so the next daemon
+    /// start failed with `RootConfigMalformed`. Serializing through
+    /// the `toml` crate now escapes them, and `load_root_config`
+    /// reads back exactly what the wizard was handed.
+    #[test]
+    fn write_root_config_round_trips_special_characters_in_ollama_url() {
+        let tricky = "http://x:1/has \"quotes\" and a\nnewline and a \\ and a \u{2028}";
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_root_config(tmp.path(), tricky, "model:xyz", false).expect("write");
+        let loaded = bookrack_config::load_root_config(tmp.path()).expect("load");
+        assert_eq!(loaded.ollama_url.as_deref(), Some(tricky));
+        assert_eq!(loaded.embed_model.as_deref(), Some("model:xyz"));
+    }
+
+    /// A wider sweep of single tricky characters: each one used to be
+    /// a candidate for breaking the hand-rolled TOML body.
+    #[test]
+    fn write_root_config_round_trips_each_tricky_character_alone() {
+        for ch in [
+            '"', '\\', '\n', '\r', '\t', '\u{2028}', '\u{2029}', '\u{0000}',
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let url = format!("http://x:1/{ch}");
+            write_root_config(tmp.path(), &url, "model:xyz", true).expect("write");
+            let parsed = bookrack_config::load_root_config(tmp.path())
+                .unwrap_or_else(|e| panic!("char {ch:?} broke parse: {e}"));
+            assert_eq!(parsed.ollama_url.as_deref(), Some(url.as_str()));
+        }
     }
 
     #[test]
