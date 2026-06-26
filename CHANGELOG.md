@@ -10,6 +10,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **distill: an unparseable page marker now errors instead of
+  collapsing to page 0.** `SplitPages` used `parse::<u32>().unwrap_or(0)`
+  on the page and sheet captures, so a digit run that overflowed `u32`
+  silently became page or sheet `0` — and every subsequent body line
+  was attributed to that phantom page. The parser now returns
+  `ParseError::InvalidPageMarker { marker, byte_offset }` so the
+  operator can locate the bad line in the source.
+
 - **vectors: a failed `drop_index` no longer poisons the sidecar.**
   Both `drop_ann_index` and the pre-rebuild drop in `build_ann_index`
   used to log every `Table::drop_index` failure at `debug` and

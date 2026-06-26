@@ -57,4 +57,13 @@ pub enum ParseError {
          see the v2 distill investigation doc §8.1"
     )]
     LlmHookNotImplemented(String),
+
+    /// A `<!-- page N (sheet M) -->` marker carried a number that did
+    /// not parse as a `u32`. The marker text and source byte offset
+    /// are both preserved so the operator can locate the bad line in
+    /// the original source. The previous code path silently collapsed
+    /// the offending marker to page / sheet `0`, mixing later content
+    /// into a phantom first page.
+    #[error("invalid page marker at byte {byte_offset}: {marker:?}")]
+    InvalidPageMarker { marker: String, byte_offset: usize },
 }

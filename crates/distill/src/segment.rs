@@ -104,8 +104,12 @@ impl Stage for SplitPages {
                 let text = source[body_start..m.start()].trim().to_string();
                 pages.push(Page { page, sheet, text });
             }
-            let page = cap.get(1).unwrap().as_str().parse::<u32>().unwrap_or(0);
-            let sheet = cap.get(2).unwrap().as_str().parse::<u32>().unwrap_or(0);
+            let marker_text = m.as_str();
+            let marker_offset = m.start();
+            let page =
+                parse_marker_number(cap.get(1).unwrap().as_str(), marker_text, marker_offset)?;
+            let sheet =
+                parse_marker_number(cap.get(2).unwrap().as_str(), marker_text, marker_offset)?;
             last = Some((page, sheet, m.end()));
         }
         if let Some((page, sheet, body_start)) = last {
@@ -116,6 +120,21 @@ impl Stage for SplitPages {
         ctx.coverage.pages = pages.len();
         Ok(StageData::Pages(pages))
     }
+}
+
+/// Parse a `(\d+)` capture from the page marker into `u32`, returning
+/// [`ParseError::InvalidPageMarker`] when the digit run does not fit
+/// (e.g. `99999999999`). The marker regex guarantees the input is all
+/// digits, so the only realistic failure shape is overflow; surfacing
+/// it with the full marker text and source byte offset lets the
+/// operator locate the bad line without grep-archaeology.
+fn parse_marker_number(digits: &str, marker: &str, byte_offset: usize) -> Result<u32, ParseError> {
+    digits
+        .parse::<u32>()
+        .map_err(|_| ParseError::InvalidPageMarker {
+            marker: marker.to_string(),
+            byte_offset,
+        })
 }
 
 // --- one_block_per_page ---------------------------------------------------
@@ -434,6 +453,51 @@ mod tests {
         assert!(pages[0].text.contains("content of page 1"));
         assert_eq!(pages[1].page, 2);
         assert_eq!(ctx.coverage.pages, 2);
+    }
+
+    /// A page marker whose digit run overflows `u32` (the only failure
+    /// shape that can reach the parser, since the regex already
+    /// constrains the captures to `\d+`) must surface as
+    /// `InvalidPageMarker` rather than silently collapsing to page 0.
+    #[test]
+    fn split_pages_errors_on_a_page_marker_that_overflows_u32() {
+        let source = "preface\n<!-- page 99999999999 (sheet 1) -->\nbody\n";
+        let mut ctx = Ctx::new();
+        let err = SplitPages
+            .run(StageData::Source(source.to_string()), &mut ctx)
+            .expect_err("overflow must error, not collapse to 0");
+        match err {
+            ParseError::InvalidPageMarker {
+                marker,
+                byte_offset,
+            } => {
+                assert!(
+                    marker.contains("99999999999"),
+                    "marker must carry the original text, was {marker:?}"
+                );
+                assert_eq!(
+                    &source[byte_offset..byte_offset + marker.len()],
+                    marker,
+                    "byte_offset must point at the marker in the source"
+                );
+            }
+            other => panic!("expected InvalidPageMarker, got {other:?}"),
+        }
+    }
+
+    /// Same for the sheet capture: a sheet value that exceeds `u32`
+    /// must not be silently dropped into a phantom sheet 0.
+    #[test]
+    fn split_pages_errors_on_a_sheet_marker_that_overflows_u32() {
+        let source = "<!-- page 1 (sheet 99999999999) -->\nbody\n";
+        let mut ctx = Ctx::new();
+        let err = SplitPages
+            .run(StageData::Source(source.to_string()), &mut ctx)
+            .expect_err("sheet overflow must error");
+        assert!(
+            matches!(err, ParseError::InvalidPageMarker { .. }),
+            "expected InvalidPageMarker, got {err:?}"
+        );
     }
 
     // ---- one_block_per_page ----
