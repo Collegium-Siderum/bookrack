@@ -161,6 +161,47 @@ fn mismatch(stage: &str, expected: &'static str, actual: &'static str) -> ParseE
     }
 }
 
+/// One row in the per-stage report attached to [`Coverage`]. Records
+/// the cardinality of the [`StageData`] flowing into and out of one
+/// `Stage::run` call, plus a small sample of items the stage dropped
+/// when the input and output variants are the same.
+///
+/// The pipeline writes one [`StageReport`] per stage; consumers (the
+/// CLI summary, future `distill lint`) read them to spot stages that
+/// silently shrink their input far more than expected.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StageReport {
+    /// `Stage::name()` of the stage that produced this row.
+    pub stage_name: String,
+    /// `StageData::kind()` of the input the stage consumed.
+    pub in_kind: &'static str,
+    /// Number of items in the input. `Source` always reports `1`;
+    /// the other variants report the length of their `Vec`.
+    pub in_len: usize,
+    /// `StageData::kind()` of the output the stage emitted.
+    pub out_kind: &'static str,
+    /// Item count of the emitted variant, in the same units as
+    /// `in_len` for its kind.
+    pub out_len: usize,
+    /// Up to three `Debug`-formatted items present in the input but
+    /// not in the output, each truncated to ~120 chars. Populated
+    /// only when `in_kind == out_kind` and the stage shrank the
+    /// collection; otherwise empty.
+    pub dropped_sample: Vec<String>,
+}
+
+impl StageReport {
+    /// Fraction of input items the stage carried over to its output,
+    /// or `None` when the input and output variants differ (the
+    /// ratio is not meaningful across kinds) or the input was empty.
+    pub fn retention(&self) -> Option<f64> {
+        if self.in_kind != self.out_kind || self.in_len == 0 {
+            return None;
+        }
+        Some(self.out_len as f64 / self.in_len as f64)
+    }
+}
+
 /// Per-run metric block updated by stages as they consume their input.
 ///
 /// `pages`, `blocks`, and the lower counters are written by the
@@ -168,6 +209,9 @@ fn mismatch(stage: &str, expected: &'static str, actual: &'static str) -> ParseE
 /// pipeline at the end of a successful run as the count of emitted
 /// `EntryDraft`s. `coverage_pct` reports how much of the candidate
 /// input the pipeline actually turned into structured entries.
+/// `stage_reports` holds one [`StageReport`] per stage, in execution
+/// order, so callers can see per-stage cardinality without having to
+/// re-derive it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Coverage {
     pub pages: usize,
@@ -177,6 +221,7 @@ pub struct Coverage {
     pub entries: usize,
     pub unmatched_lines: usize,
     pub pair_mismatch: usize,
+    pub stage_reports: Vec<StageReport>,
 }
 
 impl Coverage {

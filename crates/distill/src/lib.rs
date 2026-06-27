@@ -43,7 +43,9 @@ pub use catalogs::{
     Catalogs, FlagSpec, ParamSpec, PropertyCatalog, PropertySpec, QualityFlagCatalog, StageCatalog,
     StageSpec,
 };
-pub use core::{Block, Coverage, Ctx, EntryDraft, Page, RawEntry, SplitEntry, StageData};
+pub use core::{
+    Block, Coverage, Ctx, EntryDraft, Page, RawEntry, SplitEntry, StageData, StageReport,
+};
 pub use dispatch::dispatch_stage;
 pub use error::ParseError;
 pub use extractor::{

@@ -173,6 +173,19 @@ pub struct DistillBuildArgs {
     /// coverage summary instead.
     #[arg(long)]
     pub dry_run: bool,
+    /// Lower bound, expressed as a fraction in `[0.0, 1.0]`, for any
+    /// same-kind stage's output-to-input ratio. A stage that falls
+    /// below this threshold is treated as a probable misconfiguration:
+    /// the run prints the dropped-sample lines and exits non-zero.
+    /// Cross-kind stages (source -> pages, etc.) are not bounded.
+    #[arg(long, value_name = "FRACTION", default_value_t = 0.10)]
+    pub retention_threshold: f64,
+    /// Disable the per-stage retention guard; the per-stage table is
+    /// still printed for inspection, but a low-retention row no
+    /// longer fails the run. Operators can use this to inspect a
+    /// known-aggressive pipeline without flag noise.
+    #[arg(long)]
+    pub no_retention_check: bool,
 }
 
 /// Positional + flag bundle for `distill verify`.

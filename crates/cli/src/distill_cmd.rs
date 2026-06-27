@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{DistillAction, DistillBuildArgs, DistillListArgs, DistillVerifyArgs};
 use bookrack_config::Config;
-use bookrack_distill::{BookToml, EntryDraft, load_pipeline};
+use bookrack_distill::{BookToml, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
 use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -258,6 +258,15 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
             .run_with_extras(source, extras)
             .with_context(|| format!("run pipeline for {}", book.slug))?;
 
+        print_stage_table(&book.slug, &coverage.stage_reports);
+        if !args.no_retention_check {
+            enforce_retention(
+                &book.slug,
+                &coverage.stage_reports,
+                args.retention_threshold,
+            )?;
+        }
+
         if args.dry_run {
             println!(
                 "[dry-run] {}: entries={} coverage_pct={:.1}",
@@ -285,6 +294,61 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+/// Render the per-stage cardinality and retention block for one
+/// pipeline run. Each row reports the kind and item count on both
+/// sides of `Stage::run`; same-kind stages also get a `retention`
+/// column, while cross-kind stages report `--`. The block is keyed
+/// to the book slug so multi-book runs stay readable.
+fn print_stage_table(slug: &str, reports: &[StageReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    println!("{slug}: per-stage cardinality");
+    for report in reports {
+        let retention = match report.retention() {
+            Some(r) => format!("{:>6.1}%", r * 100.0),
+            None => "    --".to_string(),
+        };
+        println!(
+            "  {:<28} {:>7}:{:<7} -> {:>7}:{:<7} {}",
+            report.stage_name,
+            report.in_kind,
+            report.in_len,
+            report.out_kind,
+            report.out_len,
+            retention,
+        );
+        for line in &report.dropped_sample {
+            println!("      - dropped: {line}");
+        }
+    }
+}
+
+/// Fail the run when any same-kind stage carried less than `threshold`
+/// of its input across. Cross-kind stages have no meaningful ratio
+/// and are ignored. The threshold is a fraction in `[0.0, 1.0]`.
+fn enforce_retention(slug: &str, reports: &[StageReport], threshold: f64) -> Result<()> {
+    if !(0.0..=1.0).contains(&threshold) {
+        bail!("retention-threshold must be in [0.0, 1.0], got {threshold}");
+    }
+    for report in reports {
+        if let Some(ratio) = report.retention()
+            && ratio < threshold
+        {
+            bail!(
+                "{slug}: stage {:?} retained {:.1}% of its input ({} -> {}), below the {:.1}% threshold; \
+                 inspect the stage configuration or pass `--no-retention-check` to skip the guard",
+                report.stage_name,
+                ratio * 100.0,
+                report.in_len,
+                report.out_len,
+                threshold * 100.0,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -647,6 +711,8 @@ stages = [
             paths,
             recursive,
             dry_run,
+            retention_threshold: 0.10,
+            no_retention_check: false,
         }
     }
 
