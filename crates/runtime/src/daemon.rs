@@ -32,6 +32,7 @@ use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_glean::GleanParams;
 use bookrack_ingest::IngestParams;
+use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
@@ -190,6 +191,12 @@ pub struct DaemonRuntime {
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
     pub _tty_lock: TtyLock,
+    /// Drop-only field: holds the tracing non-blocking writer's
+    /// background-thread guard. Dropping flushes buffered log lines
+    /// and joins the writer thread, so this lives until the runtime
+    /// is torn down (either because bring-up after `obs::init` failed
+    /// or the daemon exited cleanly).
+    _obs_guard: Option<WorkerGuard>,
     queue_worker: Option<JoinHandle<Result<()>>>,
     signal_handle: JoinHandle<Result<()>>,
     control_accept_handle: JoinHandle<Result<()>>,
@@ -280,14 +287,12 @@ impl DaemonRuntime {
         tty_lock
             .record_library_root(cfg.data_dir(), cfg.library())
             .context("record library root in session lock")?;
-        let (_obs_guard, log_stream) = bookrack_obs::init(&cfg, &opts.log_config);
-        // The obs guard's lifetime ends with `DaemonRuntime`; leak the
-        // guard so the subscriber stays installed until the process
-        // exits. `bookrack_obs::init` returns a `WorkerGuard` whose
-        // drop flushes the tracing subscriber's worker; leaking it is
-        // the same shape `run_daemon` used historically — the runtime
-        // owns no graceful shutdown for the writer thread.
-        std::mem::forget(_obs_guard);
+        let (obs_guard, log_stream) = bookrack_obs::init(&cfg, &opts.log_config);
+        // The guard owns the non-blocking writer's background thread;
+        // drop flushes buffered lines and joins the thread. Bind it
+        // to `DaemonRuntime` so a `?` between here and the final
+        // `Ok(Self)` runs the destructor cleanly instead of stranding
+        // a writer thread on every failed bring-up.
         match &nofile {
             Ok(None) => tracing::debug!("RLIMIT_NOFILE is unlimited"),
             Ok(Some(soft)) if *soft >= crate::rlimit::NOFILE_TARGET => {
@@ -602,6 +607,7 @@ impl DaemonRuntime {
             queue_paused,
             method_context: method_ctx,
             _tty_lock: tty_lock,
+            _obs_guard: obs_guard,
             queue_worker,
             signal_handle,
             control_accept_handle,

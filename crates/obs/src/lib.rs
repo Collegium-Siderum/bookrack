@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookrack_config::{Config, DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
-use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub mod stream;
 
 pub use stream::{BroadcastLayer, LogEvent, LogStreamHandle};
+pub use tracing_appender::non_blocking::WorkerGuard;
 
 /// Install the global subscriber and return its flush guard plus the
 /// in-process log stream handle.
