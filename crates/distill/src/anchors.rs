@@ -72,34 +72,43 @@ pub struct LangAnchorRule {
 }
 
 fn is_latin_headword(s: &str) -> bool {
-    if s.len() > 80 {
+    // Match a line that opens with `[uppercase latin][latin letter | ' | -]`.
+    // Running-header / digit-only / CJK-only lines fall out because they
+    // do not start with a latin uppercase letter; bilingual entries
+    // that pack a latin headword, a CJK gloss, and a bracketed tag on
+    // a single OCR row pass through unchanged. All-caps running
+    // headers are filtered separately via the caller's
+    // `reject = ["running_header"]` list.
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_latin_headword_first(first) {
         return false;
     }
-    let first = s.chars().next().unwrap();
-    // The headword line must lead with an uppercase ASCII letter.
-    // Lower-case body lines (description prose) and digit-led runs
-    // (years, page numbers) fall out here.
-    if !first.is_ascii_uppercase() {
+    let Some(second) = chars.next() else {
         return false;
-    }
-    if s.chars().any(is_cjk) {
-        return false;
-    }
-    // Headwords are short. The four-word cap rules out
-    // sentence-shaped body lines without enumerating every
-    // punctuation form.
-    if s.split_whitespace().count() > 4 {
-        return false;
-    }
-    let has_lower = s.chars().any(|c| c.is_ascii_lowercase());
-    let letter_count = s.chars().filter(|c| c.is_alphabetic()).count();
-    // Reject all-caps multi-letter lines (running headers) but keep
-    // single-letter entries like an alphabet header that the caller
-    // elsewhere filters with `drop_lone_letter_dividers`.
-    if !has_lower && letter_count > 2 {
-        return false;
-    }
-    true
+    };
+    is_latin_headword_second(second)
+}
+
+fn is_latin_headword_first(c: char) -> bool {
+    matches!(c,
+        'A'..='Z'
+        | '\u{00C0}'..='\u{00D6}'
+        | '\u{00D8}'..='\u{00DE}'
+        | '\u{0100}'..='\u{017F}'
+    )
+}
+
+fn is_latin_headword_second(c: char) -> bool {
+    matches!(c,
+        'A'..='Z' | 'a'..='z'
+        | '\u{00C0}'..='\u{00FF}'
+        | '\u{0100}'..='\u{024F}'
+        | '\u{1E00}'..='\u{1EFF}'
+        | '\'' | '-'
+    )
 }
 
 fn is_cjk_short_headword(s: &str, max_chars: usize) -> bool {
@@ -163,13 +172,47 @@ mod tests {
     }
 
     #[test]
-    fn latin_headword_rejects_running_headers_and_sentences() {
-        assert!(!AnchorRule::LatinHeadword.matches("NEW YORK TIMES"));
+    fn latin_headword_accepts_mixed_latin_cjk_entries() {
+        // OCR rows that pack the latin headword, its CJK gloss, and a
+        // bracketed country tag onto one line are the dominant shape
+        // in the name-translation dictionaries; the anchor must let
+        // them through and leave splitting to `split_at_first_cjk`.
         assert!(
-            !AnchorRule::LatinHeadword
-                .matches("This is a complete sentence and ends with a period.")
+            AnchorRule::LatinHeadword
+                .matches("Andra\u{0301}scsik \u{963F}\u{4F26}\u{5FB7} [\u{5308}]")
         );
+        assert!(
+            AnchorRule::LatinHeadword.matches(
+                "Balch, Emily Greene (1867-1961) \u{5DF4}\u{5C14}\u{5947}\u{3008}\u{7F8E}\u{3009}\u{793E}\u{4F1A}\u{5B66}\u{5BB6}"
+            )
+        );
+    }
+
+    #[test]
+    fn latin_headword_accepts_diacritic_initials() {
+        assert!(AnchorRule::LatinHeadword.matches("\u{00D1}ervo"));
+        assert!(AnchorRule::LatinHeadword.matches("\u{00C5}dahl"));
+        assert!(AnchorRule::LatinHeadword.matches("\u{0160}imek"));
+    }
+
+    #[test]
+    fn latin_headword_rejects_non_latin_initials() {
         assert!(!AnchorRule::LatinHeadword.matches("\u{53F2}\u{5BC6}\u{65AF}"));
+        assert!(!AnchorRule::LatinHeadword.matches("1900-2000"));
+        assert!(!AnchorRule::LatinHeadword.matches("an american baseball player"));
+        assert!(!AnchorRule::LatinHeadword.matches(""));
+        assert!(!AnchorRule::LatinHeadword.matches("A"));
+    }
+
+    #[test]
+    fn running_header_rejection_layers_over_latin_headword() {
+        // `latin_headword` itself no longer rules out all-caps
+        // running headers or sentence-shaped prose; both still get
+        // suppressed because callers wire `reject = ["running_header"]`
+        // on the walk_anchors stage.
+        let header = "NEW YORK TIMES";
+        assert!(AnchorRule::LatinHeadword.matches(header));
+        assert!(AnchorRule::RejectRunningHeader.matches(header));
     }
 
     #[test]
