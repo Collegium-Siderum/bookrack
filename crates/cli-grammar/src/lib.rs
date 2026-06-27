@@ -154,6 +154,10 @@ pub enum DistillAction {
     Build(DistillBuildArgs),
     /// Re-run distill in memory and diff against the live database.
     Verify(DistillVerifyArgs),
+    /// Statically validate each `book.toml` against the catalogs and
+    /// run a per-stage retention report against a truncated source
+    /// sample, without touching the database.
+    Lint(DistillLintArgs),
     /// List the registered reference books and their entry counts.
     List(DistillListArgs),
 }
@@ -198,6 +202,28 @@ pub struct DistillVerifyArgs {
     /// Walk directories recursively when discovering `book.toml`.
     #[arg(long)]
     pub recursive: bool,
+}
+
+/// Positional + flag bundle for `distill lint`. The command keeps
+/// going across books so a multi-book run surfaces every problem at
+/// once instead of failing on the first; the process exits non-zero
+/// when any book failed.
+#[derive(clap::Args, Debug, Clone)]
+pub struct DistillLintArgs {
+    /// One or more `book.toml` files, source files, or directories.
+    /// Resolved the same way as `distill build`.
+    #[arg(required = true, value_name = "PATH")]
+    pub paths: Vec<PathBuf>,
+    /// Walk directories recursively when discovering `book.toml`.
+    #[arg(long)]
+    pub recursive: bool,
+    /// Cap on the number of source lines fed to the sample run. The
+    /// resolved source is truncated to this many lines so the
+    /// retention table prints in seconds rather than grinding through
+    /// a multi-megabyte OCR product. Zero disables the sample run and
+    /// limits the lint to the static catalog checks.
+    #[arg(long, value_name = "N", default_value_t = 300)]
+    pub sample_lines: usize,
 }
 
 /// Flag bundle for `distill list`. Currently empty; rendering mode is

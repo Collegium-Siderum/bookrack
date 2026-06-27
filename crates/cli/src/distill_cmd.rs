@@ -28,7 +28,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use bookrack_cli_grammar::{DistillAction, DistillBuildArgs, DistillListArgs, DistillVerifyArgs};
+use bookrack_cli_grammar::{
+    DistillAction, DistillBuildArgs, DistillLintArgs, DistillListArgs, DistillVerifyArgs,
+};
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
@@ -63,6 +65,7 @@ pub async fn run(
     match action {
         DistillAction::Build(args) => build(&paths, args),
         DistillAction::Verify(args) => verify(&paths, args),
+        DistillAction::Lint(args) => lint(args),
         DistillAction::List(args) => list(&paths, args),
     }
 }
@@ -350,6 +353,83 @@ fn enforce_retention(slug: &str, reports: &[StageReport], threshold: f64) -> Res
         }
     }
     Ok(())
+}
+
+/// `bookrack distill lint`: parse + validate each book.toml against
+/// the catalogs, then run the pipeline against a truncated source
+/// sample and print the per-stage retention table. Keeps going
+/// across books so a multi-book invocation surfaces every failure
+/// at once; the command exits non-zero when any book failed the
+/// static check.
+fn lint(args: DistillLintArgs) -> Result<()> {
+    let books = resolve_paths(&args.paths, args.recursive)?;
+    let distill_run_id = chrono::Utc::now().to_rfc3339();
+    let mut failures = 0usize;
+
+    for book in &books {
+        match lint_one(book, &distill_run_id, args.sample_lines) {
+            Ok(()) => println!("{}: lint OK", book.slug),
+            Err(err) => {
+                failures += 1;
+                println!("{}: lint FAIL", book.slug);
+                println!("  {err:#}");
+            }
+        }
+    }
+
+    if failures > 0 {
+        bail!("{failures} of {} book(s) failed lint", books.len());
+    }
+    Ok(())
+}
+
+/// One book's lint pass. Returns the first error along the
+/// load + sample run chain; `lint` formats the verdict.
+fn lint_one(book: &ResolvedBook, distill_run_id: &str, sample_lines: usize) -> Result<()> {
+    BookToml::load(&book.book_toml)
+        .with_context(|| format!("load {}", book.book_toml.display()))?;
+    let pipeline = load_pipeline(&book.book_toml)
+        .with_context(|| format!("assemble pipeline for {}", book.slug))?;
+
+    if sample_lines == 0 {
+        return Ok(());
+    }
+
+    let source =
+        read_source(&book.source).with_context(|| format!("read OCR source for {}", book.slug))?;
+    let sample = take_first_lines(&source, sample_lines);
+    let extras = compose_extras(&book.slug, distill_run_id);
+    let (drafts, coverage) = pipeline
+        .run_with_extras(sample, extras)
+        .with_context(|| format!("sample run for {}", book.slug))?;
+
+    print_stage_table(&book.slug, &coverage.stage_reports);
+    println!(
+        "  sample: {} line(s) -> {} entry(ies); coverage_pct {:.1}",
+        sample_lines,
+        drafts.len(),
+        coverage.coverage_pct()
+    );
+    Ok(())
+}
+
+/// Truncate `source` to at most `max_lines` `\n`-delimited lines and
+/// return the result. A trailing newline is appended so downstream
+/// stages that look for it (page markers, anchor regexes) match the
+/// same way they would on a complete source.
+fn take_first_lines(source: &str, max_lines: usize) -> String {
+    let mut out = String::new();
+    for (i, line) in source.lines().enumerate() {
+        if i >= max_lines {
+            break;
+        }
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
+    out
 }
 
 /// Read the OCR Markdown payload behind a resolved source path.
@@ -723,6 +803,14 @@ stages = [
         }
     }
 
+    fn lint_args(paths: Vec<PathBuf>, sample_lines: usize) -> DistillLintArgs {
+        DistillLintArgs {
+            paths,
+            recursive: false,
+            sample_lines,
+        }
+    }
+
     #[test]
     fn build_writes_book_and_entries_into_reference_db() {
         let tmp = TempDir::new().expect("tmp");
@@ -996,5 +1084,41 @@ stages = [
         let err = resolve_paths(&[dir_a, dir_b], false).expect_err("must error");
         let msg = format!("{err}");
         assert!(msg.contains("duplicate slug"), "got error: {msg}");
+    }
+
+    /// A well-formed book passes lint with a small sample and does
+    /// not write anything to disk.
+    #[test]
+    fn lint_passes_a_well_formed_book_without_touching_the_database() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        lint(lint_args(vec![book_dir], 16)).expect("lint OK");
+
+        assert!(
+            !paths.refs_path.exists(),
+            "lint must not create {}",
+            paths.refs_path.display()
+        );
+    }
+
+    /// A book.toml that references a stage the catalog does not know
+    /// fails lint, and the process exits non-zero with a per-book
+    /// FAIL line.
+    #[test]
+    fn lint_fails_a_book_whose_stage_is_not_in_the_catalog() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = tmp.path().join("reference").join("bad");
+        fs::create_dir_all(&book_dir).expect("mkdir");
+        let toml = TINY_BOOK_TOML
+            .replace("\"tiny\"", "\"bad\"")
+            .replace("split_pages", "no_such_stage");
+        fs::write(book_dir.join("book.toml"), toml).expect("write");
+        fs::write(book_dir.join("source.md"), TINY_SOURCE).expect("write");
+
+        let err = lint(lint_args(vec![book_dir], 16)).expect_err("must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("1 of 1"), "got: {msg}");
     }
 }
