@@ -83,7 +83,11 @@ pub fn dispatch_stage(
         // ---- extractor ----
         "extract_year_span" => {
             let key = require_string(params, "payload_key")?;
-            Ok(extract_year_span(key))
+            let target = optional_value(params, "search_in")
+                .map(decode_search_target)
+                .transpose()?
+                .unwrap_or(SearchTarget::Body);
+            Ok(extract_year_span(key, target))
         }
         "extract_bracketed_tag" => {
             let brackets = decode_bracket_kinds(require_value(params, "brackets")?)?;
@@ -96,7 +100,11 @@ pub fn dispatch_stage(
         }
         "extract_gender_tag" => {
             let key = require_string(params, "payload_key")?;
-            Ok(extract_gender_tag(key))
+            let target = optional_value(params, "search_in")
+                .map(decode_search_target)
+                .transpose()?
+                .unwrap_or(SearchTarget::Body);
+            Ok(extract_gender_tag(key, target))
         }
         "split_variants" => {
             // `payload_key` is optional; the catalog default is `variants`.
@@ -107,7 +115,11 @@ pub fn dispatch_stage(
         }
         "extract_quotes" => {
             let key = require_string(params, "payload_key")?;
-            Ok(extract_quotes(key))
+            let target = optional_value(params, "search_in")
+                .map(decode_search_target)
+                .transpose()?
+                .unwrap_or(SearchTarget::Body);
+            Ok(extract_quotes(key, target))
         }
         "partition_body_around_match" => {
             let pattern = decode_pattern_ref(require_value(params, "pattern")?)?;
@@ -359,8 +371,9 @@ fn decode_search_target(value: &TomlValue) -> Result<SearchTarget, ParseError> {
     match s {
         "body" => Ok(SearchTarget::Body),
         "headword" => Ok(SearchTarget::Headword),
+        "both" => Ok(SearchTarget::Both),
         other => Err(violation(format!(
-            "unknown search_in {other:?}; expected body | headword"
+            "unknown search_in {other:?}; expected body | headword | both"
         ))),
     }
 }

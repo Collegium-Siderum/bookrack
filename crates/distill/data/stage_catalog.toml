@@ -80,10 +80,11 @@ description = "Promote the anchor line as the headword and keep the body untouch
 [extract_year_span]
 input = "splits"
 output = "splits"
-description = "Detect a year-span pattern in the body and write a structured payload key."
+description = "Detect a year-span pattern in the body, headword, or both, and write a structured payload key."
 writes_properties = ["year_span"]
 params = [
   { name = "payload_key", type = "property_name", required = true },
+  { name = "search_in", type = "search_target", required = false, default = "body" },
 ]
 
 [extract_bracketed_tag]
@@ -99,10 +100,11 @@ params = [
 [extract_gender_tag]
 input = "splits"
 output = "splits"
-description = "Detect and extract a gender marker into the configured payload key."
+description = "Detect and extract a gender marker, scanning the body, headword, or both, into the configured payload key."
 writes_properties = ["gender"]
 params = [
   { name = "payload_key", type = "property_name", required = true },
+  { name = "search_in", type = "search_target", required = false, default = "body" },
 ]
 
 [split_variants]
@@ -117,10 +119,11 @@ params = [
 [extract_quotes]
 input = "splits"
 output = "splits"
-description = "Detect attributed quotations in the body and emit a quotes payload array."
+description = "Detect attributed quotations in the body, headword, or both, and emit a quotes payload array."
 writes_properties = ["quotes"]
 params = [
   { name = "payload_key", type = "property_name", required = true },
+  { name = "search_in", type = "search_target", required = false, default = "body" },
 ]
 
 [partition_body_around_match]

@@ -17,8 +17,11 @@ use crate::pipeline::Stage;
 
 // --- public stage constructors ----------------------------------------------
 
-pub fn extract_year_span(payload_key: String) -> Box<dyn Stage> {
-    Box::new(ExtractYearSpan { payload_key })
+pub fn extract_year_span(payload_key: String, search_in: SearchTarget) -> Box<dyn Stage> {
+    Box::new(ExtractYearSpan {
+        payload_key,
+        search_in,
+    })
 }
 
 pub fn extract_bracketed_tag(
@@ -33,8 +36,11 @@ pub fn extract_bracketed_tag(
     })
 }
 
-pub fn extract_gender_tag(payload_key: String) -> Box<dyn Stage> {
-    Box::new(ExtractGenderTag { payload_key })
+pub fn extract_gender_tag(payload_key: String, search_in: SearchTarget) -> Box<dyn Stage> {
+    Box::new(ExtractGenderTag {
+        payload_key,
+        search_in,
+    })
 }
 
 pub fn split_variants(payload_key: String, sep: String) -> Result<Box<dyn Stage>, ParseError> {
@@ -47,8 +53,11 @@ pub fn split_variants(payload_key: String, sep: String) -> Result<Box<dyn Stage>
     }))
 }
 
-pub fn extract_quotes(payload_key: String) -> Box<dyn Stage> {
-    Box::new(ExtractQuotes { payload_key })
+pub fn extract_quotes(payload_key: String, search_in: SearchTarget) -> Box<dyn Stage> {
+    Box::new(ExtractQuotes {
+        payload_key,
+        search_in,
+    })
 }
 
 pub fn partition_body_around_match(
@@ -93,17 +102,23 @@ pub fn unpack_paired_body(
     })
 }
 
-/// Whether an extract_*-shaped stage scans the body or the headword.
+/// Which `SplitEntry` field an `extract_*` stage scans when looking
+/// for the marker it owns. `Body` and `Headword` pick exactly one
+/// field; `Both` tries `Body` first and falls back to `Headword`
+/// only when the body search yields nothing, so the body remains
+/// authoritative for stages that have always worked off it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchTarget {
     Body,
     Headword,
+    Both,
 }
 
 // --- stage structs ----------------------------------------------------------
 
 struct ExtractYearSpan {
     payload_key: String,
+    search_in: SearchTarget,
 }
 struct ExtractBracketedTag {
     pattern: PatternRef,
@@ -112,6 +127,7 @@ struct ExtractBracketedTag {
 }
 struct ExtractGenderTag {
     payload_key: String,
+    search_in: SearchTarget,
 }
 struct SplitVariants {
     payload_key: String,
@@ -119,6 +135,7 @@ struct SplitVariants {
 }
 struct ExtractQuotes {
     payload_key: String,
+    search_in: SearchTarget,
 }
 struct PartitionBodyAroundMatch {
     pattern: PatternRef,
@@ -156,6 +173,34 @@ fn strip_span(s: &str, start: usize, end: usize) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Apply `try_one` against each `SplitEntry` field implied by
+/// `search_in` and stash the first `Some(_)` into `payload[payload_key]`.
+/// The closure rewrites the field in place; when it returns `None`
+/// the field is left untouched and the next target (if any) is tried.
+/// `Both` resolves to "body first, then headword", so any pipeline
+/// configured with `search_in = "body"` behaves identically when
+/// switched to `"both"`.
+fn try_targets<F>(s: &mut SplitEntry, search_in: SearchTarget, payload_key: &str, mut try_one: F)
+where
+    F: FnMut(&mut String) -> Option<JsonValue>,
+{
+    let payload = match search_in {
+        SearchTarget::Body => try_one(&mut s.body),
+        SearchTarget::Headword => try_one(&mut s.headword),
+        SearchTarget::Both => {
+            let body_hit = try_one(&mut s.body);
+            if body_hit.is_some() {
+                body_hit
+            } else {
+                try_one(&mut s.headword)
+            }
+        }
+    };
+    if let Some(p) = payload {
+        s.payload.insert(payload_key.to_string(), p);
+    }
+}
+
 // --- ExtractYearSpan --------------------------------------------------------
 
 impl Stage for ExtractYearSpan {
@@ -168,21 +213,24 @@ impl Stage for ExtractYearSpan {
         let year_re =
             Regex::new(r"\(?\s*(\d{3,4})\s*[-\u{2013}]\s*(\d{3,4})?\s*\)?").expect("year regex");
         let key = self.payload_key.clone();
+        let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
-            if let Some(cap) = year_re.captures(&s.body) {
-                let m = cap.get(0).unwrap();
+            try_targets(&mut s, search_in, &key, |field| {
+                let cap = year_re.captures(field)?;
+                let m = cap.get(0)?;
                 let birth = cap.get(1).and_then(|g| g.as_str().parse::<i64>().ok());
                 let death = cap.get(2).and_then(|g| g.as_str().parse::<i64>().ok());
-                if birth.is_some() || death.is_some() {
-                    let span = json!({
-                        "birth": birth,
-                        "death": death,
-                    });
-                    s.payload.insert(key.clone(), span);
-                    let (start, end) = (m.start(), m.end());
-                    s.body = strip_span(&s.body, start, end);
+                if birth.is_none() && death.is_none() {
+                    return None;
                 }
-            }
+                let span = json!({
+                    "birth": birth,
+                    "death": death,
+                });
+                let (start, end) = (m.start(), m.end());
+                *field = strip_span(field, start, end);
+                Some(span)
+            });
             s
         });
         Ok(StageData::Splits(out))
@@ -198,20 +246,16 @@ impl Stage for ExtractBracketedTag {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
+        let pattern = &self.pattern;
+        let key = self.payload_key.clone();
+        let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
-            let target = match self.search_in {
-                SearchTarget::Body => s.body.clone(),
-                SearchTarget::Headword => s.headword.clone(),
-            };
-            if let Some(m) = match_pattern(&self.pattern, &target) {
-                s.payload
-                    .insert(self.payload_key.clone(), JsonValue::String(m.inner));
-                let stripped = strip_span(&target, m.start, m.end);
-                match self.search_in {
-                    SearchTarget::Body => s.body = stripped,
-                    SearchTarget::Headword => s.headword = stripped,
-                }
-            }
+            try_targets(&mut s, search_in, &key, |field| {
+                let m = match_pattern(pattern, field)?;
+                let inner = m.inner;
+                *field = strip_span(field, m.start, m.end);
+                Some(JsonValue::String(inner))
+            });
             s
         });
         Ok(StageData::Splits(out))
@@ -231,22 +275,22 @@ impl Stage for ExtractGenderTag {
         // "(woman)" / CJK gender markers in parens.
         let re =
             Regex::new(r"\(\s*(F|M|f|m|woman|man|\u{5973}|\u{7537})\s*\)").expect("gender regex");
+        let key = self.payload_key.clone();
+        let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
-            if let Some(cap) = re.captures(&s.body) {
-                let m = cap.get(0).unwrap();
-                let tag = cap.get(1).unwrap().as_str();
+            try_targets(&mut s, search_in, &key, |field| {
+                let cap = re.captures(field)?;
+                let m = cap.get(0)?;
+                let tag = cap.get(1)?.as_str();
                 let normalized = match tag {
                     "F" | "f" | "woman" | "\u{5973}" => "F",
                     "M" | "m" | "man" | "\u{7537}" => "M",
                     _ => "other",
                 };
-                s.payload.insert(
-                    self.payload_key.clone(),
-                    JsonValue::String(normalized.to_string()),
-                );
                 let (start, end) = (m.start(), m.end());
-                s.body = strip_span(&s.body, start, end);
-            }
+                *field = strip_span(field, start, end);
+                Some(JsonValue::String(normalized.to_string()))
+            });
             s
         });
         Ok(StageData::Splits(out))
@@ -296,26 +340,30 @@ impl Stage for ExtractQuotes {
         // in this minimal extractor; a future hop can fill it in.
         let re = Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex");
         let key = self.payload_key.clone();
+        let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
-            let mut quotes: Vec<JsonValue> = Vec::new();
-            let mut last_end = 0usize;
-            let mut keep = String::new();
-            for cap in re.captures_iter(&s.body) {
-                let m = cap.get(0).unwrap();
-                keep.push_str(&s.body[last_end..m.start()]);
-                let text = cap
-                    .get(1)
-                    .or_else(|| cap.get(2))
-                    .map(|g| g.as_str().to_string())
-                    .unwrap_or_default();
-                quotes.push(json!({"text": text, "attribution": ""}));
-                last_end = m.end();
-            }
-            if !quotes.is_empty() {
-                keep.push_str(&s.body[last_end..]);
-                s.payload.insert(key.clone(), JsonValue::Array(quotes));
-                s.body = keep.split_whitespace().collect::<Vec<_>>().join(" ");
-            }
+            try_targets(&mut s, search_in, &key, |field| {
+                let mut quotes: Vec<JsonValue> = Vec::new();
+                let mut last_end = 0usize;
+                let mut keep = String::new();
+                for cap in re.captures_iter(field) {
+                    let m = cap.get(0).unwrap();
+                    keep.push_str(&field[last_end..m.start()]);
+                    let text = cap
+                        .get(1)
+                        .or_else(|| cap.get(2))
+                        .map(|g| g.as_str().to_string())
+                        .unwrap_or_default();
+                    quotes.push(json!({"text": text, "attribution": ""}));
+                    last_end = m.end();
+                }
+                if quotes.is_empty() {
+                    return None;
+                }
+                keep.push_str(&field[last_end..]);
+                *field = keep.split_whitespace().collect::<Vec<_>>().join(" ");
+                Some(JsonValue::Array(quotes))
+            });
             s
         });
         Ok(StageData::Splits(out))
@@ -454,7 +502,10 @@ mod tests {
     #[test]
     fn extract_year_span_writes_birth_and_death() {
         let inputs = vec![split("Smith", "American baseball player (1900-2000)")];
-        let out = run(extract_year_span("year_span".to_string()), inputs);
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
             &json!({"birth": 1900, "death": 2000})
@@ -469,7 +520,10 @@ mod tests {
     #[test]
     fn extract_year_span_handles_open_ended_death() {
         let inputs = vec![split("Smith", "American (1900-)")];
-        let out = run(extract_year_span("year_span".to_string()), inputs);
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
             &json!({"birth": 1900, "death": null})
@@ -479,9 +533,76 @@ mod tests {
     #[test]
     fn extract_year_span_no_match_leaves_payload_empty() {
         let inputs = vec![split("Smith", "American baseball player")];
-        let out = run(extract_year_span("year_span".to_string()), inputs);
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert!(out[0].payload.is_empty());
         assert_eq!(out[0].body, "American baseball player");
+    }
+
+    /// In name-translation dictionaries the year span often rides on
+    /// the latin headword (`Balch, Emily Greene (1867-1961)`) after
+    /// `split_at_first_cjk` has cut the CJK gloss out into the body.
+    /// `search_in = "headword"` finds it there and strips it from the
+    /// headword without touching the body.
+    #[test]
+    fn extract_year_span_with_search_in_headword_strips_from_headword_only() {
+        let inputs = vec![split(
+            "Balch, Emily Greene (1867-1961)",
+            "American sociologist",
+        )];
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Headword),
+            inputs,
+        );
+        assert_eq!(
+            out[0].payload.get("year_span").unwrap(),
+            &json!({"birth": 1867, "death": 1961})
+        );
+        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].body, "American sociologist");
+    }
+
+    /// `search_in = "both"` resolves body-first, so an entry with a
+    /// span on each side still cuts the body span (matching the
+    /// `"body"` default) rather than the headword one.
+    #[test]
+    fn extract_year_span_with_search_in_both_prefers_body() {
+        let inputs = vec![split(
+            "Balch, Emily Greene (1900-1980)",
+            "American sociologist (1867-1961)",
+        )];
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Both),
+            inputs,
+        );
+        assert_eq!(
+            out[0].payload.get("year_span").unwrap(),
+            &json!({"birth": 1867, "death": 1961})
+        );
+        assert_eq!(out[0].headword, "Balch, Emily Greene (1900-1980)");
+        assert_eq!(out[0].body, "American sociologist");
+    }
+
+    /// `search_in = "both"` falls back to the headword when the body
+    /// has no year span. The headword is rewritten in place.
+    #[test]
+    fn extract_year_span_with_search_in_both_falls_back_to_headword() {
+        let inputs = vec![split(
+            "Balch, Emily Greene (1867-1961)",
+            "American sociologist",
+        )];
+        let out = run(
+            extract_year_span("year_span".to_string(), SearchTarget::Both),
+            inputs,
+        );
+        assert_eq!(
+            out[0].payload.get("year_span").unwrap(),
+            &json!({"birth": 1867, "death": 1961})
+        );
+        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].body, "American sociologist");
     }
 
     // ---- ExtractBracketedTag ----
@@ -528,7 +649,10 @@ mod tests {
     #[test]
     fn extract_gender_tag_recognizes_f_marker_and_strips_it() {
         let inputs = vec![split("Smith", "American baseball player (F) etc")];
-        let out = run(extract_gender_tag("gender".to_string()), inputs);
+        let out = run(
+            extract_gender_tag("gender".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert_eq!(
             out[0].payload.get("gender").unwrap(),
             &JsonValue::String("F".to_string())
@@ -539,7 +663,10 @@ mod tests {
     #[test]
     fn extract_gender_tag_no_match_leaves_payload_empty() {
         let inputs = vec![split("Smith", "American baseball player")];
-        let out = run(extract_gender_tag("gender".to_string()), inputs);
+        let out = run(
+            extract_gender_tag("gender".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert!(out[0].payload.is_empty());
     }
 
@@ -596,7 +723,10 @@ mod tests {
             "Smith",
             "He said \"hello\" and \u{300C}\u{4F60}\u{597D}\u{300D} again",
         )];
-        let out = run(extract_quotes("quotes".to_string()), inputs);
+        let out = run(
+            extract_quotes("quotes".to_string(), SearchTarget::Body),
+            inputs,
+        );
         let quotes = out[0].payload.get("quotes").unwrap().as_array().unwrap();
         assert_eq!(quotes.len(), 2);
         assert_eq!(quotes[0]["text"], "hello");
@@ -606,7 +736,10 @@ mod tests {
     #[test]
     fn extract_quotes_no_match_writes_no_quotes() {
         let inputs = vec![split("Smith", "no quotes here")];
-        let out = run(extract_quotes("quotes".to_string()), inputs);
+        let out = run(
+            extract_quotes("quotes".to_string(), SearchTarget::Body),
+            inputs,
+        );
         assert!(out[0].payload.is_empty());
     }
 
