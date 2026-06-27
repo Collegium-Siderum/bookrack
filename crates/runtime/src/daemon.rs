@@ -504,13 +504,20 @@ impl DaemonRuntime {
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
                                     }
                                     bookrack_core::ItemKind::Reference => {
-                                        // distill pipeline lands in a later route step;
-                                        // until then a reference job in the queue is a
-                                        // submission bug, not a runtime condition.
-                                        unreachable!(
-                                            "reference jobs are routed through the distill \
-                                             worker (not wired yet); see route R5"
-                                        );
+                                        // The distill pipeline is not yet routed
+                                        // through the queue worker. A reference
+                                        // job that reaches this point is a
+                                        // submission-side bug; record it as a
+                                        // per-item failure so the worker keeps
+                                        // pulling subsequent jobs instead of
+                                        // panicking and surfacing the failure
+                                        // as a book-side backtrace.
+                                        return Err(queue::JobError::Book(format!(
+                                            "reference job {} cannot be processed: \
+                                             the distill pipeline is not yet wired \
+                                             through the queue worker",
+                                            path.display()
+                                        )));
                                     }
                                 }
                                 Ok::<(), queue::JobError>(())
