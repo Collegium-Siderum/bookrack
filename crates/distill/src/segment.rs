@@ -117,6 +117,21 @@ impl Stage for SplitPages {
             pages.push(Page { page, sheet, text });
         }
 
+        // Fall back to a single synthetic page when the source carries
+        // no polyocr markers. This lets the same downstream chain run
+        // against plain TXT or EPUB text dumps without requiring the
+        // book.toml to declare a different first stage.
+        if pages.is_empty() {
+            let text = source.trim().to_string();
+            if !text.is_empty() {
+                pages.push(Page {
+                    page: 1,
+                    sheet: 1,
+                    text,
+                });
+            }
+        }
+
         ctx.coverage.pages = pages.len();
         Ok(StageData::Pages(pages))
     }
@@ -483,6 +498,39 @@ mod tests {
             }
             other => panic!("expected InvalidPageMarker, got {other:?}"),
         }
+    }
+
+    /// A source without any polyocr page markers (plain TXT, EPUB
+    /// text dump, etc.) collapses into a single synthetic page so the
+    /// downstream chain (`one_block_per_page` -> `walk_anchors` -> ...)
+    /// runs unchanged. This frees the parser from a markdown-specific
+    /// preamble at the book.toml level.
+    #[test]
+    fn split_pages_falls_back_to_one_synthetic_page_when_no_markers() {
+        let source = "Smith \u{53F2}\u{5BC6}\u{65AF}\nJones \u{743C}\u{65AF}\n";
+        let (out, ctx) = run_stage(split_pages(), StageData::Source(source.to_string()));
+        let pages = match out {
+            StageData::Pages(p) => p,
+            other => panic!("expected Pages, got {other:?}"),
+        };
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].page, 1);
+        assert_eq!(pages[0].sheet, 1);
+        assert!(pages[0].text.contains("Smith"));
+        assert!(pages[0].text.contains("Jones"));
+        assert_eq!(ctx.coverage.pages, 1);
+    }
+
+    /// A whitespace-only source emits no pages and does not panic.
+    #[test]
+    fn split_pages_emits_no_pages_for_an_empty_source() {
+        let (out, ctx) = run_stage(split_pages(), StageData::Source("   \n  ".to_string()));
+        let pages = match out {
+            StageData::Pages(p) => p,
+            other => panic!("expected Pages, got {other:?}"),
+        };
+        assert_eq!(pages.len(), 0);
+        assert_eq!(ctx.coverage.pages, 0);
     }
 
     /// Same for the sheet capture: a sheet value that exceeds `u32`

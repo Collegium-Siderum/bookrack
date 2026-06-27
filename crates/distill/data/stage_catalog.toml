@@ -19,7 +19,7 @@ schema_version = 1
 [split_pages]
 input = "source"
 output = "pages"
-description = "Split polyocr Markdown by page markers of the form `<!-- page X (sheet Y) -->`."
+description = "Split polyocr Markdown by page markers of the form `<!-- page X (sheet Y) -->`; a source with no markers collapses into a single synthetic page so plain TXT / EPUB text dumps run through the same downstream chain."
 
 [one_block_per_page]
 input = "pages"
