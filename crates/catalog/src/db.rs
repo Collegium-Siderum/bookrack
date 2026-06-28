@@ -66,6 +66,7 @@ const SPECS: &[&TableSpec] = &[
     &crate::book_distill_audit::STAGE_SPEC,
     &crate::node_paper_audit::SPEC,
     &crate::pipeline_runs::SPEC,
+    &crate::pipeline_run_summary::SPEC,
 ];
 
 /// A handle to one `catalog.db` database.

@@ -618,16 +618,19 @@ CREATE INDEX idx_node_paper_audit_verdict_confidence
   ON node_paper_audit(verdict, confidence);
 "#;
 
-// `M[11]` — add `pipeline_runs`, the registry of top-level operator
-// invocations. Every command that drives a pipeline opens one row at
-// entry and closes it at exit; the assigned `pipeline_run_id` is
-// copied onto every audit row the run produces so a rollup over one
-// run is a single `WHERE pipeline_run_id = ?`. The id is a text
-// composite (command, ISO-8601 start instant, SHA-256 prefix over the
-// two plus the library root), so two same-second invocations against
-// different libraries do not collide on the primary key. Additive: no
-// existing table is touched.
-const PIPELINE_RUNS_DDL: &str = r#"
+// `M[11]` — add the pipeline-run pair: `pipeline_runs`, the registry
+// of top-level operator invocations, and `pipeline_run_summary`, the
+// materialized rollup over one run's audit rows. Every command that
+// drives a pipeline opens one `pipeline_runs` row at entry and closes
+// it at exit; the assigned `pipeline_run_id` is copied onto every
+// audit row the run produces so a rollup over one run is a single
+// `WHERE pipeline_run_id = ?`. The id is a text composite (command,
+// ISO-8601 start instant, SHA-256 prefix over the two plus the library
+// root), so two same-second invocations against different libraries
+// do not collide on the primary key. `pipeline_run_summary` is keyed
+// on the same id with `ON DELETE CASCADE`, so dropping a run drops its
+// summary in the same step. Additive: no existing table is touched.
+const PIPELINE_PAIR_M11_DDL: &str = r#"
 CREATE TABLE pipeline_runs (
   pipeline_run_id TEXT PRIMARY KEY,
   command TEXT NOT NULL,
@@ -638,6 +641,18 @@ CREATE TABLE pipeline_runs (
   status TEXT
 );
 CREATE INDEX idx_pipeline_runs_cmd_ts ON pipeline_runs(command, started_at);
+
+CREATE TABLE pipeline_run_summary (
+  pipeline_run_id TEXT PRIMARY KEY
+    REFERENCES pipeline_runs(pipeline_run_id) ON DELETE CASCADE,
+  n_books INTEGER NOT NULL DEFAULT 0,
+  n_papers INTEGER NOT NULL DEFAULT 0,
+  verdict_counts TEXT NOT NULL DEFAULT '{}',
+  flag_counts TEXT NOT NULL DEFAULT '{}',
+  coverage_summary TEXT NOT NULL DEFAULT '{}',
+  wall_clock_ms INTEGER,
+  computed_at TEXT NOT NULL
+);
 "#;
 
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
@@ -655,7 +670,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(INTAKE_SOURCE_PDF_PATH_DDL),
         M::up(BOOK_DISTILL_AUDIT_DDL),
         M::up(NODE_PAPER_AUDIT_DDL),
-        M::up(PIPELINE_RUNS_DDL),
+        M::up(PIPELINE_PAIR_M11_DDL),
     ])
 }
 
@@ -1080,6 +1095,98 @@ mod tests {
             })
             .expect("read pk row");
         assert_eq!(id, "distill_build-2026-06-28T10:00:00Z-deadbeef");
+    }
+
+    #[test]
+    fn migration_m11_adds_pipeline_run_summary_table_with_its_defaults() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations()
+            .to_version(&mut conn, 11)
+            .expect("apply M[0..10]");
+        assert!(columns_of(&conn, "pipeline_run_summary").is_empty());
+
+        migrations().to_latest(&mut conn).expect("apply M[11]");
+
+        let cols = columns_of(&conn, "pipeline_run_summary");
+        for col in [
+            "pipeline_run_id",
+            "n_books",
+            "n_papers",
+            "verdict_counts",
+            "flag_counts",
+            "coverage_summary",
+            "wall_clock_ms",
+            "computed_at",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == col),
+                "expected {col} on pipeline_run_summary, got {cols:?}"
+            );
+        }
+
+        // The cascade FK from `pipeline_run_summary.pipeline_run_id` to
+        // `pipeline_runs.pipeline_run_id` removes the summary alongside
+        // the registry row.
+        conn.execute("PRAGMA foreign_keys = ON", [])
+            .expect("enable FK");
+        conn.execute(
+            "INSERT INTO pipeline_runs (pipeline_run_id, command, started_at) \
+             VALUES ('cascade-run-1', 'distill_build', '2026-06-28T10:00:00Z')",
+            [],
+        )
+        .expect("insert parent");
+        conn.execute(
+            "INSERT INTO pipeline_run_summary (pipeline_run_id, computed_at) \
+             VALUES ('cascade-run-1', '2026-06-28T10:00:05Z')",
+            [],
+        )
+        .expect("insert summary");
+        conn.execute(
+            "DELETE FROM pipeline_runs WHERE pipeline_run_id = 'cascade-run-1'",
+            [],
+        )
+        .expect("delete parent");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pipeline_run_summary", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(remaining, 0);
+
+        // Declared DEFAULTs land on rows that omit them.
+        conn.execute(
+            "INSERT INTO pipeline_runs (pipeline_run_id, command, started_at) \
+             VALUES ('defaults-run', 'dryrun', '2026-06-28T10:00:00Z')",
+            [],
+        )
+        .expect("insert parent");
+        conn.execute(
+            "INSERT INTO pipeline_run_summary (pipeline_run_id, computed_at) \
+             VALUES ('defaults-run', '2026-06-28T10:00:05Z')",
+            [],
+        )
+        .expect("insert summary with defaults");
+        let (n_books, n_papers, verdicts, flags, coverage): (i64, i64, String, String, String) =
+            conn.query_row(
+                "SELECT n_books, n_papers, verdict_counts, flag_counts, coverage_summary \
+                 FROM pipeline_run_summary WHERE pipeline_run_id = 'defaults-run'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read defaults");
+        assert_eq!(n_books, 0);
+        assert_eq!(n_papers, 0);
+        assert_eq!(verdicts, "{}");
+        assert_eq!(flags, "{}");
+        assert_eq!(coverage, "{}");
     }
 
     #[test]

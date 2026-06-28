@@ -38,6 +38,7 @@ mod node_paper_audit;
 mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
+mod pipeline_run_summary;
 mod pipeline_runs;
 mod retrieval_issues;
 mod toc_edits;
@@ -70,6 +71,7 @@ pub use node_reviews::{
     NewReview, NodeReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED,
 };
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
+pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary};
 pub use pipeline_runs::{NewPipelineRun, PipelineRun};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
