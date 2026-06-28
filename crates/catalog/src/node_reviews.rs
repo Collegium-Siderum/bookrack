@@ -268,6 +268,29 @@ mod tests {
     /// A logical address used throughout these tests.
     const KIND: ItemKind = ItemKind::Book;
 
+    /// `node_reviews` is a shared write target: the ingest pipeline
+    /// writes `scope = 'book'` rows and glean writes `scope = 'paper'`
+    /// rows on the same key shape. Glean's paper-side dimensions
+    /// (per-field grades, per-flag booleans) live on `node_paper_audit`
+    /// instead of widening this table — so this test pins the column
+    /// list and any structural drift here is a build-time failure.
+    #[test]
+    fn node_reviews_spec_columns_are_pinned() {
+        let actual: Vec<&str> = SPEC.columns.iter().map(|c| c.name).collect();
+        assert_eq!(
+            actual,
+            [
+                "intake_id",
+                "scope",
+                "reviewed_at",
+                "reviewed_by",
+                "status",
+                "notes"
+            ],
+            "node_reviews schema must not absorb paper-only audit columns",
+        );
+    }
+
     #[test]
     fn a_review_round_trips_every_field() {
         let catalog = Catalog::open_in_memory().expect("open");

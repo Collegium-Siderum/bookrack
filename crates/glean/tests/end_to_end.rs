@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, IntakeStatus};
+use bookrack_catalog::{Catalog, FLAG_COLUMNS, GRADE_COLUMNS, IntakeStatus};
 use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
@@ -184,6 +184,41 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
         attrs.abstract_text.is_some(),
         "abstract text must be persisted to the catalog row"
     );
+
+    // The paper-side audit double-writes: node_publication_attrs is
+    // the read-side rollup, node_paper_audit is the dimensional face.
+    // The two must always agree on verdict and confidence, since both
+    // come from the same PaperReport in one substep.
+    let paper_audit = catalog
+        .node_paper_audit(report.intake_id, "paper")
+        .expect("read node_paper_audit")
+        .expect("node_paper_audit row must be written alongside node_reviews");
+    assert_eq!(
+        paper_audit.verdict.as_str(),
+        attrs.audit_verdict.as_deref().unwrap_or_default(),
+        "node_paper_audit.verdict must match node_publication_attrs.audit_verdict",
+    );
+    assert_eq!(
+        paper_audit.confidence.as_str(),
+        attrs.confidence.as_deref().unwrap_or_default(),
+        "node_paper_audit.confidence must match node_publication_attrs.confidence",
+    );
+    assert_eq!(paper_audit.profile_name, "default");
+    assert!(
+        !paper_audit.audited_at.is_empty(),
+        "audited_at must carry an ISO-8601 timestamp",
+    );
+    assert_eq!(paper_audit.grades.len(), GRADE_COLUMNS.len());
+    for grade in &paper_audit.grades {
+        assert!(
+            matches!(grade.as_str(), "missing" | "weak" | "medium" | "strong"),
+            "grade column must hold a known token, got {grade:?}",
+        );
+    }
+    assert_eq!(paper_audit.flags.len(), FLAG_COLUMNS.len());
+    for flag in &paper_audit.flags {
+        assert!(*flag == 0 || *flag == 1, "flag column must be 0 or 1");
+    }
     let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
     let source_sha = hex_sha256(&bytes);
     let intake = catalog
