@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **audit: glean's `PaperReport` lands as SQL-dimension rows in
+  `node_paper_audit`.** Each paper-side audit substep writes one row
+  per `(intake_id, scope='paper')` with verdict, confidence, the
+  profile name, the driving CSL-type, nine `grade_<field>` tokens
+  (`missing` / `weak` / `medium` / `strong`), and one `flag_<token>`
+  boolean per `PaperFlag` enum variant. The `notes` JSON on
+  `node_reviews` and the `audit_verdict / confidence` rollup on
+  `node_publication_attrs` are unchanged — the new side table is the
+  write-side projection, so per-flag frequency, per-field grade
+  distribution, and profile × verdict crosses become one-`GROUP BY`
+  queries. Catalog schema advances to `user_version` 11.
 - **distill: every `distill build` records its run into `catalog.db`.**
   Each build appends one row to `book_distill_audit` (the seven
   `Coverage` scalars, the retention gate verdict and threshold, the
