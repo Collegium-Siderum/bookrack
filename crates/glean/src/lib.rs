@@ -1382,6 +1382,26 @@ fn run_paper_audit_substep(
     ) {
         tracing::warn!(error = %e, "metadata: failed to write node_reviews row");
     }
+    match catalog.now_iso() {
+        Ok(audited_at) => {
+            let extractor_version = provenance.extractor_version.to_string();
+            let row = audit::paper_report_to_audit_row(
+                &report,
+                intake_id,
+                ItemKind::Paper.as_scope_str(),
+                &profile.name,
+                biblio.csl_type.map(serde_csl_type),
+                &audited_at,
+                &extractor_version,
+            );
+            if let Err(e) = catalog.upsert_node_paper_audit(&row) {
+                tracing::warn!(error = %e, "metadata: failed to write node_paper_audit row");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "metadata: failed to read now_iso for node_paper_audit");
+        }
+    }
     let outcome = match report.verdict {
         audit::PaperVerdict::Clean => "ok",
         audit::PaperVerdict::NeedsWork => "partial",
