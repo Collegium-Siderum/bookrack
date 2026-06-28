@@ -18,6 +18,7 @@
 //! [`Catalog`] handle.
 
 mod actor;
+mod book_distill_audit;
 mod cascade;
 mod catalog_meta;
 mod csl;
@@ -41,6 +42,10 @@ mod toc_edits;
 mod works;
 
 pub use actor::ActorKind;
+pub use book_distill_audit::{
+    BookDistillAudit, BookDistillStageReport, GATE_STATUS_FAIL, GATE_STATUS_OFF, GATE_STATUS_PASS,
+    NewBookDistillAudit, NewStageReport,
+};
 pub use cascade::ItemRemovalCounts;
 pub use csl::{
     CslDate, CslItem, CslName, from_catalog as csl_from_catalog,

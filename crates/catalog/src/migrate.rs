@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 9;
+pub(crate) const TARGET_VERSION: i64 = 10;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -513,6 +513,49 @@ ALTER TABLE node_contributors ADD COLUMN orcid TEXT;
 // two pointers orthogonal.
 const INTAKE_SOURCE_PDF_PATH_DDL: &str = "ALTER TABLE intake ADD COLUMN source_pdf_path TEXT;";
 
+// `M[9]` — add the distill audit pair: `book_distill_audit`, one row
+// per distill build of one reference book, plus
+// `book_distill_stage_report`, one row per pipeline stage tied to its
+// header by `run_id`. Both tables ship together so the audit and its
+// per-stage breakdown reach v10 atomically; downstream rollups address
+// rows by `(run_id, ord)` from this point. Additive: no existing table
+// is touched.
+const BOOK_DISTILL_AUDIT_DDL: &str = r#"
+CREATE TABLE book_distill_audit (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_slug TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  pages INTEGER NOT NULL,
+  blocks INTEGER NOT NULL,
+  raws INTEGER NOT NULL,
+  splits INTEGER NOT NULL,
+  entries INTEGER NOT NULL,
+  unmatched_lines INTEGER NOT NULL,
+  pair_mismatch INTEGER NOT NULL,
+  gate_status TEXT NOT NULL CHECK (gate_status IN ('pass', 'fail', 'off')),
+  gate_threshold REAL,
+  profile_ref TEXT NOT NULL DEFAULT '',
+  extractor_version TEXT NOT NULL
+);
+CREATE INDEX idx_book_distill_audit_slug_time
+  ON book_distill_audit(book_slug, started_at);
+
+CREATE TABLE book_distill_stage_report (
+  run_id INTEGER NOT NULL REFERENCES book_distill_audit(run_id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL,
+  stage_name TEXT NOT NULL,
+  in_kind TEXT NOT NULL,
+  out_kind TEXT NOT NULL,
+  in_len INTEGER NOT NULL,
+  out_len INTEGER NOT NULL,
+  PRIMARY KEY (run_id, ord)
+);
+CREATE INDEX idx_book_distill_stage_report_stage
+  ON book_distill_stage_report(stage_name);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -526,6 +569,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(INTAKE_PAGE_COUNT_DDL),
         M::up(ITEM_STATE_AND_PAPER_COLUMNS_DDL),
         M::up(INTAKE_SOURCE_PDF_PATH_DDL),
+        M::up(BOOK_DISTILL_AUDIT_DDL),
     ])
 }
 
@@ -847,6 +891,61 @@ mod tests {
             );
             assert_eq!(column_type(&conn, "node_contributors", col), "TEXT");
         }
+    }
+
+    #[test]
+    fn migration_m9_adds_the_distill_audit_pair_with_their_indexes() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        migrations()
+            .to_version(&mut conn, 9)
+            .expect("apply M[0..8]");
+        // The pre-migration database carries neither table.
+        assert!(columns_of(&conn, "book_distill_audit").is_empty());
+        assert!(columns_of(&conn, "book_distill_stage_report").is_empty());
+
+        migrations().to_latest(&mut conn).expect("apply M[9]");
+
+        let header_cols = columns_of(&conn, "book_distill_audit");
+        for col in [
+            "run_id",
+            "book_slug",
+            "source_path",
+            "started_at",
+            "finished_at",
+            "pages",
+            "blocks",
+            "raws",
+            "splits",
+            "entries",
+            "unmatched_lines",
+            "pair_mismatch",
+            "gate_status",
+            "gate_threshold",
+            "profile_ref",
+            "extractor_version",
+        ] {
+            assert!(
+                header_cols.iter().any(|c| c == col),
+                "expected {col} on book_distill_audit, got {header_cols:?}"
+            );
+        }
+        let stage_cols = columns_of(&conn, "book_distill_stage_report");
+        for col in [
+            "run_id",
+            "ord",
+            "stage_name",
+            "in_kind",
+            "out_kind",
+            "in_len",
+            "out_len",
+        ] {
+            assert!(
+                stage_cols.iter().any(|c| c == col),
+                "expected {col} on book_distill_stage_report, got {stage_cols:?}"
+            );
+        }
+        assert!(index_exists(&conn, "idx_book_distill_audit_slug_time"));
+        assert!(index_exists(&conn, "idx_book_distill_stage_report_stage"));
     }
 
     #[test]
