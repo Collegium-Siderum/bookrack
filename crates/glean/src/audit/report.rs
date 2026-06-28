@@ -160,6 +160,36 @@ pub enum PaperFlag {
 }
 
 impl PaperFlag {
+    /// Every [`PaperFlag`] variant, in declaration order. The
+    /// `node_paper_audit` writer enumerates this slice to set
+    /// per-flag columns; the order is the canonical token order.
+    pub const ALL: &'static [PaperFlag] = &[
+        PaperFlag::DoiInvalidFormat,
+        PaperFlag::ArxivIdInvalidFormat,
+        PaperFlag::IssnInvalidChecksum,
+        PaperFlag::OrcidInvalidChecksum,
+        PaperFlag::NoStableIdentifier,
+        PaperFlag::Empty,
+        PaperFlag::Voided,
+        PaperFlag::PlaceholderValue,
+        PaperFlag::EqualsFilename,
+        PaperFlag::SourceWatermark,
+        PaperFlag::PurelyNumeric,
+        PaperFlag::YearOutOfRange,
+        PaperFlag::DateLooksLikeTimestamp,
+        PaperFlag::PdfYearLikelyFileDate,
+        PaperFlag::LangMismatchesBody,
+        PaperFlag::NonBcp47,
+        PaperFlag::SourcePriorWeak,
+        PaperFlag::DoubtfulTextLayer,
+        PaperFlag::AbstractTooShort,
+        PaperFlag::VenueNotInList,
+        PaperFlag::AuthorListEmpty,
+        PaperFlag::AuthorListSingleWord,
+        PaperFlag::TitleEchoesArxivBanner,
+        PaperFlag::ContributorSentinelName,
+    ];
+
     /// A stable snake_case token for the flag, suitable for JSON
     /// output and structured logs.
     pub fn as_token(self) -> &'static str {

@@ -24,6 +24,7 @@
 pub mod csl_required;
 pub mod data;
 pub mod profile;
+pub mod projection;
 pub mod report;
 pub mod signals;
 
@@ -34,6 +35,7 @@ pub use profile::{
     PROFILE_DEFAULT, PROFILE_OVERLAY_FILE, PROFILE_STRICT, PROFILE_TRUST_SOURCE, PaperAuditProfile,
     SCHEMA_VERSION,
 };
+pub use projection::paper_report_to_audit_row;
 pub use report::{
     PaperConfidence, PaperFieldGrade, PaperFieldReport, PaperFlag, PaperReport, PaperVerdict,
 };
