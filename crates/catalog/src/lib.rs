@@ -34,6 +34,7 @@ mod migrate;
 mod node_categories;
 mod node_contributors;
 mod node_overrides;
+mod node_paper_audit;
 mod node_publication_attrs;
 mod node_reviews;
 mod node_role_takeovers;
@@ -62,6 +63,7 @@ pub use metadata_audit::{MetadataAudit, NewMetadataAudit};
 pub use node_categories::{NewCategory, NodeCategory};
 pub use node_contributors::{CONTRIBUTOR_ROLES, NewContributor, NodeContributor};
 pub use node_overrides::{NewOverride, NodeOverride};
+pub use node_paper_audit::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit, NodePaperAudit};
 pub use node_publication_attrs::{NewPublicationAttrs, PublicationAttrs};
 pub use node_reviews::{
     NewReview, NodeReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED,

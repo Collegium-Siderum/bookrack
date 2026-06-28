@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 10;
+pub(crate) const TARGET_VERSION: i64 = 11;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -556,6 +556,68 @@ CREATE INDEX idx_book_distill_stage_report_stage
   ON book_distill_stage_report(stage_name);
 "#;
 
+// `M[10]` — add `node_paper_audit`, the SQL-dimension projection of
+// glean's `PaperReport`. Mirrors `node_reviews` keying on
+// `(intake_id, scope)` so a join against the same key is trivial; the
+// `notes` JSON on `node_reviews` and the `audit_verdict / confidence`
+// rollup on `node_publication_attrs` stay the sources of truth for
+// free-form text and the read-side rollup respectively. Eight header
+// columns, nine `grade_*` columns (`missing` / `weak` / `medium` /
+// `strong`), and one `flag_*` boolean per `PaperFlag` enum token. The
+// table ships now so per-flag frequency, per-field grade distribution,
+// and profile × verdict crosses become one-`GROUP BY` queries.
+// Additive: no existing table is touched.
+const NODE_PAPER_AUDIT_DDL: &str = r#"
+CREATE TABLE node_paper_audit (
+  intake_id INTEGER NOT NULL,
+  scope TEXT NOT NULL,
+  profile_name TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  confidence TEXT NOT NULL,
+  csl_type TEXT,
+  audited_at TEXT NOT NULL,
+  extractor_version TEXT NOT NULL,
+  grade_title TEXT NOT NULL,
+  grade_year TEXT NOT NULL,
+  grade_doi TEXT NOT NULL,
+  grade_arxiv TEXT NOT NULL,
+  grade_issn TEXT NOT NULL,
+  grade_container TEXT NOT NULL,
+  grade_abstract TEXT NOT NULL,
+  grade_author TEXT NOT NULL,
+  grade_language TEXT NOT NULL,
+  flag_doi_invalid_format INTEGER NOT NULL DEFAULT 0,
+  flag_arxiv_id_invalid_format INTEGER NOT NULL DEFAULT 0,
+  flag_issn_invalid_checksum INTEGER NOT NULL DEFAULT 0,
+  flag_orcid_invalid_checksum INTEGER NOT NULL DEFAULT 0,
+  flag_no_stable_identifier INTEGER NOT NULL DEFAULT 0,
+  flag_empty INTEGER NOT NULL DEFAULT 0,
+  flag_voided INTEGER NOT NULL DEFAULT 0,
+  flag_placeholder_value INTEGER NOT NULL DEFAULT 0,
+  flag_equals_filename INTEGER NOT NULL DEFAULT 0,
+  flag_source_watermark INTEGER NOT NULL DEFAULT 0,
+  flag_purely_numeric INTEGER NOT NULL DEFAULT 0,
+  flag_year_out_of_range INTEGER NOT NULL DEFAULT 0,
+  flag_date_looks_like_timestamp INTEGER NOT NULL DEFAULT 0,
+  flag_pdf_year_likely_file_date INTEGER NOT NULL DEFAULT 0,
+  flag_lang_mismatches_body INTEGER NOT NULL DEFAULT 0,
+  flag_non_bcp47 INTEGER NOT NULL DEFAULT 0,
+  flag_source_prior_weak INTEGER NOT NULL DEFAULT 0,
+  flag_doubtful_text_layer INTEGER NOT NULL DEFAULT 0,
+  flag_abstract_too_short INTEGER NOT NULL DEFAULT 0,
+  flag_venue_not_in_list INTEGER NOT NULL DEFAULT 0,
+  flag_author_list_empty INTEGER NOT NULL DEFAULT 0,
+  flag_author_list_single_word INTEGER NOT NULL DEFAULT 0,
+  flag_title_echoes_arxiv_banner INTEGER NOT NULL DEFAULT 0,
+  flag_contributor_sentinel_name INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (intake_id, scope)
+);
+CREATE INDEX idx_node_paper_audit_profile
+  ON node_paper_audit(profile_name);
+CREATE INDEX idx_node_paper_audit_verdict_confidence
+  ON node_paper_audit(verdict, confidence);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -570,6 +632,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(ITEM_STATE_AND_PAPER_COLUMNS_DDL),
         M::up(INTAKE_SOURCE_PDF_PATH_DDL),
         M::up(BOOK_DISTILL_AUDIT_DDL),
+        M::up(NODE_PAPER_AUDIT_DDL),
     ])
 }
 
