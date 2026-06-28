@@ -209,3 +209,19 @@ anstyle = "1"
 # magnitude.
 [profile.test]
 debug = "line-tables-only"
+
+# Same reasoning extended to the dev profile, which covers `cargo build`,
+# `cargo check`, `cargo clippy`, and the `rust-analyzer` worker. Full
+# DWARF across a 27-crate workspace with heavy dependency trees
+# (lance/arrow, tantivy, the Tauri webview stack, pdfium-render) inflates
+# `target/debug` by hundreds of gigabytes once incremental caches
+# accumulate. Line tables preserve panic backtraces and `RUST_BACKTRACE=1`
+# symbol names; stepping a debugger into third-party crates loses local
+# variable inspection, which is an acceptable trade.
+[profile.dev]
+debug = "line-tables-only"
+
+# Strip debug info entirely from third-party crates. Workspace code keeps
+# the line-tables setting above.
+[profile.dev.package."*"]
+debug = 0
