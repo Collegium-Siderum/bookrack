@@ -28,11 +28,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use bookrack_catalog::{
+    Catalog, GATE_STATUS_FAIL, GATE_STATUS_OFF, GATE_STATUS_PASS, NewBookDistillAudit,
+    NewStageReport,
+};
 use bookrack_cli_grammar::{
     DistillAction, DistillBuildArgs, DistillLintArgs, DistillListArgs, DistillVerifyArgs,
 };
 use bookrack_config::Config;
-use bookrack_distill::{BookToml, EntryDraft, StageReport, load_pipeline};
+use bookrack_distill::{BookToml, Coverage, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
 use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -44,6 +48,7 @@ use crate::render::table::RowTable;
 /// share.
 struct DistillPaths {
     refs_path: PathBuf,
+    catalog_path: PathBuf,
 }
 
 impl DistillPaths {
@@ -52,6 +57,7 @@ impl DistillPaths {
         let data_dir = cfg.data_dir().to_path_buf();
         Ok(Self {
             refs_path: data_dir.join("reference.db"),
+            catalog_path: cfg.catalog_db(),
         })
     }
 }
@@ -257,17 +263,32 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
         let source = read_source(&book.source)
             .with_context(|| format!("read OCR source for {}", book.slug))?;
         let extras = compose_extras(&book.slug, &distill_run_id);
+        let started_at = chrono::Utc::now();
         let (drafts, coverage) = pipeline
             .run_with_extras(source, extras)
             .with_context(|| format!("run pipeline for {}", book.slug))?;
+        let finished_at = chrono::Utc::now();
 
         print_stage_table(&book.slug, &coverage.stage_reports);
-        if !args.no_retention_check {
-            enforce_retention(
-                &book.slug,
-                &coverage.stage_reports,
-                args.retention_threshold,
-            )?;
+
+        // The retention guard runs first so its verdict is on the audit
+        // row before we either bail or proceed. A `fail` row exists in
+        // `book_distill_audit` even though the build bails, which is the
+        // whole point of recording the gate verdict.
+        let gate_outcome = compute_gate_outcome(&book.slug, &coverage.stage_reports, &args);
+        if !args.no_audit_write {
+            write_distill_audit(
+                paths,
+                book,
+                &parsed,
+                &coverage,
+                &started_at,
+                &finished_at,
+                &gate_outcome,
+            );
+        }
+        if let Some(err) = gate_outcome.error {
+            return Err(err);
         }
 
         if args.dry_run {
@@ -298,6 +319,111 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Verdict of the retention guard for one pipeline run, in the shape the
+/// audit row consumes. `error` carries the bail-worthy failure when the
+/// guard rejected the run; the caller writes the audit row first and
+/// then propagates the error.
+struct GateOutcome {
+    status: &'static str,
+    threshold: Option<f64>,
+    error: Option<eyre::Report>,
+}
+
+fn compute_gate_outcome(
+    slug: &str,
+    reports: &[StageReport],
+    args: &DistillBuildArgs,
+) -> GateOutcome {
+    if args.no_retention_check {
+        return GateOutcome {
+            status: GATE_STATUS_OFF,
+            threshold: None,
+            error: None,
+        };
+    }
+    match enforce_retention(slug, reports, args.retention_threshold) {
+        Ok(()) => GateOutcome {
+            status: GATE_STATUS_PASS,
+            threshold: Some(args.retention_threshold),
+            error: None,
+        },
+        Err(err) => GateOutcome {
+            status: GATE_STATUS_FAIL,
+            threshold: Some(args.retention_threshold),
+            error: Some(err),
+        },
+    }
+}
+
+/// Write one distill build's audit pair into `catalog.db`. Failure to
+/// open or write `catalog.db` is logged and otherwise swallowed: the
+/// pipeline's primary output is `reference.db`, and an audit miss must
+/// never block a successful build.
+fn write_distill_audit(
+    paths: &DistillPaths,
+    book: &ResolvedBook,
+    parsed: &BookToml,
+    coverage: &Coverage,
+    started_at: &chrono::DateTime<chrono::Utc>,
+    finished_at: &chrono::DateTime<chrono::Utc>,
+    gate: &GateOutcome,
+) {
+    let header = NewBookDistillAudit {
+        book_slug: book.slug.clone(),
+        source_path: book.source.display().to_string(),
+        started_at: format_iso8601(started_at),
+        finished_at: format_iso8601(finished_at),
+        pages: coverage.pages as i64,
+        blocks: coverage.blocks as i64,
+        raws: coverage.raws as i64,
+        splits: coverage.splits as i64,
+        entries: coverage.entries as i64,
+        unmatched_lines: coverage.unmatched_lines as i64,
+        pair_mismatch: coverage.pair_mismatch as i64,
+        gate_status: gate.status.to_string(),
+        gate_threshold: gate.threshold,
+        profile_ref: String::new(),
+        extractor_version: parsed.parser_version.clone(),
+    };
+    let stages: Vec<NewStageReport> = coverage
+        .stage_reports
+        .iter()
+        .enumerate()
+        .map(|(ord, r)| NewStageReport {
+            ord: ord as i64,
+            stage_name: r.stage_name.clone(),
+            in_kind: r.in_kind.to_string(),
+            out_kind: r.out_kind.to_string(),
+            in_len: r.in_len as i64,
+            out_len: r.out_len as i64,
+        })
+        .collect();
+
+    let mut catalog = match Catalog::open(&paths.catalog_path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %paths.catalog_path.display(),
+                "distill: failed to open catalog.db for audit write",
+            );
+            return;
+        }
+    };
+    match catalog.insert_distill_audit(&header, &stages) {
+        Ok(run_id) => tracing::debug!(run_id, slug = %book.slug, "distill audit written"),
+        Err(err) => tracing::warn!(
+            error = %err,
+            slug = %book.slug,
+            "distill: failed to write book_distill_audit row",
+        ),
+    }
+}
+
+fn format_iso8601(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 /// Render the per-stage cardinality and retention block for one
@@ -783,6 +909,7 @@ stages = [
     fn make_paths(root: &Path) -> DistillPaths {
         DistillPaths {
             refs_path: root.join("reference.db"),
+            catalog_path: root.join("catalog.db"),
         }
     }
 
@@ -793,7 +920,26 @@ stages = [
             dry_run,
             retention_threshold: 0.10,
             no_retention_check: false,
+            no_audit_write: false,
         }
+    }
+
+    fn count_audit_rows(paths: &DistillPaths, slug: &str) -> (i64, i64) {
+        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let rows = catalog
+            .distill_audits_for_book(slug)
+            .expect("read audit rows");
+        let header_count = rows.len() as i64;
+        let stage_count: i64 = rows
+            .iter()
+            .map(|r| {
+                catalog
+                    .distill_stage_reports(r.run_id)
+                    .expect("read stage rows")
+                    .len() as i64
+            })
+            .sum();
+        (header_count, stage_count)
     }
 
     fn verify_args(paths: Vec<PathBuf>) -> DistillVerifyArgs {
@@ -851,6 +997,113 @@ stages = [
             !paths.refs_path.exists(),
             "dry-run must not write to reference.db"
         );
+    }
+
+    #[test]
+    fn build_writes_book_distill_audit_row() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        build(&paths, build_args(vec![book_dir], false, false)).expect("build");
+
+        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let rows = catalog.distill_audits_for_book("tiny").expect("read");
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.gate_status, GATE_STATUS_PASS);
+        assert_eq!(row.gate_threshold, Some(0.10));
+        assert_eq!(row.entries, 2, "Smith + Jones");
+        assert_eq!(row.profile_ref, "");
+        assert_eq!(row.extractor_version, "0.1.0");
+        let stages = catalog
+            .distill_stage_reports(row.run_id)
+            .expect("read stages");
+        assert!(!stages.is_empty());
+        // The first stage in the fixture pipeline is split_pages.
+        assert_eq!(stages[0].ord, 0);
+        assert_eq!(stages[0].stage_name, "split_pages");
+    }
+
+    #[test]
+    fn build_with_no_audit_write_skips_the_audit_table() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        let mut args = build_args(vec![book_dir], false, false);
+        args.no_audit_write = true;
+        build(&paths, args).expect("build");
+
+        // reference.db is written as usual; catalog.db is never opened.
+        assert!(paths.refs_path.is_file(), "reference.db must still exist");
+        assert!(
+            !paths.catalog_path.exists(),
+            "--no-audit-write must not create catalog.db"
+        );
+    }
+
+    #[test]
+    fn build_dry_run_still_writes_audit_row() {
+        // A dry-run does not touch reference.db, but the audit row is
+        // exactly the kind of observation a dry-run is meant to leave
+        // behind: it records what the pipeline would have produced.
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        build(&paths, build_args(vec![book_dir], true, false)).expect("dry-run build");
+
+        assert!(
+            !paths.refs_path.exists(),
+            "dry-run must not write to reference.db"
+        );
+        let (headers, _stages) = count_audit_rows(&paths, "tiny");
+        assert_eq!(headers, 1);
+    }
+
+    #[test]
+    fn build_fails_retention_still_writes_audit_with_gate_status_fail() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        // An out-of-range threshold trips enforce_retention's validity
+        // check; the fixture pipeline has no same-kind stages so a
+        // tightened threshold alone would not. Either way the gate
+        // rejects the run, the audit row records `fail`, and the build
+        // bails after the row lands.
+        let mut args = build_args(vec![book_dir], false, false);
+        args.retention_threshold = 1.5;
+        let err = build(&paths, args).expect_err("retention must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("retention-threshold") || msg.contains("threshold"),
+            "got: {msg}"
+        );
+
+        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let rows = catalog.distill_audits_for_book("tiny").expect("read");
+        assert_eq!(rows.len(), 1, "fail run must still leave one audit row");
+        assert_eq!(rows[0].gate_status, GATE_STATUS_FAIL);
+        assert_eq!(rows[0].gate_threshold, Some(1.5));
+    }
+
+    #[test]
+    fn build_with_no_retention_check_records_gate_status_off() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+
+        let mut args = build_args(vec![book_dir], true, false);
+        args.no_retention_check = true;
+        build(&paths, args).expect("build");
+
+        let catalog = Catalog::open(&paths.catalog_path).expect("open catalog");
+        let rows = catalog.distill_audits_for_book("tiny").expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].gate_status, GATE_STATUS_OFF);
+        assert_eq!(rows[0].gate_threshold, None);
     }
 
     #[test]
@@ -951,6 +1204,7 @@ stages = [
         let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = DistillPaths {
             refs_path: tmp.path().join("missing").join("reference.db"),
+            catalog_path: tmp.path().join("missing").join("catalog.db"),
         };
 
         let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");
@@ -981,6 +1235,7 @@ stages = [
         fs::create_dir_all(&dir_path).expect("create dir at refs path");
         let paths = DistillPaths {
             refs_path: dir_path.clone(),
+            catalog_path: tmp.path().join("catalog.db"),
         };
 
         let err = verify(&paths, verify_args(vec![book_dir])).expect_err("must fail");

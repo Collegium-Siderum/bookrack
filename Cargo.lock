@@ -862,6 +862,7 @@ name = "bookrack-cli"
 version = "0.8.0-dev"
 dependencies = [
  "anstyle",
+ "bookrack-catalog",
  "bookrack-cli-grammar",
  "bookrack-config",
  "bookrack-control-client",

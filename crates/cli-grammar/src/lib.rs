@@ -190,6 +190,12 @@ pub struct DistillBuildArgs {
     /// known-aggressive pipeline without flag noise.
     #[arg(long)]
     pub no_retention_check: bool,
+    /// Skip writing the run's audit row into `catalog.db`. The
+    /// pipeline still runs and (unless `--dry-run`) the drafts still
+    /// reach `reference.db`; this flag exists so CI checks and
+    /// reproducible parameter sweeps do not pollute the audit table.
+    #[arg(long)]
+    pub no_audit_write: bool,
 }
 
 /// Positional + flag bundle for `distill verify`.

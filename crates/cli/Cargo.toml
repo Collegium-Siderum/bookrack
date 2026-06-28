@@ -18,6 +18,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-mcp = { path = "../mcp" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
+bookrack-catalog = { path = "../catalog" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-runtime = { path = "../runtime" }
 bookrack-session = { path = "../session" }
