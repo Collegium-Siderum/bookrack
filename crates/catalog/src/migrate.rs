@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 11;
+pub(crate) const TARGET_VERSION: i64 = 12;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -618,6 +618,28 @@ CREATE INDEX idx_node_paper_audit_verdict_confidence
   ON node_paper_audit(verdict, confidence);
 "#;
 
+// `M[11]` — add `pipeline_runs`, the registry of top-level operator
+// invocations. Every command that drives a pipeline opens one row at
+// entry and closes it at exit; the assigned `pipeline_run_id` is
+// copied onto every audit row the run produces so a rollup over one
+// run is a single `WHERE pipeline_run_id = ?`. The id is a text
+// composite (command, ISO-8601 start instant, SHA-256 prefix over the
+// two plus the library root), so two same-second invocations against
+// different libraries do not collide on the primary key. Additive: no
+// existing table is touched.
+const PIPELINE_RUNS_DDL: &str = r#"
+CREATE TABLE pipeline_runs (
+  pipeline_run_id TEXT PRIMARY KEY,
+  command TEXT NOT NULL,
+  command_args TEXT,
+  library_root TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT
+);
+CREATE INDEX idx_pipeline_runs_cmd_ts ON pipeline_runs(command, started_at);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -633,6 +655,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(INTAKE_SOURCE_PDF_PATH_DDL),
         M::up(BOOK_DISTILL_AUDIT_DDL),
         M::up(NODE_PAPER_AUDIT_DDL),
+        M::up(PIPELINE_RUNS_DDL),
     ])
 }
 
@@ -1009,6 +1032,54 @@ mod tests {
         }
         assert!(index_exists(&conn, "idx_book_distill_audit_slug_time"));
         assert!(index_exists(&conn, "idx_book_distill_stage_report_stage"));
+    }
+
+    #[test]
+    fn migration_m11_adds_pipeline_runs_table_with_its_index() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[11] so the pre-migration database
+        // demonstrably carries neither the table nor the index.
+        migrations()
+            .to_version(&mut conn, 11)
+            .expect("apply M[0..10]");
+        assert!(columns_of(&conn, "pipeline_runs").is_empty());
+        assert!(!index_exists(&conn, "idx_pipeline_runs_cmd_ts"));
+
+        migrations().to_latest(&mut conn).expect("apply M[11]");
+
+        let cols = columns_of(&conn, "pipeline_runs");
+        for col in [
+            "pipeline_run_id",
+            "command",
+            "command_args",
+            "library_root",
+            "started_at",
+            "finished_at",
+            "status",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == col),
+                "expected {col} on pipeline_runs, got {cols:?}"
+            );
+        }
+        assert!(index_exists(&conn, "idx_pipeline_runs_cmd_ts"));
+
+        // The text primary key carries no AUTOINCREMENT and accepts the
+        // hand-crafted composite id verbatim.
+        conn.execute(
+            "INSERT INTO pipeline_runs \
+               (pipeline_run_id, command, started_at) \
+             VALUES ('distill_build-2026-06-28T10:00:00Z-deadbeef', \
+                     'distill_build', '2026-06-28T10:00:00Z')",
+            [],
+        )
+        .expect("insert pk row");
+        let id: String = conn
+            .query_row("SELECT pipeline_run_id FROM pipeline_runs", [], |row| {
+                row.get(0)
+            })
+            .expect("read pk row");
+        assert_eq!(id, "distill_build-2026-06-28T10:00:00Z-deadbeef");
     }
 
     #[test]
