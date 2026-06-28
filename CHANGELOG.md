@@ -8,6 +8,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **distill: every `distill build` records its run into `catalog.db`.**
+  Each build appends one row to `book_distill_audit` (the seven
+  `Coverage` scalars, the retention gate verdict and threshold, the
+  parser version stamp, and a placeholder `profile_ref` reserved for
+  a later fingerprint) plus one row per pipeline stage in
+  `book_distill_stage_report` keyed by `(run_id, ord)`. Fail runs
+  land their audit row before the build bails, so the trip wire is
+  observable after the fact; `--no-retention-check` records
+  `gate_status='off'` with a NULL threshold. The new
+  `distill build --no-audit-write` flag skips the write entirely for
+  CI checks and parameter sweeps. Catalog schema advances to
+  `user_version` 10.
+
 ### Changed
 
 - **catalog browse: paginated lists assemble each page in a constant
