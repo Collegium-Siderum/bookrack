@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 12;
+pub(crate) const TARGET_VERSION: i64 = 13;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -655,6 +655,21 @@ CREATE TABLE pipeline_run_summary (
 );
 "#;
 
+// `M[12]` — attach `pipeline_run_id` to both W1 audit tables so a run's
+// audit rows can be selected by a single `WHERE pipeline_run_id = ?`.
+// The column is nullable: historical rows written before M[12] carry
+// NULL and read back as "no run grouping". A paired index per table
+// keeps the typical rollup scan cheap. Additive: no existing column
+// shape changes.
+const AUDIT_RUN_ID_M12_DDL: &str = r#"
+ALTER TABLE book_distill_audit ADD COLUMN pipeline_run_id TEXT;
+ALTER TABLE node_paper_audit ADD COLUMN pipeline_run_id TEXT;
+CREATE INDEX idx_book_distill_audit_run
+  ON book_distill_audit(pipeline_run_id);
+CREATE INDEX idx_node_paper_audit_run
+  ON node_paper_audit(pipeline_run_id);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -671,6 +686,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(BOOK_DISTILL_AUDIT_DDL),
         M::up(NODE_PAPER_AUDIT_DDL),
         M::up(PIPELINE_PAIR_M11_DDL),
+        M::up(AUDIT_RUN_ID_M12_DDL),
     ])
 }
 
@@ -1187,6 +1203,45 @@ mod tests {
         assert_eq!(verdicts, "{}");
         assert_eq!(flags, "{}");
         assert_eq!(coverage, "{}");
+    }
+
+    #[test]
+    fn migration_m12_adds_pipeline_run_id_to_w1_audits() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[12] so the pre-migration database
+        // demonstrably carries neither the columns nor their indexes.
+        migrations()
+            .to_version(&mut conn, 12)
+            .expect("apply M[0..11]");
+        let book_cols_pre = columns_of(&conn, "book_distill_audit");
+        let paper_cols_pre = columns_of(&conn, "node_paper_audit");
+        assert!(!book_cols_pre.iter().any(|c| c == "pipeline_run_id"));
+        assert!(!paper_cols_pre.iter().any(|c| c == "pipeline_run_id"));
+        assert!(!index_exists(&conn, "idx_book_distill_audit_run"));
+        assert!(!index_exists(&conn, "idx_node_paper_audit_run"));
+
+        migrations().to_latest(&mut conn).expect("apply M[12]");
+
+        let book_cols = columns_of(&conn, "book_distill_audit");
+        let paper_cols = columns_of(&conn, "node_paper_audit");
+        assert!(
+            book_cols.iter().any(|c| c == "pipeline_run_id"),
+            "expected pipeline_run_id on book_distill_audit, got {book_cols:?}"
+        );
+        assert!(
+            paper_cols.iter().any(|c| c == "pipeline_run_id"),
+            "expected pipeline_run_id on node_paper_audit, got {paper_cols:?}"
+        );
+        assert_eq!(
+            column_type(&conn, "book_distill_audit", "pipeline_run_id"),
+            "TEXT"
+        );
+        assert_eq!(
+            column_type(&conn, "node_paper_audit", "pipeline_run_id"),
+            "TEXT"
+        );
+        assert!(index_exists(&conn, "idx_book_distill_audit_run"));
+        assert!(index_exists(&conn, "idx_node_paper_audit_run"));
     }
 
     #[test]

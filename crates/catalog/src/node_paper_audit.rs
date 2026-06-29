@@ -130,6 +130,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::int("flag_contributor_sentinel_name")
             .not_null()
             .default("0"),
+        ColumnSpec::text("pipeline_run_id")
+            .comment("run group; NULL for rows written before M[12]"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),
     uniques: &[],
@@ -140,6 +142,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             "idx_node_paper_audit_verdict_confidence",
             &["verdict", "confidence"],
         ),
+        IndexSpec::on("idx_node_paper_audit_run", &["pipeline_run_id"]),
     ],
 };
 
@@ -206,6 +209,9 @@ pub struct NewNodePaperAudit {
     /// `flag_*` values, indexed by [`FLAG_COLUMNS`] position. `1` if
     /// the flag was emitted by the audit, `0` otherwise.
     pub flags: [u8; FLAG_COLUMNS.len()],
+    /// The `pipeline_runs.pipeline_run_id` that grouped this audit, or
+    /// `None` when the writer is not running inside an opened run.
+    pub pipeline_run_id: Option<String>,
 }
 
 /// One `node_paper_audit` row, read back from the database.
@@ -221,6 +227,7 @@ pub struct NodePaperAudit {
     pub extractor_version: String,
     pub grades: [String; GRADE_COLUMNS.len()],
     pub flags: [u8; FLAG_COLUMNS.len()],
+    pub pipeline_run_id: Option<String>,
 }
 
 impl NodePaperAudit {
@@ -245,6 +252,7 @@ impl NodePaperAudit {
             extractor_version: row.get("extractor_version")?,
             grades,
             flags,
+            pipeline_run_id: row.get("pipeline_run_id")?,
         })
     }
 }
@@ -269,6 +277,7 @@ fn upsert_sql() -> String {
     for col in FLAG_COLUMNS {
         cols.push(col);
     }
+    cols.push("pipeline_run_id");
     let placeholders: Vec<String> = cols.iter().map(|c| format!(":{c}")).collect();
     let assignments: Vec<String> = cols
         .iter()
@@ -297,7 +306,8 @@ impl Catalog {
         let sql = upsert_sql();
         let mut stmt = self.conn.prepare(&sql)?;
         let csl_type = new.csl_type.as_deref();
-        let mut params: Vec<(String, &dyn rusqlite::ToSql)> = Vec::with_capacity(8 + 9 + 24);
+        let mut params: Vec<(String, &dyn rusqlite::ToSql)> =
+            Vec::with_capacity(8 + 9 + FLAG_COLUMNS.len() + 1);
         params.push((":intake_id".to_string(), &new.intake_id));
         params.push((":scope".to_string(), &new.scope));
         params.push((":profile_name".to_string(), &new.profile_name));
@@ -312,6 +322,8 @@ impl Catalog {
         for (i, col) in FLAG_COLUMNS.iter().enumerate() {
             params.push((format!(":{col}"), &new.flags[i]));
         }
+        let pipeline_run_id = new.pipeline_run_id.as_deref();
+        params.push((":pipeline_run_id".to_string(), &pipeline_run_id));
         let refs: Vec<(&str, &dyn rusqlite::ToSql)> =
             params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         stmt.execute(refs.as_slice())?;
@@ -354,6 +366,7 @@ mod tests {
             extractor_version: "0.0.0-test".to_string(),
             grades,
             flags: [0; FLAG_COLUMNS.len()],
+            pipeline_run_id: None,
         }
     }
 
@@ -379,6 +392,23 @@ mod tests {
         assert_eq!(read.flags[0], 1);
         assert_eq!(read.flags[1], 0);
         assert_eq!(read.flags[4], 1);
+        assert_eq!(read.pipeline_run_id, None);
+    }
+
+    #[test]
+    fn a_paper_audit_round_trips_with_a_pipeline_run_id() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut row = fixture(1);
+        row.pipeline_run_id = Some("glean_review-2026-06-28T10:00:00Z-deadbeef".to_string());
+        catalog.upsert_node_paper_audit(&row).expect("write");
+        let read = catalog
+            .node_paper_audit(1, "paper")
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            read.pipeline_run_id.as_deref(),
+            Some("glean_review-2026-06-28T10:00:00Z-deadbeef")
+        );
     }
 
     #[test]

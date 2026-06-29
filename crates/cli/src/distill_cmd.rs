@@ -386,6 +386,7 @@ fn write_distill_audit(
         gate_threshold: gate.threshold,
         profile_ref: String::new(),
         extractor_version: parsed.parser_version.clone(),
+        pipeline_run_id: None,
     };
     let stages: Vec<NewStageReport> = coverage
         .stage_reports

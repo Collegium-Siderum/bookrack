@@ -60,14 +60,19 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .default("''")
             .comment("placeholder for the distill profile fingerprint"),
         ColumnSpec::text("extractor_version").not_null(),
+        ColumnSpec::text("pipeline_run_id")
+            .comment("run group; NULL for rows written before M[12]"),
     ],
     composite_pk: None,
     uniques: &[],
     table_checks: &[],
-    indexes: &[IndexSpec::on(
-        "idx_book_distill_audit_slug_time",
-        &["book_slug", "started_at"],
-    )],
+    indexes: &[
+        IndexSpec::on(
+            "idx_book_distill_audit_slug_time",
+            &["book_slug", "started_at"],
+        ),
+        IndexSpec::on("idx_book_distill_audit_run", &["pipeline_run_id"]),
+    ],
 };
 
 /// The single source of truth for the `book_distill_stage_report` table's
@@ -105,10 +110,12 @@ pub(crate) const STAGE_SPEC: TableSpec = TableSpec {
 const INSERT_HEADER_SQL: &str = "INSERT INTO book_distill_audit \
      (book_slug, source_path, started_at, finished_at, \
       pages, blocks, raws, splits, entries, unmatched_lines, pair_mismatch, \
-      gate_status, gate_threshold, profile_ref, extractor_version) \
+      gate_status, gate_threshold, profile_ref, extractor_version, \
+      pipeline_run_id) \
      VALUES (:book_slug, :source_path, :started_at, :finished_at, \
              :pages, :blocks, :raws, :splits, :entries, :unmatched_lines, :pair_mismatch, \
-             :gate_status, :gate_threshold, :profile_ref, :extractor_version) \
+             :gate_status, :gate_threshold, :profile_ref, :extractor_version, \
+             :pipeline_run_id) \
      RETURNING run_id";
 
 /// Insert one stage-report row.
@@ -180,6 +187,9 @@ pub struct NewBookDistillAudit {
     pub profile_ref: String,
     /// The version stamp of the book's parser at build time.
     pub extractor_version: String,
+    /// The `pipeline_runs.pipeline_run_id` that grouped this build, or
+    /// `None` when the writer is not running inside an opened run.
+    pub pipeline_run_id: Option<String>,
 }
 
 /// One row about to be written to `book_distill_stage_report`.
@@ -235,6 +245,8 @@ pub struct BookDistillAudit {
     pub profile_ref: String,
     /// See [`NewBookDistillAudit::extractor_version`].
     pub extractor_version: String,
+    /// See [`NewBookDistillAudit::pipeline_run_id`].
+    pub pipeline_run_id: Option<String>,
 }
 
 impl BookDistillAudit {
@@ -256,6 +268,7 @@ impl BookDistillAudit {
             gate_threshold: row.get("gate_threshold")?,
             profile_ref: row.get("profile_ref")?,
             extractor_version: row.get("extractor_version")?,
+            pipeline_run_id: row.get("pipeline_run_id")?,
         })
     }
 }
@@ -320,6 +333,7 @@ impl Catalog {
                 ":gate_threshold": header.gate_threshold,
                 ":profile_ref": header.profile_ref,
                 ":extractor_version": header.extractor_version,
+                ":pipeline_run_id": header.pipeline_run_id,
             },
             |row| row.get(0),
         )?;
@@ -405,6 +419,7 @@ mod tests {
             gate_threshold: Some(0.10),
             profile_ref: String::new(),
             extractor_version: "0.1.0".to_string(),
+            pipeline_run_id: None,
         }
     }
 
@@ -442,6 +457,7 @@ mod tests {
         assert_eq!(read.gate_threshold, Some(0.10));
         assert_eq!(read.profile_ref, "");
         assert_eq!(read.extractor_version, "0.1.0");
+        assert_eq!(read.pipeline_run_id, None);
 
         let stages = catalog.distill_stage_reports(run_id).expect("read stages");
         assert_eq!(stages.len(), 2);
@@ -504,6 +520,22 @@ mod tests {
             .insert_distill_audit(&h, &[])
             .expect_err("CHECK must reject");
         assert!(matches!(err, crate::CatalogError::Sqlite(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_distill_audit_round_trips_with_a_pipeline_run_id() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let mut h = header("tiny");
+        h.pipeline_run_id = Some("distill_build-2026-06-28T10:00:00Z-deadbeef".to_string());
+        let run_id = catalog.insert_distill_audit(&h, &[]).expect("insert");
+        let read = catalog
+            .distill_audit(run_id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            read.pipeline_run_id.as_deref(),
+            Some("distill_build-2026-06-28T10:00:00Z-deadbeef")
+        );
     }
 
     #[test]

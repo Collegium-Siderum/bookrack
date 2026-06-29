@@ -65,6 +65,7 @@ pub fn paper_report_to_audit_row(
         extractor_version: extractor_version.to_string(),
         grades,
         flags,
+        pipeline_run_id: None,
     }
 }
 
