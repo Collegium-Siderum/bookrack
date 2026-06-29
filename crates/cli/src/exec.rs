@@ -15,10 +15,10 @@
 //! - `logs follow`: stream every tracing event the daemon emits via
 //!   the control-plane `log` channel until the daemon shuts down or
 //!   the client is interrupted.
-//! - `logs tail [<n>]`: subscribe to the same broadcast and emit the
-//!   next `n` live log events (defaults to 100). Distinct from the
-//!   top-level `bookrack logs --tail`, which snapshots historical
-//!   events via the `logs.tail` RPC.
+//! - `logs tail [<n>]`: snapshot the last `n` historical log events
+//!   via the `logs.tail` RPC (defaults to 100). A thin alias of the
+//!   top-level `bookrack logs --tail <n>`; use `logs follow` for the
+//!   live stream.
 //! - `<method> [<params-json>]`: any control-plane method name
 //!   containing a `.` (e.g. `library.show_book`, `library.search`,
 //!   `library.show_metadata_audit`). The optional second argument is
@@ -221,22 +221,12 @@ async fn follow_logs() -> Result<()> {
 
 async fn tail_logs(limit: u64) -> Result<()> {
     let client = helpers::connect(None).await?;
-    let mut events = client
-        .subscribe()
-        .await
-        .context("subscribe to control-plane events")?;
-    let mut emitted = 0u64;
-    while emitted < limit {
-        match events.recv().await {
-            Ok(event) if event.channel == "log" => {
-                if let Ok(ev) = serde_json::from_value::<LogEvent>(event.value) {
-                    logs_cmd::emit_event(&ev, None);
-                }
-                emitted += 1;
+    let response = helpers::dispatch(&client, "logs.tail", json!({ "n": limit })).await?;
+    if let Some(events) = response.get("events").and_then(Value::as_array) {
+        for raw in events {
+            if let Ok(ev) = serde_json::from_value::<LogEvent>(raw.clone()) {
+                logs_cmd::emit_event(&ev, None);
             }
-            Ok(_) => continue,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
         }
     }
     Ok(())
