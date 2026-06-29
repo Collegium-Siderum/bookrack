@@ -438,6 +438,7 @@ impl DaemonRuntime {
             let state_path = queue_state_path.clone();
             let params_template = queue_params_template.clone();
             let glean_template = glean_params_template.clone();
+            let cfg_for_worker = Arc::clone(&cfg);
             let shutdown_rx = shutdown_tx.subscribe();
             let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
@@ -451,6 +452,7 @@ impl DaemonRuntime {
                     let registry = Arc::clone(&registry);
                     let params_template = params_template.clone();
                     let glean_template = glean_template.clone();
+                    let cfg_for_job = Arc::clone(&cfg_for_worker);
                     let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
@@ -467,14 +469,19 @@ impl DaemonRuntime {
                             let job_kind = job.kind;
                             let path = job.path.clone();
                             let intake_ocr = job.intake_ocr.clone();
+                            let audit_profile = job.audit_profile.clone();
                             runtime.block_on(async move {
                                 let handle = registry
                                     .get(Some(&library))
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 if let Some(ocr) = intake_ocr {
-                                    let mut params = params_template;
-                                    params.force = force;
-                                    params.hold_for_metadata = hold_for_metadata;
+                                    let params = prepare_book_params(
+                                        &params_template,
+                                        &cfg_for_job,
+                                        force,
+                                        hold_for_metadata,
+                                        audit_profile.as_deref(),
+                                    );
                                     let ocr_params = bookrack_ingest::ocr::OcrIngestParams {
                                         expected_pages: ocr.expected_pages,
                                         allow_partial: ocr.allow_partial,
@@ -487,15 +494,25 @@ impl DaemonRuntime {
                                 }
                                 match job_kind {
                                     bookrack_core::ItemKind::Book => {
-                                        let mut params = params_template;
-                                        params.force = force;
-                                        params.hold_for_metadata = hold_for_metadata;
+                                        let params = prepare_book_params(
+                                            &params_template,
+                                            &cfg_for_job,
+                                            force,
+                                            hold_for_metadata,
+                                            audit_profile.as_deref(),
+                                        );
                                         handle
                                             .ingest_book(&path, &params)
                                             .await
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
                                     }
                                     bookrack_core::ItemKind::Paper => {
+                                        // Paper jobs read their audit
+                                        // profile from `glean_template`'s
+                                        // paper-side field. The book-side
+                                        // per-job override is enqueued as
+                                        // `None` for paper kinds and is
+                                        // intentionally not consulted here.
                                         let mut params = glean_template;
                                         params.force = force;
                                         handle
@@ -709,6 +726,30 @@ fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestP
     }
 }
 
+/// Overlay the per-job overrides on top of the worker's startup
+/// [`IngestParams`] template.
+///
+/// `force` and `hold_for_metadata` come straight off the
+/// [`bookrack_core::queue::QueueJob`]. `audit_profile`, when present,
+/// triggers a fresh [`load_audit_profile`] for the named built-in so
+/// the override actually reaches the pipeline; when absent the
+/// template's default profile passes through unchanged.
+fn prepare_book_params(
+    template: &IngestParams,
+    cfg: &Config,
+    force: bool,
+    hold_for_metadata: bool,
+    audit_profile: Option<&str>,
+) -> IngestParams {
+    let mut params = template.clone();
+    params.force = force;
+    params.hold_for_metadata = hold_for_metadata;
+    if let Some(name) = audit_profile {
+        params.audit_profile = load_audit_profile(cfg, Some(name));
+    }
+    params
+}
+
 /// Build the [`GleanParams`] template the queue worker reuses for
 /// every paper-side job. Mirrors [`build_queue_params_template`] for
 /// the book side: only `force` is patched per-job at dispatch time.
@@ -766,4 +807,47 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBo
     triggered.store(true, Ordering::SeqCst);
     let _ = shutdown_tx.send(());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_config::LibrarySelection;
+
+    /// Build a [`Config`] rooted at a fresh temp directory so the
+    /// per-job-override unit tests can call into the audit profile
+    /// resolver without depending on the user's data root.
+    fn synthetic_cfg() -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let selection = LibrarySelection {
+            data_dir: Some(dir.path().to_path_buf()),
+            library: None,
+        };
+        let cfg = Config::resolve(&selection).expect("resolve synthetic cfg");
+        (cfg, dir)
+    }
+
+    #[test]
+    fn prepare_book_params_threads_force_and_hold_for_metadata() {
+        let (cfg, _dir) = synthetic_cfg();
+        let template = build_queue_params_template(&cfg, &EmbedConfig::from_env());
+        let params = prepare_book_params(&template, &cfg, true, true, None);
+        assert!(params.force);
+        assert!(params.hold_for_metadata);
+        // No per-job override: the template's profile passes through.
+        assert_eq!(params.audit_profile.name, template.audit_profile.name);
+    }
+
+    #[test]
+    fn prepare_book_params_overrides_audit_profile_when_set() {
+        let (cfg, _dir) = synthetic_cfg();
+        let template = build_queue_params_template(&cfg, &EmbedConfig::from_env());
+        let params = prepare_book_params(&template, &cfg, false, false, Some("strict"));
+        // The override resolves through `load_audit_profile`, so the
+        // result must be the named built-in -- not the template's
+        // baseline profile.
+        let expected = load_audit_profile(&cfg, Some("strict"));
+        assert_eq!(params.audit_profile.name, expected.name);
+        assert_ne!(params.audit_profile.name, template.audit_profile.name);
+    }
 }
