@@ -13,6 +13,9 @@ rusqlite_migration.workspace = true
 # CSL-JSON serialization + the `extras_json` blob's opaque passthrough.
 serde.workspace = true
 serde_json.workspace = true
+# SHA-256 prefix for the pipeline_run_id composite, so two same-second
+# invocations against different libraries do not collide.
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

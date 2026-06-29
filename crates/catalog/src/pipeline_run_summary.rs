@@ -18,15 +18,17 @@
 //!     (`{ "retention_avg": 0.95, "pair_mismatch_total": 3, ... }`)
 //!
 //! All three default to `'{}'` so an upsert that has nothing to report
-//! still stores a parseable JSON object. The compute helper that runs
-//! the four SELECTs and assembles the row lands in a later commit;
-//! this commit ships the table, the typed row pair, and the upsert
-//! primitive so the writer at run-close can land its rollup.
+//! still stores a parseable JSON object. [`Catalog::compute_run_summary`]
+//! reads `book_distill_audit` and `node_paper_audit` for one run and
+//! upserts the assembled row; the four aggregates use an explicit
+//! `WHERE pipeline_run_id = :pipeline_run_id` so historical rows with
+//! NULL `pipeline_run_id` stay out of any single run's rollup.
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
+use serde_json::{Map, Value};
 
-use crate::{Catalog, Result};
+use crate::{Catalog, FLAG_COLUMNS, Result};
 
 /// The single source of truth for the `pipeline_run_summary` table's
 /// schema. Its DDL is rendered from this spec.
@@ -194,12 +196,146 @@ impl Catalog {
             .optional()?;
         Ok(row)
     }
+
+    /// Materialize the rollup for one run by aggregating its audit rows
+    /// and upserting the result. The four SELECTs all key on
+    /// `pipeline_run_id = :pipeline_run_id` so historical rows with NULL
+    /// `pipeline_run_id` stay outside every single-run rollup. The
+    /// returned row is the same one now persisted on
+    /// `pipeline_run_summary`.
+    pub fn compute_run_summary(&self, pipeline_run_id: &str) -> Result<PipelineRunSummary> {
+        let n_books: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM book_distill_audit \
+             WHERE pipeline_run_id = :pipeline_run_id",
+            named_params! { ":pipeline_run_id": pipeline_run_id },
+            |row| row.get(0),
+        )?;
+        let n_papers: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM node_paper_audit \
+             WHERE pipeline_run_id = :pipeline_run_id",
+            named_params! { ":pipeline_run_id": pipeline_run_id },
+            |row| row.get(0),
+        )?;
+
+        let mut verdict_stmt = self.conn.prepare(
+            "SELECT verdict, COUNT(*) FROM node_paper_audit \
+             WHERE pipeline_run_id = :pipeline_run_id \
+             GROUP BY verdict ORDER BY verdict",
+        )?;
+        let mut verdict_map: Map<String, Value> = Map::new();
+        let verdict_rows = verdict_stmt.query_map(
+            named_params! { ":pipeline_run_id": pipeline_run_id },
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        for r in verdict_rows {
+            let (verdict, count) = r?;
+            verdict_map.insert(verdict, Value::from(count));
+        }
+        let verdict_counts = Value::Object(verdict_map).to_string();
+
+        let flag_select = FLAG_COLUMNS
+            .iter()
+            .map(|c| format!("COALESCE(SUM({c}), 0) AS {c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let flag_sql = format!(
+            "SELECT {flag_select} FROM node_paper_audit \
+             WHERE pipeline_run_id = :pipeline_run_id"
+        );
+        let mut flag_stmt = self.conn.prepare(&flag_sql)?;
+        let flag_map = flag_stmt.query_row(
+            named_params! { ":pipeline_run_id": pipeline_run_id },
+            |row| {
+                let mut m: Map<String, Value> = Map::new();
+                for (i, col) in FLAG_COLUMNS.iter().enumerate() {
+                    let v: i64 = row.get(i)?;
+                    if v > 0 {
+                        m.insert((*col).to_string(), Value::from(v));
+                    }
+                }
+                Ok(m)
+            },
+        )?;
+        let flag_counts = Value::Object(flag_map).to_string();
+
+        let (pair_mismatch_total, unmatched_lines_total, pages_total, gate_fail_count): (
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = self.conn.query_row(
+            "SELECT COALESCE(SUM(pair_mismatch), 0), \
+                    COALESCE(SUM(unmatched_lines), 0), \
+                    COALESCE(SUM(pages), 0), \
+                    COALESCE(SUM(CASE WHEN gate_status = 'fail' THEN 1 ELSE 0 END), 0) \
+             FROM book_distill_audit \
+             WHERE pipeline_run_id = :pipeline_run_id",
+            named_params! { ":pipeline_run_id": pipeline_run_id },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let mut coverage_map: Map<String, Value> = Map::new();
+        coverage_map.insert(
+            "pair_mismatch_total".to_string(),
+            Value::from(pair_mismatch_total),
+        );
+        coverage_map.insert(
+            "unmatched_lines_total".to_string(),
+            Value::from(unmatched_lines_total),
+        );
+        coverage_map.insert("pages_total".to_string(), Value::from(pages_total));
+        coverage_map.insert("gate_fail_count".to_string(), Value::from(gate_fail_count));
+        let coverage_summary = Value::Object(coverage_map).to_string();
+
+        // Wall-clock from the parent run when both timestamps are set;
+        // None during an open run (close_pipeline_run has not stamped
+        // finished_at yet) or when no matching parent row exists.
+        let wall_clock_ms: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT CAST((julianday(finished_at) - julianday(started_at)) * 86400000.0 AS INTEGER) \
+                 FROM pipeline_runs WHERE pipeline_run_id = :pipeline_run_id",
+                named_params! { ":pipeline_run_id": pipeline_run_id },
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        let computed_at: String =
+            self.conn
+                .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                    row.get(0)
+                })?;
+
+        let row = NewPipelineRunSummary {
+            pipeline_run_id: pipeline_run_id.to_string(),
+            n_books,
+            n_papers,
+            verdict_counts,
+            flag_counts,
+            coverage_summary,
+            wall_clock_ms,
+            computed_at,
+        };
+        self.upsert_pipeline_run_summary(&row)?;
+        Ok(PipelineRunSummary {
+            pipeline_run_id: row.pipeline_run_id,
+            n_books: row.n_books,
+            n_papers: row.n_papers,
+            verdict_counts: row.verdict_counts,
+            flag_counts: row.flag_counts,
+            coverage_summary: row.coverage_summary,
+            wall_clock_ms: row.wall_clock_ms,
+            computed_at: row.computed_at,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NewPipelineRun;
+    use crate::book_distill_audit::{GATE_STATUS_FAIL, GATE_STATUS_PASS, NewBookDistillAudit};
+    use crate::node_paper_audit::{GRADE_COLUMNS, NewNodePaperAudit};
+    use crate::{FLAG_COLUMNS, NewPipelineRun};
 
     fn seed_parent_run(catalog: &Catalog, pipeline_run_id: &str) {
         catalog
@@ -248,6 +384,175 @@ mod tests {
         assert_eq!(read.coverage_summary, r#"{"retention_avg":0.95}"#);
         assert_eq!(read.wall_clock_ms, Some(12_500));
         assert_eq!(read.computed_at, "2026-06-28T10:00:05Z");
+    }
+
+    fn distill_header(slug: &str, run_id: Option<&str>, pair_mismatch: i64) -> NewBookDistillAudit {
+        NewBookDistillAudit {
+            book_slug: slug.to_string(),
+            source_path: format!("/data/reference/{slug}/source.md"),
+            started_at: "2026-06-28T10:00:00Z".to_string(),
+            finished_at: "2026-06-28T10:00:05Z".to_string(),
+            pages: 42,
+            blocks: 50,
+            raws: 100,
+            splits: 110,
+            entries: 95,
+            unmatched_lines: 3,
+            pair_mismatch,
+            gate_status: GATE_STATUS_PASS.to_string(),
+            gate_threshold: Some(0.10),
+            profile_ref: String::new(),
+            extractor_version: "0.1.0".to_string(),
+            pipeline_run_id: run_id.map(str::to_string),
+        }
+    }
+
+    fn paper_audit(
+        intake_id: i64,
+        verdict: &str,
+        run_id: Option<&str>,
+        flag_col: Option<&str>,
+    ) -> NewNodePaperAudit {
+        let mut grades: [String; GRADE_COLUMNS.len()] = Default::default();
+        for g in grades.iter_mut() {
+            *g = "medium".to_string();
+        }
+        let mut flags: [u8; FLAG_COLUMNS.len()] = [0; FLAG_COLUMNS.len()];
+        if let Some(flag) = flag_col {
+            let idx = FLAG_COLUMNS
+                .iter()
+                .position(|c| *c == flag)
+                .expect("known flag column");
+            flags[idx] = 1;
+        }
+        NewNodePaperAudit {
+            intake_id,
+            scope: "paper".to_string(),
+            profile_name: "default".to_string(),
+            verdict: verdict.to_string(),
+            confidence: "medium".to_string(),
+            csl_type: Some("article-journal".to_string()),
+            audited_at: "2026-06-28T10:00:00Z".to_string(),
+            extractor_version: "0.0.0-test".to_string(),
+            grades,
+            flags,
+            pipeline_run_id: run_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn compute_run_summary_aggregates_two_distill_audits_under_one_run_id() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let run_id = catalog
+            .open_pipeline_run("distill_build", None, Some("lib-a"))
+            .expect("open run");
+
+        // Two distill audits inside the run, one outside under a
+        // sibling run, and one historical row whose pipeline_run_id is
+        // NULL. The historical row must stay out of the rollup.
+        catalog
+            .insert_distill_audit(&distill_header("alpha", Some(&run_id), 1), &[])
+            .expect("alpha");
+        catalog
+            .insert_distill_audit(&distill_header("beta", Some(&run_id), 2), &[])
+            .expect("beta");
+        catalog
+            .insert_pipeline_run(&NewPipelineRun {
+                pipeline_run_id: "sibling-run".to_string(),
+                command: "distill_build".to_string(),
+                command_args: None,
+                library_root: None,
+                started_at: "2026-06-28T11:00:00Z".to_string(),
+                finished_at: None,
+                status: Some("running".to_string()),
+            })
+            .expect("seed sibling");
+        catalog
+            .insert_distill_audit(&distill_header("gamma", Some("sibling-run"), 99), &[])
+            .expect("gamma");
+        catalog
+            .insert_distill_audit(&distill_header("delta", None, 99), &[])
+            .expect("delta historical");
+
+        // Two paper audits inside the run with different verdicts and a
+        // flag bit set on one of them.
+        catalog
+            .upsert_node_paper_audit(&paper_audit(
+                1,
+                "clean",
+                Some(&run_id),
+                Some("flag_doi_invalid_format"),
+            ))
+            .expect("paper clean");
+        catalog
+            .upsert_node_paper_audit(&paper_audit(2, "needs_work", Some(&run_id), None))
+            .expect("paper needs_work");
+        catalog
+            .upsert_node_paper_audit(&paper_audit(3, "clean", None, None))
+            .expect("paper historical");
+
+        catalog.close_pipeline_run(&run_id, "ok").expect("close");
+
+        let summary = catalog.compute_run_summary(&run_id).expect("compute");
+        assert_eq!(summary.n_books, 2, "only alpha + beta belong to this run");
+        assert_eq!(summary.n_papers, 2, "historical paper row is excluded");
+
+        let verdicts: Value =
+            serde_json::from_str(&summary.verdict_counts).expect("verdict_counts json");
+        assert_eq!(verdicts["clean"], Value::from(1));
+        assert_eq!(verdicts["needs_work"], Value::from(1));
+
+        let flags: Value = serde_json::from_str(&summary.flag_counts).expect("flag_counts json");
+        assert_eq!(flags["flag_doi_invalid_format"], Value::from(1));
+        // Columns with zero hits drop out of the map; verify by absence.
+        assert!(flags.get("flag_empty").is_none());
+
+        let coverage: Value =
+            serde_json::from_str(&summary.coverage_summary).expect("coverage_summary json");
+        assert_eq!(coverage["pair_mismatch_total"], Value::from(3));
+        assert_eq!(coverage["pages_total"], Value::from(84));
+        assert_eq!(coverage["unmatched_lines_total"], Value::from(6));
+        assert_eq!(coverage["gate_fail_count"], Value::from(0));
+
+        // The rollup landed on the table for read-back.
+        let read = catalog
+            .pipeline_run_summary(&run_id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(read.n_books, 2);
+        assert_eq!(read.n_papers, 2);
+    }
+
+    #[test]
+    fn compute_run_summary_returns_zeros_for_a_run_with_no_audits() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let run_id = catalog
+            .open_pipeline_run("dryrun", None, None)
+            .expect("open run");
+        let summary = catalog.compute_run_summary(&run_id).expect("compute");
+        assert_eq!(summary.n_books, 0);
+        assert_eq!(summary.n_papers, 0);
+        assert_eq!(summary.verdict_counts, "{}");
+        assert_eq!(summary.flag_counts, "{}");
+        let coverage: Value =
+            serde_json::from_str(&summary.coverage_summary).expect("coverage json");
+        assert_eq!(coverage["pair_mismatch_total"], Value::from(0));
+        assert_eq!(coverage["gate_fail_count"], Value::from(0));
+    }
+
+    #[test]
+    fn compute_run_summary_counts_gate_failures_in_coverage() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let run_id = catalog
+            .open_pipeline_run("distill_build", None, Some("lib-a"))
+            .expect("open run");
+        let mut h = distill_header("alpha", Some(&run_id), 0);
+        h.gate_status = GATE_STATUS_FAIL.to_string();
+        catalog.insert_distill_audit(&h, &[]).expect("insert");
+        let summary = catalog.compute_run_summary(&run_id).expect("compute");
+        let coverage: Value =
+            serde_json::from_str(&summary.coverage_summary).expect("coverage json");
+        assert_eq!(coverage["gate_fail_count"], Value::from(1));
     }
 
     #[test]

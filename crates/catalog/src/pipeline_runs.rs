@@ -12,15 +12,17 @@
 //!
 //! The id is a short, human-readable composite — the command name, the
 //! start instant as ISO-8601 UTC, and an 8-hex SHA-256 prefix over
-//! `command || started_at || library_root` — so two same-second
-//! invocations of the same command against different libraries do not
-//! collide on the text primary key. The id-construction helper and the
-//! open / close / compute APIs land in a later commit; this commit
-//! ships only the table and its typed row pair so the schema position
-//! is fixed before writers reach for it.
+//! `command|started_at|library_root` — so two same-second invocations
+//! of the same command against different libraries do not collide on
+//! the text primary key. [`Catalog::open_pipeline_run`] constructs the
+//! id and inserts the row with `status = 'running'`;
+//! [`Catalog::close_pipeline_run`] stamps `finished_at` and the terminal
+//! status. Both reach for SQLite's `strftime` for the timestamp so the
+//! catalog crate never grows a wall-clock dependency.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
+use sha2::{Digest, Sha256};
 
 use crate::{Catalog, Result};
 
@@ -149,6 +151,59 @@ impl Catalog {
             .optional()?;
         Ok(row)
     }
+
+    /// Open a new pipeline run: construct the composite id, write a
+    /// `status = 'running'` row, and return the assigned id. The
+    /// `started_at` instant comes from SQLite's `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`
+    /// so the catalog crate stays wall-clock-free.
+    pub fn open_pipeline_run(
+        &self,
+        command: &str,
+        args: Option<&str>,
+        library_root: Option<&str>,
+    ) -> Result<String> {
+        let started_at: String =
+            self.conn
+                .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |row| {
+                    row.get(0)
+                })?;
+        let mut hasher = Sha256::new();
+        hasher.update(command.as_bytes());
+        hasher.update(b"|");
+        hasher.update(started_at.as_bytes());
+        hasher.update(b"|");
+        hasher.update(library_root.unwrap_or("").as_bytes());
+        let digest = hasher.finalize();
+        let sha8: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+        let pipeline_run_id = format!("{command}-{started_at}-{sha8}");
+        self.insert_pipeline_run(&NewPipelineRun {
+            pipeline_run_id: pipeline_run_id.clone(),
+            command: command.to_string(),
+            command_args: args.map(str::to_string),
+            library_root: library_root.map(str::to_string),
+            started_at,
+            finished_at: None,
+            status: Some("running".to_string()),
+        })?;
+        Ok(pipeline_run_id)
+    }
+
+    /// Close a pipeline run: stamp `finished_at` from SQLite's clock and
+    /// set the terminal `status`. A non-matching id is a no-op rather
+    /// than an error, since close is best-effort during shutdown paths.
+    pub fn close_pipeline_run(&self, pipeline_run_id: &str, status: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pipeline_runs \
+             SET finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+                 status = :status \
+             WHERE pipeline_run_id = :pipeline_run_id",
+            named_params! {
+                ":pipeline_run_id": pipeline_run_id,
+                ":status": status,
+            },
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +239,53 @@ mod tests {
         assert_eq!(read.started_at, "2026-06-28T10:00:00Z");
         assert_eq!(read.finished_at.as_deref(), Some("2026-06-28T10:00:05Z"));
         assert_eq!(read.status.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn open_then_close_pipeline_run_round_trip() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let id = catalog
+            .open_pipeline_run("distill_build", Some(r#"{"book":"tiny"}"#), Some("lib-a"))
+            .expect("open");
+        // The id ends with an 8-hex sha prefix; everything before the
+        // last hyphen is `<command>-<started_at>` and starts with the
+        // command name verbatim.
+        assert!(id.starts_with("distill_build-"));
+        let (head, sha8) = id.rsplit_once('-').expect("composite id");
+        assert_eq!(sha8.len(), 8);
+        assert!(sha8.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(head.starts_with("distill_build-"));
+
+        let opened = catalog.pipeline_run(&id).expect("read").expect("present");
+        assert_eq!(opened.command, "distill_build");
+        assert_eq!(opened.command_args.as_deref(), Some(r#"{"book":"tiny"}"#));
+        assert_eq!(opened.library_root.as_deref(), Some("lib-a"));
+        assert_eq!(opened.status.as_deref(), Some("running"));
+        assert_eq!(opened.finished_at, None);
+        assert_eq!(opened.started_at, head["distill_build-".len()..]);
+
+        catalog.close_pipeline_run(&id, "ok").expect("close");
+        let closed = catalog.pipeline_run(&id).expect("read").expect("present");
+        assert_eq!(closed.status.as_deref(), Some("ok"));
+        assert!(closed.finished_at.is_some());
+    }
+
+    #[test]
+    fn open_pipeline_run_differs_by_library_root() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let a = catalog
+            .open_pipeline_run("distill_build", None, Some("lib-a"))
+            .expect("open a");
+        let b = catalog
+            .open_pipeline_run("distill_build", None, Some("lib-b"))
+            .expect("open b");
+        // Even if SQLite reports the same second for both, the library
+        // root's contribution to the sha prefix keeps the ids distinct.
+        let sha_a = a.rsplit_once('-').expect("a sha").1;
+        let sha_b = b.rsplit_once('-').expect("b sha").1;
+        if a.trim_end_matches(sha_a) == b.trim_end_matches(sha_b) {
+            assert_ne!(sha_a, sha_b);
+        }
     }
 
     #[test]
