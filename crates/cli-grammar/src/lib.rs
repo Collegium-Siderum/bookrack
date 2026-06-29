@@ -67,13 +67,19 @@ pub struct IngestArgs {
 
 /// Positional + flag bundle for `remove`.
 #[derive(clap::Args, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("remove_target")
+        .required(true)
+        .multiple(false)
+        .args(["intake_id", "sha"])
+))]
 pub struct RemoveArgs {
     /// Intake id of the book to drop. Mutually exclusive with `--sha`;
     /// exactly one of the two must be supplied.
     pub intake_id: Option<i64>,
     /// Drop the book whose source SHA-256 starts with this hex prefix.
     /// Mutually exclusive with the positional intake id.
-    #[arg(long, conflicts_with = "intake_id", value_name = "HEX")]
+    #[arg(long, value_name = "HEX")]
     pub sha: Option<String>,
     /// Print the per-store removal plan and exit without writing.
     #[arg(long)]
@@ -954,11 +960,19 @@ pub struct LogsArgs {
 /// [`RemoveArgs`] for the paper pipeline. Either a positional intake
 /// id or `--sha <hex>` is required.
 #[derive(clap::Args, Debug, Clone)]
+#[command(group(
+    clap::ArgGroup::new("papers_remove_target")
+        .required(true)
+        .multiple(false)
+        .args(["intake_id", "sha"])
+))]
 pub struct PapersRemoveArgs {
-    /// The intake id of the paper to drop. Omit to pass `--sha`.
+    /// The intake id of the paper to drop. Mutually exclusive with
+    /// `--sha`; exactly one of the two must be supplied.
     pub intake_id: Option<i64>,
-    /// Alternative locator: the paper's source SHA-256.
-    #[arg(long)]
+    /// Drop the paper whose source SHA-256 starts with this hex
+    /// prefix. Mutually exclusive with the positional intake id.
+    #[arg(long, value_name = "HEX")]
     pub sha: Option<String>,
     /// Print the plan and exit without writing.
     #[arg(long)]
@@ -1162,5 +1176,35 @@ mod tests {
             }
             other => panic!("expected papers dryrun, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn papers_remove_accepts_either_locator() {
+        for argv in [
+            vec!["papers", "remove", "42"],
+            vec!["papers", "remove", "42", "--dry-run"],
+            vec!["papers", "remove", "--sha", "deadbeef"],
+            vec!["papers", "remove", "--sha", "deadbeef", "--yes"],
+        ] {
+            TestCli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn papers_remove_requires_a_locator() {
+        let Err(err) = TestCli::try_parse_from(["papers", "remove", "--dry-run"]) else {
+            panic!("an empty selector must error");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn papers_remove_rejects_both_intake_id_and_sha_together() {
+        let Err(err) = TestCli::try_parse_from(["papers", "remove", "42", "--sha", "deadbeef"])
+        else {
+            panic!("the two selectors must not be combined");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

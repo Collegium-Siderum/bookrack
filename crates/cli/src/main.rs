@@ -946,9 +946,30 @@ mod tests {
             vec!["bookrack", "remove", "42", "--yes"],
             vec!["bookrack", "remove", "--sha", "deadbeef"],
             vec!["bookrack", "remove", "--sha", "deadbeef", "--dry-run"],
+            vec!["bookrack", "papers", "remove", "42"],
+            vec!["bookrack", "papers", "remove", "--sha", "deadbeef", "--yes"],
         ] {
             Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn remove_requires_a_locator() {
+        for argv in [
+            vec!["bookrack", "remove"],
+            vec!["bookrack", "remove", "--dry-run"],
+            vec!["bookrack", "papers", "remove"],
+            vec!["bookrack", "papers", "remove", "--dry-run"],
+        ] {
+            let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
+                panic!("an empty selector must error: {argv:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "argv: {argv:?}"
+            );
         }
     }
 
@@ -991,10 +1012,19 @@ mod tests {
     fn remove_rejects_both_intake_id_and_sha_together() {
         // The `--sha` and positional id select the same target two
         // different ways; supplying both is a user error.
-        let Err(err) = Cli::try_parse_from(["bookrack", "remove", "42", "--sha", "abc"]) else {
-            panic!("the two selectors must not be combined");
-        };
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for argv in [
+            vec!["bookrack", "remove", "42", "--sha", "abc"],
+            vec!["bookrack", "papers", "remove", "42", "--sha", "abc"],
+        ] {
+            let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
+                panic!("the two selectors must not be combined: {argv:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "argv: {argv:?}"
+            );
+        }
     }
 
     #[test]
