@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pre-flight check that warns when the CLI's explicit library
-//! selection disagrees with the library a running daemon is serving.
+//! Pre-flight check that refuses a daemon-routed command when the
+//! CLI's explicit library selection disagrees with the library a
+//! running daemon is serving.
 //!
 //! The control-plane architecture is "one daemon owns one library":
 //! once a daemon is up, every CLI command that routes through it
 //! (`verify`, `exec`, `library.*` reads, ingest, ...) acts on the
 //! daemon's library, not on whatever `--data-dir` / `--library` /
 //! `BOOKRACK_DATA_DIR` the per-invocation environment expresses. The
-//! pre-flight makes that takeover visible: it compares the invoking
-//! shell's intent against the session lock's recorded `data_dir` /
-//! `library_name`, and prints a one-line warning when they differ.
+//! pre-flight makes that takeover non-silent: it compares the
+//! invoking shell's intent against the session lock's recorded
+//! `data_dir` / `library_name`, and bails with a typed
+//! [`BookrackCliError::LibraryMismatch`] when they differ so the
+//! caller never has the daemon quietly acting on the "wrong" library
+//! behind a flag that looks like it switched.
 //!
 //! The check is silent in every "cannot reliably compare" case:
 //!   * no explicit selection was given (env / flag both unset)
@@ -19,35 +23,37 @@
 //!     `data_dir=` nor `library_name=`
 //!   * the side of the comparison the intent expresses (path vs name)
 //!     is the side the lock lacks
+//!
+//! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
+//! `distill`, `runs`) bypass this check entirely — for them the flag
+//! is a real switch into a different data root, not an assertion
+//! about the running daemon.
 
 use std::path::{Path, PathBuf};
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{DATA_DIR_ENV, LibrarySelection};
 use bookrack_session::{LockInfo, peek_lock, resolve_runtime_dir, tty_lock_name};
 
 /// Compare the CLI's explicit selection against the running session
-/// (if any) and write a one-line warning to stderr when they
-/// disagree. See the module-level doc for the silent-fallthrough
+/// (if any) and return [`BookrackCliError::LibraryMismatch`] when
+/// they disagree. See the module-level doc for the silent-fallthrough
 /// cases.
-pub fn warn_on_selection_mismatch(selection: &LibrarySelection) {
+pub fn enforce_selection_mismatch(selection: &LibrarySelection) -> Result<(), BookrackCliError> {
     let env = std::env::var(DATA_DIR_ENV).ok();
     let Some(intent) = resolve_intent(selection, env.as_deref()) else {
-        return;
+        return Ok(());
     };
     let Some(lock) = read_lock_info() else {
-        return;
+        return Ok(());
     };
     if !is_mismatch(&intent, &lock) {
-        return;
+        return Ok(());
     }
-    eprintln!(
-        "warning: command-line selection points to {}, but the running session is on {}.",
-        render_intent(&intent),
-        render_lock_target(&lock),
-    );
-    eprintln!(
-        "warning: subcommands that route through the daemon will use the daemon's library; stop it with `bookrack exec daemon.shutdown` to switch."
-    );
+    Err(BookrackCliError::LibraryMismatch {
+        intent: render_intent(&intent),
+        running: render_lock_target(&lock),
+    })
 }
 
 /// The library the invoking shell appears to be asking for, distilled

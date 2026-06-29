@@ -57,8 +57,13 @@ Prerequisites:
     after_help = TOP_AFTER_HELP,
 )]
 struct Cli {
-    /// Operate on the library at this data root, overriding the
-    /// environment. Mutually exclusive with `--library`.
+    /// Select the library at this data root, overriding the
+    /// environment. On local commands (`run`, `init`, `doctor`,
+    /// `audit-profile`, `distill`, `runs`) this switches the data
+    /// root for the invocation. On commands that route through a
+    /// running daemon, the daemon must already be serving this root;
+    /// a mismatch aborts the command without acting. Mutually
+    /// exclusive with `--library`.
     #[arg(
         long,
         global = true,
@@ -66,8 +71,10 @@ struct Cli {
         help_heading = "Common Options"
     )]
     data_dir: Option<PathBuf>,
-    /// Operate on the named library from the registry (see
-    /// BOOKRACK_REGISTRY). Mutually exclusive with `--data-dir`.
+    /// Select the named library from the registry (see
+    /// BOOKRACK_REGISTRY). Behaves like `--data-dir`: a switch on
+    /// local commands, an assertion against the running daemon on
+    /// routed commands. Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
     /// Select an audit profile by name. Built-in names are
@@ -561,13 +568,25 @@ async fn run() -> Result<()> {
     }
     let json_global = cli.json;
 
-    // Warn before any subcommand dispatch when the invoking shell's
+    // Refuse a daemon-routed command when the invoking shell's
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
-    // daemon is serving. Silent when no daemon is running, when no
-    // selection was given, or when the lock predates the identity
-    // fields that make the comparison possible.
-    preflight::warn_on_selection_mismatch(&cli.selection());
+    // daemon is serving. Skipped for commands that resolve a data
+    // root locally (`run`, `init`, `audit-profile`, `distill`,
+    // `runs`): the flag is a real switch there, not an assertion.
+    // Silent when no daemon is running, when no selection was
+    // given, or when the lock predates the identity fields that
+    // make the comparison possible.
+    if !matches!(
+        cli.command,
+        Command::Init { .. }
+            | Command::Run { .. }
+            | Command::AuditProfile { .. }
+            | Command::Distill { .. }
+            | Command::Runs { .. }
+    ) {
+        preflight::enforce_selection_mismatch(&cli.selection())?;
+    }
 
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes

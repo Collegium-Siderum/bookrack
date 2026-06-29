@@ -51,6 +51,16 @@ pub enum BookrackCliError {
     /// the reporter only needs to set a non-zero exit code.
     #[error("doctor: at least one check failed; see the table above")]
     DoctorUnhealthy,
+
+    /// The invoking shell's explicit library selection
+    /// (`--data-dir` / `--library` / `BOOKRACK_DATA_DIR`) disagrees
+    /// with the library a running daemon is serving, and the
+    /// requested subcommand routes through that daemon. Bail
+    /// instead of silently acting on the daemon's library.
+    #[error(
+        "running daemon serves {running}; refusing to act on {intent}.\nRun `bookrack quit` and start a new session with the desired --library/--data-dir to switch."
+    )]
+    LibraryMismatch { intent: String, running: String },
 }
 
 impl BookrackCliError {
@@ -61,6 +71,7 @@ impl BookrackCliError {
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
             Self::DoctorUnhealthy => 1,
+            Self::LibraryMismatch { .. } => 2,
         }
     }
 
@@ -87,6 +98,26 @@ mod tests {
             3
         );
         assert_eq!(BookrackCliError::DoctorUnhealthy.exit_code(), 1);
+        assert_eq!(
+            BookrackCliError::LibraryMismatch {
+                intent: "library x".into(),
+                running: "library y".into(),
+            }
+            .exit_code(),
+            2
+        );
+    }
+
+    #[test]
+    fn library_mismatch_message_points_at_quit_and_names_both_sides() {
+        let s = BookrackCliError::LibraryMismatch {
+            intent: "/asked".into(),
+            running: "/served (library a)".into(),
+        }
+        .to_string();
+        assert!(s.contains("/asked"));
+        assert!(s.contains("/served (library a)"));
+        assert!(s.contains("bookrack quit"));
     }
 
     #[test]

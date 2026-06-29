@@ -55,6 +55,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: `--data-dir` / `--library` are now enforced on
+  daemon-routed commands instead of silently ignored.** The global
+  flags previously printed a one-line warning when they disagreed
+  with the library a running daemon was serving and then let the
+  command run against the daemon's library anyway, so a caller who
+  thought they had switched libraries silently mutated the other
+  one. The pre-flight now returns a typed
+  `BookrackCliError::LibraryMismatch` (exit code 2) before any
+  daemon dispatch, naming both sides and pointing at `bookrack
+  quit` as the canonical way to switch sessions. Local-resolving
+  commands (`run`, `init`, `doctor`, `audit-profile`, `distill`,
+  `runs`) bypass the check — for them the flag is a real switch
+  into a different data root. The flag help text is updated to
+  describe the dual semantic, and the stale `bookrack exec
+  daemon.shutdown` hint that the warning carried is replaced by
+  the canonical `bookrack quit` reference.
+
 - **distill: a broken regex pattern fails the book.toml load
   instead of slipping through as silent no-matches.** The runtime
   `match_pattern` used `Regex::new(...).ok()?`, so a syntactically
