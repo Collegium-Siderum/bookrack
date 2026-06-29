@@ -42,8 +42,8 @@ Environment:
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
 Library reads (search, browse, metadata, status) live behind `bookrack exec
-library.<tool>`. Run `bookrack run` to start a session, then ask the live
-MCP server for its tool surface with `bookrack exec tools`.
+library.<tool>`. Run `bookrack run` to start a session, then enumerate the
+live control-plane surface with `bookrack exec tools`.
 
 Prerequisites:
   Start Ollama and pull the embed model before running the session, e.g.:
@@ -186,19 +186,23 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
     },
-    /// Call MCP tools against the running session.
+    /// Call control-plane RPCs against the running session.
     ///
     /// Subcommands:
-    ///   `info` (default)          — print the session pid and MCP
-    ///                               address. Pure file read of the
-    ///                               session lock; never makes an HTTP
-    ///                               call.
-    ///   `tools`                   — open an MCP client and run
-    ///                               `tools/list` against the live
-    ///                               server.
-    ///   `library.<tool> [<json>]` — call the named MCP tool, with the
-    ///                               second positional token forwarded
-    ///                               verbatim as JSON arguments.
+    ///   `info` (default)          — print the session pid, MCP
+    ///                               address, and control socket path.
+    ///                               Pure file read of the session
+    ///                               lock; never opens the control
+    ///                               socket.
+    ///   `tools`                   — list the control-plane methods
+    ///                               the daemon answers, alongside the
+    ///                               daemon's MCP endpoint tools for
+    ///                               visibility. Only the control-plane
+    ///                               methods are reachable from `exec`.
+    ///   `<method> [<json>]`       — call the named control-plane
+    ///                               method (e.g. `library.show_book`),
+    ///                               with the second positional token
+    ///                               forwarded verbatim as JSON params.
     ///
     /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
     /// the session; never opens a catalog, corpus, or vector store.

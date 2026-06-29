@@ -8,8 +8,9 @@
 //! - `info` (default): print the active session — pid, MCP address,
 //!   control socket, lock path. Pure file read of the session lock;
 //!   never opens the control socket.
-//! - `tools`: list the control-plane methods the daemon answers plus
-//!   the MCP tools the same daemon exposes. Both rows come from the
+//! - `tools`: list the control-plane methods the daemon answers — the
+//!   call surface for `bookrack exec <method>` — alongside the MCP
+//!   endpoint tools for visibility. Both rows come from the
 //!   `daemon.methods` and `daemon.mcp_tools` RPCs.
 //! - `logs follow`: stream every tracing event the daemon emits via
 //!   the control-plane `log` channel until the daemon shuts down or
@@ -21,7 +22,9 @@
 //!   `library.show_metadata_audit`). The optional second argument is
 //!   the JSON params object; defaults to `null` when omitted. The
 //!   `daemon.methods` row set is the source of truth for available
-//!   method names.
+//!   method names; the MCP endpoint tools shown by `tools` are not
+//!   callable through this surface, though the `library.*` read
+//!   proxies share a name with their MCP counterparts.
 
 use std::path::Path;
 
@@ -110,7 +113,7 @@ async fn print_tools() -> Result<()> {
         }
     }
     println!();
-    println!("MCP tools:");
+    println!("MCP endpoint tools (visibility only; `bookrack exec` calls control-plane methods):");
     if let Some(rows) = mcp.get("tools").and_then(Value::as_array) {
         for row in rows {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("?");
