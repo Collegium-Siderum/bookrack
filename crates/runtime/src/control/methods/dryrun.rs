@@ -27,6 +27,12 @@ pub struct DryrunParams {
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
+    /// Optional book-side audit profile name. Resolves through the
+    /// shared built-in set (`default` / `trust-source` / `strict`);
+    /// absent means the daemon's overlay-resolved default profile.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    audit_profile: Option<String>,
 }
 
 pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -43,7 +49,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
                 &parsed.path,
                 parsed.out.as_deref(),
                 parsed.no_chunk,
-                None,
+                parsed.audit_profile.as_deref(),
             )
         })
         .await

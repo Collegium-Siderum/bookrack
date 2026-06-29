@@ -99,6 +99,17 @@ pub struct QueueJob {
     /// upgrade reads the previous shape as a plain book ingest.
     #[serde(default)]
     pub intake_ocr: Option<IntakeOcrInfo>,
+    /// Book-side audit profile override for this job. When `None`, the
+    /// worker uses the daemon's default profile baked into the queue
+    /// params template at startup. When `Some(name)`, the worker
+    /// reloads the named profile per job and substitutes it into the
+    /// ingest params before dispatch. Paper-side jobs do not consume
+    /// this field; the glean pipeline carries its own paper audit
+    /// profile in `glean_params_template`. A v4 queue document (no
+    /// `audit_profile` field) loads with this `None`, preserving the
+    /// previous default-profile behaviour.
+    #[serde(default)]
+    pub audit_profile: Option<String>,
     /// Current lifecycle state.
     pub state: JobState,
     /// When the job entered the queue.
@@ -204,6 +215,31 @@ mod tests {
     }
 
     #[test]
+    fn queue_job_without_audit_profile_loads_as_none() {
+        // A v4-shaped document persisted before the field was added
+        // must still deserialize cleanly, with the per-job override
+        // defaulting to `None` so the worker falls back to the daemon
+        // params template's profile.
+        let v4 = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "intake_ocr": null,
+            "state": "pending",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        }"#;
+        let job: QueueJob = serde_json::from_str(v4).expect("deserialize v4");
+        assert!(job.audit_profile.is_none());
+    }
+
+    #[test]
     fn queue_job_round_trips_intake_ocr() {
         let job = QueueJob {
             id: "0".to_string(),
@@ -218,6 +254,7 @@ mod tests {
                 expected_pages: Some(42),
                 allow_partial: true,
             }),
+            audit_profile: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -245,6 +282,7 @@ mod tests {
             force: false,
             hold_for_metadata: false,
             intake_ocr: None,
+            audit_profile: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -257,6 +295,33 @@ mod tests {
         assert_eq!(json["kind"], "paper");
         let back: QueueJob = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.kind, ItemKind::Paper);
+        assert_eq!(back, job);
+    }
+
+    #[test]
+    fn queue_job_round_trips_audit_profile() {
+        let job = QueueJob {
+            id: "0".to_string(),
+            library: "default".to_string(),
+            path: "/tmp/example.epub".into(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            force: false,
+            hold_for_metadata: false,
+            intake_ocr: None,
+            audit_profile: Some("strict".to_string()),
+            state: JobState::Pending,
+            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            started_at: None,
+            finished_at: None,
+            error: None,
+        };
+        let json = serde_json::to_value(&job).expect("serialize");
+        assert_eq!(json["audit_profile"], "strict");
+        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.audit_profile.as_deref(), Some("strict"));
         assert_eq!(back, job);
     }
 }

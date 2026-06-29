@@ -55,6 +55,11 @@ pub struct IntakeOcrParams {
     /// `ingest.submit` flag of the same name.
     #[serde(default)]
     hold_for_metadata: bool,
+    /// Optional book-side audit profile name applied to the OCR
+    /// intake's book pipeline. Resolves through the same built-in set
+    /// as `ingest.submit`; absent means the daemon's startup profile.
+    #[serde(default)]
+    audit_profile: Option<String>,
 }
 
 pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -104,6 +109,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             priority,
             parsed.force,
             parsed.hold_for_metadata,
+            parsed.audit_profile.clone(),
         );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;

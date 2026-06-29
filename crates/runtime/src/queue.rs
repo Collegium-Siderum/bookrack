@@ -244,8 +244,20 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
 }
 
 /// Append one job per `path` to the queue, all sharing `library`,
-/// `kind`, `priority`, `force`, and `hold_for_metadata`. Returns the
-/// ids of the appended jobs in the order they were inserted.
+/// `kind`, `priority`, `force`, `hold_for_metadata`, and
+/// `book_audit_profile`. Returns the ids of the appended jobs in the
+/// order they were inserted.
+///
+/// `book_audit_profile` overrides the book-side audit profile used by
+/// the worker for the appended jobs. It is named for the book pipeline
+/// because the paper pipeline (glean) consults its own paper audit
+/// profile through `glean_params_template`; callers enqueueing
+/// paper-kind jobs must pass `None` here, and any future paper-side
+/// override needs a separate field on the job.
+// The argument list mirrors the shape of `QueueJob` itself; collapsing
+// the seven scalars into an options struct would only add an
+// intermediate type that callers immediately destructure.
+#[allow(clippy::too_many_arguments)]
 pub fn enqueue_files(
     state: &mut QueueState,
     paths: &[PathBuf],
@@ -254,6 +266,7 @@ pub fn enqueue_files(
     priority: Priority,
     force: bool,
     hold_for_metadata: bool,
+    book_audit_profile: Option<String>,
 ) -> Vec<String> {
     let mut ids = Vec::with_capacity(paths.len());
     for path in paths {
@@ -267,6 +280,7 @@ pub fn enqueue_files(
             force,
             hold_for_metadata,
             intake_ocr: None,
+            audit_profile: book_audit_profile.clone(),
             state: JobState::Pending,
             queued_at: Utc::now(),
             started_at: None,
@@ -287,6 +301,10 @@ pub fn enqueue_files(
 /// on `intake_ocr.is_some()`, then calls the OCR ingest path with the
 /// stored markdown + PDF pair. The job's `kind` therefore stays
 /// `ItemKind::Book`; a queue listing reads it as a book job.
+// Same trade-off as `enqueue_files`: the scalars correspond one-to-one
+// to `QueueJob` fields and an options struct would just be a thin
+// destructure target at every caller.
+#[allow(clippy::too_many_arguments)]
 pub fn enqueue_ocr_intake(
     state: &mut QueueState,
     path: PathBuf,
@@ -295,6 +313,7 @@ pub fn enqueue_ocr_intake(
     priority: Priority,
     force: bool,
     hold_for_metadata: bool,
+    book_audit_profile: Option<String>,
 ) -> String {
     let id = Uuid::now_v7().to_string();
     state.jobs.push(QueueJob {
@@ -306,6 +325,7 @@ pub fn enqueue_ocr_intake(
         force,
         hold_for_metadata,
         intake_ocr: Some(info),
+        audit_profile: book_audit_profile,
         state: JobState::Pending,
         queued_at: Utc::now(),
         started_at: None,
@@ -585,6 +605,7 @@ mod tests {
             force: false,
             hold_for_metadata: false,
             intake_ocr: None,
+            audit_profile: None,
             state: JobState::Pending,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -666,6 +687,7 @@ mod tests {
             force: false,
             hold_for_metadata: false,
             intake_ocr: None,
+            audit_profile: None,
             state,
             queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
                 .unwrap()
@@ -834,6 +856,7 @@ mod tests {
             Priority::High,
             true,
             false,
+            None,
         );
         assert_eq!(ids.len(), 3);
         assert_eq!(state.jobs.len(), 3);
@@ -907,6 +930,7 @@ mod tests {
             Priority::Normal,
             false,
             false,
+            None,
         );
         let state = Arc::new(Mutex::new(initial));
         let (tx, rx) = broadcast::channel::<()>(2);
@@ -959,6 +983,7 @@ mod tests {
             Priority::Normal,
             false,
             false,
+            None,
         );
         let state = Arc::new(Mutex::new(initial));
         let paused = Arc::new(AtomicBool::new(false));
@@ -1036,6 +1061,7 @@ mod tests {
             Priority::Normal,
             false,
             false,
+            None,
         );
         let state = Arc::new(Mutex::new(initial));
         let paused = Arc::new(AtomicBool::new(false));

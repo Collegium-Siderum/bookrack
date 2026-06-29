@@ -49,6 +49,12 @@ pub struct IngestSubmitParams {
     /// audit remains advisory.
     #[serde(default)]
     hold_for_metadata: bool,
+    /// Optional book-side audit profile name. When set, every enqueued
+    /// job carries this override and the worker reloads the named
+    /// built-in (`default` / `trust-source` / `strict`) before running
+    /// the ingest. When unset, the daemon's startup profile applies.
+    #[serde(default)]
+    audit_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +132,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             priority,
             parsed.force,
             parsed.hold_for_metadata,
+            parsed.audit_profile.clone(),
         );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;

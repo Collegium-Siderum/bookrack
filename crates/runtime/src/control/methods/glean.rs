@@ -58,6 +58,10 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             .queue_state
             .lock()
             .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
+        // The paper pipeline reads its audit profile from the daemon's
+        // `glean_params_template` (paper_audit_profile). The book-side
+        // per-job override on `QueueJob` is not consumed for paper jobs,
+        // so pass `None` here.
         let ids = queue::enqueue_files(
             &mut guard,
             &parsed.paths,
@@ -66,6 +70,7 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             priority,
             parsed.force,
             false,
+            None,
         );
         queue::save_atomic(&guard, &ctx.queue_state_path)
             .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;

@@ -55,6 +55,12 @@ pub struct MetadataVoidParams {
 #[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataReauditParams {
     book: i64,
+    /// Optional book-side audit profile name. Resolves through the
+    /// shared built-in set; absent means the daemon's overlay-resolved
+    /// default profile.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    audit_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +116,13 @@ pub struct MetadataRejectParams {
 #[cfg_attr(test, ts(export, export_to = "./"))]
 pub struct MetadataAdvanceParams {
     book: i64,
+    /// Optional book-side audit profile name. Used when `advance`
+    /// triggers a re-audit on the way out of the metadata gate;
+    /// resolves through the shared built-in set, absent means the
+    /// daemon's overlay-resolved default profile.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    audit_profile: Option<String>,
 }
 
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -121,7 +134,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         reason: parsed.reason,
         confirmed: parsed.confirmed,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -131,7 +144,7 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         field: parsed.field,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -141,13 +154,14 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         field: parsed.field,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataReauditParams = parse(params, "metadata.reaudit")?;
+    let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Reaudit { book: parsed.book };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, profile).await
 }
 
 pub async fn contributor_add(
@@ -162,7 +176,7 @@ pub async fn contributor_add(
         nationality: parsed.nationality,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn contributor_remove(
@@ -175,7 +189,7 @@ pub async fn contributor_remove(
         contributor_id: parsed.contributor_id,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -184,7 +198,7 @@ pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -193,7 +207,7 @@ pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -202,13 +216,14 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         book: parsed.book,
         reason: parsed.reason,
     };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, None).await
 }
 
 pub async fn advance(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataAdvanceParams = parse(params, "metadata.advance")?;
+    let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Advance { book: parsed.book };
-    run_metadata_action(ctx, action).await
+    run_metadata_action(ctx, action, profile).await
 }
 
 fn parse<T: serde::de::DeserializeOwned>(
@@ -225,13 +240,20 @@ fn parse<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Shared dispatch for every `metadata.*` write. `profile_name`
+/// reaches `cmd::metadata::run_write` only for actions that re-run the
+/// audit (`reaudit`, `advance`); the other variants are not audit
+/// callers, so their wrappers pass `None` to keep the override from
+/// looking like it applies on `set` / `clear` / `ack` / `approve` /
+/// `reject` / contributor edits where it would silently drop.
 async fn run_metadata_action(
     ctx: &MethodContext,
     action: WriteMetadataAction,
+    profile_name: Option<String>,
 ) -> Result<Value, RpcError> {
     let cfg = ctx.cfg.clone();
-    run_write(ctx, || async move {
-        run_metadata(&cfg, action, None)
+    run_write(ctx, move || async move {
+        run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| write_err("metadata.write", e))?;
         Ok(json!({ "ok": true }))
