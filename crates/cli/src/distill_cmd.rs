@@ -254,15 +254,94 @@ fn visit_book_tomls(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
 fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
     let books = resolve_paths(&args.paths, args.recursive)?;
     let distill_run_id = chrono::Utc::now().to_rfc3339();
+    let pipeline_run_id = open_distill_pipeline_run(paths, &args)?;
+    let mut run_status = "ok";
+    let outcome = run_books(
+        paths,
+        &books,
+        &args,
+        &distill_run_id,
+        pipeline_run_id.as_deref(),
+    );
+    if outcome.is_err() {
+        run_status = "error";
+    }
+    if let Some(pipeline_run_id) = pipeline_run_id.as_deref() {
+        finalize_pipeline_run(paths, pipeline_run_id, run_status);
+    }
+    outcome
+}
 
-    for book in &books {
+/// Open a `pipeline_runs` row for this distill build. Audit-write
+/// failure must not block the build, and neither must run lifecycle:
+/// catalog-open errors here demote to a warning and the build keeps
+/// going under a NULL `pipeline_run_id`.
+fn open_distill_pipeline_run(
+    paths: &DistillPaths,
+    args: &DistillBuildArgs,
+) -> Result<Option<String>> {
+    if args.no_audit_write {
+        return Ok(None);
+    }
+    let catalog = match Catalog::open(&paths.catalog_path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %paths.catalog_path.display(),
+                "distill: failed to open catalog.db for pipeline_run lifecycle",
+            );
+            return Ok(None);
+        }
+    };
+    let library_root = paths
+        .catalog_path
+        .parent()
+        .and_then(|p| p.to_str())
+        .map(str::to_string);
+    let id = catalog
+        .open_pipeline_run("distill_build", None, library_root.as_deref())
+        .context("open pipeline run")?;
+    Ok(Some(id))
+}
+
+/// Close the run row and refresh its rollup. Best-effort: any error
+/// here logs and the build's exit status stays untouched.
+fn finalize_pipeline_run(paths: &DistillPaths, pipeline_run_id: &str, status: &str) {
+    let catalog = match Catalog::open(&paths.catalog_path) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %paths.catalog_path.display(),
+                "distill: failed to open catalog.db to close pipeline run",
+            );
+            return;
+        }
+    };
+    if let Err(err) = catalog.close_pipeline_run(pipeline_run_id, status) {
+        tracing::warn!(error = %err, pipeline_run_id, "distill: close_pipeline_run failed");
+    }
+    if let Err(err) = catalog.compute_run_summary(pipeline_run_id) {
+        tracing::warn!(error = %err, pipeline_run_id, "distill: compute_run_summary failed");
+    }
+}
+
+fn run_books(
+    paths: &DistillPaths,
+    books: &[ResolvedBook],
+    args: &DistillBuildArgs,
+    distill_run_id: &str,
+    pipeline_run_id: Option<&str>,
+) -> Result<()> {
+    for book in books {
         let parsed = BookToml::load(&book.book_toml)
             .with_context(|| format!("load {}", book.book_toml.display()))?;
         let pipeline = load_pipeline(&book.book_toml)
             .with_context(|| format!("assemble pipeline for {}", book.slug))?;
         let source = read_source(&book.source)
             .with_context(|| format!("read OCR source for {}", book.slug))?;
-        let extras = compose_extras(&book.slug, &distill_run_id);
+        let extras = compose_extras(&book.slug, distill_run_id);
         let started_at = chrono::Utc::now();
         let (drafts, coverage) = pipeline
             .run_with_extras(source, extras)
@@ -275,7 +354,7 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
         // row before we either bail or proceed. A `fail` row exists in
         // `book_distill_audit` even though the build bails, which is the
         // whole point of recording the gate verdict.
-        let gate_outcome = compute_gate_outcome(&book.slug, &coverage.stage_reports, &args);
+        let gate_outcome = compute_gate_outcome(&book.slug, &coverage.stage_reports, args);
         if !args.no_audit_write {
             write_distill_audit(
                 paths,
@@ -285,6 +364,7 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
                 &started_at,
                 &finished_at,
                 &gate_outcome,
+                pipeline_run_id,
             );
         }
         if let Some(err) = gate_outcome.error {
@@ -304,7 +384,7 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
         let mut refs = Refs::open(&paths.refs_path)
             .with_context(|| format!("open {}", paths.refs_path.display()))?;
         register_book_indexes(&mut refs, &book.slug, &parsed)?;
-        upsert_book_row(&refs, &parsed, &distill_run_id)?;
+        upsert_book_row(&refs, &parsed, distill_run_id)?;
         for draft in &drafts {
             let entry = draft_to_new_entry(draft);
             refs.upsert_entry(&entry)?;
@@ -361,6 +441,7 @@ fn compute_gate_outcome(
 /// open or write `catalog.db` is logged and otherwise swallowed: the
 /// pipeline's primary output is `reference.db`, and an audit miss must
 /// never block a successful build.
+#[allow(clippy::too_many_arguments)]
 fn write_distill_audit(
     paths: &DistillPaths,
     book: &ResolvedBook,
@@ -369,6 +450,7 @@ fn write_distill_audit(
     started_at: &chrono::DateTime<chrono::Utc>,
     finished_at: &chrono::DateTime<chrono::Utc>,
     gate: &GateOutcome,
+    pipeline_run_id: Option<&str>,
 ) {
     let header = NewBookDistillAudit {
         book_slug: book.slug.clone(),
@@ -386,7 +468,7 @@ fn write_distill_audit(
         gate_threshold: gate.threshold,
         profile_ref: String::new(),
         extractor_version: parsed.parser_version.clone(),
-        pipeline_run_id: None,
+        pipeline_run_id: pipeline_run_id.map(str::to_string),
     };
     let stages: Vec<NewStageReport> = coverage
         .stage_reports

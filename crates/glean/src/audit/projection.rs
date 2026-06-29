@@ -21,6 +21,7 @@ use bookrack_catalog::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit};
 use super::report::{PaperFieldGrade, PaperFlag, PaperReport};
 
 /// Build one [`NewNodePaperAudit`] row from a [`PaperReport`].
+#[allow(clippy::too_many_arguments)]
 pub fn paper_report_to_audit_row(
     report: &PaperReport,
     intake_id: i64,
@@ -29,6 +30,7 @@ pub fn paper_report_to_audit_row(
     csl_type: Option<&str>,
     audited_at: &str,
     extractor_version: &str,
+    pipeline_run_id: Option<&str>,
 ) -> NewNodePaperAudit {
     let mut grades: [String; GRADE_COLUMNS.len()] = Default::default();
     for (i, (_, field_key)) in GRADE_COLUMNS.iter().enumerate() {
@@ -65,7 +67,7 @@ pub fn paper_report_to_audit_row(
         extractor_version: extractor_version.to_string(),
         grades,
         flags,
-        pipeline_run_id: None,
+        pipeline_run_id: pipeline_run_id.map(str::to_string),
     }
 }
 
@@ -107,7 +109,29 @@ mod tests {
             Some("article-journal"),
             "2026-06-28T10:00:00Z",
             "0.0.0-test",
+            None,
         )
+    }
+
+    #[test]
+    fn a_pipeline_run_id_flows_through_to_the_audit_row() {
+        let report = report_with_one_field("title", PaperFieldGrade::Strong);
+        let with_id = paper_report_to_audit_row(
+            &report,
+            7,
+            "paper",
+            "default",
+            Some("article-journal"),
+            "2026-06-28T10:00:00Z",
+            "0.0.0-test",
+            Some("distill_build-2026-06-28T10:00:00Z-deadbeef"),
+        );
+        assert_eq!(
+            with_id.pipeline_run_id.as_deref(),
+            Some("distill_build-2026-06-28T10:00:00Z-deadbeef")
+        );
+        // The same call without an id leaves the column NULL.
+        assert_eq!(row(&report).pipeline_run_id, None);
     }
 
     #[test]

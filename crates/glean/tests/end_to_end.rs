@@ -219,6 +219,10 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
     for flag in &paper_audit.flags {
         assert!(*flag == 0 || *flag == 1, "flag column must be 0 or 1");
     }
+    assert_eq!(
+        paper_audit.pipeline_run_id, None,
+        "default GleanParams leaves pipeline_run_id NULL on the audit row",
+    );
     let bytes = std::fs::read(fixture_path()).expect("read fixture for sha");
     let source_sha = hex_sha256(&bytes);
     let intake = catalog
@@ -385,6 +389,57 @@ async fn glean_paper_skips_source_pdf_archive_when_disabled() {
     // envelope still lands and the intake still reaches `Embedded`.
     assert!(intake.stored_path.is_some());
     assert_eq!(intake.status, IntakeStatus::Embedded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn glean_paper_writes_audit_with_pipeline_run_id() {
+    if !pdfium_available() {
+        eprintln!("pdfium binary not available; skipping glean pipeline-run-id test");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let papers_dir = dir.path().join("papers");
+    let lancedb_dir = dir.path().join("lancedb_papers");
+    let mut corpus = Corpus::open_in_memory().expect("corpus");
+    let mut catalog = Catalog::open_in_memory().expect("catalog");
+    let embedder = Fake { dim: 8 };
+
+    let run_id = catalog
+        .open_pipeline_run("glean_paper", None, Some("lib-a"))
+        .expect("open run");
+    let params = GleanParams {
+        pipeline_run_id: Some(run_id.clone()),
+        ..GleanParams::default()
+    };
+    let report = glean_paper(
+        &fixture_path(),
+        &mut corpus,
+        &mut catalog,
+        &lancedb_dir,
+        &papers_dir,
+        &embedder,
+        &params,
+    )
+    .await
+    .expect("glean must succeed");
+    catalog.close_pipeline_run(&run_id, "ok").expect("close");
+
+    let paper_audit = catalog
+        .node_paper_audit(report.intake_id, "paper")
+        .expect("read")
+        .expect("present");
+    assert_eq!(
+        paper_audit.pipeline_run_id.as_deref(),
+        Some(run_id.as_str()),
+        "GleanParams.pipeline_run_id must flow onto the audit row",
+    );
+
+    // The rollup over this run sees one paper audit row.
+    let summary = catalog
+        .compute_run_summary(&run_id)
+        .expect("compute summary");
+    assert_eq!(summary.n_papers, 1);
+    assert_eq!(summary.n_books, 0);
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {

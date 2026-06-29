@@ -41,7 +41,40 @@ pub async fn run(
         heading_patterns,
         ..Default::default()
     };
+    let pipeline_run_id = catalog
+        .open_pipeline_run("ingest", None, cfg.data_dir().to_str())
+        .ok();
+    let result = run_inner(
+        &mut corpus,
+        &mut catalog,
+        cfg,
+        path,
+        recursive,
+        force,
+        &embedder,
+        &params,
+    )
+    .await;
+    if let Some(id) = pipeline_run_id.as_deref() {
+        let status = if result.is_ok() { "ok" } else { "error" };
+        if let Err(e) = catalog.close_pipeline_run(id, status) {
+            tracing::warn!(error = %e, pipeline_run_id = id, "ingest: close_pipeline_run failed");
+        }
+    }
+    result
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn run_inner<E: bookrack_embed::Embedder>(
+    corpus: &mut Corpus,
+    catalog: &mut Catalog,
+    cfg: &Config,
+    path: &Path,
+    recursive: bool,
+    force: bool,
+    embedder: &E,
+    params: &IngestParams,
+) -> Result<()> {
     if !recursive {
         if path.is_dir() {
             eyre::bail!(
@@ -51,12 +84,12 @@ pub async fn run(
         }
         let report = ingest_book(
             path,
-            &mut corpus,
-            &mut catalog,
+            corpus,
+            catalog,
             &cfg.lancedb_dir(),
             &cfg.books_dir(),
-            &embedder,
-            &params,
+            embedder,
+            params,
         )
         .await
         .context("ingest book")?;
@@ -88,12 +121,12 @@ pub async fn run(
     for file in &files {
         match ingest_book(
             file,
-            &mut corpus,
-            &mut catalog,
+            corpus,
+            catalog,
             &cfg.lancedb_dir(),
             &cfg.books_dir(),
-            &embedder,
-            &params,
+            embedder,
+            params,
         )
         .await
         {

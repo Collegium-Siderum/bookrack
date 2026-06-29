@@ -46,6 +46,59 @@ pub fn run(
     no_chunk: bool,
     profile_name: Option<&str>,
 ) -> Result<DryrunRunOutcome> {
+    let pipeline_run_id = open_dryrun_pipeline_run(cfg, "dryrun");
+    let result = run_inner(cfg, path, out, no_chunk, profile_name);
+    close_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    result
+}
+
+/// Open a `pipeline_runs` row labeled `command` for tracking. A
+/// catalog-open failure here logs and demotes to a NULL run id; the
+/// dryrun itself proceeds unchanged.
+fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %cfg.catalog_db().display(),
+                "{command}: failed to open catalog.db for pipeline_run lifecycle",
+            );
+            return None;
+        }
+    };
+    catalog
+        .open_pipeline_run(command, None, cfg.data_dir().to_str())
+        .ok()
+}
+
+/// Close the dryrun's `pipeline_runs` row. No summary is computed:
+/// dryrun does not write `book_distill_audit` / `node_paper_audit`, so
+/// the rollup would be empty.
+fn close_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
+    let Some(id) = pipeline_run_id else {
+        return;
+    };
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close path catalog open failed");
+            return;
+        }
+    };
+    let status = if ok { "ok" } else { "error" };
+    if let Err(err) = catalog.close_pipeline_run(id, status) {
+        tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close_pipeline_run failed");
+    }
+}
+
+fn run_inner(
+    cfg: &Config,
+    path: &Path,
+    out: Option<&Path>,
+    no_chunk: bool,
+    profile_name: Option<&str>,
+) -> Result<DryrunRunOutcome> {
     let audit_data = crate::audit_helpers::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {

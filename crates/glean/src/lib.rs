@@ -140,6 +140,11 @@ pub struct GleanParams {
     /// placeholder titles, watermark tokens, sentinel contributor
     /// names).
     pub paper_audit_data: audit::PaperAuditData,
+    /// The `pipeline_runs.pipeline_run_id` that groups this glean
+    /// invocation. `None` means the caller did not open a run; the
+    /// resulting `node_paper_audit` row reads back with NULL
+    /// `pipeline_run_id` and lives in the no-run-grouping bucket.
+    pub pipeline_run_id: Option<String>,
 }
 
 impl Default for GleanParams {
@@ -156,6 +161,7 @@ impl Default for GleanParams {
             heading_patterns: bookrack_audit_profile::HeadingPatterns::default_patterns(),
             paper_audit_profile: audit::PaperAuditProfile::default_profile(),
             paper_audit_data: audit::PaperAuditData::default_data(),
+            pipeline_run_id: None,
         }
     }
 }
@@ -564,6 +570,7 @@ pub async fn glean_paper<E: Embedder>(
         &run_id,
         &source_sha,
         metadata_started,
+        params.pipeline_run_id.as_deref(),
     )?;
 
     let parsed_at = catalog.now_iso()?;
@@ -1317,6 +1324,7 @@ fn run_paper_audit_substep(
     run_id: &str,
     source_sha: &str,
     started: Instant,
+    pipeline_run_id: Option<&str>,
 ) -> Result<(Option<String>, Option<String>)> {
     let reviewer = format!("bookrack-glean:{}", profile.name);
     if !profile.audit_enabled {
@@ -1393,6 +1401,7 @@ fn run_paper_audit_substep(
                 biblio.csl_type.map(serde_csl_type),
                 &audited_at,
                 &extractor_version,
+                pipeline_run_id,
             );
             if let Err(e) = catalog.upsert_node_paper_audit(&row) {
                 tracing::warn!(error = %e, "metadata: failed to write node_paper_audit row");

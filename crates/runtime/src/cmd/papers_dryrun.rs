@@ -42,6 +42,52 @@ pub fn run(
     out: Option<&Path>,
     skip_chunks: bool,
 ) -> Result<PapersDryrunRunOutcome> {
+    let pipeline_run_id = open_papers_dryrun_pipeline_run(cfg);
+    let result = run_inner(cfg, path, out, skip_chunks);
+    close_papers_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    result
+}
+
+fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<String> {
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %cfg.catalog_db().display(),
+                "papers_dryrun: failed to open catalog.db for pipeline_run lifecycle",
+            );
+            return None;
+        }
+    };
+    catalog
+        .open_pipeline_run("papers_dryrun", None, cfg.data_dir().to_str())
+        .ok()
+}
+
+fn close_papers_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
+    let Some(id) = pipeline_run_id else {
+        return;
+    };
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close path catalog open failed");
+            return;
+        }
+    };
+    let status = if ok { "ok" } else { "error" };
+    if let Err(err) = catalog.close_pipeline_run(id, status) {
+        tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close_pipeline_run failed");
+    }
+}
+
+fn run_inner(
+    cfg: &Config,
+    path: &Path,
+    out: Option<&Path>,
+    skip_chunks: bool,
+) -> Result<PapersDryrunRunOutcome> {
     let files = collect_files(path);
     if files.is_empty() {
         eyre::bail!("no supported paper files found under {}", path.display());
