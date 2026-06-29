@@ -15,8 +15,10 @@
 //! - `logs follow`: stream every tracing event the daemon emits via
 //!   the control-plane `log` channel until the daemon shuts down or
 //!   the client is interrupted.
-//! - `logs tail [<n>]`: print up to `n` recent log events
-//!   (defaults to 100) off the same broadcast.
+//! - `logs tail [<n>]`: subscribe to the same broadcast and emit the
+//!   next `n` live log events (defaults to 100). Distinct from the
+//!   top-level `bookrack logs --tail`, which snapshots historical
+//!   events via the `logs.tail` RPC.
 //! - `<method> [<params-json>]`: any control-plane method name
 //!   containing a `.` (e.g. `library.show_book`, `library.search`,
 //!   `library.show_metadata_audit`). The optional second argument is
@@ -25,15 +27,23 @@
 //!   method names; the MCP endpoint tools shown by `tools` are not
 //!   callable through this surface, though the `library.*` read
 //!   proxies share a name with their MCP counterparts.
+//!
+//! All human-facing output paths honour the global `--json` and
+//! `--quiet` flags installed in `bookrack_cli::render::ctx()`: RPCs,
+//! lock peeks, and broadcast subscriptions still run on `--quiet` so
+//! a missing daemon surfaces as an error instead of a silent no-op;
+//! only the print step is suppressed.
 
 use std::path::Path;
 
-use bookrack_session::{peek_lock, resolve_runtime_dir, tty_lock_name};
+use bookrack_cli::render::ctx;
+use bookrack_obs::stream::LogEvent;
+use bookrack_session::{LockInfo, peek_lock, resolve_runtime_dir, tty_lock_name};
 use eyre::{Context, Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-use crate::cmd::cli_client::helpers;
+use crate::cmd::cli_client::{helpers, logs as logs_cmd};
 
 pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result<()> {
     let runtime_dir = resolve_runtime_dir(runtime_dir_override)
@@ -72,8 +82,17 @@ async fn call_method(method: &str, params: &[String]) -> Result<()> {
 }
 
 fn print_info(lock_path: &Path) -> Result<()> {
+    let info = peek_lock(lock_path)?;
+    let ctx = ctx();
+    if ctx.is_quiet() {
+        return Ok(());
+    }
+    if ctx.is_json() {
+        helpers::print_value(&info_to_json(lock_path, info.as_ref()));
+        return Ok(());
+    }
     println!("lock      {}", lock_path.display());
-    match peek_lock(lock_path)? {
+    match info {
         None => {
             println!("pid       (lock file does not exist — no running daemon)");
             println!("mcp       (lock file does not exist)");
@@ -94,6 +113,27 @@ fn print_info(lock_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn info_to_json(lock_path: &Path, info: Option<&LockInfo>) -> Value {
+    match info {
+        None => json!({
+            "lock": lock_path.display().to_string(),
+            "pid": Value::Null,
+            "mcp": Value::Null,
+            "control": Value::Null,
+        }),
+        Some(info) => json!({
+            "lock": lock_path.display().to_string(),
+            "pid": info.pid,
+            "mcp": info.mcp,
+            "control": info
+                .control_sock
+                .as_deref()
+                .map(|p| Value::String(p.display().to_string()))
+                .unwrap_or(Value::Null),
+        }),
+    }
+}
+
 async fn print_tools() -> Result<()> {
     let client = helpers::connect(None).await?;
     let methods = client
@@ -104,6 +144,18 @@ async fn print_tools() -> Result<()> {
         .call_raw("daemon.mcp_tools", Value::Null)
         .await
         .context("daemon.mcp_tools rpc")?;
+    let ctx = ctx();
+    if ctx.is_quiet() {
+        return Ok(());
+    }
+    if ctx.is_json() {
+        let payload = json!({
+            "control_methods": methods.get("methods").cloned().unwrap_or(Value::Array(vec![])),
+            "mcp_tools": mcp.get("tools").cloned().unwrap_or(Value::Array(vec![])),
+        });
+        helpers::print_value(&payload);
+        return Ok(());
+    }
     println!("Control-plane methods:");
     if let Some(rows) = methods.get("methods").and_then(Value::as_array) {
         for row in rows {
@@ -156,8 +208,8 @@ async fn follow_logs() -> Result<()> {
     loop {
         match events.recv().await {
             Ok(event) if event.channel == "log" => {
-                if let Ok(text) = serde_json::to_string(&event.value) {
-                    println!("{text}");
+                if let Ok(ev) = serde_json::from_value::<LogEvent>(event.value) {
+                    logs_cmd::emit_event(&ev, None);
                 }
             }
             Ok(_) => continue,
@@ -177,8 +229,8 @@ async fn tail_logs(limit: u64) -> Result<()> {
     while emitted < limit {
         match events.recv().await {
             Ok(event) if event.channel == "log" => {
-                if let Ok(text) = serde_json::to_string(&event.value) {
-                    println!("{text}");
+                if let Ok(ev) = serde_json::from_value::<LogEvent>(event.value) {
+                    logs_cmd::emit_event(&ev, None);
                 }
                 emitted += 1;
             }

@@ -83,7 +83,7 @@ async fn follow(rx: &mut broadcast::Receiver<Event>, level_floor: Option<u8>) ->
     }
 }
 
-fn emit_event(ev: &LogEvent, level_floor: Option<u8>) {
+pub(crate) fn emit_event(ev: &LogEvent, level_floor: Option<u8>) {
     if let Some(floor) = level_floor {
         let rank = level_rank(&ev.level).unwrap_or(0);
         if rank < floor {
