@@ -3,11 +3,13 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::render::confirm::ConfirmMode;
 use bookrack_cli_grammar::WriteVectorsAction;
 use eyre::Result;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::helpers;
+use super::helpers::DestructivePrompt;
 
 pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
@@ -30,8 +32,21 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
             });
             helpers::call_with_progress(client, "vectors.rebuild", params).await
         }
-        WriteVectorsAction::Drop => {
-            helpers::call_and_print(&client, "vectors.drop", Value::Null).await
+        WriteVectorsAction::Drop { yes } => {
+            helpers::run_destructive(
+                client,
+                "vectors.drop",
+                json!({}),
+                yes,
+                false,
+                DestructivePrompt {
+                    mode: ConfirmMode::Soft,
+                    text: "About to drop the ANN index. Search falls back to a full\n\
+                           scan until the next `vectors rebuild`. Type 'yes' to continue:",
+                    non_tty_hint: "vectors drop removes the ANN index; pass --yes to confirm",
+                },
+            )
+            .await
         }
         WriteVectorsAction::Reembed {
             book,
@@ -56,32 +71,20 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
             )
             .await
         }
-        WriteVectorsAction::Reset { yes, resume } => {
-            use std::io::IsTerminal;
-
-            use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
-
-            if !yes && !resume {
-                if !std::io::stdin().is_terminal() {
-                    eyre::bail!("vectors reset drops the existing vectors; pass --yes to confirm");
-                }
-                eprintln!(
-                    "This drops the chunks table and re-embeds every book from the corpus tree."
-                );
-                eprintln!("The old vectors are unrecoverable.");
-                let confirmed = confirm_destructive(
-                    "Type RESET (exact, uppercase) to continue:",
-                    ConfirmMode::Hard { token: "RESET" },
-                    false,
-                )
-                .map_err(|e| eyre::eyre!("read RESET confirmation: {e}"))?;
-                if !confirmed {
-                    println!("aborted; no changes written");
-                    return Ok(());
-                }
-            }
-            let params = json!({"yes": true, "resume": resume});
-            helpers::call_with_progress(client, "vectors.reset", params).await
-        }
+        WriteVectorsAction::Reset { yes, resume } => helpers::run_destructive(
+            client,
+            "vectors.reset",
+            json!({ "resume": resume }),
+            yes,
+            resume,
+            DestructivePrompt {
+                mode: ConfirmMode::Hard { token: "RESET" },
+                text: "This drops the chunks table and re-embeds every book from the corpus tree.\n\
+                           The old vectors are unrecoverable.\n\
+                           Type RESET (exact, uppercase) to continue:",
+                non_tty_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
+            },
+        )
+        .await,
     }
 }

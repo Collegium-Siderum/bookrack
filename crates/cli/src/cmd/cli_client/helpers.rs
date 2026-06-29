@@ -22,6 +22,7 @@ const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_AWAIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 use bookrack_cli::error::BookrackCliError;
+use bookrack_cli::render::confirm::ConfirmMode;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
 use bookrack_control_client::{ControlClient, ControlError, Event};
@@ -394,6 +395,112 @@ pub async fn run_pinned_destructive(
     Ok(())
 }
 
+/// Outcome of the pre-prompt decision made by
+/// [`destructive_confirmation_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveConfirmation {
+    /// The caller has already vouched for the operation
+    /// (`--yes`) or it is on a daemon-exempt path (e.g. `resume`);
+    /// no prompt is shown.
+    Skip,
+    /// The operator must confirm interactively before the RPC fires.
+    Prompt,
+}
+
+/// Pure decision for whether a destructive command needs an
+/// interactive confirmation prompt. Factored out so the matrix of
+/// `(user_yes, confirmation_exempt)` cases is unit-testable without
+/// touching stdin.
+pub fn destructive_confirmation_decision(
+    user_yes: bool,
+    confirmation_exempt: bool,
+) -> DestructiveConfirmation {
+    if user_yes || confirmation_exempt {
+        DestructiveConfirmation::Skip
+    } else {
+        DestructiveConfirmation::Prompt
+    }
+}
+
+/// Bundle of prompt-shaped strings for [`run_destructive`]. Groups
+/// the three knobs that describe "how does the operator see this
+/// confirmation" so the function signature stays readable.
+pub struct DestructivePrompt<'a> {
+    /// Confirmation strength — `Soft` (`yes`/`y`) or
+    /// `Hard { token: "RESET" }`.
+    pub mode: ConfirmMode<'a>,
+    /// Multi-line text written to stderr before reading the
+    /// confirmation. The final line should be the actual prompt
+    /// (e.g. `Type 'yes' to continue:`).
+    pub text: &'a str,
+    /// Error message returned when stdin is not a TTY and the caller
+    /// did not pass `--yes`. Should explain what the command does and
+    /// how to opt in.
+    pub non_tty_hint: &'a str,
+}
+
+/// One-shot destructive RPC wrapper for methods that do not need a
+/// pinned plan id (`vectors.reset`, `vectors.drop`, and their paper
+/// peers). Sister of [`run_pinned_destructive`].
+///
+/// `params` MUST be a JSON object; the helper merges `yes: true` into
+/// it before dispatching, so call sites should construct it as
+/// `json!({})` or `json!({ "resume": resume })` rather than
+/// `Value::Null`. The assertion at the top of the function catches the
+/// misuse loudly instead of silently turning a malformed payload into
+/// `{ "yes": true }`.
+///
+/// Confirmation behaviour:
+///
+/// * When `user_yes` (i.e. `--yes`) or `confirmation_exempt` (e.g.
+///   `--resume` on `reset`) is set, the prompt is skipped and the RPC
+///   fires immediately with `yes: true`.
+/// * Otherwise the helper writes `prompt.text` to stderr through
+///   [`bookrack_cli::render::confirm::confirm_destructive`] in
+///   `prompt.mode`; a rejected or empty answer prints `aborted; no
+///   changes written` and returns `Ok(())` without firing the RPC.
+/// * When stdin is not a TTY, prompting is impossible. The helper
+///   bails with `prompt.non_tty_hint` so the operator sees a directed
+///   message instead of a hang on `read_line`.
+pub async fn run_destructive(
+    client: Arc<ControlClient>,
+    method: &str,
+    mut params: Value,
+    user_yes: bool,
+    confirmation_exempt: bool,
+    prompt: DestructivePrompt<'_>,
+) -> Result<()> {
+    use std::io::IsTerminal;
+
+    use bookrack_cli::render::confirm::confirm_destructive;
+
+    assert!(
+        params.is_object(),
+        "run_destructive: params must be a JSON object; got {params:?}"
+    );
+
+    if destructive_confirmation_decision(user_yes, confirmation_exempt)
+        == DestructiveConfirmation::Prompt
+    {
+        if !std::io::stdin().is_terminal() {
+            eyre::bail!("{}", prompt.non_tty_hint);
+        }
+        let confirmed = confirm_destructive(prompt.text, prompt.mode, false)
+            .with_context(|| format!("read {method} confirmation"))?;
+        if !confirmed {
+            println!("aborted; no changes written");
+            return Ok(());
+        }
+    }
+
+    params
+        .as_object_mut()
+        .expect("params verified as an object above")
+        .insert("yes".to_string(), Value::Bool(true));
+
+    call_with_progress(client, method, params).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,5 +621,14 @@ mod tests {
         assert!(extract_finished(&ev, &pending).is_some());
         let other = tick("b", "done", 0, 0).value;
         assert!(extract_finished(&other, &pending).is_none());
+    }
+
+    #[test]
+    fn destructive_decision_matrix() {
+        use DestructiveConfirmation::{Prompt, Skip};
+        assert_eq!(destructive_confirmation_decision(false, false), Prompt);
+        assert_eq!(destructive_confirmation_decision(true, false), Skip);
+        assert_eq!(destructive_confirmation_decision(false, true), Skip);
+        assert_eq!(destructive_confirmation_decision(true, true), Skip);
     }
 }

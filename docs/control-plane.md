@@ -157,7 +157,8 @@ human-readable `error.message`.
   `contributor_id` that `show_book` lists, whatever its origin.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
-  `vectors.drop` takes no params.
+  `vectors.drop` takes `{ yes? }`; the daemon rejects the call
+  without `yes = true`.
 - `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?, yes? }`.
 - `stamps.reconcile` — no params; rewrites the corpus index stamps.
 - `papers.corpus_rebuild` —
@@ -168,7 +169,9 @@ human-readable `error.message`.
 - `papers.vectors_rebuild` / `papers.vectors_reembed` /
   `papers.vectors_reset` / `papers.vectors_drop` — peers of
   `vectors.*` against `lancedb_papers`. Same param shapes; the
-  reembed variant takes `paper?` instead of `book?`.
+  reembed variant takes `paper?` instead of `book?`, and
+  `papers.vectors_drop` takes `{ yes? }` with the same
+  `-32012` gate as `vectors.drop`.
 - `papers.stamps_reconcile` — no params; rewrites the
   `papers_corpus.db` index stamps from the active embedder.
 - `papers.dryrun` — `{ path, out?, no_chunk? }`. Peer of `dryrun` for
@@ -207,8 +210,11 @@ human-readable `error.message`.
 - `papers.metadata.contributor_remove` — `{ contributor_id,
   library? }`. Removes a contributor row by id; returns
   `{ removed: bool }`.
-- `remove` — `{ intake_id?, sha?, dry_run?, yes? }`. Exactly one of
-  `intake_id` or `sha` must be set.
+- `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id? }`. Exactly
+  one of `intake_id` or `sha` must be set on the dry-run leg; the
+  execute leg presents the `plan_id` returned by dry-run and the
+  daemon rejects the call without `yes = true`. Paper-side peer:
+  `papers.remove`.
 - `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL
   plus a summary sidecar under `<data_root>/dryruns/`.
 
@@ -217,13 +223,16 @@ second concurrent write returns `-32001 busy`.
 
 Destructive methods that take a `yes` parameter — `corpus.rebuild`,
 `papers.corpus_rebuild`, `vectors.reembed`, `vectors.reset`,
-`papers.vectors_reembed`, `papers.vectors_reset` — require
+`vectors.drop`, `papers.vectors_reembed`, `papers.vectors_reset`,
+`papers.vectors_drop`, `remove`, `papers.remove` — require
 `yes = true` and reject `yes = false` with `-32012 confirmation
 required` before any work runs. The control plane never prompts on
 the caller's behalf, so clients must surface the confirmation
 locally and only then resend with the flag set. `dry_run` paths
-(rebuild / reembed) and `resume` paths (reset) are exempt because
-they do not destroy data on this call.
+(rebuild / reembed / remove) and `resume` paths (reset) are exempt
+because they do not destroy data on this call; the `remove` execute
+leg, identified by the presence of `plan_id`, is not exempt and
+must carry `yes = true`.
 
 ## Methods (library read proxies)
 

@@ -434,8 +434,14 @@ pub enum WriteVectorsAction {
     },
     /// Drop the ANN index and mark the meta as brute-force.
     ///
-    /// Search falls back to a full scan on the next query.
-    Drop,
+    /// Search falls back to a full scan on the next query. The index
+    /// is not recoverable without a `vectors rebuild`; the daemon
+    /// rejects the call without `--yes`.
+    Drop {
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Re-embed every (or a single) book's chunks in place.
     ///
     /// Reads the existing chunk rows back from LanceDB, drops their
@@ -782,8 +788,13 @@ pub enum PapersVectorsAction {
         refine_factor: Option<u32>,
     },
     /// Drop the ANN index over `lancedb_papers` and mark the meta as
-    /// brute-force.
-    Drop,
+    /// brute-force. Peer of [`WriteVectorsAction::Drop`]; the daemon
+    /// rejects the call without `--yes`.
+    Drop {
+        /// Skip the destructive-action confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Re-embed every (or a single) paper's chunks in place: read the
     /// existing chunk rows back from `lancedb_papers`, drop their
     /// vectors, and rewrite under the active embedder.

@@ -841,6 +841,19 @@ mod tests {
     }
 
     #[test]
+    fn vectors_drop_accepts_yes_flag() {
+        for argv in [
+            vec!["bookrack", "vectors", "drop"],
+            vec!["bookrack", "vectors", "drop", "--yes"],
+            vec!["bookrack", "papers", "vectors", "drop"],
+            vec!["bookrack", "papers", "vectors", "drop", "--yes"],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
     fn verify_short_circuits_on_an_uninitialised_data_dir() {
         // A freshly mkdir'd data directory has no catalog.db on disk
         // yet. Verify must NOT try to open one (that would create an

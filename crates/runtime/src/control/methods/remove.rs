@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, require_yes, run_write};
 use crate::cmd::remove::{ExpectedFingerprint, RemoveArgs, execute_remove_from_plan, plan_remove};
 use crate::control::error_map::{plan_lookup_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -64,7 +64,10 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         return remove_dry_run(parsed, ctx).await;
     }
     match parsed.plan_id.as_deref() {
-        Some(id) => remove_execute_from_plan(id.to_string(), ctx).await,
+        Some(id) => {
+            require_yes("remove", parsed.yes, false)?;
+            remove_execute_from_plan(id.to_string(), ctx).await
+        }
         None => Err(RpcError::new(
             INVALID_PARAMS,
             "remove: plan_id required on execute; call with dry_run=true first and \

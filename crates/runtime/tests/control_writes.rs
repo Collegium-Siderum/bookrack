@@ -163,12 +163,12 @@ async fn second_write_returns_busy_error() -> Result<()> {
         // write mutex; the other must see `-32001 busy`.
         send(
             &mut fr_w,
-            r#"{"jsonrpc":"2.0","id":10,"method":"vectors.drop"}"#,
+            r#"{"jsonrpc":"2.0","id":10,"method":"vectors.drop","params":{"yes":true}}"#,
         )
         .await?;
         send(
             &mut sr_w,
-            r#"{"jsonrpc":"2.0","id":11,"method":"vectors.drop"}"#,
+            r#"{"jsonrpc":"2.0","id":11,"method":"vectors.drop","params":{"yes":true}}"#,
         )
         .await?;
         let resp_a = recv(&mut fr_reader).await?;

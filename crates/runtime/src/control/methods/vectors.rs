@@ -192,7 +192,17 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     .await
 }
 
-pub async fn drop_index(_params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(test, derive(TS))]
+#[cfg_attr(test, ts(export, export_to = "./"))]
+pub struct VectorsDropParams {
+    #[serde(default)]
+    yes: bool,
+}
+
+pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let parsed: VectorsDropParams = parse(params, "vectors.drop")?;
+    require_yes("vectors.drop", parsed.yes, false)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         vectors::drop(&cfg)

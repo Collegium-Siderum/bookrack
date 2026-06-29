@@ -53,7 +53,46 @@ release workflow extracts the matching section verbatim from this file.
   caller's over-large limit was clamped but the result still covered
   every matching row.
 
+### Changed
+
+- **destructive RPC contract: every irreversible write requires
+  `yes = true`, including `vectors.drop`, `papers.vectors_drop`,
+  and the execute leg of `remove` / `papers.remove`.** Previously
+  the matrix was uneven: `vectors.drop` / `papers.vectors_drop`
+  took no params at all and ran on receipt, and `remove` /
+  `papers.remove` parsed a `yes` field on execute but never
+  consulted it, so a programmatic caller could commit either RPC
+  with `yes` absent or `yes = false`. All four now go through
+  `require_yes` and reject the call with `-32012 confirmation
+  required` unless `yes = true`. `dry_run` and `resume` remain
+  exempt where the method documents them; the `remove` execute leg
+  (identified by the presence of `plan_id`) is not exempt. The
+  CLI changes below already send `yes = true` end-to-end, so the
+  default CLI flows are unchanged; programmatic clients that
+  bypassed the CLI must now surface a local confirmation and
+  resend with the flag set. The destructive matrix in
+  `docs/control-plane.md` is updated to list every method covered.
+
 ### Fixed
+
+- **cli: destructive confirmation gates are now symmetric across
+  every write verb.** `bookrack vectors drop` and `bookrack papers
+  vectors drop` previously dispatched the RPC with no prompt at
+  all; `bookrack papers vectors reset` forwarded the user's `--yes`
+  flag straight to the daemon, so calling it without `--yes` came
+  back as a raw `-32012` instead of a `Type RESET to continue`
+  prompt. A new `run_destructive` helper centralises the non-pinned
+  destructive flow: it merges `yes: true` into the outgoing params,
+  prompts via `confirm_destructive` when neither `--yes` nor a
+  daemon-exempt `--resume` is set, and bails with a directed
+  message on a non-TTY caller instead of hanging on `read_line`.
+  Both `vectors drop` variants gain a `--yes` flag and a Soft
+  prompt; `papers vectors reset` adopts the same Hard `RESET`
+  prompt the book-side reset uses; the existing `vectors reset`
+  flow moves onto the shared helper so the two paths cannot drift
+  apart again. A `destructive_confirmation_decision(user_yes,
+  confirmation_exempt)` predicate is exposed for unit-level
+  coverage of the four-cell matrix without touching stdin.
 
 - **cli: `--data-dir` / `--library` are now enforced on
   daemon-routed commands instead of silently ignored.** The global

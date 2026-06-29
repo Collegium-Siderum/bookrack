@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::render::confirm::ConfirmMode;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::{KvTable, RowTable};
@@ -19,6 +20,7 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
+use super::helpers::DestructivePrompt;
 
 pub async fn run(
     action: PapersAction,
@@ -313,8 +315,23 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
             });
             helpers::call_and_print(&client, "papers.vectors_rebuild", params).await
         }
-        PapersVectorsAction::Drop => {
-            helpers::call_and_print(&client, "papers.vectors_drop", json!({})).await
+        PapersVectorsAction::Drop { yes } => {
+            helpers::run_destructive(
+                client,
+                "papers.vectors_drop",
+                json!({}),
+                yes,
+                false,
+                DestructivePrompt {
+                    mode: ConfirmMode::Soft,
+                    text: "About to drop the ANN index over the paper vector store.\n\
+                           Search falls back to a full scan until the next\n\
+                           `papers vectors rebuild`. Type 'yes' to continue:",
+                    non_tty_hint:
+                        "papers vectors drop removes the paper ANN index; pass --yes to confirm",
+                },
+            )
+            .await
         }
         PapersVectorsAction::Reembed {
             paper,
@@ -340,8 +357,22 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
             .await
         }
         PapersVectorsAction::Reset { yes, resume } => {
-            let params = json!({ "yes": yes, "resume": resume });
-            helpers::call_and_print(&client, "papers.vectors_reset", params).await
+            helpers::run_destructive(
+                client,
+                "papers.vectors_reset",
+                json!({ "resume": resume }),
+                yes,
+                resume,
+                DestructivePrompt {
+                    mode: ConfirmMode::Hard { token: "RESET" },
+                    text: "This drops the paper chunks table and re-embeds every paper abstract from the corpus tree.\n\
+                           The old vectors are unrecoverable.\n\
+                           Type RESET (exact, uppercase) to continue:",
+                    non_tty_hint:
+                        "papers vectors reset drops the existing paper vectors; pass --yes to confirm",
+                },
+            )
+            .await
         }
     }
 }
