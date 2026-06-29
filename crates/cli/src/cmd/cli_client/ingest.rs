@@ -11,7 +11,11 @@ use serde_json::json;
 
 use super::helpers;
 
-pub async fn run(args: IngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    args: IngestArgs,
+    runtime_dir: Option<PathBuf>,
+    audit_profile: Option<String>,
+) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
 
     // Subscribe before issuing the RPC so `queue.tick` events fired
@@ -23,12 +27,15 @@ pub async fn run(args: IngestArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
         .map_err(eyre::Report::from)
         .map_err(|e| e.wrap_err("subscribe to control-plane events"))?;
 
-    let params = json!({
+    let mut params = json!({
         "paths": [args.path],
         "force": args.force,
         "recursive": args.recursive,
         "hold_for_metadata": args.hold_for_metadata,
     });
+    if let Some(name) = audit_profile {
+        params["audit_profile"] = serde_json::Value::String(name);
+    }
     let response = helpers::dispatch(&client, "ingest.submit", params).await?;
     let job_ids = helpers::extract_job_ids(&response);
 

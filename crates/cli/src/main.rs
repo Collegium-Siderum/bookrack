@@ -81,7 +81,10 @@ struct Cli {
     /// `default`, `trust-source`, and `strict`. Without this flag the
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
-    /// bypassed and the named preset wins.
+    /// bypassed and the named preset wins. Applies to `ingest`,
+    /// `intake ocr`, `dryrun`, `metadata reaudit`, `metadata advance`,
+    /// and `papers metadata reaudit`; passing the flag on any other
+    /// subcommand aborts before any RPC is sent.
     #[arg(
         long,
         global = true,
@@ -684,6 +687,13 @@ async fn run() -> Result<()> {
     // is the lone exception — it reads compiled-in profiles and
     // needs no config.
     let audit_profile = cli.audit_profile.clone();
+    if audit_profile.is_some() && !accepts_audit_profile(&cli.command) {
+        eyre::bail!(
+            "--audit-profile is only consumed by `ingest`, `intake ocr`, \
+             `dryrun`, `metadata reaudit`, `metadata advance`, and \
+             `papers metadata reaudit`; remove it for this subcommand"
+        );
+    }
     let selection = cli.selection();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
@@ -699,10 +709,14 @@ async fn run() -> Result<()> {
             days,
             no_scrub,
         } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
-        Command::Ingest(args) => cmd::cli_client::ingest::run(args, None).await,
-        Command::Intake { action } => cmd::cli_client::intake::run(action, None).await,
+        Command::Ingest(args) => cmd::cli_client::ingest::run(args, None, audit_profile).await,
+        Command::Intake { action } => {
+            cmd::cli_client::intake::run(action, None, audit_profile).await
+        }
         Command::Queue { action } => cmd::cli_client::queue::run(action, None).await,
-        Command::Metadata { action } => cmd::cli_client::metadata::run(action, None).await,
+        Command::Metadata { action } => {
+            cmd::cli_client::metadata::run(action, None, audit_profile).await
+        }
         Command::Vectors { action } => cmd::cli_client::vectors::run(action, None).await,
         Command::Corpus { action } => cmd::cli_client::corpus::run(action, None).await,
         Command::Stamps { action } => cmd::cli_client::stamps::run(action, None).await,
@@ -710,7 +724,7 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
-        Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
+        Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None, audit_profile).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
         Command::Logs(args) => cmd::cli_client::logs::run(args, None).await,
@@ -719,6 +733,52 @@ async fn run() -> Result<()> {
         Command::Init { .. } => unreachable!("Init is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
         Command::Exec { .. } => unreachable!("Exec is dispatched above"),
+    }
+}
+
+/// Closed white-list of the subcommands that consume the global
+/// `--audit-profile` flag. Every other variant is rejected up front in
+/// `main` so the flag cannot silently drop on a path that does not
+/// thread it into the RPC params.
+///
+/// The match is exhaustive on purpose: when a new command joins the
+/// audit-profile-aware set, the new variant fails to compile here
+/// until its arm is added.
+fn accepts_audit_profile(command: &Command) -> bool {
+    use bookrack_cli_grammar::{
+        IntakeAction, PapersAction, PapersMetadataAction, WriteMetadataAction,
+    };
+    match command {
+        Command::Ingest(_) => true,
+        Command::Intake { action } => matches!(action, IntakeAction::Ocr { .. }),
+        Command::Dryrun(_) => true,
+        Command::Metadata { action } => matches!(
+            action,
+            WriteMetadataAction::Reaudit { .. } | WriteMetadataAction::Advance { .. }
+        ),
+        Command::Papers { action } => matches!(
+            action,
+            PapersAction::Metadata {
+                action: PapersMetadataAction::Reaudit { .. }
+            }
+        ),
+        Command::AuditProfile { .. }
+        | Command::Verify
+        | Command::Libraries { .. }
+        | Command::Diagnose { .. }
+        | Command::Queue { .. }
+        | Command::Vectors { .. }
+        | Command::Corpus { .. }
+        | Command::Stamps { .. }
+        | Command::Remove(_)
+        | Command::Distill { .. }
+        | Command::Runs { .. }
+        | Command::Logs(_)
+        | Command::Quit
+        | Command::Doctor { .. }
+        | Command::Init { .. }
+        | Command::Run { .. }
+        | Command::Exec { .. } => false,
     }
 }
 
@@ -747,6 +807,54 @@ mod tests {
         let selection = cli.selection();
         assert_eq!(selection.library.as_deref(), Some("test"));
         assert!(selection.data_dir.is_none());
+    }
+
+    #[test]
+    fn accepts_audit_profile_white_list_matches_consumers() {
+        let consumers = [
+            vec!["bookrack", "ingest", "/tmp/x.epub"],
+            vec![
+                "bookrack",
+                "intake",
+                "ocr",
+                "/tmp/x.md",
+                "--from-pdf",
+                "/tmp/x.pdf",
+            ],
+            vec!["bookrack", "dryrun", "/tmp/x.epub"],
+            vec!["bookrack", "metadata", "reaudit", "1"],
+            vec!["bookrack", "metadata", "advance", "1"],
+            vec!["bookrack", "papers", "metadata", "reaudit", "1"],
+        ];
+        for argv in consumers {
+            let cli = Cli::try_parse_from(argv.clone()).expect("argv parses");
+            assert!(
+                accepts_audit_profile(&cli.command),
+                "expected {argv:?} to consume --audit-profile",
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_audit_profile_rejects_unrelated_commands() {
+        // Non-audit subcommands must be rejected up front when the
+        // global flag is set, so the value cannot silently drop.
+        let outsiders = [
+            vec!["bookrack", "verify"],
+            vec!["bookrack", "metadata", "set", "1", "title", "x"],
+            vec!["bookrack", "metadata", "approve", "1"],
+            vec!["bookrack", "queue", "list"],
+            vec!["bookrack", "vectors", "rebuild"],
+            vec!["bookrack", "papers", "list"],
+            vec!["bookrack", "logs", "--tail", "5"],
+        ];
+        for argv in outsiders {
+            let cli = Cli::try_parse_from(argv.clone()).expect("argv parses");
+            assert!(
+                !accepts_audit_profile(&cli.command),
+                "did not expect {argv:?} to consume --audit-profile",
+            );
+        }
     }
 
     #[test]

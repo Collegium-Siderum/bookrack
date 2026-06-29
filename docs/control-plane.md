@@ -115,7 +115,7 @@ human-readable `error.message`.
 ## Methods (Phase 2)
 
 - `ingest.submit` — `{ paths, library?, priority?, force?,
-  recursive?, hold_for_metadata? }` → `{ job_ids: [<uuid v7>] }`.
+  recursive?, hold_for_metadata?, audit_profile? }` → `{ job_ids: [<uuid v7>] }`.
   Appends jobs to the persistent queue document; the worker picks
   them up on the next 200 ms tick. When `recursive` is `true`,
   every directory in `paths` is walked depth-first and expanded to
@@ -125,23 +125,34 @@ human-readable `error.message`.
   When `hold_for_metadata` is `true`, the worker parks every book
   whose audit verdict is `needs_work` at STRUCTURE, skipping CHUNK
   and EMBED until a curator drives it past the metadata gate.
+  `audit_profile`, when set, rides on every enqueued job and the
+  worker reloads the named built-in (`default` / `trust-source` /
+  `strict`) before running the ingest; absent, the daemon's startup
+  profile applies.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
 - `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
-  library?, priority?, force?, hold_for_metadata? }` → `{ job_id: <uuid v7> }`.
-  Append a single OCR-intake job. The worker treats it as a book
-  ingest whose source is the OCR markdown product paired with the scan
-  PDF named by `from_pdf`; the queue document keeps `kind = "book"`
-  and carries the OCR fields in an `intake_ocr` sidecar so the row
-  reads as a book job in `queue.list`. `expected_pages` overrides the
-  page-count gate the OCR ingest derives from the source PDF;
-  `allow_partial = true` accepts an OCR product that does not cover
-  every page. The persistent queue schema is `v4`.
+  library?, priority?, force?, hold_for_metadata?, audit_profile? }`
+  → `{ job_id: <uuid v7> }`. Append a single OCR-intake job. The worker
+  treats it as a book ingest whose source is the OCR markdown product
+  paired with the scan PDF named by `from_pdf`; the queue document
+  keeps `kind = "book"` and carries the OCR fields in an `intake_ocr`
+  sidecar so the row reads as a book job in `queue.list`.
+  `expected_pages` overrides the page-count gate the OCR ingest
+  derives from the source PDF; `allow_partial = true` accepts an OCR
+  product that does not cover every page. `audit_profile` overrides
+  the worker's book-side audit profile for this job; same semantics as
+  `ingest.submit`. The persistent queue schema is `v4`.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
   `bookrack metadata` REPL subcommands; return `{ ok: true }` on
-  success. `metadata.advance` resumes CHUNK→EMBED for a book held
+  success. `metadata.reaudit` and `metadata.advance` additionally
+  accept `audit_profile?`, which routes through the same built-in set
+  as `ingest.submit` for the re-audit they trigger. The other writes
+  in this family do not call the audit and reject the field at the
+  CLI white-list; the daemon-side helper passes `None` for them.
+  `metadata.advance` resumes CHUNK→EMBED for a book held
   at the metadata gate by `--hold-for-metadata`. `metadata.approve`
   triggers the same resume implicitly when the book is parked. `metadata.void`
   (added post-Phase 5) writes a NULL override that suppresses a
@@ -215,8 +226,11 @@ human-readable `error.message`.
   execute leg presents the `plan_id` returned by dry-run and the
   daemon rejects the call without `yes = true`. Paper-side peer:
   `papers.remove`.
-- `dryrun` — `{ path, out?, stdout?, no_chunk? }`. Writes the JSONL
-  plus a summary sidecar under `<data_root>/dryruns/`.
+- `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile? }`.
+  Writes the JSONL plus a summary sidecar under `<data_root>/dryruns/`.
+  `audit_profile`, when set, resolves through the shared built-in set
+  for this dryrun only; absent means the daemon's overlay-resolved
+  default profile.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.

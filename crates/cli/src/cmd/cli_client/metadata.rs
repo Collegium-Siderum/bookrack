@@ -9,7 +9,11 @@ use serde_json::json;
 
 use super::helpers;
 
-pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    action: WriteMetadataAction,
+    runtime_dir: Option<PathBuf>,
+    default_audit_profile: Option<String>,
+) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         WriteMetadataAction::Set {
@@ -57,7 +61,11 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             .await
         }
         WriteMetadataAction::Reaudit { book } => {
-            helpers::call_and_print(&client, "metadata.reaudit", json!({"book": book})).await
+            let mut params = json!({ "book": book });
+            if let Some(name) = default_audit_profile.clone() {
+                params["audit_profile"] = serde_json::Value::String(name);
+            }
+            helpers::call_and_print(&client, "metadata.reaudit", params).await
         }
         WriteMetadataAction::ContributorAdd {
             book,
@@ -116,7 +124,11 @@ pub async fn run(action: WriteMetadataAction, runtime_dir: Option<PathBuf>) -> R
             .await
         }
         WriteMetadataAction::Advance { book } => {
-            helpers::call_and_print(&client, "metadata.advance", json!({ "book": book })).await
+            let mut params = json!({ "book": book });
+            if let Some(name) = default_audit_profile.clone() {
+                params["audit_profile"] = serde_json::Value::String(name);
+            }
+            helpers::call_and_print(&client, "metadata.advance", params).await
         }
     }
 }

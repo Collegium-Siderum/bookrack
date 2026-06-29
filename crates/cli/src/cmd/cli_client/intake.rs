@@ -15,7 +15,11 @@ use serde_json::{Value, json};
 
 use super::helpers;
 
-pub async fn run(action: IntakeAction, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    action: IntakeAction,
+    runtime_dir: Option<PathBuf>,
+    audit_profile: Option<String>,
+) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
     match action {
         IntakeAction::Ocr {
@@ -42,6 +46,9 @@ pub async fn run(action: IntakeAction, runtime_dir: Option<PathBuf>) -> Result<(
             });
             if let Some(pages) = expected_pages {
                 params["expected_pages"] = Value::from(pages);
+            }
+            if let Some(name) = audit_profile {
+                params["audit_profile"] = Value::String(name);
             }
 
             let response = helpers::dispatch(&client, "intake.ocr", params).await?;

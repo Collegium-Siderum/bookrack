@@ -8,13 +8,20 @@ use serde_json::json;
 
 use super::helpers;
 
-pub async fn run(args: DryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+pub async fn run(
+    args: DryrunArgs,
+    runtime_dir: Option<PathBuf>,
+    audit_profile: Option<String>,
+) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
-    let params = json!({
+    let mut params = json!({
         "path": args.path,
         "out": args.out,
         "no_chunk": args.no_chunk,
     });
+    if let Some(name) = audit_profile {
+        params["audit_profile"] = serde_json::Value::String(name);
+    }
     let value = helpers::call_with_progress_value(client, "dryrun", params).await?;
     let outcome: bookrack_runtime::cmd::dryrun::DryrunRunOutcome = serde_json::from_value(value)
         .context("dryrun response did not match the expected shape")?;

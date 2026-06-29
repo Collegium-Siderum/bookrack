@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli, runtime: `--audit-profile` reaches every audit-aware command.**
+  `ingest.submit`, `intake.ocr`, `dryrun`, `metadata.reaudit`, and
+  `metadata.advance` accept an optional `audit_profile` parameter that
+  resolves through the same built-in set as the existing
+  `papers.metadata.reaudit` field (`default` / `trust-source` /
+  `strict`). Async ingest jobs persist the override on the queue row
+  (`QueueJob.audit_profile`, queue schema stays at v4 — old documents
+  load with the field unset), and the worker reloads the named
+  profile per-job before dispatch instead of reusing the daemon's
+  startup template. The CLI threads its global `--audit-profile`
+  through `bookrack ingest`, `bookrack intake ocr`, `bookrack dryrun`,
+  `bookrack metadata reaudit / advance`, and `bookrack papers metadata
+  reaudit`; passing the flag on any other subcommand aborts before any
+  RPC is sent so the value cannot silently drop.
+
 - **audit: glean's `PaperReport` lands as SQL-dimension rows in
   `node_paper_audit`.** Each paper-side audit substep writes one row
   per `(intake_id, scope='paper')` with verdict, confidence, the
