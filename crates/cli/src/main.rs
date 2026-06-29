@@ -525,10 +525,14 @@ async fn main() -> std::process::ExitCode {
         Err(err) => {
             // Typed user-error variants render as a single
             // operator-facing line and pick their own exit code, so
-            // predictable failures stay quiet. Everything else falls
+            // predictable failures stay quiet. `classify_eyre` walks
+            // the eyre chain so `.context("...")` wrappers around an
+            // RPC call still surface their JSON-RPC error code as the
+            // matching CLI exit code. Anything not classifiable falls
             // through to color-eyre's full `Debug` cause chain so
             // unexpected errors stay debuggable.
-            if let Some(cli_err) = err.downcast_ref::<bookrack_cli::error::BookrackCliError>() {
+            if let Some(cause) = bookrack_cli::error::classify_eyre(&err) {
+                let cli_err = cause.as_cli();
                 if !cli_err.is_self_reported() {
                     eprintln!("bookrack: {cli_err}");
                 }

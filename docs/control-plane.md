@@ -80,6 +80,27 @@ Clients distinguish "fix the request and retry" (`-32602` / `-32010`)
 from "report or escalate" (`-32603`) by the code, not by parsing the
 human-readable `error.message`.
 
+#### CLI exit codes
+
+The `bookrack` binary classifies failures by mapping JSON-RPC error
+codes onto a small, stable exit-code table so scripts can branch on
+the kind of failure without parsing stderr.
+
+| exit | meaning | sources |
+| --- | --- | --- |
+| `0` | success | — |
+| `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32015` plan-id mismatches |
+| `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
+| `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; a scripted caller can sleep and retry |
+| `5` | async job batch had failures | **reserved**: ingest-family commands return this when at least one queued job ended in `Failed` or `Cancelled`. The per-job summary on stdout names the offenders |
+
+`-32601 method not found` is grouped with the user-input bucket so
+the common case — `bookrack exec <typo>` — exits with the same code
+as any other CLI usage mistake. The same code is also raised when a
+CLI version targets a daemon that has not yet shipped the method;
+the exit-code bucket does not distinguish the two.
+
 ## Methods (Phase 1)
 
 - `daemon.version` — `{ version, started_at }`.

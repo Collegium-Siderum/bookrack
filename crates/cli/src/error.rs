@@ -16,6 +16,11 @@
 use std::path::PathBuf;
 
 use bookrack_control_client::ControlError;
+use bookrack_runtime::control::jsonrpc::{
+    BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
+    JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
+    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND,
+};
 
 /// Predictable, operator-facing failures the CLI emits.
 #[derive(Debug, thiserror::Error)]
@@ -61,10 +66,30 @@ pub enum BookrackCliError {
         "running daemon serves {running}; refusing to act on {intent}.\nRun `bookrack quit` and start a new session with the desired --library/--data-dir to switch."
     )]
     LibraryMismatch { intent: String, running: String },
+
+    /// Daemon rejected the call as a user-input failure: bad params,
+    /// unknown library, unknown job/plan id, missing confirmation
+    /// token, or an unknown RPC method (typo or unsupported by this
+    /// daemon version).
+    #[error("rpc error {code}: {message}")]
+    RpcUserError { code: i32, message: String },
+
+    /// Daemon is busy or not yet ready to handle the call. A scripted
+    /// caller can retry after a backoff.
+    #[error("rpc error {code}: {message}")]
+    RpcBusy { code: i32, message: String },
+
+    /// Daemon raised an internal error, or returned a JSON-RPC
+    /// protocol-layer code (`PARSE_ERROR`, `INVALID_REQUEST`) that
+    /// implies the CLI sent something the daemon could not parse.
+    /// Treated as a CLI/daemon bug; not retryable.
+    #[error("rpc error {code}: {message}")]
+    RpcInternal { code: i32, message: String },
 }
 
 impl BookrackCliError {
-    /// Exit code the binary returns for this failure.
+    /// Exit code the binary returns for this failure. See
+    /// `docs/control-plane.md` for the full exit-code table.
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::DaemonNotRunning | Self::DaemonUnreachable { .. } => 2,
@@ -72,6 +97,9 @@ impl BookrackCliError {
             Self::SessionLockUnreadable { .. } => 1,
             Self::DoctorUnhealthy => 1,
             Self::LibraryMismatch { .. } => 2,
+            Self::RpcUserError { .. } => 2,
+            Self::RpcBusy { .. } => 4,
+            Self::RpcInternal { .. } => 1,
         }
     }
 
@@ -81,6 +109,68 @@ impl BookrackCliError {
     pub fn is_self_reported(&self) -> bool {
         matches!(self, Self::DoctorUnhealthy)
     }
+
+    /// Classify a JSON-RPC error into the matching CLI variant so the
+    /// binary's exit code reflects whether the failure was a user
+    /// input mistake (exit 2), a transient busy/not-ready state
+    /// (exit 4), or an internal/protocol error (exit 1).
+    pub fn from_rpc(code: i32, message: String) -> Self {
+        match code {
+            METHOD_NOT_FOUND
+            | INVALID_PARAMS
+            | INVALID_LIBRARY
+            | JOB_NOT_FOUND
+            | CONFIRMATION_REQUIRED
+            | PLAN_NOT_FOUND
+            | PLAN_KIND_MISMATCH
+            | PLAN_LIBRARY_MISMATCH => Self::RpcUserError { code, message },
+            BUSY | NOT_READY => Self::RpcBusy { code, message },
+            PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal { code, message },
+            _ => Self::RpcInternal { code, message },
+        }
+    }
+}
+
+/// Outcome of walking an `eyre::Report` chain for a known error type.
+/// `main`'s reporter inspects this so that `.context("...")` wrappers
+/// around an RPC call do not collapse the cause into the fallback
+/// exit code.
+pub enum CliReportCause<'a> {
+    /// A typed `BookrackCliError` was found in the chain; use it
+    /// verbatim.
+    Cli(&'a BookrackCliError),
+    /// A `ControlError::Rpc` from the control client was found in the
+    /// chain; this owned variant carries the classification.
+    Rpc(BookrackCliError),
+}
+
+impl CliReportCause<'_> {
+    /// Borrow the underlying `BookrackCliError` regardless of whether
+    /// it was found in the chain or freshly classified.
+    pub fn as_cli(&self) -> &BookrackCliError {
+        match self {
+            Self::Cli(e) => e,
+            Self::Rpc(e) => e,
+        }
+    }
+}
+
+/// Walk an `eyre::Report` chain for a typed CLI error or an unwrapped
+/// JSON-RPC error from the control client.
+pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
+    for cause in err.chain() {
+        if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
+            return Some(CliReportCause::Cli(cli_err));
+        }
+        if let Some(ControlError::Rpc { code, message, .. }) = cause.downcast_ref::<ControlError>()
+        {
+            return Some(CliReportCause::Rpc(BookrackCliError::from_rpc(
+                *code,
+                message.clone(),
+            )));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -130,5 +220,73 @@ mod tests {
     fn doctor_unhealthy_is_self_reported() {
         assert!(BookrackCliError::DoctorUnhealthy.is_self_reported());
         assert!(!BookrackCliError::DaemonNotRunning.is_self_reported());
+    }
+
+    #[test]
+    fn from_rpc_classifies_user_codes_as_exit_two() {
+        for &code in &[
+            METHOD_NOT_FOUND,
+            INVALID_PARAMS,
+            INVALID_LIBRARY,
+            JOB_NOT_FOUND,
+            CONFIRMATION_REQUIRED,
+            PLAN_NOT_FOUND,
+            PLAN_KIND_MISMATCH,
+            PLAN_LIBRARY_MISMATCH,
+        ] {
+            let err = BookrackCliError::from_rpc(code, "boom".into());
+            assert!(
+                matches!(err, BookrackCliError::RpcUserError { .. }),
+                "code {code} should be RpcUserError"
+            );
+            assert_eq!(err.exit_code(), 2, "code {code}");
+        }
+    }
+
+    #[test]
+    fn from_rpc_classifies_busy_codes_as_exit_four() {
+        for &code in &[BUSY, NOT_READY] {
+            let err = BookrackCliError::from_rpc(code, "later".into());
+            assert!(matches!(err, BookrackCliError::RpcBusy { .. }));
+            assert_eq!(err.exit_code(), 4, "code {code}");
+        }
+    }
+
+    #[test]
+    fn from_rpc_classifies_protocol_and_internal_codes_as_exit_one() {
+        for &code in &[PARSE_ERROR, INVALID_REQUEST, INTERNAL_ERROR, -32999] {
+            let err = BookrackCliError::from_rpc(code, "bug".into());
+            assert!(matches!(err, BookrackCliError::RpcInternal { .. }));
+            assert_eq!(err.exit_code(), 1, "code {code}");
+        }
+    }
+
+    #[test]
+    fn classify_eyre_finds_typed_cli_error_through_context_wrappers() {
+        let err: eyre::Report = eyre::Report::from(BookrackCliError::DaemonNotRunning)
+            .wrap_err("running `library.show_book`")
+            .wrap_err("first context");
+        let cause = classify_eyre(&err).expect("typed CLI error must be found");
+        assert!(matches!(cause.as_cli(), BookrackCliError::DaemonNotRunning));
+    }
+
+    #[test]
+    fn classify_eyre_classifies_wrapped_rpc_error() {
+        let rpc = ControlError::Rpc {
+            code: INVALID_PARAMS,
+            message: "bad arg `n`".into(),
+            data: None,
+        };
+        let err: eyre::Report = eyre::Report::from(rpc).wrap_err("logs.tail rpc");
+        let cause = classify_eyre(&err).expect("wrapped RPC must classify");
+        let cli_err = cause.as_cli();
+        assert!(matches!(cli_err, BookrackCliError::RpcUserError { .. }));
+        assert_eq!(cli_err.exit_code(), 2);
+    }
+
+    #[test]
+    fn classify_eyre_returns_none_for_unrelated_errors() {
+        let err: eyre::Report = eyre::eyre!("something else");
+        assert!(classify_eyre(&err).is_none());
     }
 }
