@@ -17,6 +17,7 @@
 use std::sync::OnceLock;
 
 pub mod confirm;
+pub mod distribution;
 pub mod human;
 pub mod job_report;
 pub mod progress;

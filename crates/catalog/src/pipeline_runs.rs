@@ -138,6 +138,33 @@ impl Catalog {
         Ok(())
     }
 
+    /// List `pipeline_runs` rows, newest first. When `command_filter`
+    /// is set, only rows whose `command` matches are returned; when
+    /// `last` is set, the result is capped at that many rows.
+    pub fn list_pipeline_runs(
+        &self,
+        command_filter: Option<&str>,
+        last: Option<usize>,
+    ) -> Result<Vec<PipelineRun>> {
+        let mut sql = format!("SELECT {} FROM pipeline_runs", SPEC.select_list());
+        if command_filter.is_some() {
+            sql.push_str(" WHERE command = :command");
+        }
+        sql.push_str(" ORDER BY started_at DESC, pipeline_run_id DESC");
+        if let Some(limit) = last {
+            sql.push_str(&format!(" LIMIT {limit}"));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows: Vec<PipelineRun> = if let Some(command) = command_filter {
+            stmt.query_map(named_params! { ":command": command }, PipelineRun::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([], PipelineRun::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
     /// Fetch one `pipeline_runs` row by id, or `None` if the id is unknown.
     pub fn pipeline_run(&self, pipeline_run_id: &str) -> Result<Option<PipelineRun>> {
         let mut stmt = self
@@ -286,6 +313,41 @@ mod tests {
         if a.trim_end_matches(sha_a) == b.trim_end_matches(sha_b) {
             assert_ne!(sha_a, sha_b);
         }
+    }
+
+    #[test]
+    fn list_pipeline_runs_filters_by_command_and_caps_at_last() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut row_a = fixture("distill_build-2026-06-28T10:00:00Z-a");
+        row_a.command = "distill_build".to_string();
+        row_a.started_at = "2026-06-28T10:00:00Z".to_string();
+        let mut row_b = fixture("distill_build-2026-06-28T11:00:00Z-b");
+        row_b.command = "distill_build".to_string();
+        row_b.started_at = "2026-06-28T11:00:00Z".to_string();
+        let mut row_c = fixture("ingest-2026-06-28T12:00:00Z-c");
+        row_c.command = "ingest".to_string();
+        row_c.started_at = "2026-06-28T12:00:00Z".to_string();
+        for row in [&row_a, &row_b, &row_c] {
+            catalog.insert_pipeline_run(row).expect("insert");
+        }
+
+        // No filter, no cap: every row, newest first.
+        let all = catalog.list_pipeline_runs(None, None).expect("list");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].pipeline_run_id, row_c.pipeline_run_id);
+        assert_eq!(all[2].pipeline_run_id, row_a.pipeline_run_id);
+
+        // Command filter narrows to distill_build, newest first.
+        let distill = catalog
+            .list_pipeline_runs(Some("distill_build"), None)
+            .expect("list distill");
+        assert_eq!(distill.len(), 2);
+        assert_eq!(distill[0].pipeline_run_id, row_b.pipeline_run_id);
+
+        // `last` caps after sorting.
+        let one = catalog.list_pipeline_runs(None, Some(1)).expect("last 1");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].pipeline_run_id, row_c.pipeline_run_id);
     }
 
     #[test]

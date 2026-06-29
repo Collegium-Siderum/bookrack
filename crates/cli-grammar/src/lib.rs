@@ -237,6 +237,31 @@ pub struct DistillLintArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct DistillListArgs {}
 
+/// `bookrack runs` — list and inspect pipeline runs. A run row is
+/// opened by every top-level command that drives a pipeline; its
+/// rollup is refreshed at run close when the command writes any audit
+/// row.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum RunsAction {
+    /// List recent `pipeline_runs` rows.
+    List {
+        /// Cap the result to the most recent N runs. Default is no cap.
+        #[arg(long, value_name = "N")]
+        last: Option<usize>,
+        /// Filter to one command name (e.g. `distill_build`, `ingest`,
+        /// `dryrun`).
+        #[arg(long, value_name = "NAME")]
+        command: Option<String>,
+    },
+    /// Show one run by id, with its summary verdict / flag / coverage
+    /// distributions rendered as horizontal histograms.
+    Show {
+        /// The `pipeline_runs.pipeline_run_id` to show. The composite
+        /// form is `<command>-<ISO8601>-<sha8>`.
+        run_id: String,
+    },
+}
+
 /// Metadata-side write commands. Lives in the grammar crate so both
 /// the daemon-side runner (`bookrack_runtime::cmd::metadata::run_write`)
 /// and the REPL client can parse them.

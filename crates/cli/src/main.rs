@@ -318,6 +318,12 @@ enum Command {
         #[command(subcommand)]
         action: DistillAction,
     },
+    /// Inspect `pipeline_runs` — the registry of every top-level
+    /// operator invocation, with its `pipeline_run_summary` rollup.
+    Runs {
+        #[command(subcommand)]
+        action: bookrack_cli_grammar::RunsAction,
+    },
     /// Stream or snapshot the running daemon's logs.
     ///
     /// `--follow` (the default with no other flags) subscribes to the
@@ -687,6 +693,7 @@ async fn run() -> Result<()> {
         }
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
+        Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
         Command::Logs(args) => cmd::cli_client::logs::run(args, None).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
