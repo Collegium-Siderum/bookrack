@@ -14,6 +14,7 @@
 //! the schema and the code reading it cannot drift apart.
 
 mod backup;
+mod connection;
 mod ddl;
 mod meta;
 mod open;
@@ -23,6 +24,9 @@ mod timing;
 mod verify;
 
 pub use backup::backup_database;
+pub use connection::{
+    open_production, open_production_query_only, open_production_strict_read_only,
+};
 pub use ddl::render_ddl;
 pub use meta::{apply_schema, meta_get, meta_set};
 pub use open::{OpenDecision, READER_VERSION, reader_version_decision};

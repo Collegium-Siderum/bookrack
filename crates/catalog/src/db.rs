@@ -87,7 +87,7 @@ impl Catalog {
     /// snapshots an existing database before migrating it. This variant is
     /// for callers that manage backups themselves or do not need them.
     pub fn open(path: &Path) -> Result<Catalog> {
-        Catalog::from_connection(Connection::open(path)?, None)
+        Catalog::from_connection(bookrack_dbkit::open_production(path)?, None)
     }
 
     /// Open the `catalog.db` at `path`, backing it up into `backup_dir`
@@ -103,7 +103,10 @@ impl Catalog {
             .and_then(|s| s.to_str())
             .unwrap_or("catalog")
             .to_string();
-        Catalog::from_connection(Connection::open(path)?, Some((backup_dir, stem.as_str())))
+        Catalog::from_connection(
+            bookrack_dbkit::open_production(path)?,
+            Some((backup_dir, stem.as_str())),
+        )
     }
 
     /// Open an ephemeral, private `catalog.db` held entirely in memory.
@@ -212,7 +215,7 @@ impl Catalog {
     /// unmigrated or schema-drifted database is refused at open rather
     /// than discovered halfway through a query.
     pub fn open_read_only(path: &Path) -> Result<Catalog> {
-        let conn = Connection::open(path)?;
+        let conn = bookrack_dbkit::open_production_query_only(path)?;
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current > TARGET_VERSION {
             return Err(CatalogError::SchemaTooNew {
@@ -220,7 +223,6 @@ impl Catalog {
                 expected: TARGET_VERSION,
             });
         }
-        conn.pragma_update(None, "query_only", "ON")?;
         bookrack_dbkit::verify_all(&conn, SPECS).map_err(CatalogError::Verify)?;
         let catalog = Catalog {
             conn: TimedConnection::new(conn, "catalog"),
@@ -664,6 +666,60 @@ mod tests {
         assert_eq!(ts.len(), 20, "{ts}");
         assert!(ts.ends_with('Z'), "{ts}");
         assert_eq!(ts.as_bytes()[10], b'T', "{ts}");
+    }
+
+    /// A read-only stats-shaped scan drains through a writer's
+    /// `BEGIN EXCLUSIVE` hold. The production helpers put the
+    /// catalog in WAL with a busy timeout, so the reader sees a
+    /// committed snapshot and the EXCLUSIVE-window upgrade no
+    /// longer surfaces as `catalog error` to consumers like
+    /// `library.stats`.
+    #[test]
+    fn open_read_only_drains_through_a_writer_exclusive_hold() {
+        use crate::NewIntake;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let dir = unique_dir("read-during-exclusive");
+        let path = dir.join("catalog.db");
+        {
+            let mut catalog = Catalog::open(&path).expect("seed open");
+            for i in 0..32 {
+                catalog
+                    .register_intake(ItemKind::Book, &NewIntake::new(format!("sha-{i}")))
+                    .expect("seed row");
+            }
+        }
+
+        let writer_path = path.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let conn = bookrack_dbkit::open_production(&writer_path).expect("writer open");
+            conn.execute_batch("BEGIN EXCLUSIVE;").expect("begin");
+            ready_tx.send(()).expect("notify ready");
+            thread::sleep(Duration::from_millis(1_500));
+            conn.execute_batch("COMMIT;").expect("commit");
+        });
+
+        ready_rx.recv().expect("writer ready");
+
+        let start = Instant::now();
+        let reader = Catalog::open_read_only(&path).expect("reader open");
+        let count: i64 = reader
+            .conn
+            .query_row("SELECT count(*) FROM intake", [], |row| row.get(0))
+            .expect("stats scan");
+        let elapsed = start.elapsed();
+
+        writer.join().expect("writer join");
+        assert_eq!(count, 32);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "stats scan took {elapsed:?}; reader must drain inside busy timeout",
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     /// A unique temp directory for a test that needs a real file, tagged so

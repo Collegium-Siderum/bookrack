@@ -7,7 +7,7 @@ use std::path::Path;
 use bookrack_dbkit::{
     OpenDecision, READER_VERSION, TableSpec, TimedConnection, apply_schema, reader_version_decision,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 
 use crate::{CorpusError, Result};
 
@@ -61,7 +61,7 @@ impl Corpus {
     /// Fails with [`CorpusError::SchemaMismatch`] if the file exists but
     /// was built by an incompatible schema revision.
     pub fn open(path: &Path) -> Result<Corpus> {
-        Corpus::from_connection(Connection::open(path)?)
+        Corpus::from_connection(bookrack_dbkit::open_production(path)?)
     }
 
     /// Open an ephemeral, private `corpus.db` held entirely in memory.
@@ -80,11 +80,7 @@ impl Corpus {
     /// A missing file is reported as a SQLite open failure rather than
     /// silently materialized.
     pub fn open_read_only(path: &Path) -> Result<Corpus> {
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.pragma_update(None, "query_only", "ON")?;
+        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         bookrack_dbkit::verify_all(&conn, SPECS).map_err(CorpusError::Verify)?;
         let corpus = Corpus {
             conn: TimedConnection::new(conn, "corpus"),

@@ -101,6 +101,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **dbkit, catalog, corpus: SQLite stores open in WAL with a 5 s
+  busy timeout.** Every production handle now routes through three
+  new `bookrack_dbkit` helpers — `open_production`,
+  `open_production_query_only`, `open_production_strict_read_only`
+  — so the per-connection PRAGMAs are applied in one place. A
+  reader scanning the catalog during an ingest commit no longer
+  fails with `control-plane rpc error -32603: catalog error`; reads
+  see a committed snapshot through the EXCLUSIVE-window upgrades a
+  writer briefly takes. The catalog and dbkit suites both gain a
+  `BEGIN EXCLUSIVE` regression test that fails closed if the WAL or
+  busy-timeout PRAGMAs are ever dropped.
 - **cli: destructive confirmation gates are now symmetric across
   every write verb.** `bookrack vectors drop` and `bookrack papers
   vectors drop` previously dispatched the RPC with no prompt at

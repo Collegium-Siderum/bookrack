@@ -58,14 +58,13 @@ fn opening_a_chmod_444_catalog_for_read_write_fails_readably() {
     );
 
     // Nothing was created as a side effect of the failed open: only the
-    // seed file remains, and no sibling lance / corpus directories.
-    let siblings: Vec<_> = std::fs::read_dir(dir.path())
+    // seed file and its WAL sidecars remain, with no sibling lance or
+    // corpus directories.
+    let allowed = ["catalog.db", "catalog.db-wal", "catalog.db-shm"];
+    let stray: Vec<_> = std::fs::read_dir(dir.path())
         .expect("read dir")
         .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .filter(|name| !allowed.iter().any(|a| name == std::ffi::OsStr::new(a)))
         .collect();
-    assert_eq!(
-        siblings.len(),
-        1,
-        "unexpected sibling entries: {siblings:?}"
-    );
+    assert!(stray.is_empty(), "unexpected sibling entries: {stray:?}");
 }
