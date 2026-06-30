@@ -101,8 +101,8 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
-- **dbkit, catalog, corpus: SQLite stores open in WAL with a 5 s
-  busy timeout.** Every production handle now routes through three
+- **dbkit, catalog, corpus, refs: SQLite stores open in WAL with a
+  5 s busy timeout.** Every production handle now routes through three
   new `bookrack_dbkit` helpers — `open_production`,
   `open_production_query_only`, `open_production_strict_read_only`
   — so the per-connection PRAGMAs are applied in one place. A

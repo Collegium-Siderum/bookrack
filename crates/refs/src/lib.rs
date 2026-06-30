@@ -67,7 +67,7 @@ pub struct Refs {
 impl Refs {
     /// Open `reference.db` at `path` and bring it to [`TARGET_VERSION`].
     pub fn open(path: &Path) -> RefsResult<Self> {
-        let mut conn = Connection::open(path)?;
+        let mut conn = bookrack_dbkit::open_production(path)?;
         migrate::migrations().to_latest(&mut conn)?;
         Ok(Self { conn })
     }

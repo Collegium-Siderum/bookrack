@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Centralised SQLite open path: WAL + busy timeout for read-write
+# handles, query-only / strict read-only variants for read consumers.
+bookrack-dbkit = { path = "../dbkit" }
 rusqlite.workspace = true
 rusqlite_migration.workspace = true
 # `Value` round-trips for `payload_json` / `source_json` / overlay
