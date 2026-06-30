@@ -459,8 +459,7 @@ async fn ingest(args: PapersIngestArgs, runtime_dir: Option<PathBuf>) -> Result<
     }
 
     let report = helpers::await_jobs(rx, &job_ids).await?;
-    helpers::emit_job_summary(&report, "Ingested", &label_owned);
-    Ok(())
+    helpers::finalize_job_batch(&report, "Ingested", &label_owned)
 }
 
 async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {

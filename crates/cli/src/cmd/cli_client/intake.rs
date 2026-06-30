@@ -68,8 +68,7 @@ pub async fn run(
             }
 
             let report = helpers::await_jobs(rx, &job_ids).await?;
-            helpers::emit_job_summary(&report, "OCR-ingested", &label);
-            Ok(())
+            helpers::finalize_job_batch(&report, "OCR-ingested", &label)
         }
     }
 }

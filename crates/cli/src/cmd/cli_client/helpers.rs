@@ -326,6 +326,25 @@ pub fn emit_job_summary(report: &JobOutcomeReport, action: &str, label: &str) {
     println!("{}", report.format_one_line(action, label));
 }
 
+/// Render the per-batch summary and translate a non-success outcome
+/// into a typed [`BookrackCliError::IngestPartialFailure`] so the
+/// binary exits with code `5` instead of `0`. Centralised here so
+/// every `await_jobs` caller shares the same surface; per-job
+/// detail in the rendered summary is the operator-facing diagnostic.
+pub fn finalize_job_batch(report: &JobOutcomeReport, action: &str, label: &str) -> Result<()> {
+    emit_job_summary(report, action, label);
+    if report.all_succeeded() {
+        Ok(())
+    } else {
+        Err(BookrackCliError::IngestPartialFailure {
+            failed: report.totals.failed,
+            cancelled: report.totals.cancelled,
+            total: report.jobs.len() as u32,
+        }
+        .into())
+    }
+}
+
 /// Pretty-print a JSON value on stdout.
 pub fn print_value(value: &Value) {
     if ctx().is_quiet() {
@@ -630,5 +649,93 @@ mod tests {
         assert_eq!(destructive_confirmation_decision(true, false), Skip);
         assert_eq!(destructive_confirmation_decision(false, true), Skip);
         assert_eq!(destructive_confirmation_decision(true, true), Skip);
+    }
+
+    fn rec(id: &str, state: JobOutcomeState) -> JobOutcomeRecord {
+        JobOutcomeRecord {
+            job_id: id.into(),
+            kind: "book".into(),
+            state,
+            error: None,
+            finished_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn finalize_job_batch_returns_ok_when_every_job_succeeded() {
+        let report = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::Done),
+            ],
+            Duration::from_millis(0),
+        );
+        finalize_job_batch(&report, "Ingested", "label").expect("all-done batch returns Ok");
+    }
+
+    #[test]
+    fn finalize_job_batch_surfaces_typed_error_for_failed_jobs() {
+        let report = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::Failed),
+            ],
+            Duration::from_millis(0),
+        );
+        let err = finalize_job_batch(&report, "Ingested", "label").unwrap_err();
+        let cli = err
+            .downcast_ref::<BookrackCliError>()
+            .expect("typed CLI error must surface directly");
+        match cli {
+            BookrackCliError::IngestPartialFailure {
+                failed,
+                cancelled,
+                total,
+            } => {
+                assert_eq!(*failed, 1);
+                assert_eq!(*cancelled, 0);
+                assert_eq!(*total, 2);
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert_eq!(cli.exit_code(), 5);
+    }
+
+    #[test]
+    fn finalize_job_batch_surfaces_typed_error_for_cancelled_jobs() {
+        let report = JobOutcomeReport::new(
+            vec![rec("a", JobOutcomeState::Cancelled)],
+            Duration::from_millis(0),
+        );
+        let err = finalize_job_batch(&report, "Ingested", "label").unwrap_err();
+        let cli = err.downcast_ref::<BookrackCliError>().unwrap();
+        assert!(matches!(
+            cli,
+            BookrackCliError::IngestPartialFailure {
+                failed: 0,
+                cancelled: 1,
+                total: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn finalize_job_batch_error_survives_context_wrappers_for_classify_eyre() {
+        use bookrack_cli::error::classify_eyre;
+
+        let report = JobOutcomeReport::new(
+            vec![rec("a", JobOutcomeState::Failed)],
+            Duration::from_millis(0),
+        );
+        let err = finalize_job_batch(&report, "Ingested", "label")
+            .unwrap_err()
+            .wrap_err("await ingest jobs")
+            .wrap_err("bookrack ingest");
+        let cause = classify_eyre(&err).expect("typed CLI error must be reachable");
+        assert!(matches!(
+            cause.as_cli(),
+            BookrackCliError::IngestPartialFailure { .. }
+        ));
+        assert_eq!(cause.as_cli().exit_code(), 5);
     }
 }

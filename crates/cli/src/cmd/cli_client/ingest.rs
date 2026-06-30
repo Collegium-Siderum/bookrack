@@ -49,6 +49,5 @@ pub async fn run(
 
     let report = helpers::await_jobs(rx, &job_ids).await?;
     let label = basename_or_dash(args.path.to_str());
-    helpers::emit_job_summary(&report, "Ingested", label);
-    Ok(())
+    helpers::finalize_job_batch(&report, "Ingested", label)
 }

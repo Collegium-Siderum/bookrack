@@ -51,6 +51,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **cli: `bookrack ingest`, `bookrack papers ingest`, and `bookrack
+  intake ocr` exit `5` when an awaited job batch had failures.**
+  All three commands previously returned `0` regardless of per-job
+  outcome: the operator-facing summary named `Failed` and `Cancelled`
+  jobs on stdout, but `bookrack ingest /dir --recursive && echo ok`
+  still proceeded to `echo ok`. The CLI now surfaces a typed
+  `IngestPartialFailure` whenever `await_jobs` produces any non-`Done`
+  terminal state and maps it to exit code `5` (`async job batch had
+  failures` in the control-plane exit-code table). `--no-wait` still
+  returns `0` because the batch is not awaited.
+
 - **catalog browse: paginated lists assemble each page in a constant
   number of catalog queries, and the `truncated` flag drops a stale
   signal.** The `find_books` / `find_papers` / `list_metadata` reads

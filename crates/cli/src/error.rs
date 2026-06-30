@@ -85,6 +85,18 @@ pub enum BookrackCliError {
     /// Treated as a CLI/daemon bug; not retryable.
     #[error("rpc error {code}: {message}")]
     RpcInternal { code: i32, message: String },
+
+    /// Awaited a batch of ingest jobs and one or more reached a
+    /// non-`Done` terminal state (`Failed` or `Cancelled`). The
+    /// per-job summary on stdout has already named the offenders;
+    /// the binary only needs to surface a non-zero exit code so
+    /// scripts can branch on partial failure.
+    #[error("ingest: {failed} failed, {cancelled} cancelled of {total} job(s)")]
+    IngestPartialFailure {
+        failed: u32,
+        cancelled: u32,
+        total: u32,
+    },
 }
 
 impl BookrackCliError {
@@ -100,14 +112,18 @@ impl BookrackCliError {
             Self::RpcUserError { .. } => 2,
             Self::RpcBusy { .. } => 4,
             Self::RpcInternal { .. } => 1,
+            Self::IngestPartialFailure { .. } => 5,
         }
     }
 
-    /// True for `DoctorUnhealthy`, which lets `main` skip its own
-    /// `bookrack: …` prefix because the doctor renderer has already
-    /// drawn the failure rows.
+    /// True for variants whose stdout/stderr renderer has already
+    /// drawn the failure surface, so `main`'s reporter must skip
+    /// the `bookrack: …` prefix to avoid an extra line of noise.
     pub fn is_self_reported(&self) -> bool {
-        matches!(self, Self::DoctorUnhealthy)
+        matches!(
+            self,
+            Self::DoctorUnhealthy | Self::IngestPartialFailure { .. }
+        )
     }
 
     /// Classify a JSON-RPC error into the matching CLI variant so the
@@ -220,6 +236,21 @@ mod tests {
     fn doctor_unhealthy_is_self_reported() {
         assert!(BookrackCliError::DoctorUnhealthy.is_self_reported());
         assert!(!BookrackCliError::DaemonNotRunning.is_self_reported());
+    }
+
+    #[test]
+    fn ingest_partial_failure_uses_exit_five_and_is_self_reported() {
+        let err = BookrackCliError::IngestPartialFailure {
+            failed: 1,
+            cancelled: 0,
+            total: 3,
+        };
+        assert_eq!(err.exit_code(), 5);
+        assert!(err.is_self_reported());
+        let s = err.to_string();
+        assert!(s.contains("1 failed"));
+        assert!(s.contains("0 cancelled"));
+        assert!(s.contains("3 job"));
     }
 
     #[test]
