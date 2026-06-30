@@ -899,6 +899,29 @@ mod tests {
     }
 
     #[test]
+    fn ingest_accepts_priority_flag() {
+        Cli::try_parse_from(["bookrack", "ingest", "/x/book.epub", "--priority", "high"])
+            .expect("the flag parses");
+    }
+
+    #[test]
+    fn intake_ocr_accepts_priority_force_hold_flags() {
+        Cli::try_parse_from([
+            "bookrack",
+            "intake",
+            "ocr",
+            "/x/out.md",
+            "--from-pdf",
+            "/x/scan.pdf",
+            "--force",
+            "--hold-for-metadata",
+            "--priority",
+            "normal",
+        ])
+        .expect("the flags parse");
+    }
+
+    #[test]
     fn dryrun_subcommand_parses() {
         for argv in [
             vec!["bookrack", "dryrun", "/x"],

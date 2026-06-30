@@ -56,6 +56,10 @@ pub struct IngestArgs {
     /// catalog. Without this flag, duplicate sources are skipped.
     #[arg(long)]
     pub force: bool,
+    /// Queue priority for the enqueued job(s): `low`, `normal`, or
+    /// `high`. Defaults to `normal`.
+    #[arg(long, value_name = "LEVEL")]
+    pub priority: Option<String>,
     /// Skip waiting for the enqueued job(s) to finish. Without this
     /// flag, the command stays attached until every job reaches a
     /// terminal state (`Done` / `Failed` / `Cancelled`) and then
@@ -139,6 +143,21 @@ pub enum IntakeAction {
         /// than being silently treated as blank.
         #[arg(long)]
         allow_partial: bool,
+        /// Re-ingest even when either the OCR markdown or the scan PDF
+        /// already has an entry under its SHA-256. Without this flag,
+        /// duplicate sources are skipped.
+        #[arg(long)]
+        force: bool,
+        /// Park the resulting book at STRUCTURE if the audit verdict
+        /// is `needs_work`, skipping CHUNK and EMBED until a curator
+        /// drives it past the metadata gate. Mirrors the `ingest`
+        /// flag of the same name.
+        #[arg(long)]
+        hold_for_metadata: bool,
+        /// Queue priority for the enqueued job: `low`, `normal`, or
+        /// `high`. Defaults to `normal`.
+        #[arg(long, value_name = "LEVEL")]
+        priority: Option<String>,
         /// Skip waiting for the enqueued job to finish. Without this
         /// flag, the command stays attached until the OCR intake
         /// reaches a terminal state and prints a one-line human
@@ -1002,11 +1021,114 @@ mod tests {
             #[command(subcommand)]
             action: PapersAction,
         },
+        Ingest(IngestArgs),
+        Intake {
+            #[command(subcommand)]
+            action: IntakeAction,
+        },
     }
 
     fn parse(tokens: &[&str]) -> PapersAction {
         match TestCli::try_parse_from(tokens).expect("parse").command {
             TestCommand::Papers { action } => action,
+            other => panic!("expected papers, got {other:?}"),
+        }
+    }
+
+    fn parse_ingest(tokens: &[&str]) -> IngestArgs {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Ingest(args) => args,
+            other => panic!("expected ingest, got {other:?}"),
+        }
+    }
+
+    fn parse_intake(tokens: &[&str]) -> IntakeAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Intake { action } => action,
+            other => panic!("expected intake, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ingest_carries_priority_flag() {
+        let args = parse_ingest(&[
+            "ingest",
+            "/tmp/b.epub",
+            "--force",
+            "--hold-for-metadata",
+            "--priority",
+            "high",
+        ]);
+        assert_eq!(args.path.to_string_lossy(), "/tmp/b.epub");
+        assert!(args.force);
+        assert!(args.hold_for_metadata);
+        assert!(!args.recursive);
+        assert!(!args.no_wait);
+        assert_eq!(args.priority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ingest_priority_is_optional() {
+        let args = parse_ingest(&["ingest", "/tmp/b.epub"]);
+        assert!(args.priority.is_none());
+    }
+
+    #[test]
+    fn intake_ocr_carries_priority_force_hold_flags() {
+        let action = parse_intake(&[
+            "intake",
+            "ocr",
+            "/tmp/out.md",
+            "--from-pdf",
+            "/tmp/scan.pdf",
+            "--force",
+            "--hold-for-metadata",
+            "--priority",
+            "low",
+        ]);
+        match action {
+            IntakeAction::Ocr {
+                ocr_md,
+                from_pdf,
+                force,
+                hold_for_metadata,
+                priority,
+                allow_partial,
+                expected_pages,
+                no_wait,
+            } => {
+                assert_eq!(ocr_md.to_string_lossy(), "/tmp/out.md");
+                assert_eq!(from_pdf.to_string_lossy(), "/tmp/scan.pdf");
+                assert!(force);
+                assert!(hold_for_metadata);
+                assert_eq!(priority.as_deref(), Some("low"));
+                assert!(!allow_partial);
+                assert!(expected_pages.is_none());
+                assert!(!no_wait);
+            }
+        }
+    }
+
+    #[test]
+    fn intake_ocr_defaults_when_priority_force_hold_omitted() {
+        let action = parse_intake(&[
+            "intake",
+            "ocr",
+            "/tmp/out.md",
+            "--from-pdf",
+            "/tmp/scan.pdf",
+        ]);
+        match action {
+            IntakeAction::Ocr {
+                force,
+                hold_for_metadata,
+                priority,
+                ..
+            } => {
+                assert!(!force);
+                assert!(!hold_for_metadata);
+                assert!(priority.is_none());
+            }
         }
     }
 

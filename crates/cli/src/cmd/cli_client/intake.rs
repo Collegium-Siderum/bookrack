@@ -27,6 +27,9 @@ pub async fn run(
             from_pdf,
             expected_pages,
             allow_partial,
+            force,
+            hold_for_metadata,
+            priority,
             no_wait,
         } => {
             // Subscribe before issuing the RPC so a fast worker's
@@ -43,12 +46,17 @@ pub async fn run(
                 "ocr_md": ocr_md,
                 "from_pdf": from_pdf,
                 "allow_partial": allow_partial,
+                "force": force,
+                "hold_for_metadata": hold_for_metadata,
             });
             if let Some(pages) = expected_pages {
                 params["expected_pages"] = Value::from(pages);
             }
             if let Some(name) = audit_profile {
                 params["audit_profile"] = Value::String(name);
+            }
+            if let Some(level) = priority {
+                params["priority"] = Value::String(level);
             }
 
             let response = helpers::dispatch(&client, "intake.ocr", params).await?;

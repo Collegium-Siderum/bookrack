@@ -36,6 +36,9 @@ pub async fn run(
     if let Some(name) = audit_profile {
         params["audit_profile"] = serde_json::Value::String(name);
     }
+    if let Some(level) = args.priority {
+        params["priority"] = serde_json::Value::String(level);
+    }
     let response = helpers::dispatch(&client, "ingest.submit", params).await?;
     let job_ids = helpers::extract_job_ids(&response);
 
