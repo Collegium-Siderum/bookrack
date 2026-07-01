@@ -440,6 +440,9 @@ pub struct SessionQueueStatusResult {
     /// because the source was already in the catalog with matching
     /// stamps, so no new intake row was written.
     pub skipped_duplicate: usize,
+    /// Jobs in `NeedsOcr` state: the source had no usable text layer and
+    /// was registered as a `needs_ocr` anchor for a later OCR pass.
+    pub needs_ocr: usize,
     /// Jobs in `Failed` state.
     pub failed: usize,
     /// Jobs in `Cancelled` state.
@@ -1337,15 +1340,16 @@ impl BookrackServer {
             .queue_state
             .lock()
             .map_err(|e| ErrorData::internal_error(format!("queue state lock: {e}"), None))?;
-        let mut counts = [0usize; 6];
+        let mut counts = [0usize; 7];
         for job in &state.jobs {
             let idx = match job.state {
                 JobState::Pending => 0,
                 JobState::Running => 1,
                 JobState::Done => 2,
                 JobState::SkippedDuplicate => 3,
-                JobState::Failed => 4,
-                JobState::Cancelled => 5,
+                JobState::NeedsOcr => 4,
+                JobState::Failed => 5,
+                JobState::Cancelled => 6,
             };
             counts[idx] += 1;
         }
@@ -1356,7 +1360,10 @@ impl BookrackServer {
             .take(SESSION_QUEUE_STATUS_RECENT)
             .map(|j| QueueJobSummary {
                 id: j.id.clone(),
-                state: format!("{:?}", j.state).to_ascii_lowercase(),
+                // The stable snake_case wire token, not `Debug`, so a
+                // multi-word state reads `needs_ocr` rather than
+                // `needsocr`.
+                state: j.state.as_wire_str().to_string(),
                 library: j.library.clone(),
                 path: j.path.display().to_string(),
             })
@@ -1367,8 +1374,9 @@ impl BookrackServer {
             running: counts[1],
             done: counts[2],
             skipped_duplicate: counts[3],
-            failed: counts[4],
-            cancelled: counts[5],
+            needs_ocr: counts[4],
+            failed: counts[5],
+            cancelled: counts[6],
             recent,
         };
         respond_with(&result)

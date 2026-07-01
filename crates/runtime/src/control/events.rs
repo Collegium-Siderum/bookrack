@@ -122,7 +122,7 @@ pub struct JobOutcomeSummary {
     #[cfg_attr(
         test,
         ts(
-            type = "\"pending\" | \"running\" | \"done\" | \"skipped_duplicate\" | \"failed\" | \"cancelled\""
+            type = "\"pending\" | \"running\" | \"done\" | \"skipped_duplicate\" | \"needs_ocr\" | \"failed\" | \"cancelled\""
         )
     )]
     pub state: JobState,

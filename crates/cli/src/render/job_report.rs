@@ -18,13 +18,17 @@ use super::human::short_id;
 ///
 /// `SkippedDuplicate` covers a job whose source was already in the
 /// catalog with up-to-date stamps, so the worker short-circuited
-/// without writing. It is a success terminal — distinct from `Done` so
-/// batch summaries can reconcile against `library.stats`.
+/// without writing. `NeedsOcr` covers a scan source with no usable text
+/// layer, registered as a `needs_ocr` anchor for a later OCR pass. Both
+/// are success terminals — distinct from `Done` so batch summaries can
+/// reconcile against `library.stats` and steer the operator to the OCR
+/// worklist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobOutcomeState {
     Done,
     SkippedDuplicate,
+    NeedsOcr,
     Failed,
     Cancelled,
 }
@@ -34,6 +38,7 @@ impl JobOutcomeState {
         match state {
             "done" | "Done" => Some(Self::Done),
             "skipped_duplicate" | "SkippedDuplicate" => Some(Self::SkippedDuplicate),
+            "needs_ocr" | "NeedsOcr" => Some(Self::NeedsOcr),
             "failed" | "Failed" => Some(Self::Failed),
             "cancelled" | "Cancelled" => Some(Self::Cancelled),
             _ => None,
@@ -44,7 +49,7 @@ impl JobOutcomeState {
     /// pipeline reported `Ok` on the runner future. Callers use this
     /// to decide whether a batch overall succeeded or not.
     pub fn is_success(self) -> bool {
-        matches!(self, Self::Done | Self::SkippedDuplicate)
+        matches!(self, Self::Done | Self::SkippedDuplicate | Self::NeedsOcr)
     }
 }
 
@@ -65,6 +70,7 @@ pub struct JobOutcomeRecord {
 pub struct JobTotals {
     pub done: u32,
     pub skipped_duplicate: u32,
+    pub needs_ocr: u32,
     pub failed: u32,
     pub cancelled: u32,
 }
@@ -74,6 +80,7 @@ impl JobTotals {
         match state {
             JobOutcomeState::Done => self.done += 1,
             JobOutcomeState::SkippedDuplicate => self.skipped_duplicate += 1,
+            JobOutcomeState::NeedsOcr => self.needs_ocr += 1,
             JobOutcomeState::Failed => self.failed += 1,
             JobOutcomeState::Cancelled => self.cancelled += 1,
         }
@@ -101,7 +108,9 @@ impl JobOutcomeReport {
         }
     }
 
-    /// True when every awaited job reached `Done`.
+    /// True when every awaited job reached a terminal success state
+    /// (`Done`, `SkippedDuplicate`, or `NeedsOcr`) — i.e. none failed or
+    /// were cancelled.
     pub fn all_succeeded(&self) -> bool {
         self.totals.failed == 0 && self.totals.cancelled == 0
     }
@@ -131,6 +140,9 @@ impl JobOutcomeReport {
                         self.totals.skipped_duplicate
                     ));
                 }
+                if self.totals.needs_ocr > 0 {
+                    parts.push(format!("{} need OCR", self.totals.needs_ocr));
+                }
                 if self.totals.failed > 0 {
                     parts.push(format!("{} failed", self.totals.failed));
                 }
@@ -151,6 +163,7 @@ fn state_word(state: JobOutcomeState) -> &'static str {
     match state {
         JobOutcomeState::Done => "done",
         JobOutcomeState::SkippedDuplicate => "already in catalog",
+        JobOutcomeState::NeedsOcr => "needs OCR",
         JobOutcomeState::Failed => "failed",
         JobOutcomeState::Cancelled => "cancelled",
     }
@@ -195,6 +208,37 @@ mod tests {
         assert_eq!(r.totals.done, 2);
         assert_eq!(r.totals.failed, 1);
         assert!(!r.all_succeeded());
+    }
+
+    #[test]
+    fn needs_ocr_is_a_success_terminal_and_summarises() {
+        let r = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::NeedsOcr),
+                rec("c", JobOutcomeState::NeedsOcr),
+            ],
+            Duration::from_millis(500),
+        );
+        assert_eq!(r.totals.needs_ocr, 2);
+        // A batch of scan sources is not a failure.
+        assert!(r.all_succeeded());
+        assert!(JobOutcomeState::NeedsOcr.is_success());
+        let line = r.format_one_line("Ingested", "books");
+        assert!(line.contains("1 done"));
+        assert!(line.contains("2 need OCR"), "got: {line}");
+    }
+
+    #[test]
+    fn from_wire_accepts_needs_ocr() {
+        assert_eq!(
+            JobOutcomeState::from_wire("needs_ocr"),
+            Some(JobOutcomeState::NeedsOcr)
+        );
+        assert_eq!(
+            JobOutcomeState::from_wire("NeedsOcr"),
+            Some(JobOutcomeState::NeedsOcr)
+        );
     }
 
     #[test]

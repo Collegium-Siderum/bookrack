@@ -658,6 +658,18 @@ mod tests {
     }
 
     #[test]
+    fn extract_finished_recognises_needs_ocr_state() {
+        // A scan source that ends in `needs_ocr` is a terminal the wait
+        // path must stop on, otherwise `bookrack ingest` would spin
+        // until the stall timeout when every job needed OCR.
+        let mut pending = HashSet::new();
+        pending.insert("a".to_string());
+        let ev = tick("a", "needs_ocr", 0, 0).value;
+        let record = extract_finished(&ev, &pending).expect("needs_ocr terminal recognised");
+        assert!(matches!(record.state, JobOutcomeState::NeedsOcr));
+    }
+
+    #[test]
     fn destructive_decision_matrix() {
         use DestructiveConfirmation::{Prompt, Skip};
         assert_eq!(destructive_confirmation_decision(false, false), Prompt);

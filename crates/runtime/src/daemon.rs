@@ -493,6 +493,7 @@ impl DaemonRuntime {
                                     return Ok::<queue::JobSuccess, queue::JobError>(
                                         queue::JobSuccess {
                                             no_op: report.no_op,
+                                            needs_ocr: false,
                                             intake_id: Some(report.ocr_intake_id),
                                         },
                                     );
@@ -506,13 +507,34 @@ impl DaemonRuntime {
                                             hold_for_metadata,
                                             audit_profile.as_deref(),
                                         );
-                                        let report = handle
-                                            .ingest_book(&path, &params)
-                                            .await
-                                            .map_err(|e| queue::classify_ingest_error(&e))?;
+                                        // A source with no usable text layer
+                                        // is not a failure: ingest registered
+                                        // a `needs_ocr` anchor before erroring,
+                                        // so surface it as a non-failure
+                                        // terminal carrying that anchor id.
+                                        // Recognize it before `classify_ingest_error`
+                                        // erases the typed error into a message.
+                                        let report = match handle.ingest_book(&path, &params).await
+                                        {
+                                            Ok(report) => report,
+                                            Err(e) => {
+                                                if let Some(intake_id) = queue::ingest_needs_ocr(&e)
+                                                {
+                                                    return Ok::<queue::JobSuccess, queue::JobError>(
+                                                        queue::JobSuccess {
+                                                            no_op: false,
+                                                            needs_ocr: true,
+                                                            intake_id: Some(intake_id),
+                                                        },
+                                                    );
+                                                }
+                                                return Err(queue::classify_ingest_error(&e));
+                                            }
+                                        };
                                         Ok::<queue::JobSuccess, queue::JobError>(
                                             queue::JobSuccess {
                                                 no_op: report.no_op,
+                                                needs_ocr: false,
                                                 intake_id: Some(report.intake_id),
                                             },
                                         )
@@ -533,6 +555,7 @@ impl DaemonRuntime {
                                         Ok::<queue::JobSuccess, queue::JobError>(
                                             queue::JobSuccess {
                                                 no_op: report.no_op,
+                                                needs_ocr: false,
                                                 intake_id: Some(report.intake_id),
                                             },
                                         )

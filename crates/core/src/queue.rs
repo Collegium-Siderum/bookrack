@@ -19,7 +19,7 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
-pub const QUEUE_SCHEMA_VERSION: u32 = 5;
+pub const QUEUE_SCHEMA_VERSION: u32 = 6;
 
 /// Pull order hint for the worker. The first pending job at the
 /// highest priority is picked next.
@@ -37,9 +37,13 @@ pub enum Priority {
 /// `Done` covers ingest runs that actually wrote to the catalog «new
 /// intake or forced re-run», while `SkippedDuplicate` marks jobs whose
 /// source was already on file with up-to-date stamps, so the worker
-/// short-circuited without changing catalog state. The two terminal
-/// states are distinct so operators can reconcile queue counts against
-/// `library.stats` without cross-referencing sha256.
+/// short-circuited without changing catalog state. `NeedsOcr` marks a
+/// job whose source has no usable text layer: the worker registered it
+/// as a `needs_ocr` intake anchor for a later OCR pass but wrote no
+/// book content. All three are non-failure terminal states, distinct so
+/// operators can reconcile queue counts against `library.stats` without
+/// cross-referencing sha256; `NeedsOcr` in particular keeps scan sources
+/// out of the `Failed` bucket where they do not belong.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -47,8 +51,27 @@ pub enum JobState {
     Running,
     Done,
     SkippedDuplicate,
+    NeedsOcr,
     Failed,
     Cancelled,
+}
+
+impl JobState {
+    /// The stable wire token for this state — the same `snake_case`
+    /// string serde emits. Kept as an explicit map so string consumers
+    /// (queue rendering, the MCP session tool) share one source of
+    /// truth instead of re-deriving the token from `Debug`.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            JobState::Pending => "pending",
+            JobState::Running => "running",
+            JobState::Done => "done",
+            JobState::SkippedDuplicate => "skipped_duplicate",
+            JobState::NeedsOcr => "needs_ocr",
+            JobState::Failed => "failed",
+            JobState::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// Side data carried by an OCR-intake job. When set on a [`QueueJob`],
@@ -125,16 +148,17 @@ pub struct QueueJob {
     /// When the worker transitioned this job to `Running`.
     pub started_at: Option<DateTime<Utc>>,
     /// When the worker transitioned this job to `Done`,
-    /// `SkippedDuplicate`, `Failed`, or `Cancelled`.
+    /// `SkippedDuplicate`, `NeedsOcr`, `Failed`, or `Cancelled`.
     pub finished_at: Option<DateTime<Utc>>,
     /// Failure message recorded when `state == Failed`.
     pub error: Option<String>,
-    /// Intake id the source was recognized as when the worker skipped
-    /// the job as a duplicate. Set together with
-    /// `state == SkippedDuplicate` so `queue list` can point the
-    /// operator at the existing catalog row without a sha256 lookup.
-    /// A v4 queue document (no `merged_into` field) loads with this
-    /// `None`, matching the previous single-`done` terminal.
+    /// Intake id this job resolved to: the existing catalog row when the
+    /// worker skipped the source as a duplicate (`SkippedDuplicate`), or
+    /// the `needs_ocr` anchor the worker registered for a scan source
+    /// (`NeedsOcr`). Set together with either terminal so `queue list`
+    /// can point the operator at the intake without a sha256 lookup. A
+    /// v4 queue document (no `merged_into` field) loads with this `None`,
+    /// matching the previous single-`done` terminal.
     #[serde(default)]
     pub merged_into: Option<i64>,
 }
@@ -290,6 +314,14 @@ mod tests {
         assert_eq!(json, "skipped_duplicate");
         let back: JobState = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, JobState::SkippedDuplicate);
+    }
+
+    #[test]
+    fn job_state_needs_ocr_serializes_as_snake_case() {
+        let json = serde_json::to_value(JobState::NeedsOcr).expect("serialize");
+        assert_eq!(json, "needs_ocr");
+        let back: JobState = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, JobState::NeedsOcr);
     }
 
     #[test]

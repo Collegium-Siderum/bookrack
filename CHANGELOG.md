@@ -10,6 +10,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime, cli, mcp: OCR-needed ingests get their own queue terminal
+  state `needs_ocr`, no longer counted as failures.** A book ingest whose
+  source has no usable text layer now ends in a distinct non-failure
+  terminal: the worker registers the `needs_ocr` anchor «see the OCR
+  worklist change» and records the job as `needs_ocr` with the anchor id
+  on `merged_into`, instead of routing it through the failure path. The
+  runner recognizes the typed `NeedsOcr` outcome before it is erased into
+  an error message. `queue.list`'s `summary`, the human `queue list`
+  footer, the `bookrack ingest` batch summary («N need OCR»), and MCP
+  `session.queue_status` all gain a `needs_ocr` count, and a batch of
+  scan sources no longer reports overall failure or returns exit 5.
+  `QUEUE_SCHEMA_VERSION` advances 5 → 6 «old documents load unchanged;
+  they simply never carry the new value». MCP `session.queue_status`
+  `recent[].state` now emits the stable snake_case wire token
+  («`needs_ocr`», «`skipped_duplicate`») rather than a `Debug`-derived
+  one.
+
 - **ingest, catalog, cli: OCR-needed sources become a durable, listable
   worklist.** When the extract stage rejects a source as image-only,
   ingest now registers it as a `needs_ocr` intake anchor — recording

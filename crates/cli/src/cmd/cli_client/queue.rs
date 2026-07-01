@@ -113,6 +113,7 @@ fn render_queue_summary(summary: &Value) -> String {
         ("running", "running"),
         ("done", "done"),
         ("skipped_duplicate", "skipped"),
+        ("needs_ocr", "needs-ocr"),
         ("failed", "failed"),
         ("cancelled", "cancelled"),
     ];

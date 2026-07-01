@@ -154,18 +154,22 @@ pub fn pull_pending(state: &mut QueueState) -> Option<QueueJob> {
 
 /// Success payload the runner returns to the worker loop.
 ///
-/// The worker collapses this into a [`JobOutcome`]: `no_op == true`
-/// means the ingest short-circuited on an already-registered source
-/// with up-to-date stamps «catalog unchanged» and maps to
-/// [`JobOutcome::SkippedDuplicate`]; otherwise it maps to
+/// The worker collapses this into a [`JobOutcome`]. `needs_ocr == true`
+/// means the source has no usable text layer and was registered as a
+/// `needs_ocr` intake anchor; it maps to [`JobOutcome::NeedsOcr`].
+/// Otherwise `no_op == true` means the ingest short-circuited on an
+/// already-registered source with up-to-date stamps «catalog unchanged»
+/// and maps to [`JobOutcome::SkippedDuplicate`]; a plain success maps to
 /// [`JobOutcome::Done`]. `intake_id` is the catalog row the source
-/// resolved to, forwarded onto `QueueJob::merged_into` on the skip
-/// branch so `queue list` can point the operator at the existing
-/// entry. Paper and reference pipelines that do not surface an intake
-/// id set it to `None`; the skip branch is book-only in practice.
+/// resolved to — the existing entry on the skip branch, the anchor on
+/// the needs-OCR branch — forwarded onto `QueueJob::merged_into` so
+/// `queue list` can point the operator at the intake. Paper and
+/// reference pipelines that do not surface an intake id set it to
+/// `None`; the skip and needs-OCR branches are book-only in practice.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JobSuccess {
     pub no_op: bool,
+    pub needs_ocr: bool,
     pub intake_id: Option<i64>,
 }
 
@@ -173,6 +177,7 @@ impl JobSuccess {
     pub fn done() -> Self {
         Self {
             no_op: false,
+            needs_ocr: false,
             intake_id: None,
         }
     }
@@ -188,6 +193,11 @@ pub enum JobOutcome {
     /// so no catalog write happened. The wrapped intake id points at
     /// the existing catalog row.
     SkippedDuplicate { intake_id: i64 },
+    /// The ingest rejected the source as image-only and registered a
+    /// `needs_ocr` intake anchor for a later OCR pass. The wrapped
+    /// intake id points at that anchor. A non-failure terminal: no book
+    /// content was written, but the job did what it could.
+    NeedsOcr { intake_id: i64 },
     /// The ingest call returned an error; the message is folded into
     /// `QueueJob::error`.
     Failed(String),
@@ -225,6 +235,22 @@ pub fn classify_ingest_error(err: &eyre::Report) -> JobError {
     } else {
         JobError::Book(message)
     }
+}
+
+/// If `err` carries an [`IngestError::NeedsOcr`] anywhere in its chain,
+/// return the registered anchor intake id. The ingest layer wraps its
+/// typed error with `.context(...)` before it reaches the worker, so
+/// the variant sits as a source on the chain rather than at the top;
+/// walk the chain and downcast, exactly as the control-plane error map
+/// does. `None` for every other error, which then flows through
+/// [`classify_ingest_error`] as usual.
+pub fn ingest_needs_ocr(err: &eyre::Report) -> Option<i64> {
+    err.chain().find_map(
+        |cause| match cause.downcast_ref::<bookrack_ingest::IngestError>() {
+            Some(bookrack_ingest::IngestError::NeedsOcr { intake_id, .. }) => Some(*intake_id),
+            _ => None,
+        },
+    )
 }
 
 fn is_fd_exhaustion(err: &eyre::Report) -> bool {
@@ -270,6 +296,11 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
         }
         JobOutcome::SkippedDuplicate { intake_id } => {
             job.state = JobState::SkippedDuplicate;
+            job.error = None;
+            job.merged_into = Some(intake_id);
+        }
+        JobOutcome::NeedsOcr { intake_id } => {
+            job.state = JobState::NeedsOcr;
             job.error = None;
             job.merged_into = Some(intake_id);
         }
@@ -450,14 +481,7 @@ pub fn render_list(state: &QueueState) -> String {
     );
     for job in &state.jobs {
         let short_id: String = job.id.chars().take(8).collect();
-        let state_label = match job.state {
-            JobState::Pending => "pending",
-            JobState::Running => "running",
-            JobState::Done => "done",
-            JobState::SkippedDuplicate => "skipped_duplicate",
-            JobState::Failed => "failed",
-            JobState::Cancelled => "cancelled",
-        };
+        let state_label = job.state.as_wire_str();
         let file = job
             .path
             .file_name()
@@ -524,8 +548,24 @@ where
 
         let (outcome, pause_queue) = match runner(job.clone()).await {
             Ok(JobSuccess {
+                needs_ocr: true,
+                intake_id: Some(intake_id),
+                ..
+            }) => (JobOutcome::NeedsOcr { intake_id }, false),
+            Ok(JobSuccess {
+                needs_ocr: true, ..
+            }) => {
+                // A needs-OCR success without an anchor id. The book
+                // path always registers the anchor before surfacing
+                // this, so the arm only guards a future runner that
+                // omits the id; fall back to Done rather than a
+                // needs_ocr terminal with a dangling `merged_into`.
+                (JobOutcome::Done, false)
+            }
+            Ok(JobSuccess {
                 no_op: true,
                 intake_id: Some(intake_id),
+                ..
             }) => (JobOutcome::SkippedDuplicate { intake_id }, false),
             Ok(JobSuccess { no_op: true, .. }) => {
                 // A pipeline claimed the noop-if-up-to-date fast path
@@ -643,6 +683,9 @@ fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
         JobOutcome::Done => eprintln!("queue: {short} {name} done"),
         JobOutcome::SkippedDuplicate { intake_id } => {
             eprintln!("queue: {short} {name} skipped (already in catalog as intake {intake_id})")
+        }
+        JobOutcome::NeedsOcr { intake_id } => {
+            eprintln!("queue: {short} {name} needs OCR (anchor intake {intake_id})")
         }
         JobOutcome::Failed(msg) => eprintln!("queue: {short} {name} failed: {msg}"),
     }
@@ -957,6 +1000,21 @@ mod tests {
         assert_eq!(state.jobs[0].error.as_deref(), Some("boom"));
     }
 
+    #[test]
+    fn apply_outcome_needs_ocr_sets_state_and_anchor_without_error() {
+        let mut state = QueueState {
+            schema_version: QUEUE_SCHEMA_VERSION,
+            paused: false,
+            jobs: vec![job("xx", Priority::Normal, JobState::Running)],
+        };
+        state.jobs[0].error = Some("stale".to_string());
+        apply_outcome(&mut state, "xx", JobOutcome::NeedsOcr { intake_id: 7 });
+        assert_eq!(state.jobs[0].state, JobState::NeedsOcr);
+        assert_eq!(state.jobs[0].merged_into, Some(7));
+        assert!(state.jobs[0].error.is_none());
+        assert!(state.jobs[0].finished_at.is_some());
+    }
+
     #[tokio::test]
     async fn worker_loop_exits_on_shutdown_signal() {
         let dir = tempfile::tempdir().unwrap();
@@ -1027,6 +1085,66 @@ mod tests {
         assert_eq!(snapshot.jobs.len(), 1);
         assert_eq!(snapshot.jobs[0].state, JobState::Done);
         assert!(snapshot.jobs[0].finished_at.is_some());
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn worker_loop_maps_needs_ocr_success_to_needs_ocr_state() {
+        // The core risk is the worker-loop match order: a
+        // `needs_ocr` success must be recognized ahead of the `no_op`
+        // arms and land as `NeedsOcr` with the anchor id, not `Done`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/scan.pdf")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                |_job| async {
+                    Ok::<JobSuccess, JobError>(JobSuccess {
+                        no_op: false,
+                        needs_ocr: true,
+                        intake_id: Some(42),
+                    })
+                },
+                EventStreamHandle::default(),
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let settled = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.finished_at.is_some())
+            };
+            if settled {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not finish the job within 3 s"
+            );
+        }
+        let snapshot = state.lock().unwrap().clone();
+        assert_eq!(snapshot.jobs[0].state, JobState::NeedsOcr);
+        assert_eq!(snapshot.jobs[0].merged_into, Some(42));
+        assert!(snapshot.jobs[0].error.is_none());
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
@@ -1185,5 +1303,26 @@ mod tests {
             unreachable!()
         };
         assert!(message.starts_with("ingest: "), "got: {message}");
+    }
+
+    #[test]
+    fn ingest_needs_ocr_recovers_the_anchor_from_a_wrapped_error() {
+        // The typed error, wrapped exactly as the ops layer wraps it
+        // before the worker sees it, still yields the anchor id.
+        let typed = bookrack_ingest::IngestError::NeedsOcr {
+            reason: "no text layer".to_string(),
+            intake_id: 99,
+        };
+        let wrapped = eyre::Report::new(typed).wrap_err("registry-mediated ingest");
+        assert_eq!(ingest_needs_ocr(&wrapped), Some(99));
+    }
+
+    #[test]
+    fn ingest_needs_ocr_ignores_unrelated_and_string_errors() {
+        // A plain string that merely mentions OCR is not the typed
+        // variant, so it is not recognized — it flows through the
+        // failure path instead.
+        let strayed = eyre::eyre!("source needs OCR and cannot be ingested as text");
+        assert_eq!(ingest_needs_ocr(&strayed), None);
     }
 }

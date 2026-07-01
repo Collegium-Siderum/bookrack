@@ -163,6 +163,7 @@ fn derive_queue_summary(state: &bookrack_core::queue::QueueState) -> Value {
     let mut running = 0u32;
     let mut done = 0u32;
     let mut skipped_duplicate = 0u32;
+    let mut needs_ocr = 0u32;
     let mut failed = 0u32;
     let mut cancelled = 0u32;
     for job in &state.jobs {
@@ -171,6 +172,7 @@ fn derive_queue_summary(state: &bookrack_core::queue::QueueState) -> Value {
             JobState::Running => running += 1,
             JobState::Done => done += 1,
             JobState::SkippedDuplicate => skipped_duplicate += 1,
+            JobState::NeedsOcr => needs_ocr += 1,
             JobState::Failed => failed += 1,
             JobState::Cancelled => cancelled += 1,
         }
@@ -180,6 +182,7 @@ fn derive_queue_summary(state: &bookrack_core::queue::QueueState) -> Value {
         "running": running,
         "done": done,
         "skipped_duplicate": skipped_duplicate,
+        "needs_ocr": needs_ocr,
         "failed": failed,
         "cancelled": cancelled,
         "total": state.jobs.len() as u32,
@@ -280,6 +283,7 @@ fn derive_tick_snapshot(state: &bookrack_core::queue::QueueState) -> QueueTick {
             }
             bookrack_core::queue::JobState::Done
             | bookrack_core::queue::JobState::SkippedDuplicate
+            | bookrack_core::queue::JobState::NeedsOcr
             | bookrack_core::queue::JobState::Failed
             | bookrack_core::queue::JobState::Cancelled => {
                 if let Some(finished_at) = job.finished_at {
