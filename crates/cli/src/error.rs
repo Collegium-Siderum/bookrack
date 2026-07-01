@@ -97,6 +97,17 @@ pub enum BookrackCliError {
         cancelled: u32,
         total: u32,
     },
+
+    /// `bookrack exec <method> <params>` was handed a params argument
+    /// that is not valid JSON. A usage mistake on the exec surface, so
+    /// it shares the exit-2 bucket with the daemon's own
+    /// `-32602 invalid params` rather than falling through to the
+    /// exit-1 internal-error path.
+    #[error(
+        "`{method}`: params must be a valid JSON object, e.g. `{{}}` — or omit the \
+         argument entirely for tools that take no arguments. invalid JSON: {detail}"
+    )]
+    ExecParamsInvalid { method: String, detail: String },
 }
 
 impl BookrackCliError {
@@ -113,6 +124,7 @@ impl BookrackCliError {
             Self::RpcBusy { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
+            Self::ExecParamsInvalid { .. } => 2,
         }
     }
 
@@ -251,6 +263,21 @@ mod tests {
         assert!(s.contains("1 failed"));
         assert!(s.contains("0 cancelled"));
         assert!(s.contains("3 job"));
+    }
+
+    #[test]
+    fn exec_params_invalid_uses_exit_two_and_teaches_the_operator() {
+        let err = BookrackCliError::ExecParamsInvalid {
+            method: "library.stats".into(),
+            detail: "invalid number at line 1 column 2".into(),
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.is_self_reported());
+        let s = err.to_string();
+        assert!(s.contains("library.stats"), "{s}");
+        assert!(s.contains("{}"), "{s}");
+        assert!(s.contains("omit"), "{s}");
+        assert!(s.contains("invalid number at line 1 column 2"), "{s}");
     }
 
     #[test]

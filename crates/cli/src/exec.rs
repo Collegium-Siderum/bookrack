@@ -36,6 +36,7 @@
 
 use std::path::Path;
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::ctx;
 use bookrack_obs::stream::LogEvent;
 use bookrack_session::{LockInfo, peek_lock, resolve_runtime_dir, tty_lock_name};
@@ -68,8 +69,12 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
 
 async fn call_method(method: &str, params: &[String]) -> Result<()> {
     let payload = match params.first() {
-        Some(raw) => serde_json::from_str::<Value>(raw)
-            .with_context(|| format!("parse params for `{method}` as JSON"))?,
+        Some(raw) => {
+            serde_json::from_str::<Value>(raw).map_err(|e| BookrackCliError::ExecParamsInvalid {
+                method: method.to_string(),
+                detail: e.to_string(),
+            })?
+        }
         None => Value::Null,
     };
     let client = helpers::connect(None).await?;
