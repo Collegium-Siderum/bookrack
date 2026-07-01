@@ -327,8 +327,30 @@ pub async fn dispatch(req: &Request, ctx: &MethodContext) -> Result<DispatchOutc
         Some(result) => result.map(DispatchOutcome::Result),
         None => Err(RpcError::new(
             METHOD_NOT_FOUND,
-            format!("unknown method: {}", req.method),
+            unknown_method_message(req.method.as_str(), &ctx.mcp_tools),
         )),
+    }
+}
+
+/// Message for a method name [`dispatch_normal`] does not route. When
+/// the name matches an MCP endpoint tool, say so — those tools are
+/// reachable only from an MCP client, not over the control plane — and,
+/// for the queue snapshot, name the control-plane equivalent. Kept
+/// client-neutral: it points at `queue.list`, not any one front end's
+/// spelling of it.
+fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> String {
+    if !mcp_tools.iter().any(|t| t.name == method) {
+        return format!("unknown method: {method}");
+    }
+    match method {
+        "session.queue_status" => format!(
+            "`{method}` is an MCP endpoint tool, not a control-plane method; \
+             the control-plane queue snapshot is `queue.list`"
+        ),
+        _ => format!(
+            "`{method}` is an MCP endpoint tool, not a control-plane method; \
+             it is reachable only from an MCP client"
+        ),
     }
 }
 
@@ -564,6 +586,36 @@ mod tests {
     #[test]
     fn queue_worker_disabled_code_is_stable() {
         assert_eq!(QUEUE_WORKER_DISABLED, -32002);
+    }
+
+    fn mcp_tool(name: &str) -> meta::McpToolInfo {
+        meta::McpToolInfo {
+            name: name.to_string(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn unknown_method_message_steers_queue_status_to_queue_list() {
+        let tools = [mcp_tool("session.queue_status")];
+        let msg = unknown_method_message("session.queue_status", &tools);
+        assert!(msg.contains("MCP endpoint tool"), "{msg}");
+        assert!(msg.contains("queue.list"), "{msg}");
+    }
+
+    #[test]
+    fn unknown_method_message_generic_mcp_tool_omits_queue_list() {
+        let tools = [mcp_tool("session.logs_tail")];
+        let msg = unknown_method_message("session.logs_tail", &tools);
+        assert!(msg.contains("MCP endpoint tool"), "{msg}");
+        assert!(!msg.contains("queue.list"), "{msg}");
+    }
+
+    #[test]
+    fn unknown_method_message_keeps_plain_form_for_truly_unknown() {
+        let tools = [mcp_tool("session.queue_status")];
+        let msg = unknown_method_message("library.no_such_read", &tools);
+        assert_eq!(msg, "unknown method: library.no_such_read");
     }
 
     /// Names of every method intercepted by `dispatch` before
