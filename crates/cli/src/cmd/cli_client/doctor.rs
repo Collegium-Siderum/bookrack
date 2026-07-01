@@ -5,12 +5,21 @@
 //! in-binary `bookrack_runtime::doctor::run` so a fresh install can
 //! still produce a useful health summary before any session exists.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bookrack_config::LibrarySelection;
 use bookrack_control_client::ControlError;
 use eyre::Result;
 use serde_json::Value;
+
+/// True when a daemon is reachable on the control socket for
+/// `runtime_dir`. Used to keep offline repairs off a live library.
+async fn daemon_is_running(runtime_dir: Option<&Path>) -> bool {
+    match bookrack_control_client::discover(runtime_dir) {
+        Ok(socket) => bookrack_control_client::connect(&socket).await.is_ok(),
+        Err(_) => false,
+    }
+}
 
 /// Returns `true` when the doctor report (or the envelope rename
 /// summary) is clean, and `false` when at least one row is FAIL. The
@@ -44,10 +53,19 @@ pub async fn run(
         bookrack_runtime::doctor::render_rename_report(&report, json);
         return Ok(!report.has_failures());
     }
-    // The derivation backfill is a catalog-plus-envelope repair; like
-    // the rename it runs before the report path forks so the operator
-    // gets a self-contained result.
+    // The derivation backfill opens the catalog for writing, which would
+    // race the daemon's exclusive write handle. It is an offline repair:
+    // refuse it while a daemon is serving this library rather than
+    // corrupt a live session. The dry run is refused too — it still opens
+    // the catalog, and a plan against a library the operator is about to
+    // take offline is misleading.
     if backfill_ocr_derivation {
+        if daemon_is_running(runtime_dir.as_deref()).await {
+            eyre::bail!(
+                "a daemon is serving this library; --backfill-ocr-derivation is an \
+                 offline repair. Stop the daemon with `bookrack quit` and re-run."
+            );
+        }
         let report = bookrack_runtime::doctor::backfill_ocr_derivation(selection, dry_run).await?;
         bookrack_runtime::doctor::render_backfill_report(&report, json);
         return Ok(!report.has_failures());

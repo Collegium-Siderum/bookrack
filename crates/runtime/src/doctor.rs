@@ -365,15 +365,28 @@ pub struct BackfillFailure {
 /// set are not revisited (the accessor filters on NULL), and the
 /// write-once conflict guard refuses to re-point an existing edge.
 ///
-/// With `dry_run = true` the plan is computed and returned without
-/// writing.
+/// This is an **offline** repair: it opens the catalog for writing,
+/// which would race the daemon's exclusive write handle, so the caller
+/// must ensure no daemon is serving this library before invoking it.
+///
+/// With `dry_run = true` the catalog is opened read-only — no migration
+/// is applied and no row is written — and the plan is returned. A
+/// read-only open of a database still at the pre-column schema fails
+/// cleanly rather than silently migrating it.
 pub async fn backfill_ocr_derivation(
     selection: &LibrarySelection,
     dry_run: bool,
 ) -> Result<BackfillReport> {
     let cfg = Config::resolve(selection).context("resolve config for OCR derivation backfill")?;
-    let catalog =
-        Catalog::open(&cfg.catalog_db()).context("open catalog for OCR derivation backfill")?;
+    // A dry run must not touch the database: the read-only open neither
+    // migrates nor writes. The real run opens read-write, which also
+    // applies any pending migration as part of the repair.
+    let catalog = if dry_run {
+        Catalog::open_read_only(&cfg.catalog_db())
+            .context("open catalog (read-only) for OCR derivation backfill plan")?
+    } else {
+        Catalog::open(&cfg.catalog_db()).context("open catalog for OCR derivation backfill")?
+    };
     let pending = catalog
         .ocr_intakes_missing_derivation()
         .context("list OCR intakes missing a derivation edge")?;

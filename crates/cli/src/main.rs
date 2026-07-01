@@ -238,7 +238,9 @@ enum Command {
         /// edge is already set are skipped. Run this once after
         /// upgrading a library that holds OCR intakes, so
         /// `intake list-ocr-pending` does not list their already-
-        /// processed sources.
+        /// processed sources. An offline repair: it writes the catalog
+        /// directly, so it is refused while a daemon is serving the
+        /// library — stop it with `bookrack quit` first.
         #[arg(long)]
         backfill_ocr_derivation: bool,
         /// With `--rename-envelopes` or `--backfill-ocr-derivation`,

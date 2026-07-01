@@ -29,7 +29,10 @@ release workflow extracts the matching section verbatim from this file.
   overwritten when it would re-point to a different source.
   `bookrack doctor --backfill-ocr-derivation` recovers the edge on OCR
   intakes that predate the column by reading each envelope's provenance,
-  so an upgraded library does not list already-processed sources.
+  so an upgraded library does not list already-processed sources; it is
+  an offline repair, refused while a daemon is serving the library, and
+  its `--dry-run` opens the catalog read-only so a plan never migrates
+  or writes.
 
 - **runtime, cli: `queue.list` returns a top-level `summary` of state
   counts.** Alongside `schema_version`, `paused`, and `jobs`, the
