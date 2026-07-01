@@ -152,11 +152,42 @@ pub fn pull_pending(state: &mut QueueState) -> Option<QueueJob> {
     None
 }
 
+/// Success payload the runner returns to the worker loop.
+///
+/// The worker collapses this into a [`JobOutcome`]: `no_op == true`
+/// means the ingest short-circuited on an already-registered source
+/// with up-to-date stamps «catalog unchanged» and maps to
+/// [`JobOutcome::SkippedDuplicate`]; otherwise it maps to
+/// [`JobOutcome::Done`]. `intake_id` is the catalog row the source
+/// resolved to, forwarded onto `QueueJob::merged_into` on the skip
+/// branch so `queue list` can point the operator at the existing
+/// entry. Paper and reference pipelines that do not surface an intake
+/// id set it to `None`; the skip branch is book-only in practice.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JobSuccess {
+    pub no_op: bool,
+    pub intake_id: Option<i64>,
+}
+
+impl JobSuccess {
+    pub fn done() -> Self {
+        Self {
+            no_op: false,
+            intake_id: None,
+        }
+    }
+}
+
 /// Outcome of one job run, applied by [`apply_outcome`].
 #[derive(Debug, Clone)]
 pub enum JobOutcome {
-    /// The ingest call returned `Ok`.
+    /// The ingest call returned `Ok` and actually wrote to the catalog.
     Done,
+    /// The ingest call returned `Ok` from the noop-if-up-to-date fast
+    /// path: the source was already on file and every stamp matched,
+    /// so no catalog write happened. The wrapped intake id points at
+    /// the existing catalog row.
+    SkippedDuplicate { intake_id: i64 },
     /// The ingest call returned an error; the message is folded into
     /// `QueueJob::error`.
     Failed(String),
@@ -235,10 +266,17 @@ pub fn apply_outcome(state: &mut QueueState, id: &str, outcome: JobOutcome) {
         JobOutcome::Done => {
             job.state = JobState::Done;
             job.error = None;
+            job.merged_into = None;
+        }
+        JobOutcome::SkippedDuplicate { intake_id } => {
+            job.state = JobState::SkippedDuplicate;
+            job.error = None;
+            job.merged_into = Some(intake_id);
         }
         JobOutcome::Failed(msg) => {
             job.state = JobState::Failed;
             job.error = Some(msg);
+            job.merged_into = None;
         }
     }
 }
@@ -286,6 +324,7 @@ pub fn enqueue_files(
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         });
         ids.push(id);
     }
@@ -331,6 +370,7 @@ pub fn enqueue_ocr_intake(
         started_at: None,
         finished_at: None,
         error: None,
+        merged_into: None,
     });
     id
 }
@@ -405,7 +445,7 @@ pub fn render_list(state: &QueueState) -> String {
     }
     let _ = writeln!(
         out,
-        "{:<10}  {:<9}  {:<12}  {:<40}  QUEUED",
+        "{:<10}  {:<17}  {:<12}  {:<40}  QUEUED",
         "ID", "STATE", "LIBRARY", "FILE",
     );
     for job in &state.jobs {
@@ -414,6 +454,7 @@ pub fn render_list(state: &QueueState) -> String {
             JobState::Pending => "pending",
             JobState::Running => "running",
             JobState::Done => "done",
+            JobState::SkippedDuplicate => "skipped_duplicate",
             JobState::Failed => "failed",
             JobState::Cancelled => "cancelled",
         };
@@ -442,7 +483,7 @@ pub async fn worker_loop<R, Fut>(
 ) -> Result<()>
 where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = std::result::Result<(), JobError>> + Send,
+    Fut: Future<Output = std::result::Result<JobSuccess, JobError>> + Send,
 {
     // Crash recovery once at startup.
     {
@@ -482,7 +523,22 @@ where
         };
 
         let (outcome, pause_queue) = match runner(job.clone()).await {
-            Ok(()) => (JobOutcome::Done, false),
+            Ok(JobSuccess {
+                no_op: true,
+                intake_id: Some(intake_id),
+            }) => (JobOutcome::SkippedDuplicate { intake_id }, false),
+            Ok(JobSuccess { no_op: true, .. }) => {
+                // A pipeline claimed the noop-if-up-to-date fast path
+                // without surfacing an intake id — record it as a
+                // regular Done so operators do not see a skip terminal
+                // with a dangling `merged_into = null`. The
+                // book-ingest path always produces an id on this
+                // branch; this arm is a defensive fallback for the
+                // paper/reference pipelines and any future runner
+                // that omits the id.
+                (JobOutcome::Done, false)
+            }
+            Ok(JobSuccess { no_op: false, .. }) => (JobOutcome::Done, false),
             Err(err) => {
                 let pause = matches!(err, JobError::Process(_));
                 let message = err.into_message();
@@ -585,6 +641,9 @@ fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
         .unwrap_or_else(|| job.path.display().to_string());
     match outcome {
         JobOutcome::Done => eprintln!("queue: {short} {name} done"),
+        JobOutcome::SkippedDuplicate { intake_id } => {
+            eprintln!("queue: {short} {name} skipped (already in catalog as intake {intake_id})")
+        }
         JobOutcome::Failed(msg) => eprintln!("queue: {short} {name} failed: {msg}"),
     }
 }
@@ -613,6 +672,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         }
     }
 
@@ -695,6 +755,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         }
     }
 
@@ -906,7 +967,7 @@ mod tests {
             path,
             Arc::clone(&state),
             rx,
-            |_| async { Ok::<(), JobError>(()) },
+            |_| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
             EventStreamHandle::default(),
             Arc::new(AtomicBool::new(false)),
         ));
@@ -940,7 +1001,7 @@ mod tests {
                 path.clone(),
                 state,
                 rx,
-                |_job| async { Ok::<(), JobError>(()) },
+                |_job| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
                 EventStreamHandle::default(),
                 Arc::new(AtomicBool::new(false)),
             ))

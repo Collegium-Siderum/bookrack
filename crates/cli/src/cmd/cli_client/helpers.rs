@@ -643,6 +643,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_finished_recognises_skipped_duplicate_state() {
+        // Sanity-guard the wire-token contract between the daemon and
+        // the CLI wait path: a job whose ingest short-circuited on the
+        // noop-if-up-to-date path must be extracted as a terminal
+        // outcome, otherwise `bookrack ingest --wait` would silently
+        // spin until the stall timeout when every job was a dedup skip.
+        let mut pending = HashSet::new();
+        pending.insert("a".to_string());
+        let ev = tick("a", "skipped_duplicate", 0, 0).value;
+        let record =
+            extract_finished(&ev, &pending).expect("skipped_duplicate terminal recognised");
+        assert!(matches!(record.state, JobOutcomeState::SkippedDuplicate));
+    }
+
+    #[test]
     fn destructive_decision_matrix() {
         use DestructiveConfirmation::{Prompt, Skip};
         assert_eq!(destructive_confirmation_decision(false, false), Prompt);

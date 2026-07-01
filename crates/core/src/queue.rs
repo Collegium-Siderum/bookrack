@@ -19,7 +19,7 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
-pub const QUEUE_SCHEMA_VERSION: u32 = 4;
+pub const QUEUE_SCHEMA_VERSION: u32 = 5;
 
 /// Pull order hint for the worker. The first pending job at the
 /// highest priority is picked next.
@@ -33,12 +33,20 @@ pub enum Priority {
 }
 
 /// Lifecycle state of a queued job.
+///
+/// `Done` covers ingest runs that actually wrote to the catalog «new
+/// intake or forced re-run», while `SkippedDuplicate` marks jobs whose
+/// source was already on file with up-to-date stamps, so the worker
+/// short-circuited without changing catalog state. The two terminal
+/// states are distinct so operators can reconcile queue counts against
+/// `library.stats` without cross-referencing sha256.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum JobState {
     Pending,
     Running,
     Done,
+    SkippedDuplicate,
     Failed,
     Cancelled,
 }
@@ -116,11 +124,19 @@ pub struct QueueJob {
     pub queued_at: DateTime<Utc>,
     /// When the worker transitioned this job to `Running`.
     pub started_at: Option<DateTime<Utc>>,
-    /// When the worker transitioned this job to `Done`, `Failed`, or
-    /// `Cancelled`.
+    /// When the worker transitioned this job to `Done`,
+    /// `SkippedDuplicate`, `Failed`, or `Cancelled`.
     pub finished_at: Option<DateTime<Utc>>,
     /// Failure message recorded when `state == Failed`.
     pub error: Option<String>,
+    /// Intake id the source was recognized as when the worker skipped
+    /// the job as a duplicate. Set together with
+    /// `state == SkippedDuplicate` so `queue list` can point the
+    /// operator at the existing catalog row without a sha256 lookup.
+    /// A v4 queue document (no `merged_into` field) loads with this
+    /// `None`, matching the previous single-`done` terminal.
+    #[serde(default)]
+    pub merged_into: Option<i64>,
 }
 
 /// The full document persisted to disk.
@@ -240,6 +256,71 @@ mod tests {
     }
 
     #[test]
+    fn queue_job_without_merged_into_loads_as_none() {
+        // A v4-shaped document persisted before the field was added
+        // must still deserialize cleanly, with the dedup back-pointer
+        // defaulting to `None` so a job without it renders identically
+        // to the previous single-`done` terminal.
+        let v4 = r#"{
+            "id": "0",
+            "library": "default",
+            "path": "/tmp/example.epub",
+            "kind": "book",
+            "priority": "normal",
+            "force": false,
+            "hold_for_metadata": false,
+            "intake_ocr": null,
+            "audit_profile": null,
+            "state": "done",
+            "queued_at": "2026-01-02T03:04:05Z",
+            "started_at": null,
+            "finished_at": null,
+            "error": null
+        }"#;
+        let job: QueueJob = serde_json::from_str(v4).expect("deserialize v4");
+        assert!(job.merged_into.is_none());
+    }
+
+    #[test]
+    fn job_state_skipped_duplicate_serializes_as_snake_case() {
+        // The wire token is what CLI parsers and the MCP session tool
+        // key off; keep it stable under `snake_case` so future readers
+        // do not silently drop unrecognized states.
+        let json = serde_json::to_value(JobState::SkippedDuplicate).expect("serialize");
+        assert_eq!(json, "skipped_duplicate");
+        let back: JobState = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, JobState::SkippedDuplicate);
+    }
+
+    #[test]
+    fn queue_job_round_trips_merged_into() {
+        let job = QueueJob {
+            id: "0".to_string(),
+            library: "default".to_string(),
+            path: "/tmp/example.epub".into(),
+            kind: ItemKind::Book,
+            priority: Priority::Normal,
+            force: false,
+            hold_for_metadata: false,
+            intake_ocr: None,
+            audit_profile: None,
+            state: JobState::SkippedDuplicate,
+            queued_at: DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            merged_into: Some(42),
+        };
+        let json = serde_json::to_value(&job).expect("serialize");
+        assert_eq!(json["state"], "skipped_duplicate");
+        assert_eq!(json["merged_into"], 42);
+        let back: QueueJob = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, job);
+    }
+
+    #[test]
     fn queue_job_round_trips_intake_ocr() {
         let job = QueueJob {
             id: "0".to_string(),
@@ -262,6 +343,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
         assert_eq!(json["intake_ocr"]["from_pdf"], "/tmp/scan.pdf");
@@ -290,6 +372,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
         assert_eq!(json["kind"], "paper");
@@ -317,6 +400,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             error: None,
+            merged_into: None,
         };
         let json = serde_json::to_value(&job).expect("serialize");
         assert_eq!(json["audit_profile"], "strict");

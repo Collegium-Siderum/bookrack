@@ -245,6 +245,7 @@ fn derive_tick_snapshot(state: &bookrack_core::queue::QueueState) -> QueueTick {
                 }
             }
             bookrack_core::queue::JobState::Done
+            | bookrack_core::queue::JobState::SkippedDuplicate
             | bookrack_core::queue::JobState::Failed
             | bookrack_core::queue::JobState::Cancelled => {
                 if let Some(finished_at) = job.finished_at {

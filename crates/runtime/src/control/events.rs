@@ -121,7 +121,9 @@ pub struct JobOutcomeSummary {
     pub kind: ItemKind,
     #[cfg_attr(
         test,
-        ts(type = "\"pending\" | \"running\" | \"done\" | \"failed\" | \"cancelled\"")
+        ts(
+            type = "\"pending\" | \"running\" | \"done\" | \"skipped_duplicate\" | \"failed\" | \"cancelled\""
+        )
     )]
     pub state: JobState,
     #[serde(skip_serializing_if = "Option::is_none")]

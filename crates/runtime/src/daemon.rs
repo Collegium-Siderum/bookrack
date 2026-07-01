@@ -486,11 +486,16 @@ impl DaemonRuntime {
                                         expected_pages: ocr.expected_pages,
                                         allow_partial: ocr.allow_partial,
                                     };
-                                    handle
+                                    let report = handle
                                         .ingest_ocr(&path, &ocr.from_pdf, &ocr_params, &params)
                                         .await
                                         .map_err(|e| queue::classify_ingest_error(&e))?;
-                                    return Ok::<(), queue::JobError>(());
+                                    return Ok::<queue::JobSuccess, queue::JobError>(
+                                        queue::JobSuccess {
+                                            no_op: report.no_op,
+                                            intake_id: Some(report.ocr_intake_id),
+                                        },
+                                    );
                                 }
                                 match job_kind {
                                     bookrack_core::ItemKind::Book => {
@@ -501,10 +506,16 @@ impl DaemonRuntime {
                                             hold_for_metadata,
                                             audit_profile.as_deref(),
                                         );
-                                        handle
+                                        let report = handle
                                             .ingest_book(&path, &params)
                                             .await
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
+                                        Ok::<queue::JobSuccess, queue::JobError>(
+                                            queue::JobSuccess {
+                                                no_op: report.no_op,
+                                                intake_id: Some(report.intake_id),
+                                            },
+                                        )
                                     }
                                     bookrack_core::ItemKind::Paper => {
                                         // Paper jobs read their audit
@@ -515,10 +526,16 @@ impl DaemonRuntime {
                                         // intentionally not consulted here.
                                         let mut params = glean_template;
                                         params.force = force;
-                                        handle
+                                        let report = handle
                                             .glean_paper(&path, &params)
                                             .await
                                             .map_err(|e| queue::classify_ingest_error(&e))?;
+                                        Ok::<queue::JobSuccess, queue::JobError>(
+                                            queue::JobSuccess {
+                                                no_op: report.no_op,
+                                                intake_id: Some(report.intake_id),
+                                            },
+                                        )
                                     }
                                     bookrack_core::ItemKind::Reference => {
                                         // The distill pipeline is not yet routed
@@ -529,15 +546,14 @@ impl DaemonRuntime {
                                         // pulling subsequent jobs instead of
                                         // panicking and surfacing the failure
                                         // as a book-side backtrace.
-                                        return Err(queue::JobError::Book(format!(
+                                        Err(queue::JobError::Book(format!(
                                             "reference job {} cannot be processed: \
                                              the distill pipeline is not yet wired \
                                              through the queue worker",
                                             path.display()
-                                        )));
+                                        )))
                                     }
                                 }
-                                Ok::<(), queue::JobError>(())
                             })
                         })
                         .await

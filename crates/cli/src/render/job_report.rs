@@ -15,10 +15,16 @@ use serde::Serialize;
 use super::human::short_id;
 
 /// Terminal state observed for one job.
+///
+/// `SkippedDuplicate` covers a job whose source was already in the
+/// catalog with up-to-date stamps, so the worker short-circuited
+/// without writing. It is a success terminal — distinct from `Done` so
+/// batch summaries can reconcile against `library.stats`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum JobOutcomeState {
     Done,
+    SkippedDuplicate,
     Failed,
     Cancelled,
 }
@@ -27,10 +33,18 @@ impl JobOutcomeState {
     pub fn from_wire(state: &str) -> Option<Self> {
         match state {
             "done" | "Done" => Some(Self::Done),
+            "skipped_duplicate" | "SkippedDuplicate" => Some(Self::SkippedDuplicate),
             "failed" | "Failed" => Some(Self::Failed),
             "cancelled" | "Cancelled" => Some(Self::Cancelled),
             _ => None,
         }
+    }
+
+    /// True for terminal states the worker treats as success: the
+    /// pipeline reported `Ok` on the runner future. Callers use this
+    /// to decide whether a batch overall succeeded or not.
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Done | Self::SkippedDuplicate)
     }
 }
 
@@ -50,6 +64,7 @@ pub struct JobOutcomeRecord {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct JobTotals {
     pub done: u32,
+    pub skipped_duplicate: u32,
     pub failed: u32,
     pub cancelled: u32,
 }
@@ -58,6 +73,7 @@ impl JobTotals {
     fn record(&mut self, state: JobOutcomeState) {
         match state {
             JobOutcomeState::Done => self.done += 1,
+            JobOutcomeState::SkippedDuplicate => self.skipped_duplicate += 1,
             JobOutcomeState::Failed => self.failed += 1,
             JobOutcomeState::Cancelled => self.cancelled += 1,
         }
@@ -109,6 +125,12 @@ impl JobOutcomeReport {
                 if self.totals.done > 0 {
                     parts.push(format!("{} done", self.totals.done));
                 }
+                if self.totals.skipped_duplicate > 0 {
+                    parts.push(format!(
+                        "{} already in catalog",
+                        self.totals.skipped_duplicate
+                    ));
+                }
                 if self.totals.failed > 0 {
                     parts.push(format!("{} failed", self.totals.failed));
                 }
@@ -128,6 +150,7 @@ impl JobOutcomeReport {
 fn state_word(state: JobOutcomeState) -> &'static str {
     match state {
         JobOutcomeState::Done => "done",
+        JobOutcomeState::SkippedDuplicate => "already in catalog",
         JobOutcomeState::Failed => "failed",
         JobOutcomeState::Cancelled => "cancelled",
     }
@@ -219,6 +242,39 @@ mod tests {
             JobOutcomeState::from_wire("Cancelled"),
             Some(JobOutcomeState::Cancelled)
         );
+        assert_eq!(
+            JobOutcomeState::from_wire("skipped_duplicate"),
+            Some(JobOutcomeState::SkippedDuplicate)
+        );
         assert_eq!(JobOutcomeState::from_wire("pending"), None);
+    }
+
+    #[test]
+    fn totals_track_skipped_duplicate_and_report_still_succeeds() {
+        let r = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::SkippedDuplicate),
+                rec("c", JobOutcomeState::SkippedDuplicate),
+            ],
+            Duration::from_secs(1),
+        );
+        assert_eq!(r.totals.done, 1);
+        assert_eq!(r.totals.skipped_duplicate, 2);
+        assert!(r.all_succeeded());
+    }
+
+    #[test]
+    fn one_line_summarises_skipped_duplicate_batch() {
+        let r = JobOutcomeReport::new(
+            vec![
+                rec("a", JobOutcomeState::Done),
+                rec("b", JobOutcomeState::SkippedDuplicate),
+            ],
+            Duration::from_millis(200),
+        );
+        let line = r.format_one_line("Ingested", "books");
+        assert!(line.contains("1 done"));
+        assert!(line.contains("1 already in catalog"));
     }
 }
