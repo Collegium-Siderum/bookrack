@@ -141,6 +141,7 @@ pub fn queue_list(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         .queue_state
         .lock()
         .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
+    let summary = derive_queue_summary(&state);
     let mut jobs = state.jobs.clone();
     if let Some(limit) = parsed.limit {
         jobs.truncate(limit as usize);
@@ -148,8 +149,41 @@ pub fn queue_list(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     Ok(json!({
         "schema_version": state.schema_version,
         "paused": state.paused,
+        "summary": summary,
         "jobs": jobs,
     }))
+}
+
+/// Counts jobs by state across the whole queue, independent of any
+/// `limit` applied to the returned `jobs` array, so clients get exact
+/// totals without regrouping the truncated list.
+fn derive_queue_summary(state: &bookrack_core::queue::QueueState) -> Value {
+    use bookrack_core::queue::JobState;
+    let mut pending = 0u32;
+    let mut running = 0u32;
+    let mut done = 0u32;
+    let mut skipped_duplicate = 0u32;
+    let mut failed = 0u32;
+    let mut cancelled = 0u32;
+    for job in &state.jobs {
+        match job.state {
+            JobState::Pending => pending += 1,
+            JobState::Running => running += 1,
+            JobState::Done => done += 1,
+            JobState::SkippedDuplicate => skipped_duplicate += 1,
+            JobState::Failed => failed += 1,
+            JobState::Cancelled => cancelled += 1,
+        }
+    }
+    json!({
+        "pending": pending,
+        "running": running,
+        "done": done,
+        "skipped_duplicate": skipped_duplicate,
+        "failed": failed,
+        "cancelled": cancelled,
+        "total": state.jobs.len() as u32,
+    })
 }
 
 pub fn library_list(ctx: &MethodContext) -> Result<Value, RpcError> {

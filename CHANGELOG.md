@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime, cli: `queue.list` returns a top-level `summary` of state
+  counts.** Alongside `schema_version`, `paused`, and `jobs`, the
+  response now carries `summary` with one count per job state
+  (`pending`, `running`, `done`, `skipped_duplicate`, `failed`,
+  `cancelled`) plus `total`, computed across the whole queue
+  independent of the `limit` applied to `jobs`, so a client no longer
+  regroups the job array to size the queue. `bookrack queue list`
+  prints the same counts as a one-line footer in human mode,
+  suppressing zero states.
+
 - **cli, runtime: `--audit-profile` reaches every audit-aware command.**
   `ingest.submit`, `intake.ocr`, `dryrun`, `metadata.reaudit`, and
   `metadata.advance` accept an optional `audit_profile` parameter that

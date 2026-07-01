@@ -97,7 +97,33 @@ fn render_queue_list(response: &Value, long: bool) {
             println!("queue is empty");
         }
     }
+    if let Some(summary) = response.get("summary") {
+        println!("{}", render_queue_summary(summary));
+    }
     if paused {
         println!("queue is paused");
     }
+}
+
+/// Renders the queue summary counts as a single line, omitting states
+/// with a zero count to keep the common case terse.
+fn render_queue_summary(summary: &Value) -> String {
+    let counts = [
+        ("pending", "pending"),
+        ("running", "running"),
+        ("done", "done"),
+        ("skipped_duplicate", "skipped"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    ];
+    let mut parts: Vec<String> = counts
+        .iter()
+        .filter_map(|(key, label)| {
+            let n = summary.get(key).and_then(Value::as_u64).unwrap_or(0);
+            (n > 0).then(|| format!("{label} {n}"))
+        })
+        .collect();
+    let total = summary.get("total").and_then(Value::as_u64).unwrap_or(0);
+    parts.push(format!("total {total}"));
+    parts.join("  ")
 }
