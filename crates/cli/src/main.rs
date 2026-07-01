@@ -232,9 +232,18 @@ enum Command {
         /// skipped.
         #[arg(long)]
         rename_envelopes: bool,
-        /// With `--rename-envelopes`, list the rename plan without
-        /// touching the disk.
-        #[arg(long, requires = "rename_envelopes")]
+        /// Recover the `derived_from_sha256` edge on OCR product intakes
+        /// that predate the column, reading each parent scan PDF's hash
+        /// from the intake's envelope provenance. Idempotent; rows whose
+        /// edge is already set are skipped. Run this once after
+        /// upgrading a library that holds OCR intakes, so
+        /// `intake list-ocr-pending` does not list their already-
+        /// processed sources.
+        #[arg(long)]
+        backfill_ocr_derivation: bool,
+        /// With `--rename-envelopes` or `--backfill-ocr-derivation`,
+        /// compute the plan without touching the disk or database.
+        #[arg(long)]
         dry_run: bool,
     },
     /// Submit one or more files for ingest.
@@ -608,6 +617,7 @@ async fn run() -> Result<()> {
         json,
         install_pdfium,
         rename_envelopes,
+        backfill_ocr_derivation,
         dry_run,
     } = &cli.command
     {
@@ -616,6 +626,7 @@ async fn run() -> Result<()> {
             *json || json_global,
             *install_pdfium,
             *rename_envelopes,
+            *backfill_ocr_derivation,
             *dry_run,
             None,
         )
@@ -719,7 +730,7 @@ async fn run() -> Result<()> {
         } => cmd::cli_client::diagnose::run(out, days, no_scrub, None).await,
         Command::Ingest(args) => cmd::cli_client::ingest::run(args, None, audit_profile).await,
         Command::Intake { action } => {
-            cmd::cli_client::intake::run(action, None, audit_profile).await
+            cmd::cli_client::intake::run(action, None, audit_profile, json_global).await
         }
         Command::Queue { action } => cmd::cli_client::queue::run(action, None).await,
         Command::Metadata { action } => {

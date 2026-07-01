@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 13;
+pub(crate) const TARGET_VERSION: i64 = 14;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -670,6 +670,20 @@ CREATE INDEX idx_node_paper_audit_run
   ON node_paper_audit(pipeline_run_id);
 "#;
 
+// `M[13]` — record on a derived intake the SHA-256 of the source it was
+// produced from, so an OCR product row points back to its scan PDF
+// anchor without a join through the envelope. Written on the OCR
+// markdown intake at `intake ocr` time; NULL for born-digital intakes
+// and for the scan PDF anchor itself. The composite index pairs the
+// parent hash with `status` because the "still needs OCR" query filters
+// on both at once (a NeedsOcr source with no successfully-processed
+// derivative). Additive: `ALTER TABLE ... ADD COLUMN` is O(1) and
+// leaves existing rows with NULL until a repair pass backfills them.
+const INTAKE_DERIVED_FROM_DDL: &str = r#"
+ALTER TABLE intake ADD COLUMN derived_from_sha256 TEXT;
+CREATE INDEX idx_intake_derived_status ON intake(derived_from_sha256, status);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -687,6 +701,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(NODE_PAPER_AUDIT_DDL),
         M::up(PIPELINE_PAIR_M11_DDL),
         M::up(AUDIT_RUN_ID_M12_DDL),
+        M::up(INTAKE_DERIVED_FROM_DDL),
     ])
 }
 

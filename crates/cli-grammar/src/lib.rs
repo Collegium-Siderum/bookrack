@@ -113,9 +113,27 @@ pub struct DryrunArgs {
     pub no_chunk: bool,
 }
 
-/// Intake-side write commands (currently OCR-only).
+/// Intake-side commands: the OCR product re-entry point and the
+/// worklist of scan sources still awaiting OCR.
 #[derive(clap::Subcommand, Debug)]
 pub enum IntakeAction {
+    /// List scan sources still awaiting OCR.
+    ///
+    /// Each row is a source the extract stage rejected as image-only:
+    /// registered as a `needs_ocr` anchor with no OCR product yet. The
+    /// output names the path to hand to an external OCR tool, the
+    /// source hash, a best-effort page count, and why the text layer
+    /// was rejected. Run OCR with any tool, then re-enter the product
+    /// through `intake ocr`. `--json` emits the full manifest.
+    ListOcrPending {
+        /// Maximum number of sources to list. Omitted or zero uses the
+        /// default page size; the value is clamped to the read cap.
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        /// Number of sources to skip before the page starts.
+        #[arg(long, value_name = "N")]
+        offset: Option<u32>,
+    },
     /// Bring an OCR product into the library as a derived source.
     ///
     /// The scan PDF named by `--from-pdf` is registered as the durable
@@ -1106,6 +1124,7 @@ mod tests {
                 assert!(expected_pages.is_none());
                 assert!(!no_wait);
             }
+            other => panic!("expected ocr action, got {other:?}"),
         }
     }
 
@@ -1129,6 +1148,7 @@ mod tests {
                 assert!(!hold_for_metadata);
                 assert!(priority.is_none());
             }
+            other => panic!("expected ocr action, got {other:?}"),
         }
     }
 

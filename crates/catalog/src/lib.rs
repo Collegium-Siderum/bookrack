@@ -57,7 +57,7 @@ pub use csl::{
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};
-pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, Registration};
+pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, OcrPending, Registration};
 pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
 pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
@@ -96,6 +96,25 @@ pub enum CatalogError {
     /// The underlying SQLite layer reported an error.
     #[error("catalog database error")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// A derivation edge was being rewritten to a different source. An
+    /// intake's `derived_from_sha256` is set once, when the derived
+    /// manifestation is registered; a later attempt to point it at a
+    /// different source hash is a data conflict (e.g. the same OCR text
+    /// mapped to two different scan PDFs) and is refused rather than
+    /// silently overwritten.
+    #[error(
+        "intake {intake_id} is already derived from {existing}, \
+         cannot re-point to {requested}"
+    )]
+    DerivedFromConflict {
+        /// The intake whose derivation edge was being rewritten.
+        intake_id: i64,
+        /// The source hash already recorded on the row.
+        existing: String,
+        /// The source hash the caller tried to write.
+        requested: String,
+    },
 
     /// The database was written by a newer schema revision than this
     /// binary understands: its `user_version` exceeds the highest

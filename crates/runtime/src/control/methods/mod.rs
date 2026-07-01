@@ -209,6 +209,7 @@ methods! {
     // library reads (sync, parametrised)
     read   no_queue sync    "library.stats"                 => reads_library::stats,
     read   no_queue sync    "library.list_books"            => reads_library::list_books,
+    read   no_queue sync    "library.list_ocr_pending"      => reads_library::list_ocr_pending,
     read   no_queue sync    "library.find_books"            => reads_library::find_books,
     read   no_queue sync    "library.show_book"             => reads_library::show_book,
     read   no_queue sync    "library.show_toc"              => reads_library::show_toc,

@@ -22,6 +22,7 @@ pub async fn run(
     json: bool,
     install_pdfium: bool,
     rename_envelopes: bool,
+    backfill_ocr_derivation: bool,
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<bool> {
@@ -41,6 +42,14 @@ pub async fn run(
     if rename_envelopes {
         let report = bookrack_runtime::doctor::rename_envelopes(selection, dry_run).await?;
         bookrack_runtime::doctor::render_rename_report(&report, json);
+        return Ok(!report.has_failures());
+    }
+    // The derivation backfill is a catalog-plus-envelope repair; like
+    // the rename it runs before the report path forks so the operator
+    // gets a self-contained result.
+    if backfill_ocr_derivation {
+        let report = bookrack_runtime::doctor::backfill_ocr_derivation(selection, dry_run).await?;
+        bookrack_runtime::doctor::render_backfill_report(&report, json);
         return Ok(!report.has_failures());
     }
     match bookrack_control_client::discover(runtime_dir.as_deref()) {

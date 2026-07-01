@@ -93,6 +93,14 @@ pub(crate) const SPEC: TableSpec = TableSpec {
              configured with `keep_source_pdf = false` all read back \
              as NULL.",
         ),
+        ColumnSpec::text("derived_from_sha256").comment(
+            "on a derived intake, the `source_sha256` of the source it \
+             was produced from (an OCR product points back to its scan \
+             PDF anchor). Nullable: NULL for born-digital intakes and \
+             for the scan PDF anchor itself; NULL on OCR rows written \
+             before this column existed until a repair pass backfills \
+             them from the envelope.",
+        ),
     ],
     composite_pk: None,
     uniques: &[],
@@ -100,6 +108,10 @@ pub(crate) const SPEC: TableSpec = TableSpec {
     indexes: &[
         IndexSpec::on("idx_intake_status", &["status"]),
         IndexSpec::on("idx_intake_format", &["format"]),
+        IndexSpec::on(
+            "idx_intake_derived_status",
+            &["derived_from_sha256", "status"],
+        ),
     ],
 };
 
@@ -427,6 +439,12 @@ pub struct Intake {
     /// before this column existed, and runs configured with
     /// `keep_source_pdf = false`.
     pub source_pdf_path: Option<String>,
+    /// On a derived intake, the `source_sha256` of the source it was
+    /// produced from: an OCR product carries the scan PDF anchor's
+    /// hash here. `None` for born-digital intakes, for the scan PDF
+    /// anchor itself, and for OCR rows written before the column
+    /// existed until a repair pass backfills them from the envelope.
+    pub derived_from_sha256: Option<String>,
 }
 
 impl Intake {
@@ -449,8 +467,23 @@ impl Intake {
             notes: row.get("notes")?,
             page_count: row.get("page_count")?,
             source_pdf_path: row.get("source_pdf_path")?,
+            derived_from_sha256: row.get("derived_from_sha256")?,
         })
     }
+}
+
+/// One scan source still awaiting OCR: a `NeedsOcr` intake anchor with
+/// no successfully-processed OCR product derived from it. Pairs the
+/// intake row with the reason the text layer was rejected, read from
+/// the latest `extract` / `skipped` audit row for the same source, so
+/// the operator sees why each source needs OCR without a second query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OcrPending {
+    /// The scan source's intake row — the durable `NeedsOcr` anchor.
+    pub intake: Intake,
+    /// Why the text layer was rejected, from the `extract` / `skipped`
+    /// audit row. `None` when no such audit row survives.
+    pub reason: Option<String>,
 }
 
 /// The fields known when a file is first registered. The opaque
@@ -608,6 +641,88 @@ impl Catalog {
             named_params! { ":status": status.as_str() },
             Intake::from_row,
         )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The `WHERE` clause selecting scan sources still awaiting OCR: a
+    /// `NeedsOcr` anchor with no OCR product that reached a
+    /// successfully-processed state derived from it. `aborted` OCR
+    /// products are deliberately not counted as processed, so a source
+    /// whose OCR attempt failed keeps surfacing here for a re-run.
+    const OCR_PENDING_WHERE: &'static str = "\
+        WHERE intake.status = 'needs_ocr' \
+          AND NOT EXISTS ( \
+            SELECT 1 FROM intake child \
+            WHERE child.derived_from_sha256 = intake.source_sha256 \
+              AND child.status IN ('embedded', 'extracted', 'dedup_hold') \
+          )";
+
+    /// Scan sources still awaiting OCR, ordered by ascending
+    /// `intake_id`, paged by `limit` and `offset`. Each row pairs the
+    /// `NeedsOcr` anchor with the reason its text layer was rejected,
+    /// pulled from the latest `extract` / `skipped` audit row for the
+    /// same source hash.
+    ///
+    /// A `limit` of zero, or an `offset` past the end, returns an empty
+    /// `Vec` rather than an error.
+    pub fn list_ocr_pending(&self, limit: u32, offset: u32) -> Result<Vec<OcrPending>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {cols}, ( \
+                 SELECT a.error_message FROM item_pipeline_audit a \
+                 WHERE a.source_sha256 = intake.source_sha256 \
+                   AND a.stage = 'extract' AND a.outcome = 'skipped' \
+                 ORDER BY a.ts DESC, a.audit_id DESC LIMIT 1 \
+             ) AS ocr_reason \
+             FROM intake {where_clause} \
+             ORDER BY intake.intake_id LIMIT :limit OFFSET :offset",
+            cols = SPEC.select_list(),
+            where_clause = Self::OCR_PENDING_WHERE,
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            named_params! { ":limit": limit, ":offset": offset },
+            |row| {
+                Ok(OcrPending {
+                    intake: Intake::from_row(row)?,
+                    reason: row.get("ocr_reason")?,
+                })
+            },
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Total number of scan sources still awaiting OCR, ignoring
+    /// pagination. Shares [`Self::OCR_PENDING_WHERE`] with
+    /// [`Self::list_ocr_pending`] so the count and the listing reach the
+    /// same rows.
+    pub fn count_ocr_pending(&self) -> Result<u64> {
+        let sql = format!("SELECT COUNT(*) FROM intake {}", Self::OCR_PENDING_WHERE);
+        let n: i64 = self.conn.query_row(&sql, [], |row| row.get(0))?;
+        count_as_u64(n)
+    }
+
+    /// OCR product intakes (`format = 'ocr-markdown'`) whose derivation
+    /// edge is still NULL, ordered by ascending `intake_id`. These are
+    /// the rows a backfill pass revisits: written before
+    /// `derived_from_sha256` existed, they must recover the parent scan
+    /// PDF's hash from their envelope provenance so the "still needs
+    /// OCR" query stops counting their sources as pending.
+    pub fn ocr_intakes_missing_derivation(&self) -> Result<Vec<Intake>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE format = 'ocr-markdown' AND derived_from_sha256 IS NULL ORDER BY intake_id",
+        ))?;
+        let rows = stmt.query_map([], Intake::from_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -936,6 +1051,56 @@ impl Catalog {
             named_params! { ":page_count": page_count, ":intake_id": intake_id },
         )?;
         Ok(affected > 0)
+    }
+
+    /// Record the source hash a derived intake was produced from — the
+    /// scan PDF anchor's `source_sha256` on an OCR product. The `kind`
+    /// parameter is a signature-layer safety belt; see
+    /// [`Self::register_intake`] for the rationale. Returns whether a
+    /// row with that id existed.
+    ///
+    /// The edge is write-once: setting it to the value already stored
+    /// is idempotent, but re-pointing it at a *different* source hash
+    /// is refused with [`CatalogError::DerivedFromConflict`] rather
+    /// than silently overwritten, because the same OCR text mapped to
+    /// two different scan PDFs is a data conflict the operator must
+    /// see. Passing the value it already holds, or setting it on a row
+    /// where it is still NULL, both succeed.
+    ///
+    /// [`CatalogError::DerivedFromConflict`]: crate::CatalogError::DerivedFromConflict
+    pub fn set_derived_from(
+        &self,
+        kind: ItemKind,
+        intake_id: i64,
+        derived_from_sha256: &str,
+    ) -> Result<bool> {
+        let _ = kind;
+        let existing: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT derived_from_sha256 FROM intake WHERE intake_id = :intake_id",
+                named_params! { ":intake_id": intake_id },
+                |row| row.get(0),
+            )
+            .optional()?;
+        match existing {
+            None => Ok(false),
+            Some(Some(current)) if current != derived_from_sha256 => {
+                Err(crate::CatalogError::DerivedFromConflict {
+                    intake_id,
+                    existing: current,
+                    requested: derived_from_sha256.to_string(),
+                })
+            }
+            Some(_) => {
+                self.conn.execute(
+                    "UPDATE intake SET derived_from_sha256 = :derived \
+                     WHERE intake_id = :intake_id",
+                    named_params! { ":derived": derived_from_sha256, ":intake_id": intake_id },
+                )?;
+                Ok(true)
+            }
+        }
     }
 
     /// Stamp the extraction provenance: the adapter that parsed the
@@ -2050,5 +2215,132 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), 5);
+    }
+
+    /// Register a book intake at `sha` with `format` and advance it to
+    /// `status`, returning its id. A small helper for the OCR-pending
+    /// tests below.
+    fn register_book(cat: &mut Catalog, sha: &str, format: &str, status: IntakeStatus) -> i64 {
+        let reg = cat
+            .register_intake(ItemKind::Book, &NewIntake::new(sha).format(format))
+            .expect("register");
+        let id = reg.intake().intake_id;
+        cat.set_intake_status(ItemKind::Book, id, status)
+            .expect("set status");
+        id
+    }
+
+    #[test]
+    fn set_derived_from_is_write_once_and_refuses_a_conflicting_source() {
+        let mut cat = catalog();
+        let id = register_book(&mut cat, "ocr-sha", "ocr-markdown", IntakeStatus::Embedded);
+
+        // Setting it the first time succeeds and reads back.
+        assert!(
+            cat.set_derived_from(ItemKind::Book, id, "pdf-a")
+                .expect("first set")
+        );
+        assert_eq!(
+            cat.intake_by_id(id).unwrap().unwrap().derived_from_sha256,
+            Some("pdf-a".to_string())
+        );
+
+        // Re-setting the same value is idempotent.
+        assert!(
+            cat.set_derived_from(ItemKind::Book, id, "pdf-a")
+                .expect("idempotent set")
+        );
+
+        // Re-pointing to a different source is refused.
+        let err = cat
+            .set_derived_from(ItemKind::Book, id, "pdf-b")
+            .expect_err("conflict must error");
+        assert!(matches!(
+            err,
+            crate::CatalogError::DerivedFromConflict { intake_id, .. } if intake_id == id
+        ));
+        // The stored edge is unchanged after the refused write.
+        assert_eq!(
+            cat.intake_by_id(id).unwrap().unwrap().derived_from_sha256,
+            Some("pdf-a".to_string())
+        );
+    }
+
+    #[test]
+    fn set_derived_from_reports_a_missing_row() {
+        let cat = catalog();
+        assert!(
+            !cat.set_derived_from(ItemKind::Book, 999, "pdf-a")
+                .expect("missing row is not an error")
+        );
+    }
+
+    #[test]
+    fn list_ocr_pending_lists_anchors_without_a_processed_product() {
+        let mut cat = catalog();
+        // A needs_ocr anchor with no OCR product yet: pending.
+        let anchor = register_book(&mut cat, "pdf-open", "pdf", IntakeStatus::NeedsOcr);
+        cat.set_page_count(ItemKind::Book, anchor, 12)
+            .expect("pages");
+
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intake.intake_id, anchor);
+        assert_eq!(pending[0].intake.page_count, Some(12));
+        assert_eq!(pending[0].reason, None);
+        assert_eq!(cat.count_ocr_pending().expect("count"), 1);
+    }
+
+    #[test]
+    fn list_ocr_pending_hides_an_anchor_once_its_product_is_processed() {
+        let mut cat = catalog();
+        register_book(&mut cat, "pdf-done", "pdf", IntakeStatus::NeedsOcr);
+        let product = register_book(&mut cat, "ocr-done", "ocr-markdown", IntakeStatus::Embedded);
+        cat.set_derived_from(ItemKind::Book, product, "pdf-done")
+            .expect("edge");
+
+        assert!(cat.list_ocr_pending(50, 0).expect("list").is_empty());
+        assert_eq!(cat.count_ocr_pending().expect("count"), 0);
+    }
+
+    #[test]
+    fn list_ocr_pending_keeps_an_anchor_whose_product_only_aborted() {
+        let mut cat = catalog();
+        let anchor = register_book(&mut cat, "pdf-retry", "pdf", IntakeStatus::NeedsOcr);
+        let product = register_book(&mut cat, "ocr-bad", "ocr-markdown", IntakeStatus::Aborted);
+        cat.set_derived_from(ItemKind::Book, product, "pdf-retry")
+            .expect("edge");
+
+        // An aborted product is not "processed": the source keeps
+        // surfacing so the operator can re-run OCR.
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intake.intake_id, anchor);
+    }
+
+    #[test]
+    fn ocr_intakes_missing_derivation_finds_only_unlinked_products() {
+        let mut cat = catalog();
+        let linked = register_book(
+            &mut cat,
+            "ocr-linked",
+            "ocr-markdown",
+            IntakeStatus::Embedded,
+        );
+        cat.set_derived_from(ItemKind::Book, linked, "pdf-x")
+            .expect("edge");
+        let unlinked = register_book(
+            &mut cat,
+            "ocr-unlinked",
+            "ocr-markdown",
+            IntakeStatus::Embedded,
+        );
+        // A born-digital book must never appear regardless of its edge.
+        register_book(&mut cat, "born", "pdf", IntakeStatus::Embedded);
+
+        let missing = cat.ocr_intakes_missing_derivation().expect("missing");
+        let ids: Vec<i64> = missing.iter().map(|i| i.intake_id).collect();
+        assert_eq!(ids, vec![unlinked]);
+        assert!(!ids.contains(&linked));
     }
 }

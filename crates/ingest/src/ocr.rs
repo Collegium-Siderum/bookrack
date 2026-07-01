@@ -198,6 +198,15 @@ pub async fn ingest_ocr_intake<E: Embedder>(
     )?;
     let ocr_intake_id = ocr_reg.intake().intake_id;
 
+    // Materialize the derivation edge on the OCR product row: it points
+    // back to the scan PDF anchor's hash so the "still needs OCR" query
+    // can tell an anchored-and-processed source from one still awaiting
+    // OCR without a join through the envelope. Write-once; re-pointing
+    // the same OCR text at a different PDF is refused rather than
+    // silently overwritten. Set before the noop fast path so a re-run
+    // over a row registered before this column existed backfills it.
+    catalog.set_derived_from(ItemKind::Book, ocr_intake_id, &source_sha_pdf)?;
+
     // 4a. Idempotent fast path: if the OCR intake already reached
     //     `Embedded` with current OCR_INTAKE_VERSION and the configured
     //     embed model, the run has nothing left to do. Mirrors the

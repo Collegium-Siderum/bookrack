@@ -19,6 +19,7 @@
 //! install still produces a row stating that — rather than the resolver
 //! short-circuiting the very diagnosis the user needs.
 
+use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
     LibrarySelection, ResolutionSource, default_registry_path, locate_pdfium,
@@ -313,6 +314,146 @@ pub fn render_rename_report(report: &RenameReport, json: bool) {
     }
     for failure in &report.failures {
         println!("  FAILED {} ({})", failure.path, failure.error);
+    }
+}
+
+/// Outcome of a `--backfill-ocr-derivation` run: OCR product intakes
+/// whose `derived_from_sha256` was still NULL, recovered from their
+/// envelope provenance so `intake list-ocr-pending` stops listing their
+/// already-processed sources.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackfillReport {
+    /// True when the plan was computed without writing.
+    pub dry_run: bool,
+    /// Edges that were (or would be) filled from envelope provenance.
+    pub filled: Vec<BackfillAction>,
+    /// Rows that could not be backfilled automatically and need a
+    /// manual re-OCR: envelope missing, unreadable, or carrying no
+    /// derivation hash.
+    pub needs_manual: Vec<BackfillFailure>,
+}
+
+impl BackfillReport {
+    /// True when at least one row needs manual attention.
+    pub fn has_failures(&self) -> bool {
+        !self.needs_manual.is_empty()
+    }
+}
+
+/// One OCR intake whose derivation edge was recovered.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillAction {
+    /// The OCR product intake id.
+    pub intake_id: i64,
+    /// The scan PDF hash recovered from the envelope and written onto
+    /// the row.
+    pub derived_from_sha256: String,
+}
+
+/// One OCR intake that could not be backfilled automatically.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillFailure {
+    /// The OCR product intake id.
+    pub intake_id: i64,
+    /// Why the derivation edge could not be recovered.
+    pub reason: String,
+}
+
+/// Recover the `derived_from_sha256` edge on OCR product intakes that
+/// predate the column, reading the parent scan PDF's hash from each
+/// intake's envelope provenance. Idempotent: rows whose edge is already
+/// set are not revisited (the accessor filters on NULL), and the
+/// write-once conflict guard refuses to re-point an existing edge.
+///
+/// With `dry_run = true` the plan is computed and returned without
+/// writing.
+pub async fn backfill_ocr_derivation(
+    selection: &LibrarySelection,
+    dry_run: bool,
+) -> Result<BackfillReport> {
+    let cfg = Config::resolve(selection).context("resolve config for OCR derivation backfill")?;
+    let catalog =
+        Catalog::open(&cfg.catalog_db()).context("open catalog for OCR derivation backfill")?;
+    let pending = catalog
+        .ocr_intakes_missing_derivation()
+        .context("list OCR intakes missing a derivation edge")?;
+
+    let mut report = BackfillReport {
+        dry_run,
+        ..Default::default()
+    };
+    for intake in pending {
+        let Some(stored_path) = intake.stored_path.as_deref() else {
+            report.needs_manual.push(BackfillFailure {
+                intake_id: intake.intake_id,
+                reason: "no stored envelope path recorded".to_string(),
+            });
+            continue;
+        };
+        let envelope = match bookrack_extract::envelope::read_envelope_with_fallback(
+            std::path::Path::new(stored_path),
+        ) {
+            Ok(env) => env,
+            Err(e) => {
+                report.needs_manual.push(BackfillFailure {
+                    intake_id: intake.intake_id,
+                    reason: format!("read envelope: {e}"),
+                });
+                continue;
+            }
+        };
+        let Some(sha) = envelope.extraction.provenance.derived_from_sha256.clone() else {
+            report.needs_manual.push(BackfillFailure {
+                intake_id: intake.intake_id,
+                reason: "envelope provenance carries no derived_from_sha256".to_string(),
+            });
+            continue;
+        };
+        if !dry_run
+            && let Err(e) =
+                catalog.set_derived_from(bookrack_core::ItemKind::Book, intake.intake_id, &sha)
+        {
+            report.needs_manual.push(BackfillFailure {
+                intake_id: intake.intake_id,
+                reason: format!("write derivation edge: {e}"),
+            });
+            continue;
+        }
+        report.filled.push(BackfillAction {
+            intake_id: intake.intake_id,
+            derived_from_sha256: sha,
+        });
+    }
+    Ok(report)
+}
+
+/// Render a [`BackfillReport`] to the operator, matching the style of
+/// [`render_rename_report`]. The JSON view emits the report verbatim.
+pub fn render_backfill_report(report: &BackfillReport, json: bool) {
+    if json {
+        let v = serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string());
+        println!("{v}");
+        return;
+    }
+    let mode = if report.dry_run { "(plan)" } else { "" };
+    println!(
+        "OCR derivation backfill {mode}: {} filled, {} need manual re-OCR",
+        report.filled.len(),
+        report.needs_manual.len(),
+    );
+    for action in &report.filled {
+        let verb = if report.dry_run {
+            "would fill"
+        } else {
+            "filled"
+        };
+        println!(
+            "  {verb} intake {} -> {}",
+            action.intake_id, action.derived_from_sha256,
+        );
+    }
+    for failure in &report.needs_manual {
+        println!("  MANUAL intake {} ({})", failure.intake_id, failure.reason);
     }
 }
 

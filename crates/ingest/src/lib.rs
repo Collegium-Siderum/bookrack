@@ -124,11 +124,16 @@ pub enum IngestError {
     Extract(#[from] bookrack_extract::ExtractError),
 
     /// The source has no usable text layer and must go through OCR, which
-    /// this pipeline does not do.
+    /// this pipeline does not do. The source is still registered as a
+    /// `NeedsOcr` intake anchor before the error returns, so it is a
+    /// durable, listable work item rather than a dropped job; `intake_id`
+    /// names that anchor.
     #[error("source needs OCR and cannot be ingested as text: {reason}")]
     NeedsOcr {
         /// Why the text layer was judged unusable.
         reason: String,
+        /// The `NeedsOcr` intake anchor registered for the source.
+        intake_id: i64,
     },
 
     /// The catalog layer reported an error.
@@ -423,6 +428,38 @@ pub async fn ingest_book<E: Embedder>(
     let extraction = match extracted {
         Ok(ExtractOutcome::Extracted(extraction)) => extraction,
         Ok(ExtractOutcome::NeedsOcr { reason }) => {
+            // Register the scan source as a durable `NeedsOcr` anchor so
+            // it becomes a listable OCR work item instead of a dropped
+            // job. Only the PDF adapter yields `NeedsOcr`, so the source
+            // is a PDF. On a fresh registration this is where the status,
+            // best-effort page count, and opaque-store copy land; a
+            // re-run finds the anchor already present and leaves it be.
+            let registration = catalog.register_intake(
+                ItemKind::Book,
+                &NewIntake::new(source_sha.clone())
+                    .format("pdf")
+                    .byte_size(bytes.len() as i64)
+                    .original_path(file.to_string_lossy().into_owned()),
+            )?;
+            let intake_id = registration.intake().intake_id;
+            if registration.is_new() {
+                catalog.set_intake_status(ItemKind::Book, intake_id, IntakeStatus::NeedsOcr)?;
+                // Page count is best-effort: it needs a PDFium read, so a
+                // build without PDFium records NULL rather than failing
+                // the anchor.
+                if let Ok(pages) = bookrack_extract::ocr::count_pdf_pages(file) {
+                    catalog.set_page_count(ItemKind::Book, intake_id, i64::from(pages))?;
+                }
+                std::fs::create_dir_all(books_dir)?;
+                let stored = books_dir.join(format!("{intake_id}.pdf"));
+                std::fs::write(&stored, &bytes)?;
+                catalog.set_stored_path(
+                    ItemKind::Book,
+                    intake_id,
+                    stored.to_string_lossy().as_ref(),
+                )?;
+            }
+            tracing::Span::current().record("intake_id", intake_id);
             audit(
                 catalog,
                 &run_id,
@@ -435,7 +472,7 @@ pub async fn ingest_book<E: Embedder>(
                 None,
                 Some(&reason),
             );
-            return Err(IngestError::NeedsOcr { reason });
+            return Err(IngestError::NeedsOcr { reason, intake_id });
         }
         Err(e) => {
             audit(

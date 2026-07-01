@@ -10,6 +10,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **ingest, catalog, cli: OCR-needed sources become a durable, listable
+  worklist.** When the extract stage rejects a source as image-only,
+  ingest now registers it as a `needs_ocr` intake anchor — recording
+  its bytes in the opaque store, a best-effort PDFium page count, and
+  the rejection reason — instead of dropping the job with only an audit
+  row. A new read surface, control-plane `library.list_ocr_pending` and
+  CLI `bookrack intake list-ocr-pending` (with `--json` emitting a
+  tool-agnostic manifest of `intake_id` / `source_path` / `sha256` /
+  `pages` / `reason`), lists every scan source still awaiting OCR: a
+  `needs_ocr` anchor with no successfully-processed OCR product derived
+  from it. The operator runs any OCR engine over the manifest and
+  re-enters the product through the existing `intake ocr`; bookrack
+  stays engine-agnostic. To make the worklist exact, catalog gains a
+  nullable `intake.derived_from_sha256` edge (schema v13 → v14, additive
+  column plus a `(derived_from_sha256, status)` index), written
+  write-once on the OCR product intake and refused rather than
+  overwritten when it would re-point to a different source.
+  `bookrack doctor --backfill-ocr-derivation` recovers the edge on OCR
+  intakes that predate the column by reading each envelope's provenance,
+  so an upgraded library does not list already-processed sources.
+
 - **runtime, cli: `queue.list` returns a top-level `summary` of state
   counts.** Alongside `schema_version`, `paused`, and `jobs`, the
   response now carries `summary` with one count per job state

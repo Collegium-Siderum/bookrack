@@ -19,8 +19,8 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
-    TocNode, clamp_limit,
+    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES,
+    OcrPendingItem, OcrPendingResult, Toc, TocNode, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -97,6 +97,41 @@ pub fn find_books<E: Embedder>(
             truncated,
         })
     })
+}
+
+/// List scan sources still awaiting OCR, paginated. Each item carries
+/// the path to hand to an external OCR tool, the source hash, a
+/// best-effort page count, and the reason its text layer was rejected.
+/// The limit is clamped to
+/// [`dto::MAX_LIST_LIMIT`](crate::dto::MAX_LIST_LIMIT); `truncated` is
+/// set when the page does not cover the full result set.
+pub fn list_ocr_pending<E: Embedder>(
+    ops: &Ops<E>,
+    limit: u32,
+    offset: u32,
+) -> Result<OcrPendingResult> {
+    record_call_sync!(
+        ops,
+        "library.list_ocr_pending",
+        serde_json::json!({ "limit": limit, "offset": offset }),
+        {
+            let (effective_limit, _) = clamp_limit(limit);
+            let catalog = Catalog::open_read_only(ops.catalog_db())?;
+            let pending = catalog.list_ocr_pending(effective_limit, offset)?;
+            let total = catalog.count_ocr_pending()?;
+            let items: Vec<OcrPendingItem> = pending
+                .into_iter()
+                .map(OcrPendingItem::from_pending)
+                .collect();
+            let returned = items.len() as u64;
+            let truncated = u64::from(offset) + returned < total;
+            Ok(OcrPendingResult {
+                items,
+                total,
+                truncated,
+            })
+        }
+    )
 }
 
 /// Fetch the full bibliographic record of one book by intake id.

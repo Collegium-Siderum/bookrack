@@ -24,8 +24,8 @@ pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
 
 use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES, Toc,
-    TocNode, clamp_limit,
+    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES,
+    OcrPendingItem, OcrPendingResult, Toc, TocNode, clamp_limit,
 };
 
 // Re-exported so consumers name query results through this crate, not the
@@ -463,6 +463,31 @@ impl<E: Embedder> Library<E> {
         let truncated = u64::from(offset) + returned < total;
         Ok(ListBooksResult {
             books,
+            total,
+            truncated,
+        })
+    }
+
+    /// List scan sources still awaiting OCR, paginated. The limit is
+    /// clamped to [`dto::MAX_LIST_LIMIT`]; `truncated` is set when the
+    /// page does not cover the full result set. Each item carries the
+    /// path the operator should hand to their OCR tool, the source
+    /// hash, a best-effort page count, and the reason its text layer
+    /// was rejected — enough to drive an external OCR run and re-enter
+    /// the product through `intake ocr`.
+    pub fn list_ocr_pending(&self, limit: u32, offset: u32) -> Result<OcrPendingResult> {
+        let (effective_limit, _) = clamp_limit(limit);
+        let catalog = Catalog::open_read_only(&self.catalog_db)?;
+        let pending = catalog.list_ocr_pending(effective_limit, offset)?;
+        let total = catalog.count_ocr_pending()?;
+        let items: Vec<OcrPendingItem> = pending
+            .into_iter()
+            .map(OcrPendingItem::from_pending)
+            .collect();
+        let returned = items.len() as u64;
+        let truncated = u64::from(offset) + returned < total;
+        Ok(OcrPendingResult {
+            items,
             total,
             truncated,
         })
