@@ -87,6 +87,16 @@ pub struct BookDetail {
     pub format: Option<String>,
     /// Coarse lifecycle status.
     pub status: String,
+    /// Path as recorded at intake time. May be relative or no longer
+    /// exist on disk — bookrack stores it verbatim from the original
+    /// submission and never re-canonicalises it.
+    pub source_path: Option<String>,
+    /// Basename derived from [`Self::source_path`], if any.
+    pub source_filename: Option<String>,
+    /// Whole-file SHA-256 of the original source.
+    pub source_sha256: String,
+    /// When the file was first registered, ISO-8601 UTC.
+    pub intake_at: String,
     /// Effective bibliographic attributes — the base layer merged with
     /// any human override. Keys are stable strings (`title`,
     /// `publisher`, `isbn`, ...).
@@ -342,11 +352,20 @@ impl BookDetail {
             effective_biblio.insert(name.to_string(), value.to_string());
         }
         let title = effective_biblio.get("title").cloned();
+        let source_filename = intake.original_path.as_deref().and_then(|path| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
         BookDetail {
             intake_id: intake.intake_id,
             title,
             format: intake.format,
             status: intake.status.as_str().to_string(),
+            source_path: intake.original_path,
+            source_filename,
+            source_sha256: intake.source_sha256,
+            intake_at: intake.intake_at,
             effective_biblio,
             overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
             contributors: contributors

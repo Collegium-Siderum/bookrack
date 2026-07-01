@@ -2000,6 +2000,10 @@ mod tests {
             title: Some("T".to_string()),
             format: Some("pdf".to_string()),
             status: "embedded".to_string(),
+            source_path: Some("library/book.pdf".to_string()),
+            source_filename: Some("book.pdf".to_string()),
+            source_sha256: "0".repeat(64),
+            intake_at: "2026-01-01T00:00:00Z".to_string(),
             effective_biblio: biblio,
             overrides: Vec::new(),
             contributors: vec![ContributorEntry {
@@ -2014,6 +2018,14 @@ mod tests {
         let value = serde_json::to_value(&detail).expect("serialize");
         assert_eq!(value["effective_biblio"]["title"], "T");
         assert_eq!(value["contributors"][0]["role"], "author");
+        assert_eq!(value["source_filename"], "book.pdf");
+        assert_eq!(value["source_path"], "library/book.pdf");
+        assert_eq!(value["intake_at"], "2026-01-01T00:00:00Z");
+        assert!(
+            value["source_sha256"]
+                .as_str()
+                .is_some_and(|s| s.len() == 64)
+        );
     }
 
     #[test]
