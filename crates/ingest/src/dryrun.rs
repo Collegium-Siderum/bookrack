@@ -457,6 +457,7 @@ fn run_pipeline(
         intake_id,
         extraction,
         Some(&filename_biblio),
+        &params.audit_data,
         &params.audit_profile,
     );
     let mut attrs = outcome.attrs;

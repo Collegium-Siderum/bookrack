@@ -999,7 +999,14 @@ pub(crate) fn run_metadata_substep(
     let started = std::time::Instant::now();
 
     // Real ingest discards the action trail; only the dryrun consumes it.
-    let mut attrs = build_base_attrs(intake_id, extraction, filename_biblio, audit_profile).attrs;
+    let mut attrs = build_base_attrs(
+        intake_id,
+        extraction,
+        filename_biblio,
+        audit_data,
+        audit_profile,
+    )
+    .attrs;
     if let Err(e) = catalog.upsert_publication_attrs(&attrs) {
         tracing::warn!(error = %e, "metadata: failed to seed publication attrs");
         audit(
@@ -1249,6 +1256,7 @@ fn build_base_attrs(
     intake_id: i64,
     extraction: &Extraction,
     filename_biblio: Option<&bookrack_metadata::FilenameBiblio>,
+    audit_data: &bookrack_metadata::AuditData,
     profile: &bookrack_metadata::AuditProfile,
 ) -> BaseAttrsOutcome {
     let biblio = &extraction.biblio;
@@ -1272,6 +1280,13 @@ fn build_base_attrs(
             &mut actions,
         );
     }
+    let garbage_matcher = GarbageTitleMatcher::from_data(audit_data);
+    drop_garbage_extracted_title(
+        &mut attrs.title,
+        &garbage_matcher,
+        &audit_data.placeholder_titles,
+        &mut actions,
+    );
     let extracted_any = attrs.title.is_some()
         || attrs.subtitle.is_some()
         || attrs.publisher.is_some()
@@ -1358,6 +1373,11 @@ pub(crate) enum BaseAttrsAction {
     /// `merge_from_filename` filled an adapter-empty field from the
     /// filename parser. The static string is the field name.
     FilenameFallback(&'static str),
+    /// `drop_garbage_extracted_title` rejected the adapter's title as
+    /// junk (placeholder word, blacklisted substring, or blacklisted
+    /// regex). The string is the rule kind that fired:
+    /// `placeholder` / `substring` / `regex`.
+    DropGarbageTitle(&'static str),
 }
 
 impl BaseAttrsAction {
@@ -1368,6 +1388,7 @@ impl BaseAttrsAction {
             Self::DropInvalidIsbn => "drop_invalid_isbn".to_string(),
             Self::DropStaleYear => "drop_stale_year".to_string(),
             Self::FilenameFallback(field) => format!("filename_fallback:{field}"),
+            Self::DropGarbageTitle(kind) => format!("drop_garbage_title:{kind}"),
         }
     }
 }
@@ -1415,6 +1436,118 @@ fn drop_stale_extracted_year(
     if filename_year != current {
         *slot = None;
         actions.push(BaseAttrsAction::DropStaleYear);
+    }
+}
+
+/// Compiled garbage-title rules: substring blacklist and regex
+/// blacklist. Built once per ingest run from the active [`AuditData`];
+/// regex sources that fail to compile are dropped with a `tracing::warn!`
+/// rather than aborting the run, so a bad operator overlay degrades
+/// gracefully.
+pub(crate) struct GarbageTitleMatcher {
+    substrings_lower: Vec<String>,
+    regexes: Vec<regex::Regex>,
+}
+
+impl GarbageTitleMatcher {
+    pub(crate) fn from_data(data: &bookrack_metadata::AuditData) -> Self {
+        let substrings_lower = data
+            .garbage_title_substrings
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let mut regexes = Vec::with_capacity(data.garbage_title_regexes.len());
+        for pattern in &data.garbage_title_regexes {
+            match regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+            {
+                Ok(re) => regexes.push(re),
+                Err(error) => {
+                    tracing::warn!(
+                        pattern = pattern.as_str(),
+                        error = %error,
+                        "metadata: skipping unparseable garbage-title regex"
+                    );
+                }
+            }
+        }
+        Self {
+            substrings_lower,
+            regexes,
+        }
+    }
+
+    /// Classify `title` against the configured rules. Returns the rule
+    /// kind that matched (`placeholder`, `substring`, `regex`) or
+    /// `None` if the title is not garbage. `placeholder_titles` is
+    /// matched by alphanumeric-core equality, the same shape the audit
+    /// uses; `substrings` is case-insensitive `contains`; `regexes` is
+    /// case-insensitive `is_match`.
+    pub(crate) fn classify(
+        &self,
+        title: &str,
+        placeholder_titles: &[String],
+    ) -> Option<&'static str> {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if !placeholder_titles.is_empty() && is_placeholder_title(trimmed, placeholder_titles) {
+            return Some("placeholder");
+        }
+        let lowered = trimmed.to_lowercase();
+        if self
+            .substrings_lower
+            .iter()
+            .any(|needle| !needle.is_empty() && lowered.contains(needle))
+        {
+            return Some("substring");
+        }
+        if self.regexes.iter().any(|re| re.is_match(trimmed)) {
+            return Some("regex");
+        }
+        None
+    }
+}
+
+/// Alphanumeric-core equality against a placeholder-title list. The
+/// shape mirrors `bookrack_metadata::signals::is_placeholder` so an
+/// extracted title that the audit would flag as `PlaceholderValue` is
+/// also dropped here, before the filename fallback runs.
+fn is_placeholder_title(value: &str, placeholder_titles: &[String]) -> bool {
+    let core = alphanumeric_core(value);
+    if core.is_empty() {
+        return false;
+    }
+    placeholder_titles
+        .iter()
+        .any(|word| alphanumeric_core(word) == core)
+}
+
+fn alphanumeric_core(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Drop an extracted title that matches the garbage-title rules so the
+/// filename fallback can fill the slot. The rule kind that fired is
+/// pushed onto the action trail.
+fn drop_garbage_extracted_title(
+    slot: &mut Option<String>,
+    matcher: &GarbageTitleMatcher,
+    placeholder_titles: &[String],
+    actions: &mut Vec<BaseAttrsAction>,
+) {
+    let Some(value) = slot.as_deref() else {
+        return;
+    };
+    if let Some(kind) = matcher.classify(value, placeholder_titles) {
+        *slot = None;
+        actions.push(BaseAttrsAction::DropGarbageTitle(kind));
     }
 }
 
@@ -2996,7 +3129,13 @@ mod book_pipeline_tests {
             ..Default::default()
         });
         let profile = bookrack_metadata::AuditProfile::default();
-        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            None,
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         assert!(
             outcome.actions.is_empty(),
             "expected no actions, got {:?}",
@@ -3014,7 +3153,13 @@ mod book_pipeline_tests {
             ..Default::default()
         });
         let profile = bookrack_metadata::AuditProfile::default();
-        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            None,
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         assert!(outcome.attrs.isbn.is_none());
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         assert!(
@@ -3035,7 +3180,13 @@ mod book_pipeline_tests {
         });
         let mut profile = bookrack_metadata::AuditProfile::default();
         profile.publisher.drop_10digit_isbn_to_filename = false;
-        let outcome = super::build_base_attrs(1, &extraction, None, &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            None,
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         assert_eq!(outcome.attrs.isbn.as_deref(), Some("1234567891"));
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         assert!(
@@ -3057,7 +3208,13 @@ mod book_pipeline_tests {
             "Alice Author - A Sample Title (2006, Sample Press)",
             &profile.filename_parser,
         );
-        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            Some(&filename),
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         // The stale 2019 was dropped, then the filename year filled in.
         assert_eq!(outcome.attrs.year.as_deref(), Some("2006"));
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
@@ -3088,7 +3245,13 @@ mod book_pipeline_tests {
             "Alice Author - A Sample Title (2006, Sample Press)",
             &profile.filename_parser,
         );
-        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            Some(&filename),
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         assert_eq!(outcome.attrs.year.as_deref(), Some("2019"));
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         assert!(
@@ -3108,7 +3271,13 @@ mod book_pipeline_tests {
             "Alice Author - A Sample Title (2006, Sample Press)",
             &profile.filename_parser,
         );
-        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &profile);
+        let outcome = super::build_base_attrs(
+            1,
+            &extraction,
+            Some(&filename),
+            &bookrack_metadata::AuditData::empty(),
+            &profile,
+        );
         let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
         for expected in [
             "filename_fallback:title",
@@ -3121,6 +3290,113 @@ mod book_pipeline_tests {
             );
         }
         assert_eq!(outcome.attrs.source.as_deref(), Some("filename"));
+    }
+
+    #[test]
+    fn drop_garbage_title_placeholder_routes_through_filename_fallback() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Untitled".to_string()),
+            ..Default::default()
+        });
+        let profile = bookrack_metadata::AuditProfile::default();
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &profile.filename_parser,
+        );
+        let mut data = bookrack_metadata::AuditData::empty();
+        data.placeholder_titles = vec!["untitled".to_string()];
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &data, &profile);
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_garbage_title:placeholder".to_string()),
+            "expected drop_garbage_title:placeholder in {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&"filename_fallback:title".to_string()),
+            "expected filename_fallback:title in {tokens:?}"
+        );
+        assert_eq!(outcome.attrs.title.as_deref(), Some("A Sample Title"));
+        assert_eq!(outcome.attrs.source.as_deref(), Some("filename"));
+    }
+
+    #[test]
+    fn drop_garbage_title_substring_routes_through_filename_fallback() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Microsoft Word - chapter.doc".to_string()),
+            ..Default::default()
+        });
+        let profile = bookrack_metadata::AuditProfile::default();
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &profile.filename_parser,
+        );
+        let mut data = bookrack_metadata::AuditData::empty();
+        data.garbage_title_substrings = vec!["microsoft word -".to_string()];
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &data, &profile);
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_garbage_title:substring".to_string()),
+            "expected drop_garbage_title:substring in {tokens:?}"
+        );
+        assert_eq!(outcome.attrs.title.as_deref(), Some("A Sample Title"));
+    }
+
+    #[test]
+    fn drop_garbage_title_regex_routes_through_filename_fallback() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Document42".to_string()),
+            ..Default::default()
+        });
+        let profile = bookrack_metadata::AuditProfile::default();
+        let filename = bookrack_metadata::parse_filename(
+            "Alice Author - A Sample Title (2006, Sample Press)",
+            &profile.filename_parser,
+        );
+        let mut data = bookrack_metadata::AuditData::empty();
+        data.garbage_title_regexes = vec!["^document\\d+$".to_string()];
+        let outcome = super::build_base_attrs(1, &extraction, Some(&filename), &data, &profile);
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_garbage_title:regex".to_string()),
+            "expected drop_garbage_title:regex in {tokens:?}"
+        );
+        assert_eq!(outcome.attrs.title.as_deref(), Some("A Sample Title"));
+    }
+
+    #[test]
+    fn drop_garbage_title_with_no_filename_fallback_leaves_title_none() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Untitled".to_string()),
+            ..Default::default()
+        });
+        let profile = bookrack_metadata::AuditProfile::default();
+        let mut data = bookrack_metadata::AuditData::empty();
+        data.placeholder_titles = vec!["untitled".to_string()];
+        let outcome = super::build_base_attrs(1, &extraction, None, &data, &profile);
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            tokens.contains(&"drop_garbage_title:placeholder".to_string()),
+            "expected drop_garbage_title:placeholder in {tokens:?}"
+        );
+        assert!(outcome.attrs.title.is_none());
+    }
+
+    #[test]
+    fn drop_garbage_title_unparseable_regex_is_skipped_not_aborted() {
+        let extraction = extraction_with_biblio(bookrack_extract::Biblio {
+            title: Some("Some Title".to_string()),
+            ..Default::default()
+        });
+        let profile = bookrack_metadata::AuditProfile::default();
+        let mut data = bookrack_metadata::AuditData::empty();
+        data.garbage_title_regexes = vec!["[unclosed".to_string()];
+        let outcome = super::build_base_attrs(1, &extraction, None, &data, &profile);
+        assert_eq!(outcome.attrs.title.as_deref(), Some("Some Title"));
+        let tokens: Vec<String> = outcome.actions.iter().map(|a| a.token()).collect();
+        assert!(
+            !tokens.iter().any(|t| t.starts_with("drop_garbage_title:")),
+            "expected no drop_garbage_title action in {tokens:?}"
+        );
     }
 
     fn intake_id(catalog: &mut Catalog, sha: &str) -> i64 {

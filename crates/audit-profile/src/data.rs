@@ -56,6 +56,18 @@ pub struct AuditData {
     pub abbreviations: BTreeMap<String, String>,
     /// Case-insensitive placeholder-title words the title audit flags.
     pub placeholder_titles: Vec<String>,
+    /// Case-insensitive substrings the ingest base-attrs stage treats
+    /// as junk titles: an extracted title containing any one of these
+    /// is dropped before the filename fallback runs. Distinct from
+    /// `placeholder_titles`, which scores the *final* title in the
+    /// audit; this list scrubs the *extracted* title prior to merge.
+    pub garbage_title_substrings: Vec<String>,
+    /// Regex source strings paired with `garbage_title_substrings`.
+    /// Each pattern is matched case-insensitively against the trimmed
+    /// extracted title; the regexes are compiled by the consumer
+    /// (`bookrack-ingest`) once per ingest run and unparseable patterns
+    /// are skipped with a warning so a bad overlay never aborts ingest.
+    pub garbage_title_regexes: Vec<String>,
     /// Suffix tokens that mark a trailing bracketed segment as a
     /// volume / edition / printing marker.
     pub volume_suffix_tokens: Vec<String>,
@@ -184,6 +196,10 @@ struct TitleSection {
     #[serde(default)]
     placeholder_words: Option<Vec<String>>,
     #[serde(default)]
+    garbage_substrings: Option<Vec<String>>,
+    #[serde(default)]
+    garbage_regexes: Option<Vec<String>>,
+    #[serde(default)]
     volume_suffix_tokens: Option<Vec<String>>,
 }
 
@@ -260,6 +276,12 @@ fn apply_overlay(data: &mut AuditData, file: DataFile) {
         if let Some(v) = s.placeholder_words {
             data.placeholder_titles = v;
         }
+        if let Some(v) = s.garbage_substrings {
+            data.garbage_title_substrings = v;
+        }
+        if let Some(v) = s.garbage_regexes {
+            data.garbage_title_regexes = v;
+        }
         if let Some(v) = s.volume_suffix_tokens {
             data.volume_suffix_tokens = v;
         }
@@ -306,6 +328,8 @@ mod tests {
             Some("publishing")
         );
         assert!(data.placeholder_titles.iter().any(|w| w == "unknown"));
+        assert!(data.garbage_title_substrings.is_empty());
+        assert!(data.garbage_title_regexes.is_empty());
         assert!(data.book_extensions.iter().any(|e| e == "epub"));
         assert!(data.book_extensions.iter().any(|e| e == "html"));
         assert!(data.scrub_book_extensions.iter().any(|e| e == "pdf"));
@@ -363,6 +387,27 @@ mod tests {
         assert!(loaded.watermark_url_substrings.is_empty());
         // Other watermark fields keep the shipped default.
         assert!(loaded.watermark_email_substrings.iter().any(|s| s == "@"));
+    }
+
+    #[test]
+    fn overlay_can_populate_garbage_title_lists() {
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            DATA_OVERLAY_FILE,
+            "schema_version = 1\n\
+             [title]\n\
+             garbage_substrings = [\"microsoft word -\", \"untitled.pd\"]\n\
+             garbage_regexes = [\"^doc\\\\d+$\"]\n",
+        );
+        let loaded = AuditData::load_from(dir.path()).unwrap();
+        assert_eq!(
+            loaded.garbage_title_substrings,
+            vec!["microsoft word -", "untitled.pd"]
+        );
+        assert_eq!(loaded.garbage_title_regexes, vec!["^doc\\d+$"]);
+        // Other title-section fields keep the shipped default.
+        assert!(loaded.placeholder_titles.iter().any(|w| w == "unknown"));
     }
 
     #[test]

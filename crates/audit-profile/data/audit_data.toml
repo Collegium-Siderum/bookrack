@@ -50,6 +50,16 @@ intl = "international"
 # Case-insensitive placeholder-title words. A trimmed title whose
 # alphanumeric core matches any entry is flagged as a placeholder.
 placeholder_words = ["unknown", "untitled", "no title", "anonymous", "n a", "na"]
+# Case-insensitive substrings that mark an extracted title as junk.
+# The ingest base-attrs stage drops the extracted title (so the
+# filename fallback runs) when the trimmed title contains any entry.
+# Empty by default — operators curate the list for their corpus, e.g.
+# producer-tool prefixes the title field often carries.
+garbage_substrings = []
+# Regex patterns paired with `garbage_substrings`. Each pattern is
+# compiled case-insensitively by the consumer at run time; unparseable
+# patterns are skipped with a warning rather than aborting ingest.
+garbage_regexes = []
 # Suffix tokens that mark a trailing bracketed segment as a volume /
 # edition / printing marker rather than a series name. Matches by
 # `ends_with` against the trimmed bracketed content. Empty by default —
