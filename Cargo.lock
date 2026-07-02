@@ -1140,6 +1140,7 @@ name = "bookrack-ops"
 version = "0.8.0-dev"
 dependencies = [
  "bookrack-catalog",
+ "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
  "bookrack-embed",

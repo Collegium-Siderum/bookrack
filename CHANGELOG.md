@@ -152,6 +152,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **ops, cli: queue-driven gleans now record a pipeline run.** The
+  registry-mediated glean path — the one every `glean.submit` queue
+  job takes — passed a `GleanParams` whose `pipeline_run_id` was
+  always `None`, so every production `node_paper_audit` row landed
+  with a NULL run id and `bookrack runs show` could never aggregate
+  the paper side. `Ops::glean_paper` now opens a `glean` row in the
+  paper catalog's `pipeline_runs` registry, threads the id onto the
+  audit row, and on exit closes the run and refreshes its rollup via
+  `compute_run_summary` (best-effort: lifecycle failures log and
+  never block the glean). Because paper-side runs live in
+  `papers_catalog.db` next to the audit rows they group, `bookrack
+  runs list` / `runs show` now read both catalogs and merge,
+  newest-first; a `runs` invocation never creates the papers
+  database as a side effect.
 - **dbkit, catalog, corpus, refs: SQLite stores open in WAL with a
   5 s busy timeout.** Every production handle now routes through three
   new `bookrack_dbkit` helpers — `open_production`,

@@ -10,12 +10,14 @@
 //!   `flag`, and `coverage` distributions as horizontal histograms
 //!   built from `render::distribution::render_histogram_bars`.
 //!
-//! Both commands open the catalog directly, the same way `distill`
-//! does, and never touch the daemon: the runs surface is local-only
-//! and read-only.
+//! Runs live next to the audit rows they group, so the registry is
+//! split across two databases: book-side commands register in
+//! `catalog.db`, the glean pipeline in `papers_catalog.db`. Both
+//! commands read the two and merge. The catalogs open directly, the
+//! same way `distill` does, and never touch the daemon: the runs
+//! surface is local-only and read-only.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use bookrack_catalog::{Catalog, PipelineRun, PipelineRunSummary};
 use bookrack_cli_grammar::RunsAction;
@@ -27,65 +29,105 @@ use crate::render::distribution::render_histogram_bars;
 
 /// Dispatch the requested `bookrack runs` action.
 pub fn run(selection: &bookrack_config::LibrarySelection, action: RunsAction) -> Result<()> {
-    let catalog_path = resolve_catalog_path(selection)?;
-    let catalog =
-        Catalog::open(&catalog_path).with_context(|| format!("open {}", catalog_path.display()))?;
+    let cfg = Config::resolve(selection).context("resolve configuration")?;
+    let catalogs = open_run_catalogs(&cfg)?;
     match action {
-        RunsAction::List { last, command } => list(&catalog, last, command.as_deref()),
-        RunsAction::Show { run_id } => show(&catalog, &run_id),
+        RunsAction::List { last, command } => list(&catalogs, last, command.as_deref()),
+        RunsAction::Show { run_id } => show(&catalogs, &run_id),
     }
 }
 
-fn resolve_catalog_path(selection: &bookrack_config::LibrarySelection) -> Result<PathBuf> {
-    let cfg = Config::resolve(selection).context("resolve configuration")?;
-    Ok(cfg.catalog_db())
+/// Open every catalog that carries a `pipeline_runs` registry. The
+/// paper catalog joins only when its file already exists, so a
+/// read-only `runs` invocation does not materialize an empty papers
+/// database as a side effect.
+fn open_run_catalogs(cfg: &Config) -> Result<Vec<Catalog>> {
+    let book_path = cfg.catalog_db();
+    let mut catalogs =
+        vec![Catalog::open(&book_path).with_context(|| format!("open {}", book_path.display()))?];
+    let papers_path = cfg.papers_catalog_db();
+    if papers_path.exists() {
+        catalogs.push(
+            Catalog::open(&papers_path)
+                .with_context(|| format!("open {}", papers_path.display()))?,
+        );
+    }
+    Ok(catalogs)
 }
 
 /// Render the recent-runs table. Empty result prints a single `No runs`
 /// line so the operator sees an explicit zero rather than blank output.
-fn list(catalog: &Catalog, last: Option<usize>, command: Option<&str>) -> Result<()> {
-    let runs = catalog
-        .list_pipeline_runs(command, last)
-        .context("list pipeline_runs")?;
-    println!("{}", render_runs_list(catalog, &runs)?);
+fn list(catalogs: &[Catalog], last: Option<usize>, command: Option<&str>) -> Result<()> {
+    let rows = collect_runs(catalogs, last, command)?;
+    println!("{}", render_runs_list(&rows));
     Ok(())
 }
 
-/// Render `runs show <id>`. Empty rollup (no audit rows under this run)
-/// prints the header section but omits the three histograms; that case
-/// is normal for runs from commands like `ingest` / `dryrun` that do
-/// not write audits today.
-fn show(catalog: &Catalog, pipeline_run_id: &str) -> Result<()> {
-    let run = catalog
-        .pipeline_run(pipeline_run_id)
-        .context("read pipeline_runs row")?
-        .ok_or_else(|| eyre::eyre!("no pipeline run with id {pipeline_run_id:?}"))?;
-    let summary = catalog
-        .pipeline_run_summary(pipeline_run_id)
-        .context("read pipeline_run_summary row")?;
-    println!("{}", render_run_show(&run, summary.as_ref())?);
-    Ok(())
-}
-
-/// Build the `runs list` text block. Public to the crate so tests can
-/// assert on the rendered shape without spawning the binary.
-pub(crate) fn render_runs_list(catalog: &Catalog, runs: &[PipelineRun]) -> Result<String> {
-    if runs.is_empty() {
-        return Ok("No runs.".to_string());
-    }
-    let mut summaries: BTreeMap<String, PipelineRunSummary> = BTreeMap::new();
-    for run in runs {
-        if let Some(s) = catalog
-            .pipeline_run_summary(&run.pipeline_run_id)
-            .context("read pipeline_run_summary row")?
-        {
-            summaries.insert(run.pipeline_run_id.clone(), s);
+/// Pull recent runs from every catalog, join each against its rollup
+/// row in the catalog it came from, and merge into one newest-first
+/// list. The per-catalog `last` limit keeps each source query bounded;
+/// the merged list truncates to the same limit again, so the union
+/// still contains the global most-recent N.
+fn collect_runs(
+    catalogs: &[Catalog],
+    last: Option<usize>,
+    command: Option<&str>,
+) -> Result<Vec<(PipelineRun, Option<PipelineRunSummary>)>> {
+    let mut rows = Vec::new();
+    for catalog in catalogs {
+        let runs = catalog
+            .list_pipeline_runs(command, last)
+            .context("list pipeline_runs")?;
+        for run in runs {
+            let summary = catalog
+                .pipeline_run_summary(&run.pipeline_run_id)
+                .context("read pipeline_run_summary row")?;
+            rows.push((run, summary));
         }
+    }
+    rows.sort_by(|(a, _), (b, _)| {
+        (b.started_at.as_str(), b.pipeline_run_id.as_str())
+            .cmp(&(a.started_at.as_str(), a.pipeline_run_id.as_str()))
+    });
+    if let Some(limit) = last {
+        rows.truncate(limit);
+    }
+    Ok(rows)
+}
+
+/// Render `runs show <id>`. The id resolves against each catalog in
+/// turn. Empty rollup (no audit rows under this run) prints the header
+/// section but omits the three histograms; that case is normal for
+/// runs from commands like `ingest` / `dryrun` that do not write
+/// audits today.
+fn show(catalogs: &[Catalog], pipeline_run_id: &str) -> Result<()> {
+    for catalog in catalogs {
+        let Some(run) = catalog
+            .pipeline_run(pipeline_run_id)
+            .context("read pipeline_runs row")?
+        else {
+            continue;
+        };
+        let summary = catalog
+            .pipeline_run_summary(pipeline_run_id)
+            .context("read pipeline_run_summary row")?;
+        println!("{}", render_run_show(&run, summary.as_ref())?);
+        return Ok(());
+    }
+    Err(eyre::eyre!("no pipeline run with id {pipeline_run_id:?}"))
+}
+
+/// Build the `runs list` text block from pre-joined (run, rollup)
+/// pairs. Public to the crate so tests can assert on the rendered
+/// shape without spawning the binary.
+pub(crate) fn render_runs_list(rows: &[(PipelineRun, Option<PipelineRunSummary>)]) -> String {
+    if rows.is_empty() {
+        return "No runs.".to_string();
     }
     let mut out = String::new();
     out.push_str("run_id                                                  command         started_at            status   n_books  n_papers  needs_work\n");
-    for run in runs {
-        let summary = summaries.get(&run.pipeline_run_id);
+    for (run, summary) in rows {
+        let summary = summary.as_ref();
         let n_books = summary.map(|s| s.n_books).unwrap_or(0);
         let n_papers = summary.map(|s| s.n_papers).unwrap_or(0);
         let needs_work = summary
@@ -104,7 +146,7 @@ pub(crate) fn render_runs_list(catalog: &Catalog, runs: &[PipelineRun]) -> Resul
         );
         out.push_str(&line);
     }
-    Ok(out.trim_end().to_string())
+    out.trim_end().to_string()
 }
 
 /// Build the `runs show <id>` text block.
@@ -225,8 +267,7 @@ mod tests {
 
     #[test]
     fn runs_list_renders_with_zero_runs() {
-        let catalog = open_in_memory();
-        let out = render_runs_list(&catalog, &[]).expect("render");
+        let out = render_runs_list(&[]);
         assert_eq!(out, "No runs.");
     }
 
@@ -235,8 +276,8 @@ mod tests {
         let catalog = open_in_memory();
         seed_run(&catalog, "run-a", "distill_build", "2026-06-28T10:00:00Z");
         seed_summary(&catalog, "run-a", 3, r#"{"clean":2,"needs_work":1}"#);
-        let runs = catalog.list_pipeline_runs(None, None).expect("list");
-        let out = render_runs_list(&catalog, &runs).expect("render");
+        let rows = collect_runs(std::slice::from_ref(&catalog), None, None).expect("collect");
+        let out = render_runs_list(&rows);
         // The header line is the first row.
         let header = out.lines().next().expect("header");
         assert!(header.starts_with("run_id"));
@@ -252,6 +293,43 @@ mod tests {
             data.trim_end().ends_with("1"),
             "needs_work column present, got {data:?}"
         );
+    }
+
+    #[test]
+    fn runs_list_merges_two_catalogs_newest_first() {
+        let books = open_in_memory();
+        let papers = open_in_memory();
+        seed_run(&books, "run-book", "distill_build", "2026-06-28T10:00:00Z");
+        seed_run(&papers, "run-paper", "glean", "2026-06-28T11:00:00Z");
+        catalogs_seed_paper_summary(&papers, "run-paper");
+        let catalogs = [books, papers];
+
+        let rows = collect_runs(&catalogs, None, None).expect("collect");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.pipeline_run_id, "run-paper");
+        assert_eq!(rows[1].0.pipeline_run_id, "run-book");
+        // The rollup joins from the catalog its run came from.
+        assert_eq!(rows[0].1.as_ref().map(|s| s.n_papers), Some(1));
+
+        // The merged list re-applies the limit after the union.
+        let rows = collect_runs(&catalogs, Some(1), None).expect("collect");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.pipeline_run_id, "run-paper");
+    }
+
+    fn catalogs_seed_paper_summary(catalog: &Catalog, id: &str) {
+        catalog
+            .upsert_pipeline_run_summary(&NewPipelineRunSummary {
+                pipeline_run_id: id.to_string(),
+                n_books: 0,
+                n_papers: 1,
+                verdict_counts: r#"{"clean":1}"#.to_string(),
+                flag_counts: "{}".to_string(),
+                coverage_summary: "{}".to_string(),
+                wall_clock_ms: Some(500),
+                computed_at: "2026-06-28T11:00:06Z".to_string(),
+            })
+            .expect("upsert summary");
     }
 
     #[test]

@@ -270,17 +270,34 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
         let mut corpus = Corpus::open(corpus_db).context("open papers corpus for glean write")?;
         let mut catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
             .context("open papers catalog for glean write")?;
-        let report = bookrack_glean::glean_paper(
+        // A caller that already opened a `pipeline_runs` row keeps
+        // ownership of its lifecycle; otherwise this handle opens one
+        // on the paper catalog so the `node_paper_audit` row lands
+        // with a run id instead of NULL.
+        let owned_run_id = if params.pipeline_run_id.is_none() {
+            open_glean_pipeline_run(&catalog, catalog_db.parent().and_then(Path::to_str))
+        } else {
+            None
+        };
+        let mut effective = params.clone();
+        if let Some(id) = owned_run_id.as_deref() {
+            effective.pipeline_run_id = Some(id.to_string());
+        }
+        let result = bookrack_glean::glean_paper(
             path,
             &mut corpus,
             &mut catalog,
             lancedb_dir,
             papers_dir,
             embedder,
-            params,
+            &effective,
         )
         .await
-        .context("registry-mediated glean")?;
+        .context("registry-mediated glean");
+        if let Some(id) = owned_run_id.as_deref() {
+            finalize_glean_pipeline_run(&catalog, id, result.is_ok());
+        }
+        let report = result?;
         if let Some(library) = self.ops.papers_library() {
             library
                 .refresh_store()
@@ -477,6 +494,31 @@ impl<E: Embedder> LibraryRegistry<E> {
     }
 }
 
+/// Open a `pipeline_runs` row on the paper catalog for one glean
+/// invocation. Run lifecycle is best-effort: an open failure demotes
+/// to a warning and the glean proceeds with a NULL `pipeline_run_id`.
+fn open_glean_pipeline_run(catalog: &Catalog, library_root: Option<&str>) -> Option<String> {
+    match catalog.open_pipeline_run("glean", None, library_root) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            tracing::warn!(error = %err, "glean: open_pipeline_run failed");
+            None
+        }
+    }
+}
+
+/// Close the run row and refresh its rollup. Best-effort: any error
+/// here logs and the glean outcome stays untouched.
+fn finalize_glean_pipeline_run(catalog: &Catalog, pipeline_run_id: &str, ok: bool) {
+    let status = if ok { "ok" } else { "error" };
+    if let Err(err) = catalog.close_pipeline_run(pipeline_run_id, status) {
+        tracing::warn!(error = %err, pipeline_run_id, "glean: close_pipeline_run failed");
+    }
+    if let Err(err) = catalog.compute_run_summary(pipeline_run_id) {
+        tracing::warn!(error = %err, pipeline_run_id, "glean: compute_run_summary failed");
+    }
+}
+
 fn sorted_names<E: Embedder>(libs: &HashMap<String, Arc<LibraryHandle<E>>>) -> Vec<String> {
     let mut names: Vec<String> = libs.keys().cloned().collect();
     names.sort();
@@ -522,6 +564,36 @@ mod tests {
 
     fn handle(name: &str) -> std::sync::Arc<LibraryHandle<FakeEmbedder>> {
         LibraryHandle::new(name, fake_ops())
+    }
+
+    #[test]
+    fn glean_run_lifecycle_opens_closes_and_rolls_up() {
+        let catalog = bookrack_catalog::Catalog::open_in_memory().expect("open catalog");
+        let id = super::open_glean_pipeline_run(&catalog, Some("lib-a")).expect("run id");
+        let run = catalog.pipeline_run(&id).expect("read").expect("present");
+        assert_eq!(run.command, "glean");
+        assert_eq!(run.status.as_deref(), Some("running"));
+        assert!(run.finished_at.is_none());
+
+        super::finalize_glean_pipeline_run(&catalog, &id, true);
+        let run = catalog.pipeline_run(&id).expect("read").expect("present");
+        assert_eq!(run.status.as_deref(), Some("ok"));
+        assert!(run.finished_at.is_some());
+        let summary = catalog
+            .pipeline_run_summary(&id)
+            .expect("read")
+            .expect("rollup row present");
+        assert_eq!(summary.n_papers, 0);
+        assert_eq!(summary.n_books, 0);
+    }
+
+    #[test]
+    fn glean_run_finalize_records_error_status() {
+        let catalog = bookrack_catalog::Catalog::open_in_memory().expect("open catalog");
+        let id = super::open_glean_pipeline_run(&catalog, None).expect("run id");
+        super::finalize_glean_pipeline_run(&catalog, &id, false);
+        let run = catalog.pipeline_run(&id).expect("read").expect("present");
+        assert_eq!(run.status.as_deref(), Some("error"));
     }
 
     #[test]
