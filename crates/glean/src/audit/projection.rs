@@ -15,9 +15,14 @@
 //! - `flag_<token>`: `1` if `report.cross_field_flags` or any field's
 //!   `flags` list emits the flag at least once; `0` otherwise.
 //! - `verdict` / `confidence`: the report's tokens.
+//! - `profile_name` / `profile_fingerprint` / `profile_toggle_summary`:
+//!   derived from the effective profile. A fingerprint or summary that
+//!   fails to compute is logged and written as NULL rather than
+//!   blocking the audit row.
 
 use bookrack_catalog::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit};
 
+use super::profile::PaperAuditProfile;
 use super::report::{PaperFieldGrade, PaperFlag, PaperReport};
 
 /// Build one [`NewNodePaperAudit`] row from a [`PaperReport`].
@@ -26,7 +31,7 @@ pub fn paper_report_to_audit_row(
     report: &PaperReport,
     intake_id: i64,
     scope: &str,
-    profile_name: &str,
+    profile: &PaperAuditProfile,
     csl_type: Option<&str>,
     audited_at: &str,
     extractor_version: &str,
@@ -56,10 +61,25 @@ pub fn paper_report_to_audit_row(
         flags[i] = u8::from(*hit);
     }
 
+    let profile_fingerprint = match bookrack_audit_profile::profile_fingerprint(profile) {
+        Ok(fp) => Some(fp),
+        Err(error) => {
+            tracing::warn!(%error, "paper audit: failed to fingerprint the profile");
+            None
+        }
+    };
+    let profile_toggle_summary = match bookrack_audit_profile::profile_toggle_summary(profile) {
+        Ok(summary) => Some(summary),
+        Err(error) => {
+            tracing::warn!(%error, "paper audit: failed to summarize the profile toggles");
+            None
+        }
+    };
+
     NewNodePaperAudit {
         intake_id,
         scope: scope.to_string(),
-        profile_name: profile_name.to_string(),
+        profile_name: profile.name.clone(),
         verdict: report.verdict.as_token().to_string(),
         confidence: report.confidence.as_token().to_string(),
         csl_type: csl_type.map(str::to_string),
@@ -68,6 +88,8 @@ pub fn paper_report_to_audit_row(
         grades,
         flags,
         pipeline_run_id: pipeline_run_id.map(str::to_string),
+        profile_fingerprint,
+        profile_toggle_summary,
     }
 }
 
@@ -105,7 +127,7 @@ mod tests {
             report,
             7,
             "paper",
-            "default",
+            &PaperAuditProfile::default_profile(),
             Some("article-journal"),
             "2026-06-28T10:00:00Z",
             "0.0.0-test",
@@ -120,7 +142,7 @@ mod tests {
             &report,
             7,
             "paper",
-            "default",
+            &PaperAuditProfile::default_profile(),
             Some("article-journal"),
             "2026-06-28T10:00:00Z",
             "0.0.0-test",
@@ -132,6 +154,19 @@ mod tests {
         );
         // The same call without an id leaves the column NULL.
         assert_eq!(row(&report).pipeline_run_id, None);
+    }
+
+    #[test]
+    fn the_audit_row_carries_profile_name_fingerprint_and_summary() {
+        let report = report_with_one_field("title", PaperFieldGrade::Strong);
+        let row = row(&report);
+        assert_eq!(row.profile_name, "default");
+        let fp = row.profile_fingerprint.expect("fingerprint present");
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+        let summary = row.profile_toggle_summary.expect("summary present");
+        assert!(summary.contains(r#""name":"identifier.require_any""#));
+        assert!(summary.contains(r#""name":"abstract.required""#));
     }
 
     #[test]

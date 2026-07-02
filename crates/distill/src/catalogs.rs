@@ -187,6 +187,37 @@ impl Catalogs {
         .expect("embedded catalog TOMLs must fingerprint")
     }
 
+    /// Readable summary of the embedded quality-flag vocabulary,
+    /// paired with [`Catalogs::embedded_fingerprint`] on the audit row.
+    pub fn embedded_flag_summary() -> String {
+        Self::load_all()
+            .expect("embedded catalog TOMLs must parse")
+            .quality_flag_summary()
+    }
+
+    /// Summarize this catalog set's quality-flag vocabulary as a JSON
+    /// array of `{"name", "severity"}` objects sorted by name — the
+    /// distill-side analog of a profile's boolean-toggle summary.
+    pub fn quality_flag_summary(&self) -> String {
+        let entries: Vec<serde_json::Value> = self
+            .quality_flags
+            .entries
+            .iter()
+            .map(|(name, spec)| {
+                // Keys are inserted in sorted order so the byte output
+                // does not depend on the JSON map backend.
+                let mut entry = serde_json::Map::new();
+                entry.insert("name".to_string(), serde_json::Value::String(name.clone()));
+                entry.insert(
+                    "severity".to_string(),
+                    serde_json::Value::String(spec.severity.clone()),
+                );
+                serde_json::Value::Object(entry)
+            })
+            .collect();
+        serde_json::Value::Array(entries).to_string()
+    }
+
     /// Parse the three catalogs from arbitrary TOML strings.
     /// Reserved for tests that exercise the self-check against
     /// hand-crafted negative fixtures.

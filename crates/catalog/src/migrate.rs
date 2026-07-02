@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 14;
+pub(crate) const TARGET_VERSION: i64 = 15;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -684,6 +684,19 @@ ALTER TABLE intake ADD COLUMN derived_from_sha256 TEXT;
 CREATE INDEX idx_intake_derived_status ON intake(derived_from_sha256, status);
 "#;
 
+// `M[14]` — attach the audit-profile identity to both W1 audit tables.
+// `node_paper_audit` gains the stable fingerprint of the effective
+// paper-audit profile plus its readable toggle summary;
+// `book_distill_audit` gains only the summary column because its
+// fingerprint reuses the pre-existing `profile_ref`. All three columns
+// are nullable: rows written before M[14] read back as NULL and group
+// into a legacy bucket. Additive: no existing column shape changes.
+const AUDIT_PROFILE_FINGERPRINT_M14_DDL: &str = r#"
+ALTER TABLE node_paper_audit ADD COLUMN profile_fingerprint TEXT;
+ALTER TABLE node_paper_audit ADD COLUMN profile_toggle_summary TEXT;
+ALTER TABLE book_distill_audit ADD COLUMN profile_toggle_summary TEXT;
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -702,6 +715,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(PIPELINE_PAIR_M11_DDL),
         M::up(AUDIT_RUN_ID_M12_DDL),
         M::up(INTAKE_DERIVED_FROM_DDL),
+        M::up(AUDIT_PROFILE_FINGERPRINT_M14_DDL),
     ])
 }
 
@@ -1257,6 +1271,41 @@ mod tests {
         );
         assert!(index_exists(&conn, "idx_book_distill_audit_run"));
         assert!(index_exists(&conn, "idx_node_paper_audit_run"));
+    }
+
+    #[test]
+    fn migration_m14_adds_profile_fingerprint_columns_to_w1_audits() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[14] so the pre-migration database
+        // demonstrably carries none of the three columns.
+        migrations()
+            .to_version(&mut conn, 14)
+            .expect("apply M[0..13]");
+        let paper_cols_pre = columns_of(&conn, "node_paper_audit");
+        let book_cols_pre = columns_of(&conn, "book_distill_audit");
+        assert!(!paper_cols_pre.iter().any(|c| c == "profile_fingerprint"));
+        assert!(!paper_cols_pre.iter().any(|c| c == "profile_toggle_summary"));
+        assert!(!book_cols_pre.iter().any(|c| c == "profile_toggle_summary"));
+
+        migrations().to_latest(&mut conn).expect("apply M[14]");
+
+        let paper_cols = columns_of(&conn, "node_paper_audit");
+        let book_cols = columns_of(&conn, "book_distill_audit");
+        for col in ["profile_fingerprint", "profile_toggle_summary"] {
+            assert!(
+                paper_cols.iter().any(|c| c == col),
+                "expected {col} on node_paper_audit, got {paper_cols:?}"
+            );
+            assert_eq!(column_type(&conn, "node_paper_audit", col), "TEXT");
+        }
+        assert!(
+            book_cols.iter().any(|c| c == "profile_toggle_summary"),
+            "expected profile_toggle_summary on book_distill_audit, got {book_cols:?}"
+        );
+        assert_eq!(
+            column_type(&conn, "book_distill_audit", "profile_toggle_summary"),
+            "TEXT"
+        );
     }
 
     #[test]

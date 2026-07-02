@@ -1397,7 +1397,7 @@ fn run_paper_audit_substep(
                 &report,
                 intake_id,
                 ItemKind::Paper.as_scope_str(),
-                &profile.name,
+                profile,
                 biblio.csl_type.map(serde_csl_type),
                 &audited_at,
                 &extractor_version,

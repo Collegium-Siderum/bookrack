@@ -404,6 +404,7 @@ mod tests {
             profile_ref: String::new(),
             extractor_version: "0.1.0".to_string(),
             pipeline_run_id: run_id.map(str::to_string),
+            profile_toggle_summary: None,
         }
     }
 
@@ -437,6 +438,8 @@ mod tests {
             grades,
             flags,
             pipeline_run_id: run_id.map(str::to_string),
+            profile_fingerprint: None,
+            profile_toggle_summary: None,
         }
     }
 

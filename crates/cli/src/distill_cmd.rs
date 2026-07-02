@@ -469,6 +469,7 @@ fn write_distill_audit(
         profile_ref: bookrack_distill::Catalogs::embedded_fingerprint(),
         extractor_version: parsed.parser_version.clone(),
         pipeline_run_id: pipeline_run_id.map(str::to_string),
+        profile_toggle_summary: Some(bookrack_distill::Catalogs::embedded_flag_summary()),
     };
     let stages: Vec<NewStageReport> = coverage
         .stage_reports
@@ -1104,6 +1105,12 @@ stages = [
         );
         assert_eq!(row.profile_ref.len(), 16);
         assert!(row.profile_ref.chars().all(|c| c.is_ascii_hexdigit()));
+        let summary = row
+            .profile_toggle_summary
+            .as_deref()
+            .expect("flag summary present");
+        assert!(summary.starts_with('['), "summary is a JSON array");
+        assert!(summary.contains(r#""severity""#));
         assert_eq!(row.extractor_version, "0.1.0");
         let stages = catalog
             .distill_stage_reports(row.run_id)

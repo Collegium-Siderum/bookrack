@@ -62,6 +62,8 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("extractor_version").not_null(),
         ColumnSpec::text("pipeline_run_id")
             .comment("run group; NULL for rows written before M[12]"),
+        ColumnSpec::text("profile_toggle_summary")
+            .comment("JSON summary of the distill catalog set; NULL before M[14]"),
     ],
     composite_pk: None,
     uniques: &[],
@@ -111,11 +113,11 @@ const INSERT_HEADER_SQL: &str = "INSERT INTO book_distill_audit \
      (book_slug, source_path, started_at, finished_at, \
       pages, blocks, raws, splits, entries, unmatched_lines, pair_mismatch, \
       gate_status, gate_threshold, profile_ref, extractor_version, \
-      pipeline_run_id) \
+      pipeline_run_id, profile_toggle_summary) \
      VALUES (:book_slug, :source_path, :started_at, :finished_at, \
              :pages, :blocks, :raws, :splits, :entries, :unmatched_lines, :pair_mismatch, \
              :gate_status, :gate_threshold, :profile_ref, :extractor_version, \
-             :pipeline_run_id) \
+             :pipeline_run_id, :profile_toggle_summary) \
      RETURNING run_id";
 
 /// Insert one stage-report row.
@@ -190,6 +192,9 @@ pub struct NewBookDistillAudit {
     /// The `pipeline_runs.pipeline_run_id` that grouped this build, or
     /// `None` when the writer is not running inside an opened run.
     pub pipeline_run_id: Option<String>,
+    /// JSON summary of the distill catalog set (per-flag severities),
+    /// or `None` when the writer could not compute one.
+    pub profile_toggle_summary: Option<String>,
 }
 
 /// One row about to be written to `book_distill_stage_report`.
@@ -247,6 +252,8 @@ pub struct BookDistillAudit {
     pub extractor_version: String,
     /// See [`NewBookDistillAudit::pipeline_run_id`].
     pub pipeline_run_id: Option<String>,
+    /// See [`NewBookDistillAudit::profile_toggle_summary`].
+    pub profile_toggle_summary: Option<String>,
 }
 
 impl BookDistillAudit {
@@ -269,6 +276,7 @@ impl BookDistillAudit {
             profile_ref: row.get("profile_ref")?,
             extractor_version: row.get("extractor_version")?,
             pipeline_run_id: row.get("pipeline_run_id")?,
+            profile_toggle_summary: row.get("profile_toggle_summary")?,
         })
     }
 }
@@ -334,6 +342,7 @@ impl Catalog {
                 ":profile_ref": header.profile_ref,
                 ":extractor_version": header.extractor_version,
                 ":pipeline_run_id": header.pipeline_run_id,
+                ":profile_toggle_summary": header.profile_toggle_summary,
             },
             |row| row.get(0),
         )?;
@@ -420,6 +429,7 @@ mod tests {
             profile_ref: String::new(),
             extractor_version: "0.1.0".to_string(),
             pipeline_run_id: None,
+            profile_toggle_summary: None,
         }
     }
 

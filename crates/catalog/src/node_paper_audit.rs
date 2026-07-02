@@ -23,10 +23,10 @@
 //! flag absent from a report writes as `0` and a `SUM(flag_*)` over
 //! the table answers per-flag frequency directly.
 //!
-//! `profile_name` carries the audit profile short name today
-//! (`default` / `trust-source` / `strict`). When the profile
-//! fingerprint lands, that column upgrades in place — the table name
-//! and column name stay.
+//! `profile_name` carries the audit profile short name
+//! (`default` / `trust-source` / `strict`); `profile_fingerprint` and
+//! `profile_toggle_summary` (M[14]) pin the effective profile the row
+//! was judged with, independent of what the name resolves to later.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
@@ -132,6 +132,10 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .default("0"),
         ColumnSpec::text("pipeline_run_id")
             .comment("run group; NULL for rows written before M[12]"),
+        ColumnSpec::text("profile_fingerprint")
+            .comment("stable fingerprint of the effective profile; NULL before M[14]"),
+        ColumnSpec::text("profile_toggle_summary")
+            .comment("JSON toggle summary of the effective profile; NULL before M[14]"),
     ],
     composite_pk: Some(&["intake_id", "scope"]),
     uniques: &[],
@@ -212,6 +216,12 @@ pub struct NewNodePaperAudit {
     /// The `pipeline_runs.pipeline_run_id` that grouped this audit, or
     /// `None` when the writer is not running inside an opened run.
     pub pipeline_run_id: Option<String>,
+    /// Stable fingerprint of the effective audit profile, or `None`
+    /// when the writer could not compute one.
+    pub profile_fingerprint: Option<String>,
+    /// JSON summary of the profile's boolean toggles, or `None` when
+    /// the writer could not compute one.
+    pub profile_toggle_summary: Option<String>,
 }
 
 /// One `node_paper_audit` row, read back from the database.
@@ -228,6 +238,8 @@ pub struct NodePaperAudit {
     pub grades: [String; GRADE_COLUMNS.len()],
     pub flags: [u8; FLAG_COLUMNS.len()],
     pub pipeline_run_id: Option<String>,
+    pub profile_fingerprint: Option<String>,
+    pub profile_toggle_summary: Option<String>,
 }
 
 impl NodePaperAudit {
@@ -253,6 +265,8 @@ impl NodePaperAudit {
             grades,
             flags,
             pipeline_run_id: row.get("pipeline_run_id")?,
+            profile_fingerprint: row.get("profile_fingerprint")?,
+            profile_toggle_summary: row.get("profile_toggle_summary")?,
         })
     }
 }
@@ -278,6 +292,8 @@ fn upsert_sql() -> String {
         cols.push(col);
     }
     cols.push("pipeline_run_id");
+    cols.push("profile_fingerprint");
+    cols.push("profile_toggle_summary");
     let placeholders: Vec<String> = cols.iter().map(|c| format!(":{c}")).collect();
     let assignments: Vec<String> = cols
         .iter()
@@ -307,7 +323,7 @@ impl Catalog {
         let mut stmt = self.conn.prepare(&sql)?;
         let csl_type = new.csl_type.as_deref();
         let mut params: Vec<(String, &dyn rusqlite::ToSql)> =
-            Vec::with_capacity(8 + 9 + FLAG_COLUMNS.len() + 1);
+            Vec::with_capacity(8 + 9 + FLAG_COLUMNS.len() + 3);
         params.push((":intake_id".to_string(), &new.intake_id));
         params.push((":scope".to_string(), &new.scope));
         params.push((":profile_name".to_string(), &new.profile_name));
@@ -324,6 +340,13 @@ impl Catalog {
         }
         let pipeline_run_id = new.pipeline_run_id.as_deref();
         params.push((":pipeline_run_id".to_string(), &pipeline_run_id));
+        let profile_fingerprint = new.profile_fingerprint.as_deref();
+        params.push((":profile_fingerprint".to_string(), &profile_fingerprint));
+        let profile_toggle_summary = new.profile_toggle_summary.as_deref();
+        params.push((
+            ":profile_toggle_summary".to_string(),
+            &profile_toggle_summary,
+        ));
         let refs: Vec<(&str, &dyn rusqlite::ToSql)> =
             params.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         stmt.execute(refs.as_slice())?;
@@ -367,6 +390,8 @@ mod tests {
             grades,
             flags: [0; FLAG_COLUMNS.len()],
             pipeline_run_id: None,
+            profile_fingerprint: None,
+            profile_toggle_summary: None,
         }
     }
 
@@ -408,6 +433,28 @@ mod tests {
         assert_eq!(
             read.pipeline_run_id.as_deref(),
             Some("glean_review-2026-06-28T10:00:00Z-deadbeef")
+        );
+    }
+
+    #[test]
+    fn a_paper_audit_round_trips_fingerprint_and_summary() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut row = fixture(1);
+        row.profile_fingerprint = Some("0123456789abcdef".to_string());
+        row.profile_toggle_summary =
+            Some(r#"[{"enabled":true,"name":"identifier.require_any"}]"#.to_string());
+        catalog.upsert_node_paper_audit(&row).expect("write");
+        let read = catalog
+            .node_paper_audit(1, "paper")
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            read.profile_fingerprint.as_deref(),
+            Some("0123456789abcdef")
+        );
+        assert_eq!(
+            read.profile_toggle_summary.as_deref(),
+            Some(r#"[{"enabled":true,"name":"identifier.require_any"}]"#),
         );
     }
 

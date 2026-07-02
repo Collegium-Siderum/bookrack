@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// File name of the runtime overlay, looked up under
 /// `<data_root>/audit-rules/`.
@@ -32,7 +32,7 @@ pub const PROFILE_STRICT: &str = "strict";
 pub const ALL_BUILT_IN_NAMES: &[&str] = &[PROFILE_DEFAULT, PROFILE_TRUST_SOURCE, PROFILE_STRICT];
 
 /// Audit profile consumed by the papers pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PaperAuditProfile {
     /// Symbolic name stamped into `node_reviews.reviewed_by` as
     /// `bookrack-glean:<name>`.
@@ -43,6 +43,9 @@ pub struct PaperAuditProfile {
     /// columns.
     pub audit_enabled: bool,
     pub identifier: IdentifierToggles,
+    // Serialized as `abstract` so fingerprint and toggle-summary names
+    // match the on-disk profile schema rather than the Rust escape.
+    #[serde(rename = "abstract")]
     pub abstract_: AbstractToggles,
     pub author: AuthorToggles,
     pub title: TitleToggles,
@@ -52,7 +55,7 @@ pub struct PaperAuditProfile {
     pub source_prior: SourcePriorToggles,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct IdentifierToggles {
     pub require_any: bool,
     pub doi_format_check: bool,
@@ -73,7 +76,7 @@ impl Default for IdentifierToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AbstractToggles {
     pub required: bool,
     pub min_chars: u32,
@@ -88,7 +91,7 @@ impl Default for AbstractToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuthorToggles {
     pub required: bool,
     pub sentinel_check: bool,
@@ -105,7 +108,7 @@ impl Default for AuthorToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TitleToggles {
     pub required: bool,
     pub placeholder_check: bool,
@@ -126,7 +129,7 @@ impl Default for TitleToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct YearToggles {
     pub required: bool,
     pub range_check: bool,
@@ -151,7 +154,7 @@ impl Default for YearToggles {
 
 /// Body-script ratios are stored as basis points (0..=10_000) so the
 /// type carries `Eq`; helpers expose them as floats at the call site.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LanguageToggles {
     pub bcp47_check: bool,
     pub body_script_match: bool,
@@ -206,7 +209,7 @@ impl Default for LanguageToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VenueToggles {
     pub whitelist_check: bool,
 }
@@ -219,7 +222,7 @@ impl Default for VenueToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourcePriorToggles {
     pub enabled: bool,
 }
