@@ -29,6 +29,10 @@ serde_json = "1"
 # TOML decoder for the `config` crate's library registry, a name->root
 # map deserialized through serde. Decode only.
 toml = "1"
+# Format- and comment-preserving TOML editor for registry write paths:
+# mutates individual entries in `registry.toml` without discarding
+# operator comments or reordering the rest of the document.
+toml_edit = "0.25"
 # Platform config-directory discovery for the `config` crate: locates the
 # platform-conventional `<config>/bookrack/registry.toml` so a freshly
 # installed binary can find its data root without an exported variable.
