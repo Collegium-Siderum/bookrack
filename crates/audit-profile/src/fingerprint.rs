@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Stable fingerprinting of profile TOML sources and a boolean-toggle
-//! summary of an [`AuditProfile`], both destined for audit rows.
+//! Stable fingerprinting of profile TOML sources and effective
+//! profiles, plus a boolean-toggle summary of an [`AuditProfile`],
+//! all destined for audit rows.
 
 use std::fmt::Write as _;
 
@@ -49,12 +50,35 @@ pub fn stable_fingerprint(toml_bytes: &[u8]) -> Result<String, FingerprintError>
     let value: toml::Value = toml::from_str(text).map_err(FingerprintError::Parse)?;
     let canonical =
         serde_json::to_string(&sorted_json(&value)).map_err(FingerprintError::Serialize)?;
+    Ok(digest_hex(&canonical))
+}
+
+/// Fingerprint of the effective profile: serialize the profile, drop
+/// the `name` field, canonicalize with sorted keys, and hash like
+/// [`stable_fingerprint`].
+///
+/// Hashing the effective struct instead of a source file covers every
+/// construction path — embedded default, named preset, overlay merge —
+/// including presets that are built in code and have no TOML source.
+/// Two profiles that differ only in name share a fingerprint.
+pub fn profile_fingerprint(profile: &AuditProfile) -> Result<String, FingerprintError> {
+    let mut value = serde_json::to_value(profile).map_err(FingerprintError::Serialize)?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.remove("name");
+    }
+    let canonical =
+        serde_json::to_string(&sorted_value(&value)).map_err(FingerprintError::Serialize)?;
+    Ok(digest_hex(&canonical))
+}
+
+/// SHA-256 the canonical text and keep the first 16 hex characters.
+fn digest_hex(canonical: &str) -> String {
     let digest = Sha256::digest(canonical.as_bytes());
     let mut hex = String::with_capacity(FINGERPRINT_HEX_LEN);
     for byte in digest.iter().take(FINGERPRINT_HEX_LEN / 2) {
         write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    Ok(hex)
+    hex
 }
 
 /// Summarize every boolean toggle of a profile as a JSON array of
@@ -101,6 +125,26 @@ fn sorted_json(value: &toml::Value) -> serde_json::Value {
             }
             serde_json::Value::Object(map)
         }
+    }
+}
+
+/// Rebuild a JSON value with every object's keys inserted in sorted
+/// order, so the serialized text does not depend on the map backend.
+fn sorted_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(sorted_value).collect())
+        }
+        serde_json::Value::Object(object) => {
+            let mut pairs: Vec<(&String, &serde_json::Value)> = object.iter().collect();
+            pairs.sort_by_key(|(key, _)| *key);
+            let mut map = serde_json::Map::new();
+            for (key, child) in pairs {
+                map.insert(key.clone(), sorted_value(child));
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other.clone(),
     }
 }
 
@@ -159,6 +203,47 @@ mod tests {
             stable_fingerprint(&[0xff, 0xfe]),
             Err(FingerprintError::Utf8(_))
         ));
+    }
+
+    #[test]
+    fn profile_fingerprint_is_total_across_construction_paths() {
+        let from_toml = AuditProfile::default_profile();
+        let from_preset = AuditProfile::from_named(crate::PROFILE_DEFAULT).expect("default preset");
+        let empty_dir = tempfile::tempdir().expect("tempdir");
+        let from_disk = AuditProfile::load_from(empty_dir.path()).expect("load from empty dir");
+        let fp = profile_fingerprint(&from_toml).expect("fingerprint default");
+        assert_eq!(
+            fp,
+            profile_fingerprint(&from_preset).expect("fingerprint preset")
+        );
+        assert_eq!(
+            fp,
+            profile_fingerprint(&from_disk).expect("fingerprint disk")
+        );
+        assert_eq!(fp.len(), FINGERPRINT_HEX_LEN);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn profile_fingerprint_ignores_name_and_tracks_toggles() {
+        let base = AuditProfile::default_profile();
+        let mut renamed = base.clone();
+        renamed.name = "renamed-copy".to_string();
+        assert_eq!(
+            profile_fingerprint(&base).expect("fingerprint base"),
+            profile_fingerprint(&renamed).expect("fingerprint renamed"),
+        );
+
+        let mut flipped = base.clone();
+        flipped.year.range_check = !flipped.year.range_check;
+        assert_ne!(
+            profile_fingerprint(&base).expect("fingerprint base"),
+            profile_fingerprint(&flipped).expect("fingerprint flipped"),
+        );
+        assert_ne!(
+            profile_fingerprint(&base).expect("fingerprint base"),
+            profile_fingerprint(&AuditProfile::trust_source()).expect("fingerprint trust-source"),
+        );
     }
 
     #[test]

@@ -53,7 +53,9 @@ mod load;
 pub use data::{
     AuditData, DATA_OVERLAY_FILE, DATA_SCHEMA_VERSION, DEFAULT_DATA_TOML, DataLoadError,
 };
-pub use fingerprint::{FingerprintError, profile_toggle_summary, stable_fingerprint};
+pub use fingerprint::{
+    FingerprintError, profile_fingerprint, profile_toggle_summary, stable_fingerprint,
+};
 pub use headings::{
     DEFAULT_HEADINGS_TOML, GermanPatterns, HEADINGS_OVERLAY_FILE, HEADINGS_SCHEMA_VERSION,
     HeadingPatterns, HeadingsLoadError, LatinPatterns, SinoPatterns,
