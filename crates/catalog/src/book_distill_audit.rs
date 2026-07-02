@@ -18,10 +18,10 @@
 //! guard. `gate_threshold` is the numeric threshold the guard ran with,
 //! or NULL when `gate_status='off'`.
 //!
-//! `profile_ref` is a placeholder column for the distill profile
-//! fingerprint a later step will land. The writer leaves it as an empty
-//! string until then; the column ships now so its position in the row is
-//! fixed before downstream rollups consume the table.
+//! `profile_ref` carries the stable fingerprint of the distill catalog
+//! set (the controlled vocabularies) the build ran with. Rows written
+//! before the fingerprint writer landed hold an empty string; rollups
+//! that `GROUP BY profile_ref` should treat `''` as a legacy bucket.
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
 use rusqlite::{OptionalExtension, Row, named_params};
@@ -58,7 +58,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("profile_ref")
             .not_null()
             .default("''")
-            .comment("placeholder for the distill profile fingerprint"),
+            .comment("stable fingerprint of the distill catalog set; '' on legacy rows"),
         ColumnSpec::text("extractor_version").not_null(),
         ColumnSpec::text("pipeline_run_id")
             .comment("run group; NULL for rows written before M[12]"),
@@ -182,8 +182,8 @@ pub struct NewBookDistillAudit {
     pub gate_status: String,
     /// The retention threshold the guard ran with, when it ran.
     pub gate_threshold: Option<f64>,
-    /// Placeholder reference to the distill profile fingerprint. The
-    /// current writer always passes an empty string.
+    /// Stable fingerprint of the distill catalog set the build ran
+    /// with. Empty on rows written before the fingerprint landed.
     pub profile_ref: String,
     /// The version stamp of the book's parser at build time.
     pub extractor_version: String,

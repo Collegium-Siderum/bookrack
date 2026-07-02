@@ -55,6 +55,7 @@ pub use data::{
 };
 pub use fingerprint::{
     FingerprintError, profile_fingerprint, profile_toggle_summary, stable_fingerprint,
+    stable_fingerprint_parts,
 };
 pub use headings::{
     DEFAULT_HEADINGS_TOML, GermanPatterns, HEADINGS_OVERLAY_FILE, HEADINGS_SCHEMA_VERSION,

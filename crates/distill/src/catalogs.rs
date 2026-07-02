@@ -174,6 +174,19 @@ impl Catalogs {
         )
     }
 
+    /// Stable fingerprint of the three embedded catalog TOMLs, in the
+    /// order (properties, quality flags, stages). Stamped into
+    /// `book_distill_audit.profile_ref` by the build audit writer, so
+    /// an audit row records which controlled vocabularies judged it.
+    pub fn embedded_fingerprint() -> String {
+        bookrack_audit_profile::stable_fingerprint_parts(&[
+            PROPERTY_CATALOG_TOML.as_bytes(),
+            QUALITY_FLAGS_TOML.as_bytes(),
+            STAGE_CATALOG_TOML.as_bytes(),
+        ])
+        .expect("embedded catalog TOMLs must fingerprint")
+    }
+
     /// Parse the three catalogs from arbitrary TOML strings.
     /// Reserved for tests that exercise the self-check against
     /// hand-crafted negative fixtures.
@@ -462,6 +475,14 @@ stages = [
             stage.description.as_deref().is_some_and(|d| !d.is_empty()),
             "walk_anchors stage must carry a non-empty description"
         );
+    }
+
+    #[test]
+    fn embedded_fingerprint_is_stable_short_hex() {
+        let fp = Catalogs::embedded_fingerprint();
+        assert_eq!(fp, Catalogs::embedded_fingerprint());
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

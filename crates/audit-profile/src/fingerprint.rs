@@ -46,11 +46,30 @@ impl std::error::Error for FingerprintError {}
 /// fingerprint independent of key order, whitespace, and comments in
 /// the source; it changes only when a parsed value changes.
 pub fn stable_fingerprint(toml_bytes: &[u8]) -> Result<String, FingerprintError> {
+    let canonical = serde_json::to_string(&toml_projection(toml_bytes)?)
+        .map_err(FingerprintError::Serialize)?;
+    Ok(digest_hex(&canonical))
+}
+
+/// Fingerprint several TOML sources as one unit: each source is
+/// projected like [`stable_fingerprint`], the projections are placed
+/// in a JSON array in argument order, and the array text is hashed.
+/// The position of each source is part of the identity.
+pub fn stable_fingerprint_parts(parts: &[&[u8]]) -> Result<String, FingerprintError> {
+    let mut items = Vec::with_capacity(parts.len());
+    for part in parts {
+        items.push(toml_projection(part)?);
+    }
+    let canonical = serde_json::to_string(&serde_json::Value::Array(items))
+        .map_err(FingerprintError::Serialize)?;
+    Ok(digest_hex(&canonical))
+}
+
+/// Parse TOML bytes and project them onto sorted-key JSON.
+fn toml_projection(toml_bytes: &[u8]) -> Result<serde_json::Value, FingerprintError> {
     let text = std::str::from_utf8(toml_bytes).map_err(FingerprintError::Utf8)?;
     let value: toml::Value = toml::from_str(text).map_err(FingerprintError::Parse)?;
-    let canonical =
-        serde_json::to_string(&sorted_json(&value)).map_err(FingerprintError::Serialize)?;
-    Ok(digest_hex(&canonical))
+    Ok(sorted_json(&value))
 }
 
 /// Fingerprint of the effective profile: serialize the profile, drop
@@ -191,6 +210,22 @@ mod tests {
             stable_fingerprint(base).expect("fingerprint base"),
             stable_fingerprint(flipped).expect("fingerprint flipped"),
         );
+    }
+
+    #[test]
+    fn stable_fingerprint_parts_depend_on_content_and_order() {
+        let a = b"x = 1\n" as &[u8];
+        let b = b"y = 2\n" as &[u8];
+        let ab = stable_fingerprint_parts(&[a, b]).expect("fingerprint ab");
+        assert_eq!(
+            ab,
+            stable_fingerprint_parts(&[a, b]).expect("fingerprint ab again"),
+        );
+        assert_ne!(
+            ab,
+            stable_fingerprint_parts(&[b, a]).expect("fingerprint ba")
+        );
+        assert_eq!(ab.len(), FINGERPRINT_HEX_LEN);
     }
 
     #[test]

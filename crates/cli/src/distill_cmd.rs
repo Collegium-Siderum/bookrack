@@ -466,7 +466,7 @@ fn write_distill_audit(
         pair_mismatch: coverage.pair_mismatch as i64,
         gate_status: gate.status.to_string(),
         gate_threshold: gate.threshold,
-        profile_ref: String::new(),
+        profile_ref: bookrack_distill::Catalogs::embedded_fingerprint(),
         extractor_version: parsed.parser_version.clone(),
         pipeline_run_id: pipeline_run_id.map(str::to_string),
     };
@@ -1097,7 +1097,13 @@ stages = [
         assert_eq!(row.gate_status, GATE_STATUS_PASS);
         assert_eq!(row.gate_threshold, Some(0.10));
         assert_eq!(row.entries, 2, "Smith + Jones");
-        assert_eq!(row.profile_ref, "");
+        assert_eq!(
+            row.profile_ref,
+            bookrack_distill::Catalogs::embedded_fingerprint(),
+            "profile_ref carries the distill catalog fingerprint",
+        );
+        assert_eq!(row.profile_ref.len(), 16);
+        assert!(row.profile_ref.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(row.extractor_version, "0.1.0");
         let stages = catalog
             .distill_stage_reports(row.run_id)

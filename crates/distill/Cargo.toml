@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Stable fingerprint of the three embedded catalog TOMLs, stamped into
+# `book_distill_audit.profile_ref` by the build audit writer.
+bookrack-audit-profile.workspace = true
 # `Map<String, Value>` for `Ctx::extras` and `EntryDraft::payload`, the
 # untyped grab-bags downstream stages and the `to_entry_draft` finalize
 # stage carry between themselves.
