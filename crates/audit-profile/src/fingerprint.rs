@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Stable fingerprinting of profile TOML sources and effective
-//! profiles, plus a boolean-toggle summary of an [`AuditProfile`],
-//! all destined for audit rows.
+//! profiles, plus a boolean-toggle summary of a profile struct, all
+//! destined for audit rows.
+//!
+//! The profile-shaped helpers take any [`serde::Serialize`] value —
+//! [`crate::AuditProfile`] here, sibling profile types in other
+//! crates — as long as it serializes to an object whose sections hold
+//! the toggles.
 
 use std::fmt::Write as _;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
-
-use crate::AuditProfile;
 
 /// Number of hex characters kept from the SHA-256 digest.
 const FINGERPRINT_HEX_LEN: usize = 16;
@@ -73,14 +77,14 @@ fn toml_projection(toml_bytes: &[u8]) -> Result<serde_json::Value, FingerprintEr
 }
 
 /// Fingerprint of the effective profile: serialize the profile, drop
-/// the `name` field, canonicalize with sorted keys, and hash like
-/// [`stable_fingerprint`].
+/// the top-level `name` field, canonicalize with sorted keys, and
+/// hash like [`stable_fingerprint`].
 ///
 /// Hashing the effective struct instead of a source file covers every
 /// construction path — embedded default, named preset, overlay merge —
 /// including presets that are built in code and have no TOML source.
 /// Two profiles that differ only in name share a fingerprint.
-pub fn profile_fingerprint(profile: &AuditProfile) -> Result<String, FingerprintError> {
+pub fn profile_fingerprint<P: Serialize>(profile: &P) -> Result<String, FingerprintError> {
     let mut value = serde_json::to_value(profile).map_err(FingerprintError::Serialize)?;
     if let serde_json::Value::Object(map) = &mut value {
         map.remove("name");
@@ -104,7 +108,7 @@ fn digest_hex(canonical: &str) -> String {
 /// `{"enabled": <bool>, "name": "<section>.<field>"}` objects, sorted
 /// by name. Numeric thresholds and string lists are not part of the
 /// summary; the fingerprint covers them.
-pub fn profile_toggle_summary(profile: &AuditProfile) -> Result<String, FingerprintError> {
+pub fn profile_toggle_summary<P: Serialize>(profile: &P) -> Result<String, FingerprintError> {
     let value = serde_json::to_value(profile).map_err(FingerprintError::Serialize)?;
     let mut toggles: Vec<(String, bool)> = Vec::new();
     collect_bool_leaves(&value, "", &mut toggles);
@@ -190,6 +194,7 @@ fn collect_bool_leaves(value: &serde_json::Value, prefix: &str, out: &mut Vec<(S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AuditProfile;
 
     #[test]
     fn stable_fingerprint_is_order_independent() {
