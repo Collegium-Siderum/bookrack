@@ -76,6 +76,27 @@ release workflow extracts the matching section verbatim from this file.
   reaudit`; passing the flag on any other subcommand aborts before any
   RPC is sent so the value cannot silently drop.
 
+- **catalog, cli, runtime, glean: every top-level pipeline command
+  registers a run in a `pipeline_runs` registry, and new `bookrack
+  runs list` / `runs show` subcommands aggregate a run's audit rows.**
+  M[11] introduces the `pipeline_runs` table — one row per command
+  invocation with a `<command>-<ISO8601>-<sha8>` id, start / finish
+  timestamps, and a terminal status — plus a `pipeline_run_summary`
+  rollup materialized when the run closes; M[12] adds a nullable,
+  indexed `pipeline_run_id` column to `book_distill_audit` and
+  `node_paper_audit`, so one id groups everything a run wrote (rows
+  from before the migration read back as NULL and stay out of every
+  single-run rollup). `distill build` opens a run, threads the id
+  through its audit writer, and refreshes the rollup on exit;
+  `ingest`, `dryrun`, and `papers dryrun` register runs without a
+  summary since they write no audit rows; `GleanParams` gains a
+  `pipeline_run_id` field that the paper-audit substep threads onto
+  its rows. `bookrack runs list` prints recent runs with the rollup's
+  book / paper counts (`--last` caps the result, `--command` filters
+  to one command name); `bookrack runs show <run-id>` renders the
+  run's header plus verdict / flag / coverage histograms. Catalog
+  schema advances to `user_version` 13 across the two migrations.
+
 - **audit: glean's `PaperReport` lands as SQL-dimension rows in
   `node_paper_audit`.** Each paper-side audit substep writes one row
   per `(intake_id, scope='paper')` with verdict, confidence, the
