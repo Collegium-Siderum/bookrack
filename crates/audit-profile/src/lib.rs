@@ -43,15 +43,17 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 mod data;
+mod fingerprint;
 mod headings;
 mod load;
 
 pub use data::{
     AuditData, DATA_OVERLAY_FILE, DATA_SCHEMA_VERSION, DEFAULT_DATA_TOML, DataLoadError,
 };
+pub use fingerprint::{FingerprintError, profile_toggle_summary, stable_fingerprint};
 pub use headings::{
     DEFAULT_HEADINGS_TOML, GermanPatterns, HEADINGS_OVERLAY_FILE, HEADINGS_SCHEMA_VERSION,
     HeadingPatterns, HeadingsLoadError, LatinPatterns, SinoPatterns,
@@ -80,7 +82,7 @@ pub const ALL_BUILT_IN_NAMES: &[&str] = &[PROFILE_DEFAULT, PROFILE_TRUST_SOURCE,
 
 /// Audit profile consumed by the metadata audit, the filename parser,
 /// and the extract half-rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AuditProfile {
     /// Symbolic name of the profile. Stamped into `reviewed_by` as
     /// `bookrack-ingest:<name>` and surfaced in the dryrun report.
@@ -102,7 +104,7 @@ pub struct AuditProfile {
     pub quality: QualityThresholds,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct YearToggles {
     pub range_check: bool,
     pub min: i32,
@@ -125,7 +127,7 @@ impl Default for YearToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TitleToggles {
     pub placeholder_check: bool,
     pub purely_numeric: bool,
@@ -157,7 +159,7 @@ impl Default for TitleToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LanguageToggles {
     pub bcp47_check: bool,
     pub body_script_match: bool,
@@ -221,7 +223,7 @@ impl Default for LanguageToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PublisherToggles {
     pub url_watermark: bool,
     pub whitelist_normalize_abbreviations: bool,
@@ -238,7 +240,7 @@ impl Default for PublisherToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TocShapeToggles {
     pub suspicious_flat: bool,
     pub flat_min_entries: usize,
@@ -265,7 +267,7 @@ impl Default for TocShapeToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourcePriorToggles {
     pub enabled: bool,
 }
@@ -276,7 +278,7 @@ impl Default for SourcePriorToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CopyrightBlocksToggles {
     pub enabled: bool,
     pub count: usize,
@@ -291,7 +293,7 @@ impl Default for CopyrightBlocksToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FilenameParserToggles {
     pub enabled: bool,
     pub year_min: u32,
@@ -308,7 +310,7 @@ impl Default for FilenameParserToggles {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExtractToggles {
     pub epub_year_range_check: bool,
     pub epub_year_min: i32,
@@ -318,7 +320,7 @@ pub struct ExtractToggles {
     pub txt_toc_enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HtmlToggles {
     /// Block-level tags the DOM walk emits as one [`Block`].
     pub block_tags: Vec<String>,
@@ -362,7 +364,7 @@ impl Default for HtmlToggles {
 /// PDF text-layer quality thresholds. The eight ratios / counts are
 /// stored as basis points (0..=10_000) for `Eq`; helpers expose them
 /// as floats at the call site.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QualityThresholds {
     /// Below this characters-per-page count, route the layer to OCR
     /// as a bare scan. Stored as the integer value (chars / page) the
