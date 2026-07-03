@@ -150,6 +150,32 @@ impl Catalog {
             .optional()?;
         Ok(row)
     }
+
+    /// Delete every retrieval call whose fingerprint differs from
+    /// `current`, returning the number of deleted calls. Their hits go
+    /// with them through the cascading foreign key; the generic
+    /// `mcp_tool_calls` log rows stay. Use after a corpus rebuild, when
+    /// the recorded hits no longer describe any servable store state.
+    pub fn prune_retrieval_calls_with_stale_fingerprint(&self, current: &str) -> Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM retrieval_calls WHERE corpus_fingerprint != :current",
+            named_params! { ":current": current },
+        )?;
+        Ok(deleted)
+    }
+
+    /// Delete every retrieval call recorded more than `days` days ago,
+    /// returning the number of deleted calls. Their hits go with them
+    /// through the cascading foreign key; the generic `mcp_tool_calls`
+    /// log rows stay.
+    pub fn prune_retrieval_calls_older_than(&self, days: u32) -> Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM retrieval_calls \
+             WHERE recorded_at < datetime('now', :modifier)",
+            named_params! { ":modifier": format!("-{days} days") },
+        )?;
+        Ok(deleted)
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +235,77 @@ mod tests {
             .record_tool_call(&NewMcpToolCall::new("cli", "papers_dryrun", "ok"))
             .expect("record parent call");
         assert_eq!(catalog.retrieval_call(call_id).expect("read"), None);
+    }
+
+    fn count(catalog: &Catalog, table: &str) -> i64 {
+        catalog
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .expect("count")
+    }
+
+    #[test]
+    fn prune_with_stale_fingerprint_cascades_to_hits() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let stale = seed_call(
+            &catalog,
+            "0000000000000000",
+            &[("p-alpha", 0.1), ("p-beta", 0.2)],
+        );
+        let current = seed_call(&catalog, "deadbeefcafef00d", &[("p-gamma", 0.3)]);
+
+        let deleted = catalog
+            .prune_retrieval_calls_with_stale_fingerprint("deadbeefcafef00d")
+            .expect("prune");
+        assert_eq!(deleted, 1);
+        assert_eq!(catalog.retrieval_call(stale).expect("read stale"), None);
+        assert!(
+            catalog
+                .retrieval_hits(stale)
+                .expect("stale hits")
+                .is_empty()
+        );
+        assert!(
+            catalog
+                .retrieval_call(current)
+                .expect("read current")
+                .is_some()
+        );
+        assert_eq!(
+            catalog.retrieval_hits(current).expect("current hits").len(),
+            1
+        );
+        // The generic log rows survive the prune untouched.
+        assert_eq!(count(&catalog, "mcp_tool_calls"), 2);
+    }
+
+    #[test]
+    fn prune_older_than_seven_days_keeps_recent() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let old = seed_call(&catalog, "deadbeefcafef00d", &[("p-alpha", 0.1)]);
+        let recent = seed_call(&catalog, "deadbeefcafef00d", &[("p-beta", 0.2)]);
+        catalog
+            .conn
+            .execute(
+                "UPDATE retrieval_calls \
+                 SET recorded_at = datetime('now', '-30 days') \
+                 WHERE call_id = :call_id",
+                named_params! { ":call_id": old },
+            )
+            .expect("age the old call");
+
+        let deleted = catalog.prune_retrieval_calls_older_than(7).expect("prune");
+        assert_eq!(deleted, 1);
+        assert_eq!(catalog.retrieval_call(old).expect("read old"), None);
+        assert!(catalog.retrieval_hits(old).expect("old hits").is_empty());
+        assert!(
+            catalog
+                .retrieval_call(recent)
+                .expect("read recent")
+                .is_some()
+        );
     }
 
     #[test]
