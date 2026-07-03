@@ -360,6 +360,8 @@ fn json_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
@@ -465,5 +467,15 @@ mod tests {
         assert!(json.contains("\"year\":{\"grade\":\"strong\",\"flags\":[]}"));
         // No trailing junk and ends in matched braces.
         assert!(json.ends_with("}}"));
+    }
+
+    #[test]
+    fn json_str_escapes_control_and_line_separators() {
+        assert_eq!(json_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(json_str("a\nb\rc\td"), "\"a\\nb\\rc\\td\"");
+        assert_eq!(json_str("a\u{0}b"), "\"a\\u0000b\"");
+        // U+2028 / U+2029 are legal JSON but break JavaScript string
+        // literals, so they are escaped rather than emitted verbatim.
+        assert_eq!(json_str("a\u{2028}b\u{2029}c"), "\"a\\u2028b\\u2029c\"");
     }
 }

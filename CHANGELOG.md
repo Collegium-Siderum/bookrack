@@ -216,6 +216,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **glean: paper-audit report JSON escapes U+2028 and U+2029.** The
+  hand-rolled `json_str` serializer in `crates/glean/src/audit/report.rs`
+  escaped quotes, backslashes, and control characters below `0x20` but
+  emitted the Unicode line and paragraph separators verbatim. Both are
+  legal JSON yet terminate JavaScript string literals, so a hint or
+  token carrying one produced audit JSON that a JavaScript consumer
+  could not parse. They now serialize as `\u2028` / `\u2029`.
+
 - **ops, cli: queue-driven gleans now record a pipeline run.** The
   registry-mediated glean path — the one every `glean.submit` queue
   job takes — passed a `GleanParams` whose `pipeline_run_id` was
