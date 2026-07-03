@@ -7,8 +7,11 @@
 //! the schema version — so a daemon can refuse to serve an index that no
 //! longer matches its compiled-in constants.
 
+use std::fmt::Write as _;
+
 use bookrack_dbkit::{ColumnSpec, TableSpec};
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 
 use crate::{Corpus, CorpusError, Result};
 
@@ -35,6 +38,10 @@ pub const VECTOR_DIM_KEY: &str = "vector_dim";
 pub const CHUNK_VERSION_KEY: &str = "chunk_version";
 /// `index_meta` key recording the text-normalization version.
 pub const NORMALIZE_VERSION_KEY: &str = "normalize_version";
+
+/// Number of hex characters kept from the SHA-256 digest when composing
+/// the corpus fingerprint.
+const FINGERPRINT_HEX_LEN: usize = 16;
 
 /// The build parameters an index was created with.
 ///
@@ -156,6 +163,39 @@ impl Corpus {
             &expected.normalize_version.to_string(),
         )?;
         Ok(true)
+    }
+
+    /// Compose the corpus fingerprint: SHA-256 over the five build
+    /// stamps, keeping the first 16 hex characters.
+    ///
+    /// The digest input is the fixed-order join
+    /// `embed_model|vector_dim|chunk_version|normalize_version|kind`,
+    /// where the first four values come from `index_meta` and
+    /// `ann_kind` is the vector store's ANN algorithm kind, passed in
+    /// by the caller because it lives in the vector store's own
+    /// metadata. Any stamp change yields a new fingerprint, so rows
+    /// keyed by it name the exact corpus state that produced them.
+    /// An index missing any of the four stamps is rejected with
+    /// [`CorpusError::IndexNotStamped`].
+    pub fn compose_corpus_fingerprint(&self, ann_kind: &str) -> Result<String> {
+        let embed_model = self.require_stamp(EMBED_MODEL_KEY)?;
+        let vector_dim = self.require_stamp(VECTOR_DIM_KEY)?;
+        let chunk_version = self.require_stamp(CHUNK_VERSION_KEY)?;
+        let normalize_version = self.require_stamp(NORMALIZE_VERSION_KEY)?;
+        let joined =
+            format!("{embed_model}|{vector_dim}|{chunk_version}|{normalize_version}|{ann_kind}");
+        let digest = Sha256::digest(joined.as_bytes());
+        let mut hex = String::with_capacity(FINGERPRINT_HEX_LEN);
+        for byte in digest.iter().take(FINGERPRINT_HEX_LEN / 2) {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Ok(hex)
+    }
+
+    /// Read a required stamp, rejecting an unset key with
+    /// [`CorpusError::IndexNotStamped`].
+    fn require_stamp(&self, key: &str) -> Result<String> {
+        self.meta_get(key)?.ok_or(CorpusError::IndexNotStamped)
     }
 
     /// Write all four build stamps in one transaction, replacing any
@@ -358,5 +398,69 @@ mod tests {
         ] {
             assert_eq!(corpus.meta_get(key).expect("get"), None, "{key} cleared");
         }
+    }
+
+    fn fingerprint_with(stamps: &IndexStamps, ann_kind: &str) -> String {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(stamps).expect("stamp");
+        corpus
+            .compose_corpus_fingerprint(ann_kind)
+            .expect("fingerprint")
+    }
+
+    #[test]
+    fn compose_corpus_fingerprint_is_deterministic() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        corpus.reconcile_index_stamps(&stamps()).expect("stamp");
+        let first = corpus
+            .compose_corpus_fingerprint("flat")
+            .expect("fingerprint");
+        let second = corpus
+            .compose_corpus_fingerprint("flat")
+            .expect("fingerprint");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 16);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn compose_corpus_fingerprint_changes_with_each_stamp() {
+        let base = fingerprint_with(&stamps(), "flat");
+        let changed_model = IndexStamps {
+            embed_model: "different-model".to_string(),
+            ..stamps()
+        };
+        let changed_dim = IndexStamps {
+            vector_dim: 512,
+            ..stamps()
+        };
+        let changed_chunk = IndexStamps {
+            chunk_version: 2,
+            ..stamps()
+        };
+        let changed_normalize = IndexStamps {
+            normalize_version: 2,
+            ..stamps()
+        };
+        let variants = [
+            fingerprint_with(&changed_model, "flat"),
+            fingerprint_with(&changed_dim, "flat"),
+            fingerprint_with(&changed_chunk, "flat"),
+            fingerprint_with(&changed_normalize, "flat"),
+            fingerprint_with(&stamps(), "ivf-pq"),
+        ];
+        let mut unique: std::collections::HashSet<&str> =
+            variants.iter().map(String::as_str).collect();
+        unique.insert(base.as_str());
+        assert_eq!(unique.len(), 6);
+    }
+
+    #[test]
+    fn compose_on_an_unstamped_index_is_rejected() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        let err = corpus
+            .compose_corpus_fingerprint("flat")
+            .expect_err("unstamped index must not fingerprint");
+        assert!(matches!(err, CorpusError::IndexNotStamped));
     }
 }
