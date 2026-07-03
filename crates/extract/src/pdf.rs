@@ -118,6 +118,7 @@ pub fn extract(
                 pages_text.push(text.all());
                 pages.push(PageParagraphs {
                     page: index,
+                    page_height: page.height().value,
                     paragraphs,
                 });
             }
@@ -392,9 +393,13 @@ fn missing_library_message(probed: &[std::path::PathBuf]) -> String {
 
 // --- block assembly ------------------------------------------------------
 
-/// One page's reconstructed paragraphs, tagged with its page number.
+/// One page's reconstructed paragraphs, tagged with its page number and
+/// height. The height normalizes each paragraph's `cy` into a margin
+/// fraction so page-number detection can tell a footer digit run from a
+/// number embedded in the body.
 struct PageParagraphs {
     page: u32,
+    page_height: f32,
     paragraphs: Vec<Paragraph>,
 }
 
@@ -405,6 +410,12 @@ struct PageParagraphs {
 struct Paragraph {
     text: String,
     style: Option<BlockStyle>,
+    /// Page-coordinate vertical center of the paragraph's first line
+    /// (origin bottom-left, y increasing upward). Normalized against the
+    /// page height, this places a bare digit run in the top or bottom
+    /// margin — the mark of a page number, as opposed to a number that
+    /// happens to sit in the body flow.
+    cy: f32,
 }
 
 /// The longest a paragraph can be and still be taken for a running
@@ -416,6 +427,13 @@ const RUNNING_ELEMENT_MAX_CHARS: usize = 80;
 /// number.
 const PAGE_NUMBER_MAX_CHARS: usize = 6;
 
+/// How far into the page, as a fraction of page height, the top and
+/// bottom margin bands reach. A bare digit run is taken for a page
+/// number only when its vertical center falls inside one of these
+/// bands; a number in the body flow (a year, a list value) sits well
+/// inside the text block and is kept.
+const PAGE_NUMBER_MARGIN_FRACTION: f32 = 0.15;
+
 /// Flatten per-page paragraphs into ordered body blocks, dropping the
 /// running headers, footers, and page numbers that pollute the text.
 ///
@@ -423,7 +441,7 @@ const PAGE_NUMBER_MAX_CHARS: usize = 6;
 /// paragraphs but cannot tell they are not body text; that judgement
 /// needs the whole document. A running header or footer is a short
 /// paragraph repeated verbatim across pages; a page number is a short
-/// run of digits.
+/// run of digits sitting in the top or bottom margin band.
 fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
     // Which pages each short paragraph appears on. A short paragraph
     // present on two or more pages is a running header or footer.
@@ -443,7 +461,9 @@ fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
     let mut blocks = Vec::new();
     for page in &pages {
         for paragraph in &page.paragraphs {
-            if is_page_number(&paragraph.text) || is_running(&paragraph.text) {
+            if is_page_number(&paragraph.text, paragraph.cy, page.page_height)
+                || is_running(&paragraph.text)
+            {
                 continue;
             }
             blocks.push(Block {
@@ -458,12 +478,23 @@ fn build_blocks(pages: Vec<PageParagraphs>) -> Vec<Block> {
 }
 
 /// Whether a paragraph is a bare page number — a short run of digits
-/// that coordinate reconstruction isolated as its own line.
-fn is_page_number(text: &str) -> bool {
+/// that coordinate reconstruction isolated as its own line, sitting in
+/// the top or bottom margin band. The position guard is what keeps a
+/// number in the body flow (a year, a bare list value) from being
+/// dropped: only a digit run in the margin, where page numbers live, is
+/// removed. `cy` and `page_height` are page coordinates (origin
+/// bottom-left, y increasing upward); a non-positive height leaves the
+/// paragraph in place, since the margin fraction cannot be formed.
+fn is_page_number(text: &str, cy: f32, page_height: f32) -> bool {
     let trimmed = text.trim();
-    !trimmed.is_empty()
+    let is_digit_run = !trimmed.is_empty()
         && trimmed.len() <= PAGE_NUMBER_MAX_CHARS
-        && trimmed.bytes().all(|b| b.is_ascii_digit())
+        && trimmed.bytes().all(|b| b.is_ascii_digit());
+    if !is_digit_run || page_height <= 0.0 {
+        return false;
+    }
+    let v = cy / page_height;
+    v <= PAGE_NUMBER_MARGIN_FRACTION || v >= 1.0 - PAGE_NUMBER_MARGIN_FRACTION
 }
 
 // --- paragraph reconstruction from glyph coordinates ---------------------
@@ -831,6 +862,8 @@ struct ParagraphBuilder {
     char_count: u32,
     /// First-line left coordinate, captured at [`Self::start`].
     x0_first_line: f32,
+    /// First-line vertical center, captured at [`Self::start`].
+    cy_first_line: f32,
     /// Vertical gap above the paragraph's first line, in page units.
     above_gap: f32,
     line_count: u32,
@@ -844,6 +877,7 @@ impl ParagraphBuilder {
         self.bold_chars = line.bold_chars;
         self.char_count = line.char_count;
         self.x0_first_line = line.left;
+        self.cy_first_line = line.cy;
         self.above_gap = gap_above;
         self.line_count = 1;
     }
@@ -878,6 +912,7 @@ impl ParagraphBuilder {
             out.push(Paragraph {
                 text: trimmed,
                 style,
+                cy: self.cy_first_line,
             });
         }
         self.text.clear();
@@ -885,6 +920,7 @@ impl ParagraphBuilder {
         self.bold_chars = 0;
         self.char_count = 0;
         self.x0_first_line = 0.0;
+        self.cy_first_line = 0.0;
         self.above_gap = 0.0;
         self.line_count = 0;
     }
@@ -965,5 +1001,44 @@ mod fallback_tests {
             fallbacks.is_empty(),
             "spec-conforming D: prefix must record nothing, got {fallbacks:?}",
         );
+    }
+
+    // Page numbers live in the top or bottom margin; a digit run in the
+    // body flow, however short, is kept. Coordinates use the PDF origin
+    // (bottom-left, y increasing upward); the page is 800 units tall, so
+    // the default 15% margin bands are cy <= 120 and cy >= 680.
+
+    #[test]
+    fn digit_run_in_bottom_margin_is_a_page_number() {
+        assert!(is_page_number("12", 40.0, 800.0));
+    }
+
+    #[test]
+    fn digit_run_in_top_margin_is_a_page_number() {
+        assert!(is_page_number("12", 760.0, 800.0));
+    }
+
+    #[test]
+    fn digit_run_in_body_flow_is_kept() {
+        // The regression this guards: a bare "1984" mid-page is not a
+        // page number and must survive.
+        assert!(!is_page_number("1984", 400.0, 800.0));
+        assert!(!is_page_number("42", 400.0, 800.0));
+    }
+
+    #[test]
+    fn non_digit_run_is_never_a_page_number() {
+        assert!(!is_page_number("Chapter 1", 40.0, 800.0));
+    }
+
+    #[test]
+    fn long_digit_run_is_never_a_page_number() {
+        // Beyond PAGE_NUMBER_MAX_CHARS, even in the margin.
+        assert!(!is_page_number("1234567", 40.0, 800.0));
+    }
+
+    #[test]
+    fn unknown_page_height_keeps_the_paragraph() {
+        assert!(!is_page_number("12", 40.0, 0.0));
     }
 }

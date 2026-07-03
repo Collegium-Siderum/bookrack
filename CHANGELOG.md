@@ -216,6 +216,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **extract: a bare number in the body flow is no longer dropped as a
+  page number.** The PDF block assembler treated every short all-digit
+  paragraph as a page number and discarded it, so a year or list value
+  that coordinate reconstruction isolated as its own line — «1984»,
+  «42» — vanished from the text. `is_page_number` now also requires the
+  digit run to sit in the top or bottom margin band (vertical center
+  within 15 % of a page edge, the page height threaded through
+  `PageParagraphs`), where page numbers live; a digit run in the body
+  is kept.
+
 - **glean: paper-audit report JSON escapes U+2028 and U+2029.** The
   hand-rolled `json_str` serializer in `crates/glean/src/audit/report.rs`
   escaped quotes, backslashes, and control characters below `0x20` but
