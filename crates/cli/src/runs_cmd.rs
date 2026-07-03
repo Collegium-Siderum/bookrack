@@ -19,7 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use bookrack_catalog::{Catalog, PipelineRun, PipelineRunSummary};
+use bookrack_catalog::{Catalog, PipelineRun, PipelineRunSummary, RunProfileBucket};
 use bookrack_cli_grammar::RunsAction;
 use bookrack_config::Config;
 use eyre::{Context as _, Result};
@@ -111,7 +111,10 @@ fn show(catalogs: &[Catalog], pipeline_run_id: &str) -> Result<()> {
         let summary = catalog
             .pipeline_run_summary(pipeline_run_id)
             .context("read pipeline_run_summary row")?;
-        println!("{}", render_run_show(&run, summary.as_ref())?);
+        let buckets = catalog
+            .run_profile_buckets(pipeline_run_id)
+            .context("read profile buckets")?;
+        println!("{}", render_run_show(&run, summary.as_ref(), &buckets)?);
         return Ok(());
     }
     Err(eyre::eyre!("no pipeline run with id {pipeline_run_id:?}"))
@@ -153,6 +156,7 @@ pub(crate) fn render_runs_list(rows: &[(PipelineRun, Option<PipelineRunSummary>)
 pub(crate) fn render_run_show(
     run: &PipelineRun,
     summary: Option<&PipelineRunSummary>,
+    buckets: &[RunProfileBucket],
 ) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("run_id:       {}\n", run.pipeline_run_id));
@@ -170,6 +174,22 @@ pub(crate) fn render_run_show(
         "library_root: {}\n",
         run.library_root.as_deref().unwrap_or("-")
     ));
+    if !buckets.is_empty() {
+        out.push_str("\nprofiles:\n");
+        for bucket in buckets {
+            let fingerprint = bucket.profile_fingerprint.as_deref().unwrap_or("(legacy)");
+            let identity = match bucket.profile_name.as_deref() {
+                Some(name) => format!("{name} @ {fingerprint}"),
+                None => fingerprint.to_string(),
+            };
+            out.push_str(&format!(
+                "  {kind:<6} {identity:<45} {n:>5}\n",
+                kind = bucket.kind,
+                identity = identity,
+                n = bucket.n,
+            ));
+        }
+    }
     let Some(summary) = summary else {
         out.push_str("\nno rollup recorded for this run.");
         return Ok(out.trim_end().to_string());
@@ -345,7 +365,7 @@ mod tests {
             .pipeline_run_summary("run-b")
             .expect("read")
             .expect("present");
-        let out = render_run_show(&run, Some(&summary)).expect("render");
+        let out = render_run_show(&run, Some(&summary), &[]).expect("render");
         assert!(out.contains("run_id:       run-b"));
         assert!(out.contains("n_books:      3"));
         assert!(out.contains("\nverdict:\n"));
@@ -371,10 +391,45 @@ mod tests {
             .pipeline_run("run-c")
             .expect("read")
             .expect("present");
-        let out = render_run_show(&run, None).expect("render");
+        let out = render_run_show(&run, None, &[]).expect("render");
         assert!(out.contains("run_id:       run-c"));
         assert!(out.contains("no rollup recorded for this run."));
         assert!(!out.contains("verdict:"));
+    }
+
+    #[test]
+    fn runs_show_groups_by_profile_fingerprint() {
+        let catalog = open_in_memory();
+        seed_run(&catalog, "run-d", "glean_review", "2026-06-28T13:00:00Z");
+        let run = catalog
+            .pipeline_run("run-d")
+            .expect("read")
+            .expect("present");
+        let buckets = vec![
+            RunProfileBucket {
+                kind: "paper".to_string(),
+                profile_fingerprint: Some("0123456789abcdef".to_string()),
+                profile_name: Some("default".to_string()),
+                n: 4,
+            },
+            RunProfileBucket {
+                kind: "paper".to_string(),
+                profile_fingerprint: None,
+                profile_name: Some("default".to_string()),
+                n: 1,
+            },
+            RunProfileBucket {
+                kind: "book".to_string(),
+                profile_fingerprint: Some("fedcba9876543210".to_string()),
+                profile_name: None,
+                n: 2,
+            },
+        ];
+        let out = render_run_show(&run, None, &buckets).expect("render");
+        assert!(out.contains("\nprofiles:\n"));
+        assert!(out.contains("default @ 0123456789abcdef"));
+        assert!(out.contains("default @ (legacy)"));
+        assert!(out.contains("fedcba9876543210"));
     }
 
     #[test]

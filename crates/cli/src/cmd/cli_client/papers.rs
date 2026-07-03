@@ -583,6 +583,23 @@ fn render_paper_detail(response: &Value) {
             t.push(key, val);
         }
     }
+    if let Some(audit) = response.get("audit").and_then(Value::as_object) {
+        let verdict = audit.get("verdict").and_then(Value::as_str).unwrap_or("-");
+        let confidence = audit
+            .get("confidence")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        t.push("audit", format!("{verdict} ({confidence})"));
+        let name = audit
+            .get("profile_name")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        let profile = match audit.get("profile_fingerprint").and_then(Value::as_str) {
+            Some(fp) => format!("{name} @ {fp}"),
+            None => name.to_string(),
+        };
+        t.push("profile", profile);
+    }
     if let Some(biblio) = response.get("effective_biblio").and_then(Value::as_object) {
         for (k, v) in biblio {
             let s = v

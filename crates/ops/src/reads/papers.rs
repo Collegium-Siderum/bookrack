@@ -17,8 +17,8 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::{
-    ListPapersResult, MAX_TOC_NODES, PaperDetail, PaperFilter, PaperSource, PaperSummary, Toc,
-    TocNode, clamp_limit,
+    ListPapersResult, MAX_TOC_NODES, PaperAuditInfo, PaperDetail, PaperFilter, PaperSource,
+    PaperSummary, Toc, TocNode, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -130,11 +130,21 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
             let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Paper)?;
             let contributors =
                 catalog.contributors_for_address(intake.intake_id, ItemKind::Paper)?;
+            let audit = catalog
+                .node_paper_audit(intake.intake_id, ItemKind::Paper.as_scope_str())?
+                .map(|row| PaperAuditInfo {
+                    verdict: row.verdict,
+                    confidence: row.confidence,
+                    audited_at: row.audited_at,
+                    profile_name: row.profile_name,
+                    profile_fingerprint: row.profile_fingerprint,
+                });
             Ok(PaperDetail::build(
                 intake,
                 effective,
                 overrides,
                 contributors,
+                audit,
             ))
         }
     )

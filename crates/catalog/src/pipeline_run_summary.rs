@@ -157,6 +157,21 @@ impl PipelineRunSummary {
     }
 }
 
+/// One `(kind, profile identity)` bucket of a run's audit rows, as
+/// returned by [`Catalog::run_profile_buckets`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunProfileBucket {
+    /// `paper` or `book`, naming the audit table the bucket came from.
+    pub kind: String,
+    /// The profile fingerprint, or `None` for legacy rows written
+    /// before the fingerprint columns landed.
+    pub profile_fingerprint: Option<String>,
+    /// The human-readable profile name; only paper rows carry one.
+    pub profile_name: Option<String>,
+    /// Number of audit rows in the bucket.
+    pub n: i64,
+}
+
 impl Catalog {
     /// Upsert one `pipeline_run_summary` row, overwriting any previous
     /// rollup for the same `pipeline_run_id`. The compute helper that
@@ -195,6 +210,51 @@ impl Catalog {
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// Group one run's audit rows by the profile identity that judged
+    /// them: paper rows by `(profile_fingerprint, profile_name)`, book
+    /// rows by `profile_ref`. Legacy rows whose fingerprint column is
+    /// NULL (or `''` on `book_distill_audit`) come back with
+    /// `profile_fingerprint = None`, so a mixed run is visible at a
+    /// glance. Ordered by kind, then descending count.
+    pub fn run_profile_buckets(&self, pipeline_run_id: &str) -> Result<Vec<RunProfileBucket>> {
+        let mut buckets = Vec::new();
+        let mut papers = self.conn.prepare(
+            "SELECT profile_fingerprint, profile_name, COUNT(*) AS n \
+             FROM node_paper_audit WHERE pipeline_run_id = :pipeline_run_id \
+             GROUP BY profile_fingerprint, profile_name \
+             ORDER BY n DESC, profile_fingerprint",
+        )?;
+        let rows =
+            papers.query_map(named_params! { ":pipeline_run_id": pipeline_run_id }, |r| {
+                Ok(RunProfileBucket {
+                    kind: "paper".to_string(),
+                    profile_fingerprint: r.get(0)?,
+                    profile_name: r.get(1)?,
+                    n: r.get(2)?,
+                })
+            })?;
+        for row in rows {
+            buckets.push(row?);
+        }
+        let mut books = self.conn.prepare(
+            "SELECT NULLIF(profile_ref, '') AS fp, COUNT(*) AS n \
+             FROM book_distill_audit WHERE pipeline_run_id = :pipeline_run_id \
+             GROUP BY fp ORDER BY n DESC, fp",
+        )?;
+        let rows = books.query_map(named_params! { ":pipeline_run_id": pipeline_run_id }, |r| {
+            Ok(RunProfileBucket {
+                kind: "book".to_string(),
+                profile_fingerprint: r.get(0)?,
+                profile_name: None,
+                n: r.get(1)?,
+            })
+        })?;
+        for row in rows {
+            buckets.push(row?);
+        }
+        Ok(buckets)
     }
 
     /// Materialize the rollup for one run by aggregating its audit rows
@@ -441,6 +501,43 @@ mod tests {
             profile_fingerprint: None,
             profile_toggle_summary: None,
         }
+    }
+
+    #[test]
+    fn run_profile_buckets_group_paper_and_book_rows_by_fingerprint() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let run_id = catalog
+            .open_pipeline_run("glean_review", None, Some("lib-a"))
+            .expect("open run");
+
+        // Two papers under one fingerprint, one under another, one
+        // legacy row with no fingerprint, plus one distill build whose
+        // profile_ref carries the catalog fingerprint.
+        for (intake_id, fp) in [(1, Some("aaaa")), (2, Some("aaaa")), (3, Some("bbbb"))] {
+            let mut row = paper_audit(intake_id, "clean", Some(&run_id), None);
+            row.profile_fingerprint = fp.map(str::to_string);
+            catalog.upsert_node_paper_audit(&row).expect("write paper");
+        }
+        catalog
+            .upsert_node_paper_audit(&paper_audit(4, "clean", Some(&run_id), None))
+            .expect("write legacy paper");
+        let mut header = distill_header("alpha", Some(&run_id), 0);
+        header.profile_ref = "cccc".to_string();
+        catalog
+            .insert_distill_audit(&header, &[])
+            .expect("write distill");
+
+        let buckets = catalog.run_profile_buckets(&run_id).expect("buckets");
+        let papers: Vec<_> = buckets.iter().filter(|b| b.kind == "paper").collect();
+        let books: Vec<_> = buckets.iter().filter(|b| b.kind == "book").collect();
+        assert_eq!(papers.len(), 3, "aaaa, bbbb, legacy: {papers:?}");
+        assert_eq!(papers[0].profile_fingerprint.as_deref(), Some("aaaa"));
+        assert_eq!(papers[0].n, 2);
+        assert_eq!(papers[0].profile_name.as_deref(), Some("default"));
+        assert!(papers.iter().any(|b| b.profile_fingerprint.is_none()));
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].profile_fingerprint.as_deref(), Some("cccc"));
+        assert_eq!(books[0].n, 1);
     }
 
     #[test]

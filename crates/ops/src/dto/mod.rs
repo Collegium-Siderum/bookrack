@@ -15,7 +15,7 @@ pub mod writes;
 pub use bookrack_query::dto::{
     BookDetail, BookFilter, BookSummary, ContextWindow, ContributorEntry, DEFAULT_LIST_LIMIT,
     LibraryStats, ListBooksResult, ListPapersResult, MAX_CONTEXT_RADIUS, MAX_LIST_LIMIT,
-    MAX_READ_CHARS, MAX_SPAN_LEAVES, MAX_TOC_NODES, OcrPendingItem, OcrPendingResult, PaperDetail,
-    PaperFilter, PaperSource, PaperSummary, PapersStats, Passage, SpanText, Toc, TocNode,
-    clamp_limit,
+    MAX_READ_CHARS, MAX_SPAN_LEAVES, MAX_TOC_NODES, OcrPendingItem, OcrPendingResult,
+    PaperAuditInfo, PaperDetail, PaperFilter, PaperSource, PaperSummary, PapersStats, Passage,
+    SpanText, Toc, TocNode, clamp_limit,
 };

@@ -535,6 +535,26 @@ pub struct PaperDetail {
     pub contributors: Vec<ContributorEntry>,
     /// Abstract body, when the IDENTIFY pass found one.
     pub abstract_text: Option<String>,
+    /// Latest audit identity for the paper, when an audit row exists.
+    pub audit: Option<PaperAuditInfo>,
+}
+
+/// Audit identity block on one `library.show_paper` response: the
+/// verdict rollup plus the profile that produced it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperAuditInfo {
+    /// `clean` / `needs_work`.
+    pub verdict: String,
+    /// `low` / `medium` / `high`.
+    pub confidence: String,
+    /// ISO-8601 UTC timestamp of the audit write.
+    pub audited_at: String,
+    /// Short name of the audit profile (`default` / `trust-source` /
+    /// `strict` / overlay).
+    pub profile_name: String,
+    /// Stable fingerprint of the effective profile; `None` on rows
+    /// written before the fingerprint landed.
+    pub profile_fingerprint: Option<String>,
 }
 
 /// One `papers.fetch_source` response. Carries the locator of one
@@ -631,6 +651,7 @@ impl PaperDetail {
         effective: EffectiveAttrs,
         overrides: Vec<NodeOverride>,
         contributors: Vec<NodeContributor>,
+        audit: Option<PaperAuditInfo>,
     ) -> PaperDetail {
         let mut effective_biblio = BTreeMap::new();
         for (name, value) in effective.iter() {
@@ -650,6 +671,7 @@ impl PaperDetail {
                 .map(ContributorEntry::from_row)
                 .collect(),
             abstract_text,
+            audit,
         }
     }
 }

@@ -71,7 +71,7 @@ pub use node_reviews::{
     NewReview, NodeReview, STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED,
 };
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
-pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary};
+pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary, RunProfileBucket};
 pub use pipeline_runs::{NewPipelineRun, PipelineRun};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
