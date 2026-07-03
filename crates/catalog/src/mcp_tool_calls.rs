@@ -8,9 +8,10 @@
 //! diagnostic, trimmable, never a source of truth.
 
 use bookrack_dbkit::{ColumnSpec, IndexSpec, TableSpec};
-use rusqlite::{Row, named_params};
+use rusqlite::{Connection, Row, named_params};
 
-use crate::{Catalog, Result};
+use crate::retrieval_calls::NewRetrievalCall;
+use crate::{Catalog, Result, retrieval_call_hits, retrieval_calls};
 
 /// The single source of truth for the `mcp_tool_calls` table's schema.
 /// Its DDL is rendered from this spec.
@@ -153,26 +154,51 @@ impl NewMcpToolCall {
     }
 }
 
+/// Insert one tool-call row on `conn`, which may be inside a
+/// transaction, returning the assigned `call_id`.
+fn insert_tool_call(conn: &Connection, new: &NewMcpToolCall) -> rusqlite::Result<i64> {
+    conn.query_row(
+        INSERT_SQL,
+        named_params! {
+            ":source": new.source,
+            ":tool": new.tool,
+            ":status": new.status,
+            ":duration_ms": new.duration_ms,
+            ":session_id": new.session_id,
+            ":error_type": new.error_type,
+            ":error_msg": new.error_msg,
+            ":args": new.args,
+            ":timings_ms": new.timings_ms,
+            ":extras": new.extras,
+        },
+        |row| row.get(0),
+    )
+}
+
 impl Catalog {
     /// Append one row to the tool-call log, returning its `call_id`.
     pub fn record_tool_call(&self, new: &NewMcpToolCall) -> Result<i64> {
-        let id = self.conn.query_row(
-            INSERT_SQL,
-            named_params! {
-                ":source": new.source,
-                ":tool": new.tool,
-                ":status": new.status,
-                ":duration_ms": new.duration_ms,
-                ":session_id": new.session_id,
-                ":error_type": new.error_type,
-                ":error_msg": new.error_msg,
-                ":args": new.args,
-                ":timings_ms": new.timings_ms,
-                ":extras": new.extras,
-            },
-            |row| row.get(0),
-        )?;
-        Ok(id)
+        Ok(insert_tool_call(&self.conn, new)?)
+    }
+
+    /// Append one row to the tool-call log and, when `retrieval` is
+    /// set, its retrieval sidecar: the `retrieval_calls` row and one
+    /// `retrieval_call_hits` row per hit. All inserts share one
+    /// transaction, so the log row and its sidecar land together or
+    /// not at all. Returns the shared `call_id`.
+    pub fn record_tool_call_with_retrieval(
+        &self,
+        new: &NewMcpToolCall,
+        retrieval: Option<&NewRetrievalCall>,
+    ) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
+        let call_id = insert_tool_call(&tx, new)?;
+        if let Some(retrieval) = retrieval {
+            retrieval_calls::insert_retrieval_call(&tx, call_id, retrieval)?;
+            retrieval_call_hits::insert_retrieval_call_hits(&tx, call_id, &retrieval.hits)?;
+        }
+        tx.commit()?;
+        Ok(call_id)
     }
 
     /// Every logged call of `tool`, oldest first.
@@ -325,5 +351,98 @@ mod tests {
             .recent_tool_calls("2026-06-01T00:00:00Z", 2)
             .expect("read");
         assert_eq!(rows.len(), 2);
+    }
+
+    fn retrieval_payload() -> NewRetrievalCall {
+        NewRetrievalCall {
+            fingerprint: "deadbeefcafef00d".to_string(),
+            top_k: 5,
+            query_text: Some("what is a monad".to_string()),
+            hits: vec![
+                ("p-alpha".to_string(), 0.12),
+                ("p-beta".to_string(), 0.34),
+                ("p-gamma".to_string(), 0.56),
+            ],
+        }
+    }
+
+    fn table_counts(catalog: &Catalog) -> (i64, i64, i64) {
+        let count = |table: &str| -> i64 {
+            catalog
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count")
+        };
+        (
+            count("mcp_tool_calls"),
+            count("retrieval_calls"),
+            count("retrieval_call_hits"),
+        )
+    }
+
+    #[test]
+    fn record_tool_call_with_retrieval_writes_three_tables() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let call_id = catalog
+            .record_tool_call_with_retrieval(
+                &NewMcpToolCall::new("mcp", "search", "ok"),
+                Some(&retrieval_payload()),
+            )
+            .expect("record");
+        assert_eq!(table_counts(&catalog), (1, 1, 3));
+
+        let logged = catalog.tool_calls_for_tool("search").expect("read log");
+        assert_eq!(logged[0].call_id, call_id);
+        let call = catalog
+            .retrieval_call(call_id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(call.corpus_fingerprint, "deadbeefcafef00d");
+        assert_eq!(call.top_k_requested, 5);
+        assert_eq!(call.n_hits, 3);
+        assert_eq!(call.query_text.as_deref(), Some("what is a monad"));
+        let hits = catalog.retrieval_hits(call_id).expect("read hits");
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[2].passage_id, "p-gamma");
+        assert_eq!(hits[2].distance, f64::from(0.56f32));
+    }
+
+    #[test]
+    fn record_tool_call_with_no_retrieval_leaves_the_sidecar_empty() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .record_tool_call_with_retrieval(
+                &NewMcpToolCall::new("cli", "papers_dryrun", "ok"),
+                None,
+            )
+            .expect("record");
+        assert_eq!(table_counts(&catalog), (1, 0, 0));
+    }
+
+    #[test]
+    fn record_tool_call_with_retrieval_rolls_back_on_hit_insert_failure() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        // Fault injection: abort the second hit insert, after the log
+        // row, the sidecar row, and the first hit have already landed
+        // inside the transaction.
+        catalog
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_second_hit \
+                 BEFORE INSERT ON retrieval_call_hits WHEN NEW.ord = 1 \
+                 BEGIN SELECT RAISE(ABORT, 'injected hit failure'); END;",
+            )
+            .expect("create fault trigger");
+
+        let result = catalog.record_tool_call_with_retrieval(
+            &NewMcpToolCall::new("mcp", "search", "ok"),
+            Some(&retrieval_payload()),
+        );
+        assert!(result.is_err());
+        // The whole transaction rolled back: no log row, no sidecar
+        // row, no hit row survives the partial write.
+        assert_eq!(table_counts(&catalog), (0, 0, 0));
     }
 }

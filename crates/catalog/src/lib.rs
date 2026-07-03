@@ -76,7 +76,7 @@ pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary, RunProfileBucket};
 pub use pipeline_runs::{NewPipelineRun, PipelineRun};
 pub use retrieval_call_hits::RetrievalCallHit;
-pub use retrieval_calls::RetrievalCall;
+pub use retrieval_calls::{NewRetrievalCall, RetrievalCall};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
 

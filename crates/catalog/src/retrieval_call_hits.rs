@@ -10,7 +10,7 @@
 //! `retrieval_calls` parent.
 
 use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
-use rusqlite::{Row, named_params};
+use rusqlite::{Connection, Row, named_params};
 
 use crate::{Catalog, Result};
 
@@ -43,6 +43,31 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         &["passage_id"],
     )],
 };
+
+/// Insert one `retrieval_call_hits` row.
+const INSERT_SQL: &str = "INSERT INTO retrieval_call_hits \
+     (call_id, ord, passage_id, distance) \
+     VALUES (:call_id, :ord, :passage_id, :distance)";
+
+/// Insert one `retrieval_call_hits` row per `(passage_id, distance)`
+/// pair, `ord` following the slice order. `conn` may be inside a
+/// transaction; the caller owns the commit boundary.
+pub(crate) fn insert_retrieval_call_hits(
+    conn: &Connection,
+    call_id: i64,
+    hits: &[(String, f32)],
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(INSERT_SQL)?;
+    for (ord, (passage_id, distance)) in hits.iter().enumerate() {
+        stmt.execute(named_params! {
+            ":call_id": call_id,
+            ":ord": ord as i64,
+            ":passage_id": passage_id,
+            ":distance": f64::from(*distance),
+        })?;
+    }
+    Ok(())
+}
 
 /// One `retrieval_call_hits` row — a single returned passage.
 #[derive(Debug, Clone, PartialEq)]
