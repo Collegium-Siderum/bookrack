@@ -105,6 +105,52 @@ pub(crate) fn insert_retrieval_call(
     Ok(())
 }
 
+/// One retrieval call joined with the `mcp_tool_calls` row it was
+/// logged under — the operator-facing listing shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalCallListing {
+    /// The shared call id.
+    pub call_id: i64,
+    /// When the call was logged, ISO-8601 UTC (from the log row).
+    pub ts: String,
+    /// The invoked tool (from the log row).
+    pub tool: String,
+    /// 16-hex prefix naming the corpus state that served the call.
+    pub corpus_fingerprint: String,
+    /// How many hits the caller asked for.
+    pub top_k_requested: i64,
+    /// How many hits actually came back.
+    pub n_hits: i64,
+    /// The query text, when the caller passed one along.
+    pub query_text: Option<String>,
+}
+
+impl RetrievalCallListing {
+    /// Build a [`RetrievalCallListing`] from a joined row.
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<RetrievalCallListing> {
+        Ok(RetrievalCallListing {
+            call_id: row.get("call_id")?,
+            ts: row.get("ts")?,
+            tool: row.get("tool")?,
+            corpus_fingerprint: row.get("corpus_fingerprint")?,
+            top_k_requested: row.get("top_k_requested")?,
+            n_hits: row.get("n_hits")?,
+            query_text: row.get("query_text")?,
+        })
+    }
+}
+
+/// The joined `SELECT` behind [`RetrievalCallListing`] with `tail`
+/// appended.
+fn listing_sql(tail: &str) -> String {
+    format!(
+        "SELECT rc.call_id, m.ts, m.tool, rc.corpus_fingerprint, \
+                rc.top_k_requested, rc.n_hits, rc.query_text \
+         FROM retrieval_calls rc \
+         JOIN mcp_tool_calls m ON m.call_id = rc.call_id {tail}"
+    )
+}
+
 /// One `retrieval_calls` row — the retrieval detail of a logged call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalCall {
@@ -146,6 +192,52 @@ impl Catalog {
             .query_row(
                 named_params! { ":call_id": call_id },
                 RetrievalCall::from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List retrieval calls joined with their log rows, newest first.
+    /// When `fingerprint` is set, only calls served by that corpus
+    /// state are returned; when `last` is set, the result is capped at
+    /// that many rows.
+    pub fn list_retrieval_calls(
+        &self,
+        fingerprint: Option<&str>,
+        last: Option<usize>,
+    ) -> Result<Vec<RetrievalCallListing>> {
+        let mut tail = String::new();
+        if fingerprint.is_some() {
+            tail.push_str("WHERE rc.corpus_fingerprint = :fingerprint ");
+        }
+        tail.push_str("ORDER BY rc.call_id DESC");
+        if let Some(limit) = last {
+            tail.push_str(&format!(" LIMIT {limit}"));
+        }
+        let mut stmt = self.conn.prepare(&listing_sql(&tail))?;
+        let rows: Vec<RetrievalCallListing> = if let Some(fingerprint) = fingerprint {
+            stmt.query_map(
+                named_params! { ":fingerprint": fingerprint },
+                RetrievalCallListing::from_row,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map([], RetrievalCallListing::from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Fetch one retrieval call joined with its log row, or `None` if
+    /// the call is unknown or carries no retrieval detail.
+    pub fn retrieval_call_listing(&self, call_id: i64) -> Result<Option<RetrievalCallListing>> {
+        let mut stmt = self
+            .conn
+            .prepare(&listing_sql("WHERE rc.call_id = :call_id"))?;
+        let row = stmt
+            .query_row(
+                named_params! { ":call_id": call_id },
+                RetrievalCallListing::from_row,
             )
             .optional()?;
         Ok(row)
@@ -244,6 +336,47 @@ mod tests {
                 row.get(0)
             })
             .expect("count")
+    }
+
+    #[test]
+    fn list_retrieval_calls_filters_by_fingerprint_and_caps_at_last() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let a = seed_call(&catalog, "deadbeefcafef00d", &[("p-alpha", 0.1)]);
+        let b = seed_call(&catalog, "0000000000000000", &[("p-beta", 0.2)]);
+        let c = seed_call(&catalog, "deadbeefcafef00d", &[("p-gamma", 0.3)]);
+
+        // No filter, no cap: every call, newest first, joined with the
+        // log row's tool and timestamp.
+        let all = catalog.list_retrieval_calls(None, None).expect("list");
+        assert_eq!(
+            all.iter().map(|l| l.call_id).collect::<Vec<_>>(),
+            vec![c, b, a]
+        );
+        assert_eq!(all[0].tool, "search");
+        assert!(!all[0].ts.is_empty());
+
+        // The fingerprint filter narrows to the matching corpus state.
+        let matching = catalog
+            .list_retrieval_calls(Some("deadbeefcafef00d"), None)
+            .expect("list by fingerprint");
+        assert_eq!(
+            matching.iter().map(|l| l.call_id).collect::<Vec<_>>(),
+            vec![c, a]
+        );
+
+        // `last` caps after sorting.
+        let one = catalog
+            .list_retrieval_calls(None, Some(1))
+            .expect("list capped");
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].call_id, c);
+
+        let single = catalog
+            .retrieval_call_listing(b)
+            .expect("read")
+            .expect("present");
+        assert_eq!(single.corpus_fingerprint, "0000000000000000");
+        assert_eq!(single.n_hits, 1);
     }
 
     #[test]

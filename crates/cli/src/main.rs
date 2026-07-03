@@ -349,6 +349,13 @@ enum Command {
         #[command(subcommand)]
         action: bookrack_cli_grammar::RunsAction,
     },
+    /// Inspect `retrieval_calls` — the sidecar recording every
+    /// single-store search invocation with the corpus fingerprint that
+    /// served it and its per-hit detail.
+    Retrieval {
+        #[command(subcommand)]
+        action: bookrack_cli_grammar::RetrievalAction,
+    },
     /// Stream or snapshot the running daemon's logs.
     ///
     /// `--follow` (the default with no other flags) subscribes to the
@@ -606,6 +613,7 @@ async fn run() -> Result<()> {
             | Command::AuditProfile { .. }
             | Command::Distill { .. }
             | Command::Runs { .. }
+            | Command::Retrieval { .. }
     ) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
     }
@@ -748,6 +756,7 @@ async fn run() -> Result<()> {
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None, audit_profile).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
+        Command::Retrieval { action } => bookrack_cli::retrieval_cmd::run(&selection, action),
         Command::Logs(args) => cmd::cli_client::logs::run(args, None).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
@@ -794,6 +803,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Remove(_)
         | Command::Distill { .. }
         | Command::Runs { .. }
+        | Command::Retrieval { .. }
         | Command::Logs(_)
         | Command::Quit
         | Command::Doctor { .. }

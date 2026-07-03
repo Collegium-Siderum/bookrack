@@ -305,6 +305,30 @@ pub enum RunsAction {
     },
 }
 
+/// `bookrack retrieval` — list and inspect recorded retrieval calls.
+/// One sidecar row lands per single-store `search` invocation, keyed
+/// by the corpus fingerprint that served it, with the returned hits
+/// in rank order.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum RetrievalAction {
+    /// List recent retrieval calls.
+    List {
+        /// Cap the result to the most recent N calls. Default is no cap.
+        #[arg(long, value_name = "N")]
+        last: Option<usize>,
+        /// Filter to calls served by one corpus fingerprint (16 hex
+        /// characters).
+        #[arg(long, value_name = "HEX")]
+        corpus_fingerprint: Option<String>,
+    },
+    /// Show one retrieval call by id: call metadata and its hits in
+    /// rank order.
+    Show {
+        /// The `mcp_tool_calls.call_id` the retrieval was logged under.
+        call_id: i64,
+    },
+}
+
 /// Metadata-side write commands. Lives in the grammar crate so both
 /// the daemon-side runner (`bookrack_runtime::cmd::metadata::run_write`)
 /// and the REPL client can parse them.
