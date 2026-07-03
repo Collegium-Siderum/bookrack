@@ -10,6 +10,28 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **corpus, catalog, ops, cli: every single-store search invocation is
+  recorded against the corpus state that served it.** A new
+  `Corpus::compose_corpus_fingerprint` hashes the five corpus stamps
+  (embed model, vector dimension, chunk version, normalize version,
+  and the ANN kind from `vectors_meta.json`, `brute-force` when no
+  meta file exists) into a 16-hex prefix. M[15] adds the sidecar pair:
+  `retrieval_calls`, one row per `library.search` /
+  `library.search_in_book` / `library.search_paper` /
+  `library.search_in_paper` call carrying that fingerprint, the
+  requested depth, and the query, and `retrieval_call_hits`, one row
+  per returned passage keyed `(call_id, ord)` with its
+  `norm_chunk_sha256` and distance. The recorder writes the log row
+  and the sidecar in one transaction
+  (`Catalog::record_tool_call_with_retrieval`) and stamps the
+  fingerprint into `mcp_tool_calls.extras`; the unified two-store
+  search records no sidecar because one row cannot carry two
+  fingerprints. `Catalog::prune_retrieval_calls_with_stale_fingerprint`
+  / `prune_retrieval_calls_older_than` trim the tables (no CLI entry
+  yet); `bookrack retrieval list [--last N] [--corpus-fingerprint HEX]`
+  and `bookrack retrieval show <call-id>` render the recorded calls
+  and their hits. Catalog schema advances to `user_version` 16.
+
 - **audit-profile, catalog, glean, distill, cli: audit rows pin the
   profile identity that judged them.** A new fingerprint module in
   `audit-profile` hashes a canonical, key-order-independent projection
