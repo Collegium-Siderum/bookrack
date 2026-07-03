@@ -19,7 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
-pub(crate) const TARGET_VERSION: i64 = 15;
+pub(crate) const TARGET_VERSION: i64 = 16;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),
 /// captured from the rendered specs. Immutable: never edit this text; add a
@@ -697,6 +697,42 @@ ALTER TABLE node_paper_audit ADD COLUMN profile_toggle_summary TEXT;
 ALTER TABLE book_distill_audit ADD COLUMN profile_toggle_summary TEXT;
 "#;
 
+// `M[15]` — add the retrieval sidecar pair: `retrieval_calls`, one row
+// per search / retrieve invocation carrying the corpus fingerprint the
+// call was served against, and `retrieval_call_hits`, one row per
+// returned passage keyed `(call_id, ord)`. `retrieval_calls` shares its
+// `call_id` with the `mcp_tool_calls` row the invocation was logged
+// under, so the generic log row and its retrieval detail join on the
+// primary key; both foreign keys cascade so dropping a logged call
+// drops its sidecar rows in the same step. The fingerprint-by-time
+// index serves the replay-window scan, the passage index the
+// cross-call "how often was this passage hit" aggregate. Additive: no
+// existing table is touched.
+const RETRIEVAL_PAIR_M15_DDL: &str = r#"
+CREATE TABLE retrieval_calls (
+  call_id INTEGER PRIMARY KEY
+    REFERENCES mcp_tool_calls(call_id) ON DELETE CASCADE,
+  corpus_fingerprint TEXT NOT NULL,
+  top_k_requested INTEGER NOT NULL,
+  n_hits INTEGER NOT NULL,
+  query_text TEXT,
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX idx_retrieval_calls_fp_ts
+  ON retrieval_calls(corpus_fingerprint, recorded_at);
+
+CREATE TABLE retrieval_call_hits (
+  call_id INTEGER NOT NULL
+    REFERENCES retrieval_calls(call_id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL,
+  passage_id TEXT NOT NULL,
+  distance REAL NOT NULL,
+  PRIMARY KEY (call_id, ord)
+);
+CREATE INDEX idx_retrieval_call_hits_passage
+  ON retrieval_call_hits(passage_id);
+"#;
+
 /// The migration sequence applied to `catalog.db` on open. Forward-only: a
 /// desktop downgrade restores a backup rather than running a `down` step.
 pub(crate) fn migrations() -> Migrations<'static> {
@@ -716,6 +752,7 @@ pub(crate) fn migrations() -> Migrations<'static> {
         M::up(AUDIT_RUN_ID_M12_DDL),
         M::up(INTAKE_DERIVED_FROM_DDL),
         M::up(AUDIT_PROFILE_FINGERPRINT_M14_DDL),
+        M::up(RETRIEVAL_PAIR_M15_DDL),
     ])
 }
 
@@ -1305,6 +1342,70 @@ mod tests {
         assert_eq!(
             column_type(&conn, "book_distill_audit", "profile_toggle_summary"),
             "TEXT"
+        );
+    }
+
+    #[test]
+    fn migration_m15_creates_retrieval_calls_and_hits() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[15] so the pre-migration database
+        // demonstrably carries neither table nor their indexes.
+        migrations()
+            .to_version(&mut conn, 15)
+            .expect("apply M[0..14]");
+        assert!(columns_of(&conn, "retrieval_calls").is_empty());
+        assert!(columns_of(&conn, "retrieval_call_hits").is_empty());
+        assert!(!index_exists(&conn, "idx_retrieval_calls_fp_ts"));
+        assert!(!index_exists(&conn, "idx_retrieval_call_hits_passage"));
+
+        migrations().to_latest(&mut conn).expect("apply M[15]");
+
+        let call_cols = columns_of(&conn, "retrieval_calls");
+        for col in [
+            "call_id",
+            "corpus_fingerprint",
+            "top_k_requested",
+            "n_hits",
+            "query_text",
+            "recorded_at",
+        ] {
+            assert!(
+                call_cols.iter().any(|c| c == col),
+                "expected {col} on retrieval_calls, got {call_cols:?}"
+            );
+        }
+        let hit_cols = columns_of(&conn, "retrieval_call_hits");
+        for col in ["call_id", "ord", "passage_id", "distance"] {
+            assert!(
+                hit_cols.iter().any(|c| c == col),
+                "expected {col} on retrieval_call_hits, got {hit_cols:?}"
+            );
+        }
+        assert!(index_exists(&conn, "idx_retrieval_calls_fp_ts"));
+        assert!(index_exists(&conn, "idx_retrieval_call_hits_passage"));
+
+        // Both foreign keys cascade: sidecar to log row, hits to sidecar.
+        let fk_calls: (String, String) = conn
+            .query_row(
+                "SELECT \"table\", on_delete FROM pragma_foreign_key_list('retrieval_calls')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("retrieval_calls fk");
+        assert_eq!(
+            fk_calls,
+            ("mcp_tool_calls".to_string(), "CASCADE".to_string())
+        );
+        let fk_hits: (String, String) = conn
+            .query_row(
+                "SELECT \"table\", on_delete FROM pragma_foreign_key_list('retrieval_call_hits')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("retrieval_call_hits fk");
+        assert_eq!(
+            fk_hits,
+            ("retrieval_calls".to_string(), "CASCADE".to_string())
         );
     }
 

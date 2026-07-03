@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The `retrieval_calls` table — the retrieval sidecar of
+//! `mcp_tool_calls`.
+//!
+//! One row per retrieval invocation (`search` / `retrieve`), keyed by
+//! the same `call_id` as the `mcp_tool_calls` row it was logged under.
+//! It captures what the generic tool-call log cannot: the corpus
+//! fingerprint the call was served against, the requested depth, and
+//! the hit count, with the per-hit detail in `retrieval_call_hits`.
+//! A replay window over one corpus state is
+//! `WHERE corpus_fingerprint = ?` ordered by `recorded_at`.
+//!
+//! Like its parent, it is an observability table — diagnostic,
+//! trimmable, never a source of truth.
+
+use bookrack_dbkit::{ColumnSpec, ForeignKey, IndexSpec, OnDelete, TableSpec};
+use rusqlite::{OptionalExtension, Row, named_params};
+
+use crate::{Catalog, Result};
+
+/// The single source of truth for the `retrieval_calls` table's schema.
+/// Its DDL is rendered from this spec.
+pub(crate) const SPEC: TableSpec = TableSpec {
+    name: "retrieval_calls",
+    comment: Some(
+        "Observability: retrieval sidecar of mcp_tool_calls, one row per search / retrieve call.",
+    ),
+    columns: &[
+        ColumnSpec::int("call_id")
+            .primary_key()
+            .references(ForeignKey::new(
+                "mcp_tool_calls",
+                "call_id",
+                OnDelete::Cascade,
+            ))
+            .comment("same id as the mcp_tool_calls row the call was logged under"),
+        ColumnSpec::text("corpus_fingerprint")
+            .not_null()
+            .comment("16-hex SHA-256 prefix over the five corpus stamps"),
+        ColumnSpec::int("top_k_requested").not_null(),
+        ColumnSpec::int("n_hits").not_null(),
+        ColumnSpec::text("query_text")
+            .comment("copy of the query inside mcp_tool_calls.args, for LIKE filtering"),
+        ColumnSpec::text("recorded_at")
+            .not_null()
+            .comment("ISO-8601 UTC"),
+    ],
+    composite_pk: None,
+    uniques: &[],
+    table_checks: &[],
+    indexes: &[IndexSpec::on(
+        "idx_retrieval_calls_fp_ts",
+        &["corpus_fingerprint", "recorded_at"],
+    )],
+};
+
+/// A `SELECT` of every column with `tail` appended; column list from
+/// [`SPEC`].
+fn select_sql(tail: &str) -> String {
+    format!("SELECT {} FROM retrieval_calls {tail}", SPEC.select_list())
+}
+
+/// One `retrieval_calls` row — the retrieval detail of a logged call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalCall {
+    /// The `mcp_tool_calls` row the call was logged under.
+    pub call_id: i64,
+    /// 16-hex prefix naming the corpus state that served the call.
+    pub corpus_fingerprint: String,
+    /// How many hits the caller asked for.
+    pub top_k_requested: i64,
+    /// How many hits actually came back.
+    pub n_hits: i64,
+    /// The query text, when the caller passed one along.
+    pub query_text: Option<String>,
+    /// When the row was written, ISO-8601 UTC.
+    pub recorded_at: String,
+}
+
+impl RetrievalCall {
+    /// Build a [`RetrievalCall`] from a row that includes every column.
+    fn from_row(row: &Row<'_>) -> rusqlite::Result<RetrievalCall> {
+        Ok(RetrievalCall {
+            call_id: row.get("call_id")?,
+            corpus_fingerprint: row.get("corpus_fingerprint")?,
+            top_k_requested: row.get("top_k_requested")?,
+            n_hits: row.get("n_hits")?,
+            query_text: row.get("query_text")?,
+            recorded_at: row.get("recorded_at")?,
+        })
+    }
+}
+
+impl Catalog {
+    /// Fetch the retrieval detail of one call, or `None` if the call
+    /// carries none (a non-retrieval tool, or a row written before the
+    /// sidecar existed).
+    pub fn retrieval_call(&self, call_id: i64) -> Result<Option<RetrievalCall>> {
+        let mut stmt = self.conn.prepare(&select_sql("WHERE call_id = :call_id"))?;
+        let row = stmt
+            .query_row(
+                named_params! { ":call_id": call_id },
+                RetrievalCall::from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NewMcpToolCall;
+
+    /// Log one parent tool call and its retrieval sidecar with `hits`,
+    /// returning the shared `call_id`.
+    fn seed_call(catalog: &Catalog, fingerprint: &str, hits: &[(&str, f64)]) -> i64 {
+        let call_id = catalog
+            .record_tool_call(&NewMcpToolCall::new("mcp", "search", "ok"))
+            .expect("record parent call");
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO retrieval_calls \
+                   (call_id, corpus_fingerprint, top_k_requested, n_hits, query_text, recorded_at) \
+                 VALUES (:call_id, :fingerprint, 10, :n_hits, 'what is a monad', \
+                         '2026-07-03T10:00:00Z')",
+                named_params! {
+                    ":call_id": call_id,
+                    ":fingerprint": fingerprint,
+                    ":n_hits": hits.len() as i64,
+                },
+            )
+            .expect("insert retrieval call");
+        for (ord, (passage_id, distance)) in hits.iter().enumerate() {
+            catalog
+                .conn
+                .execute(
+                    "INSERT INTO retrieval_call_hits (call_id, ord, passage_id, distance) \
+                     VALUES (:call_id, :ord, :passage_id, :distance)",
+                    named_params! {
+                        ":call_id": call_id,
+                        ":ord": ord as i64,
+                        ":passage_id": passage_id,
+                        ":distance": distance,
+                    },
+                )
+                .expect("insert hit");
+        }
+        call_id
+    }
+
+    #[test]
+    fn retrieval_call_round_trip_with_three_hits() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let hits = [("p-alpha", 0.12), ("p-beta", 0.34), ("p-gamma", 0.56)];
+        let call_id = seed_call(&catalog, "deadbeefcafef00d", &hits);
+
+        let call = catalog
+            .retrieval_call(call_id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(call.call_id, call_id);
+        assert_eq!(call.corpus_fingerprint, "deadbeefcafef00d");
+        assert_eq!(call.top_k_requested, 10);
+        assert_eq!(call.n_hits, 3);
+        assert_eq!(call.query_text.as_deref(), Some("what is a monad"));
+        assert!(!call.recorded_at.is_empty());
+
+        let read_hits = catalog.retrieval_hits(call_id).expect("read hits");
+        assert_eq!(read_hits.len(), 3);
+        for (ord, (passage_id, distance)) in hits.iter().enumerate() {
+            assert_eq!(read_hits[ord].ord, ord as i64);
+            assert_eq!(read_hits[ord].passage_id, *passage_id);
+            assert!((read_hits[ord].distance - distance).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn a_call_without_retrieval_detail_reads_none() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let call_id = catalog
+            .record_tool_call(&NewMcpToolCall::new("cli", "papers_dryrun", "ok"))
+            .expect("record parent call");
+        assert_eq!(catalog.retrieval_call(call_id).expect("read"), None);
+    }
+
+    #[test]
+    fn delete_mcp_tool_call_cascades_to_retrieval_calls_and_hits() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .conn
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        let call_id = seed_call(&catalog, "deadbeefcafef00d", &[("p-alpha", 0.12)]);
+
+        catalog
+            .conn
+            .execute(
+                "DELETE FROM mcp_tool_calls WHERE call_id = :call_id",
+                named_params! { ":call_id": call_id },
+            )
+            .expect("delete parent");
+
+        let calls: i64 = catalog
+            .conn
+            .query_row("SELECT COUNT(*) FROM retrieval_calls", [], |row| row.get(0))
+            .expect("count calls");
+        let hits: i64 = catalog
+            .conn
+            .query_row("SELECT COUNT(*) FROM retrieval_call_hits", [], |row| {
+                row.get(0)
+            })
+            .expect("count hits");
+        assert_eq!((calls, hits), (0, 0));
+    }
+}

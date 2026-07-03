@@ -40,6 +40,8 @@ mod node_reviews;
 mod node_role_takeovers;
 mod pipeline_run_summary;
 mod pipeline_runs;
+mod retrieval_call_hits;
+mod retrieval_calls;
 mod retrieval_issues;
 mod toc_edits;
 mod works;
@@ -73,6 +75,8 @@ pub use node_reviews::{
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary, RunProfileBucket};
 pub use pipeline_runs::{NewPipelineRun, PipelineRun};
+pub use retrieval_call_hits::RetrievalCallHit;
+pub use retrieval_calls::RetrievalCall;
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
 
