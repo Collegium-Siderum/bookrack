@@ -27,7 +27,7 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Instant;
 
-use bookrack_catalog::{Catalog, NewMcpToolCall};
+use bookrack_catalog::{Catalog, NewMcpToolCall, NewRetrievalCall};
 use bookrack_embed::Embedder;
 
 use crate::{Caller, Ops, OpsError};
@@ -131,6 +131,21 @@ impl<'a> Recorder<'a> {
     /// catalog write failure is logged at `warn` and swallowed —
     /// `finish` never panics and never alters `result`.
     pub fn finish<T>(self, result: &crate::Result<T>) {
+        self.finish_with_retrieval(result, None)
+    }
+
+    /// Like [`Recorder::finish`], but when `retrieval` is set the row
+    /// carries the corpus fingerprint in `extras` and the retrieval
+    /// sidecar rows (`retrieval_calls` + `retrieval_call_hits`) land in
+    /// the same transaction as the log row, so a partial write cannot
+    /// leave a logged call without its hits. The retrieval ops build
+    /// the payload from their settled result; every other op goes
+    /// through [`Recorder::finish`].
+    pub fn finish_with_retrieval<T>(
+        self,
+        result: &crate::Result<T>,
+        retrieval: Option<NewRetrievalCall>,
+    ) {
         let duration_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
         let (status, error_type, error_msg) = match result {
             Ok(_) => ("ok", None, None),
@@ -154,8 +169,14 @@ impl<'a> Recorder<'a> {
         row.args = self.args;
         row.error_type = error_type;
         row.error_msg = error_msg;
+        if let Some(retrieval) = &retrieval {
+            row.extras = Some(
+                serde_json::json!({ "corpus_fingerprint": retrieval.fingerprint }).to_string(),
+            );
+        }
 
-        let write_attempt = Catalog::open(self.catalog_db).and_then(|c| c.record_tool_call(&row));
+        let write_attempt = Catalog::open(self.catalog_db)
+            .and_then(|c| c.record_tool_call_with_retrieval(&row, retrieval.as_ref()));
         if let Err(e) = write_attempt {
             tracing::warn!(
                 tool = self.tool,
@@ -329,5 +350,52 @@ mod tests {
         recorder.finish::<()>(&Ok(()));
         let rows = catalog.tool_calls_for_tool("library.test").expect("read");
         assert!(rows[0].args.is_none());
+    }
+
+    #[test]
+    fn finish_with_retrieval_writes_the_sidecar_and_stamps_extras() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (path, catalog) = open_catalog(&tmp);
+        let recorder = Recorder::for_test(&path, DEFAULT_SOURCE, "library.search");
+        let retrieval = NewRetrievalCall {
+            fingerprint: "deadbeefcafef00d".to_string(),
+            top_k: 5,
+            query_text: Some("what is a monad".to_string()),
+            hits: vec![("p-alpha".to_string(), 0.12), ("p-beta".to_string(), 0.34)],
+        };
+        recorder.finish_with_retrieval::<()>(&Ok(()), Some(retrieval));
+
+        let rows = catalog.tool_calls_for_tool("library.search").expect("read");
+        assert_eq!(rows.len(), 1);
+        let extras = rows[0].extras.as_deref().expect("extras present");
+        assert!(extras.contains("\"corpus_fingerprint\""));
+        assert!(extras.contains("deadbeefcafef00d"));
+
+        let call = catalog
+            .retrieval_call(rows[0].call_id)
+            .expect("read sidecar")
+            .expect("sidecar present");
+        assert_eq!(call.corpus_fingerprint, "deadbeefcafef00d");
+        assert_eq!(call.top_k_requested, 5);
+        assert_eq!(call.n_hits, 2);
+        let hits = catalog.retrieval_hits(rows[0].call_id).expect("read hits");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].passage_id, "p-alpha");
+        assert_eq!(hits[1].passage_id, "p-beta");
+    }
+
+    #[test]
+    fn plain_finish_leaves_the_retrieval_sidecar_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (path, catalog) = open_catalog(&tmp);
+        let recorder = Recorder::for_test(&path, DEFAULT_SOURCE, "library.list_books");
+        recorder.finish::<()>(&Ok(()));
+
+        let rows = catalog
+            .tool_calls_for_tool("library.list_books")
+            .expect("read");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].extras.is_none());
+        assert_eq!(catalog.retrieval_call(rows[0].call_id).expect("read"), None);
     }
 }
