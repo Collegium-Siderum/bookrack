@@ -10,6 +10,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **audit-profile, catalog, glean, distill, cli: audit rows pin the
+  profile identity that judged them.** A new fingerprint module in
+  `audit-profile` hashes a canonical, key-order-independent projection
+  of a TOML source (`stable_fingerprint`, with a multi-source variant)
+  or of any serialized effective profile (`profile_fingerprint`, which
+  covers named presets built in code and ignores the profile's display
+  name), and renders a `profile_toggle_summary` JSON of every boolean
+  toggle. The glean paper-audit substep stamps
+  `node_paper_audit.profile_fingerprint` / `profile_toggle_summary`
+  from the effective `PaperAuditProfile`; `distill build` upgrades
+  `book_distill_audit.profile_ref` from an always-empty placeholder to
+  the stable fingerprint of the three embedded catalog TOMLs and fills
+  the new `profile_toggle_summary` column with the quality-flag
+  severity vocabulary. M[14] adds the three nullable columns; rows
+  written before the migration read back as NULL («''» on
+  `profile_ref`) and group into a legacy bucket. `bookrack papers
+  show` prints an `audit:` line plus `profile: <name> @ <fingerprint>`;
+  `bookrack runs show` gains a `profiles:` section bucketing the run's
+  audit rows by fingerprint, so a mixed-profile run is visible at a
+  glance. Catalog schema advances to `user_version` 15.
+
 - **runtime, cli, mcp: OCR-needed ingests get their own queue terminal
   state `needs_ocr`, no longer counted as failures.** A book ingest whose
   source has no usable text layer now ends in a distinct non-failure
