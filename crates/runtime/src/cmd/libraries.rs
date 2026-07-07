@@ -56,7 +56,11 @@ where
     F: FnOnce(&str) -> Result<bool>,
 {
     validate_inputs(cfg, new_name, target)?;
-    let registry_path = registry_target_path()?;
+    let registry_path = bookrack_config::registry_target_path().ok_or_else(|| {
+        eyre!(
+            "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform config directory is available"
+        )
+    })?;
 
     let source_books = cfg.books_dir();
     let source_catalog = cfg.catalog_db();
@@ -215,20 +219,6 @@ fn canonicalize_target(target: &Path) -> Result<PathBuf> {
         .canonicalize()
         .with_context(|| format!("canonicalize parent {}", parent.display()))?;
     Ok(parent_canonical.join(file_name))
-}
-
-/// Resolve the registry file to write the new entry into. `BOOKRACK_REGISTRY`
-/// wins; otherwise the platform default. The fork command refuses if
-/// neither resolves — the caller has no place to record the new entry.
-fn registry_target_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os(bookrack_config::REGISTRY_ENV) {
-        return Ok(PathBuf::from(path));
-    }
-    bookrack_config::default_registry_path().ok_or_else(|| {
-        eyre!(
-            "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform config directory is available"
-        )
-    })
 }
 
 /// Walk `src` and either hardlink (with copy fallback) or always copy

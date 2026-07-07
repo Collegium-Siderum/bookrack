@@ -93,11 +93,14 @@ pub struct LibrarySetDefaultParams {
     pub name: String,
 }
 
-/// Re-point the registry's default-library pointer at `name`. The
-/// daemon's primary `library_name` (used as a fallback when an RPC
-/// caller omits `library`) is unchanged — the call is advisory and
-/// fires a `library.changed` event so subscribers can refresh their
-/// view of which library the registry now reports as default.
+/// Re-point the daemon's in-memory default-library pointer at `name`.
+/// This affects only the running daemon session and is not persisted;
+/// the on-disk registry default is written by the CLI's offline
+/// `libraries default`, which owns registry persistence. The daemon's
+/// primary `library_name` (used as a fallback when an RPC caller omits
+/// `library`) is unchanged — the call is advisory and fires a
+/// `library.changed` event so subscribers can refresh their view of
+/// which library the daemon now reports as default.
 pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let raw = params
         .clone()

@@ -389,12 +389,13 @@ pub(crate) enum LibrariesAction {
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
     },
-    /// Move the registry's default-library pointer to `name`.
+    /// Set the registry's default-library pointer to `name`.
     ///
-    /// The change lives in the daemon's in-memory registry only; the
-    /// on-disk library registry stays as written.
+    /// Writes straight to the on-disk registry, so it needs no running
+    /// daemon and the change persists across restarts. Errors if the
+    /// registry does not define `name`.
     Default {
-        /// Library short name to set as the daemon's default.
+        /// Library short name to record as the registry default.
         name: String,
     },
     /// Clone the current library into a sibling at a new data root.
@@ -602,10 +603,10 @@ async fn run() -> Result<()> {
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
     // root locally (`run`, `init`, `audit-profile`, `distill`,
-    // `runs`): the flag is a real switch there, not an assertion.
-    // Silent when no daemon is running, when no selection was
-    // given, or when the lock predates the identity fields that
-    // make the comparison possible.
+    // `runs`, `libraries default`): the flag is a real switch there,
+    // not an assertion. Silent when no daemon is running, when no
+    // selection was given, or when the lock predates the identity
+    // fields that make the comparison possible.
     if !matches!(
         cli.command,
         Command::Init { .. }
@@ -614,6 +615,9 @@ async fn run() -> Result<()> {
             | Command::Distill { .. }
             | Command::Runs { .. }
             | Command::Retrieval { .. }
+            | Command::Libraries {
+                action: LibrariesAction::Default { .. }
+            }
     ) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
     }
@@ -731,7 +735,48 @@ async fn run() -> Result<()> {
             if let LibrariesAction::List { json } = &mut action {
                 *json = *json || json_global;
             }
-            cmd::cli_client::libraries::run(action, None).await
+            if let LibrariesAction::Default { name } = &action {
+                // `libraries default` writes the registry directly, so
+                // it works with no daemon and the pointer persists
+                // across restarts. Resolve the registry file the same
+                // way the daemon's fork helper does.
+                let registry_path = bookrack_config::registry_target_path().ok_or_else(|| {
+                    eyre::eyre!(
+                        "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the \
+                         platform config directory is available"
+                    )
+                })?;
+                bookrack_config::set_default_library(&registry_path, name).map_err(|err| {
+                    match err {
+                        // An unknown name is operator input, not a
+                        // system fault: exit 2, not the exit-1 fallback.
+                        ConfigError::UnknownLibrary { .. } => eyre::Report::new(
+                            bookrack_cli::error::BookrackCliError::LocalUserError {
+                                message: err.to_string(),
+                            },
+                        ),
+                        other => eyre::Report::new(other),
+                    }
+                })?;
+                if bookrack_cli::render::ctx().is_json() {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": true,
+                            "name": name,
+                            "registry": registry_path.display().to_string(),
+                        })
+                    );
+                } else if !bookrack_cli::render::ctx().is_quiet() {
+                    println!(
+                        "default library set to '{name}' ({})",
+                        registry_path.display()
+                    );
+                }
+                Ok(())
+            } else {
+                cmd::cli_client::libraries::run(action, None).await
+            }
         }
         Command::Diagnose {
             out,
@@ -838,6 +883,24 @@ mod tests {
         let selection = cli.selection();
         assert_eq!(selection.library.as_deref(), Some("test"));
         assert!(selection.data_dir.is_none());
+    }
+
+    #[test]
+    fn libraries_default_parses_the_name_argument() {
+        let cli = Cli::try_parse_from(["bookrack", "libraries", "default", "prod"])
+            .expect("`libraries default <name>` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Default { name },
+            } => assert_eq!(name, "prod"),
+            _ => panic!("expected `libraries default`"),
+        }
+    }
+
+    #[test]
+    fn libraries_default_requires_a_name() {
+        let parsed = Cli::try_parse_from(["bookrack", "libraries", "default"]);
+        assert!(parsed.is_err(), "the name argument is required");
     }
 
     #[test]

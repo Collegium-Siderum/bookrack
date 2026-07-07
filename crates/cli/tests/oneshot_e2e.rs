@@ -130,6 +130,96 @@ async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
     Ok(())
 }
 
+/// `libraries default` resolves locally: with no daemon running it
+/// still writes the on-disk registry default and exits 0, rather than
+/// the daemon-not-running code 2. A legacy bare-path registry is
+/// rewritten into the entry-table form in the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_default_writes_the_registry_offline() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        "default = \"alpha\"\n\
+         [libraries]\n\
+         alpha = \"/roots/alpha\"\n\
+         beta = \"/roots/beta\"\n",
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "default", "beta"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "libraries default should write offline and exit 0; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("default library set to 'beta'"),
+        "stdout missing success line: {stdout}",
+    );
+    let written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        written.contains("default = \"beta\""),
+        "default pointer not repointed: {written}",
+    );
+    // The legacy bare-path entries are rewritten into table form, so
+    // each now carries an explicit `data_dir` key.
+    assert!(
+        written.contains("data_dir"),
+        "registry not upgraded to entry-table form: {written}",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("registry upgraded to entry-table format"),
+        "stderr missing the one-time upgrade notice: {stderr}",
+    );
+    Ok(())
+}
+
+/// A `libraries default` naming a library the registry does not define
+/// is operator input, not a system fault: it exits 2 and does not
+/// disturb the file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(&registry_path, "[libraries]\nalpha = \"/roots/alpha\"\n")?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "default", "ghost"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unknown library name is a user error (exit 2); stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no library named"),
+        "stderr should name the unknown library: {stderr}",
+    );
+    Ok(())
+}
+
 enum CaseExpect {
     NotRunning,
     Quit,

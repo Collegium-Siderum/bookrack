@@ -11,11 +11,13 @@
 //! databases, and the vector store — so book content, including real
 //! titles, never sits next to the source code.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod registry;
 
+pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
 
 /// Environment variable naming the data root (an absolute directory).
@@ -338,6 +340,17 @@ pub struct LibraryEntry {
     /// True when the registry's `default = "<this name>"` picks this
     /// entry as the resolution fallback.
     pub is_default: bool,
+    /// Library kind. A legacy bare-path entry reports the default
+    /// [`LibraryKind::Prod`].
+    pub kind: LibraryKind,
+    /// Free-form description, when the entry carries one.
+    pub description: Option<String>,
+    /// Index-profile name the entry records, when set.
+    pub index_profile: Option<String>,
+    /// Cached RFC 3339 creation timestamp, when set.
+    pub created_at: Option<String>,
+    /// Cached library uuid, when set.
+    pub uuid: Option<String>,
 }
 
 /// Read the library registry and return every entry, sorted by name.
@@ -365,10 +378,15 @@ fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {
     let mut entries: Vec<LibraryEntry> = registry
         .libraries
         .iter()
-        .map(|(name, data_dir)| LibraryEntry {
+        .map(|(name, raw)| LibraryEntry {
             name: name.clone(),
-            data_dir: data_dir.clone(),
+            data_dir: raw.data_dir().to_path_buf(),
             is_default: registry.default.as_deref() == Some(name.as_str()),
+            kind: raw.kind(),
+            description: raw.description().map(str::to_string),
+            index_profile: raw.index_profile().map(str::to_string),
+            created_at: raw.created_at().map(str::to_string),
+            uuid: raw.uuid().map(str::to_string),
         })
         .collect();
     entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -874,14 +892,18 @@ fn select_root(
 
 /// Look up a named library's root in the registry.
 fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigError> {
-    registry.libraries.get(name).cloned().ok_or_else(|| {
-        let mut available: Vec<String> = registry.libraries.keys().cloned().collect();
-        available.sort();
-        ConfigError::UnknownLibrary {
-            name: name.to_string(),
-            available,
-        }
-    })
+    registry
+        .libraries
+        .get(name)
+        .map(|entry| entry.data_dir().to_path_buf())
+        .ok_or_else(|| {
+            let mut available: Vec<String> = registry.libraries.keys().cloned().collect();
+            available.sort();
+            ConfigError::UnknownLibrary {
+                name: name.to_string(),
+                available,
+            }
+        })
 }
 
 /// Validate the chosen root and build a [`Config`]. The root must be an
@@ -928,14 +950,144 @@ pub fn merge_library_into_registry(
     data_dir: &Path,
 ) -> Result<(), ConfigError> {
     let mut doc = read_registry_table(path)?;
-    upsert_library_in_table(&mut doc, name, data_dir, path)?;
+    let upgraded = upsert_library_in_table(&mut doc, name, data_dir, path)?;
     write_registry_table(path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
     Ok(())
 }
 
+/// Point the registry's `default = "..."` selection at `name`, writing
+/// the change straight to disk. Unlike [`merge_library_into_registry`],
+/// this overwrites any existing default — it is the explicit
+/// "make this the default" entry point behind `bookrack libraries
+/// default`, and the change persists across daemon restarts. Errors
+/// with [`ConfigError::UnknownLibrary`] when the registry does not
+/// define `name`, so the default can never point at a missing library.
+pub fn set_default_library(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let mut doc = read_registry_table(path)?;
+    let upgraded = normalize_registry_entries(&mut doc, path)?;
+    if !registry_has_library(&doc, name) {
+        return Err(ConfigError::UnknownLibrary {
+            name: name.to_string(),
+            available: registry_library_names(&doc),
+        });
+    }
+    doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+    write_registry_table(path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(())
+}
+
+/// Remove the library named `name` from the registry, writing the
+/// change straight to disk. When the removed library was the recorded
+/// default, the `default` pointer is dropped so it never dangles.
+/// Errors with [`ConfigError::UnknownLibrary`] when no such entry
+/// exists. Removing a registry entry never touches the library's data
+/// root — it only forgets the name.
+pub fn remove_library_from_registry(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let mut doc = read_registry_table(path)?;
+    let upgraded = normalize_registry_entries(&mut doc, path)?;
+    let removed = doc
+        .get_mut("libraries")
+        .and_then(toml::Value::as_table_mut)
+        .map(|libraries| libraries.remove(name).is_some())
+        .unwrap_or(false);
+    if !removed {
+        return Err(ConfigError::UnknownLibrary {
+            name: name.to_string(),
+            available: registry_library_names(&doc),
+        });
+    }
+    if doc.get("default").and_then(toml::Value::as_str) == Some(name) {
+        doc.remove("default");
+    }
+    write_registry_table(path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(())
+}
+
+/// Insert or replace a full registry entry, writing every metadata
+/// field the caller sets. Like [`merge_library_into_registry`], the
+/// `default` pointer is set to `name` only when none is recorded yet.
+/// This is the write-side counterpart of the read-side entry table.
+pub fn upsert_library_entry(
+    path: &Path,
+    name: &str,
+    entry: &LibraryEntryFields,
+) -> Result<(), ConfigError> {
+    let mut doc = read_registry_table(path)?;
+    let upgraded = normalize_registry_entries(&mut doc, path)?;
+    let libraries = doc
+        .get_mut("libraries")
+        .expect("normalize_registry_entries inserts the libraries table")
+        .as_table_mut()
+        .expect("normalize_registry_entries guarantees a table");
+    libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
+    if !doc.contains_key("default") {
+        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+    }
+    write_registry_table(path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(())
+}
+
+/// The metadata a full registry entry can carry, for the write side of
+/// the registry. `data_dir` is required; every other field is written
+/// only when set. Mirrors the read-side registry entry table.
+#[derive(Debug, Clone)]
+pub struct LibraryEntryFields {
+    /// Absolute data root the name maps to.
+    pub data_dir: PathBuf,
+    /// Library kind.
+    pub kind: LibraryKind,
+    /// Free-form description.
+    pub description: Option<String>,
+    /// Index-profile name the library is built under.
+    pub index_profile: Option<String>,
+    /// RFC 3339 creation timestamp.
+    pub created_at: Option<String>,
+    /// Stable library uuid.
+    pub uuid: Option<String>,
+}
+
+impl LibraryEntryFields {
+    /// Render the entry into a TOML table, emitting only the fields
+    /// that are set. `data_dir` and `kind` are always present.
+    fn to_toml_table(&self) -> toml::Table {
+        let mut table = toml::Table::new();
+        table.insert(
+            "data_dir".to_string(),
+            toml::Value::String(self.data_dir.display().to_string()),
+        );
+        table.insert(
+            "kind".to_string(),
+            toml::Value::String(self.kind.as_str().to_string()),
+        );
+        for (key, value) in [
+            ("description", self.description.as_ref()),
+            ("index_profile", self.index_profile.as_ref()),
+            ("created_at", self.created_at.as_ref()),
+            ("uuid", self.uuid.as_ref()),
+        ] {
+            if let Some(v) = value {
+                table.insert(key.to_string(), toml::Value::String(v.clone()));
+            }
+        }
+        table
+    }
+}
+
 /// Read the registry at `path` as a free-form TOML table. A missing
-/// file resolves to an empty table so [`merge_library_into_registry`]
-/// can write a fresh file without a separate branch.
+/// file resolves to an empty table so a writer can create a fresh file
+/// without a separate branch.
 fn read_registry_table(path: &Path) -> Result<toml::Table, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -954,16 +1106,41 @@ fn read_registry_table(path: &Path) -> Result<toml::Table, ConfigError> {
         })
 }
 
-/// Mutate `doc` to carry the new library entry, preserving every other
-/// table field. Errors when an existing `libraries` or `default` key
-/// has the wrong type — the writer refuses to clobber a file it does
-/// not understand.
+/// Mutate `doc` to carry the new library entry in table form,
+/// preserving every other table field. Returns whether a legacy
+/// string entry was upgraded to table form, so the caller can emit the
+/// one-time upgrade notice.
 fn upsert_library_in_table(
     doc: &mut toml::Table,
     name: &str,
     data_dir: &Path,
     path: &Path,
-) -> Result<(), ConfigError> {
+) -> Result<bool, ConfigError> {
+    let upgraded = normalize_registry_entries(doc, path)?;
+    let libraries = doc
+        .get_mut("libraries")
+        .expect("normalize_registry_entries inserts the libraries table")
+        .as_table_mut()
+        .expect("normalize_registry_entries guarantees a table");
+    let mut table = toml::Table::new();
+    table.insert(
+        "data_dir".to_string(),
+        toml::Value::String(data_dir.display().to_string()),
+    );
+    libraries.insert(name.to_string(), toml::Value::Table(table));
+    if !doc.contains_key("default") {
+        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+    }
+    Ok(upgraded)
+}
+
+/// Validate the registry's top-level shape and upgrade any legacy
+/// bare-string entries to table form in place, ensuring a `libraries`
+/// table exists. Returns true when at least one legacy entry was
+/// upgraded. Errors when an existing `libraries` or `default` key has
+/// the wrong type — the writer refuses to clobber a file it does not
+/// understand.
+fn normalize_registry_entries(doc: &mut toml::Table, path: &Path) -> Result<bool, ConfigError> {
     if let Some(existing) = doc.get("libraries")
         && !existing.is_table()
     {
@@ -985,34 +1162,103 @@ fn upsert_library_in_table(
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
         .as_table_mut()
         .expect("ensured to be a table by the check above");
-    libraries.insert(
-        name.to_string(),
-        toml::Value::String(data_dir.display().to_string()),
-    );
-    if !doc.contains_key("default") {
-        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
-    }
-    Ok(())
+    Ok(upgrade_legacy_entries(libraries))
 }
 
-/// Serialize `doc` and overwrite `path`, creating its parent directory
-/// as needed. Errors map to [`ConfigError::RegistryUnreadable`] so the
-/// caller renders a single uniform reason regardless of which I/O step
-/// failed.
+/// Rewrite every bare-string entry in a `libraries` table into the
+/// table form `{ data_dir = "<path>" }`, leaving existing table
+/// entries untouched. Returns true when at least one entry changed.
+fn upgrade_legacy_entries(libraries: &mut toml::Table) -> bool {
+    let legacy: Vec<String> = libraries
+        .iter()
+        .filter_map(|(name, value)| value.as_str().map(|_| name.clone()))
+        .collect();
+    for name in &legacy {
+        let Some(path) = libraries.get(name).and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let mut table = toml::Table::new();
+        table.insert(
+            "data_dir".to_string(),
+            toml::Value::String(path.to_string()),
+        );
+        libraries.insert(name.clone(), toml::Value::Table(table));
+    }
+    !legacy.is_empty()
+}
+
+/// Whether the registry table defines a library named `name`.
+fn registry_has_library(doc: &toml::Table, name: &str) -> bool {
+    doc.get("libraries")
+        .and_then(toml::Value::as_table)
+        .map(|libraries| libraries.contains_key(name))
+        .unwrap_or(false)
+}
+
+/// The sorted library names the registry table carries, for the
+/// "available: ..." hint on an unknown-library error.
+fn registry_library_names(doc: &toml::Table) -> Vec<String> {
+    let mut names: Vec<String> = doc
+        .get("libraries")
+        .and_then(toml::Value::as_table)
+        .map(|libraries| libraries.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// Print the one-time notice that a legacy registry file was rewritten
+/// into the entry-table format. Emitted on stderr so it never pollutes
+/// a `--json` stdout stream.
+fn emit_registry_upgrade_notice() {
+    eprintln!("info: registry upgraded to entry-table format");
+}
+
+/// Serialize `doc` and write it to `path` atomically, creating the
+/// parent directory as needed.
 fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|source| ConfigError::RegistryUnreadable {
+    let serialised = toml::to_string_pretty(doc).expect("toml::Table is always serialisable");
+    write_atomically(path, &serialised)
+}
+
+/// Write `contents` to `path` atomically: stage a temporary file in the
+/// same directory, flush it, then rename it over the target. A reader
+/// racing the write sees either the old file or the new one, never a
+/// truncated one. Errors map to [`ConfigError::RegistryUnreadable`] so
+/// the caller renders one uniform reason regardless of which I/O step
+/// failed.
+fn write_atomically(path: &Path, contents: &str) -> Result<(), ConfigError> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&parent).map_err(|source| ConfigError::RegistryUnreadable {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&parent).map_err(|source| {
+        ConfigError::RegistryUnreadable {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    tmp.write_all(contents.as_bytes())
+        .map_err(|source| ConfigError::RegistryUnreadable {
             path: path.to_path_buf(),
             source,
         })?;
-    }
-    let serialised = toml::to_string_pretty(doc).expect("toml::Table is always serialisable");
-    std::fs::write(path, serialised).map_err(|source| ConfigError::RegistryUnreadable {
-        path: path.to_path_buf(),
-        source,
-    })
+    tmp.as_file()
+        .sync_all()
+        .map_err(|source| ConfigError::RegistryUnreadable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tmp.persist(path)
+        .map_err(|e| ConfigError::RegistryUnreadable {
+            path: path.to_path_buf(),
+            source: e.error,
+        })?;
+    Ok(())
 }
 
 /// Load the registry from the file named by [`REGISTRY_ENV`]. Returns
@@ -1079,6 +1325,20 @@ pub fn default_registry_path() -> Option<PathBuf> {
 /// shape can be tested without depending on the host's HOME.
 fn default_registry_path_from(config_dir: Option<PathBuf>) -> Option<PathBuf> {
     config_dir.map(|d| d.join("bookrack").join(DEFAULT_REGISTRY_NAME))
+}
+
+/// Resolve the registry file the write-side commands edit.
+///
+/// [`REGISTRY_ENV`] wins when set; otherwise the platform-default
+/// registry path. Returns `None` when neither is available — the
+/// caller then has no registry to record the change in. Used by both
+/// the offline CLI write verbs and the daemon's `fork` helper so the
+/// two agree on which file is the registry.
+pub fn registry_target_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os(REGISTRY_ENV) {
+        return Some(PathBuf::from(path));
+    }
+    default_registry_path()
 }
 
 /// Load the platform-default registry, if present. A missing file is
@@ -1174,6 +1434,7 @@ fn locate_pdfium_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::RawRegistryEntry;
 
     /// A directory guaranteed to exist, for happy-path resolution.
     fn existing_dir() -> String {
@@ -1925,7 +2186,10 @@ mod tests {
         let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
             .expect("registry parses");
         assert_eq!(registry.default.as_deref(), Some("default"));
-        assert_eq!(registry.libraries.get("default"), Some(&data_root));
+        assert_eq!(
+            registry.libraries.get("default").map(|e| e.data_dir()),
+            Some(data_root.as_path())
+        );
     }
 
     #[test]
@@ -1965,10 +2229,13 @@ mod tests {
         // The default is untouched; both libraries are present.
         assert_eq!(registry.default.as_deref(), Some("alpha"));
         assert_eq!(
-            registry.libraries.get("alpha"),
-            Some(&PathBuf::from("/roots/alpha"))
+            registry.libraries.get("alpha").map(|e| e.data_dir()),
+            Some(Path::new("/roots/alpha"))
         );
-        assert_eq!(registry.libraries.get("beta"), Some(&beta_root));
+        assert_eq!(
+            registry.libraries.get("beta").map(|e| e.data_dir()),
+            Some(beta_root.as_path())
+        );
     }
 
     #[test]
@@ -1987,7 +2254,10 @@ mod tests {
         merge_library_into_registry(&path, "default", &new_root).expect("merge");
         let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
             .expect("registry parses");
-        assert_eq!(registry.libraries.get("default"), Some(&new_root));
+        assert_eq!(
+            registry.libraries.get("default").map(|e| e.data_dir()),
+            Some(new_root.as_path())
+        );
     }
 
     #[test]
@@ -2001,6 +2271,149 @@ mod tests {
             matches!(err, ConfigError::RegistryShape { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn set_default_upgrades_a_legacy_file_and_repoints_the_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n\
+             beta = \"/roots/beta\"\n",
+        )
+        .expect("seed");
+        set_default_library(&path, "beta").expect("set default");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let registry = parse_registry(&text).expect("registry parses");
+        assert_eq!(registry.default.as_deref(), Some("beta"));
+        // The whole file is rewritten in table form: both legacy
+        // entries are now tables, and both data roots survive.
+        assert!(matches!(
+            registry.libraries["alpha"],
+            RawRegistryEntry::Table(_)
+        ));
+        assert!(matches!(
+            registry.libraries["beta"],
+            RawRegistryEntry::Table(_)
+        ));
+        assert_eq!(
+            registry.libraries["alpha"].data_dir(),
+            Path::new("/roots/alpha")
+        );
+    }
+
+    #[test]
+    fn set_default_rejects_an_unknown_library() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("seed");
+        let err = set_default_library(&path, "ghost").expect_err("unknown library");
+        match err {
+            ConfigError::UnknownLibrary { name, available } => {
+                assert_eq!(name, "ghost");
+                assert_eq!(available, vec!["alpha".to_string()]);
+            }
+            other => panic!("expected UnknownLibrary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_write_leaves_a_complete_reparsable_file() {
+        // The atomic writer must never leave a truncated file: after a
+        // write the registry reparses cleanly and reflects the change.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("seed");
+        set_default_library(&path, "alpha").expect("set default");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let registry = parse_registry(&text).expect("file reparses after write");
+        assert_eq!(registry.default.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn a_write_preserves_unknown_top_level_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "future_knob = \"keep me\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n",
+        )
+        .expect("seed");
+        set_default_library(&path, "alpha").expect("set default");
+        let doc = std::fs::read_to_string(&path)
+            .expect("read")
+            .parse::<toml::Table>()
+            .expect("parses");
+        assert_eq!(
+            doc.get("future_knob").and_then(toml::Value::as_str),
+            Some("keep me"),
+            "an unknown top-level key must survive a write"
+        );
+    }
+
+    #[test]
+    fn remove_library_forgets_the_entry_and_drops_a_dangling_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n\
+             beta = \"/roots/beta\"\n",
+        )
+        .expect("seed");
+        remove_library_from_registry(&path, "alpha").expect("remove");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        assert!(!registry.libraries.contains_key("alpha"));
+        assert!(registry.libraries.contains_key("beta"));
+        // `default` pointed at the removed library, so it is dropped
+        // rather than left dangling.
+        assert_eq!(registry.default, None);
+    }
+
+    #[test]
+    fn remove_library_rejects_an_unknown_library() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("seed");
+        let err = remove_library_from_registry(&path, "ghost").expect_err("unknown library");
+        assert!(
+            matches!(err, ConfigError::UnknownLibrary { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn upsert_library_entry_writes_every_set_metadata_field() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        let entry = LibraryEntryFields {
+            data_dir: PathBuf::from("/roots/prod"),
+            kind: LibraryKind::Test,
+            description: Some("primary".to_string()),
+            index_profile: Some("qwen3-0.6b-default".to_string()),
+            created_at: Some("2026-06-30T12:00:00Z".to_string()),
+            uuid: Some("01890a5d-0000-7000-8000-000000000000".to_string()),
+        };
+        upsert_library_entry(&path, "prod", &entry).expect("upsert");
+        let registry = parse_registry(&std::fs::read_to_string(&path).expect("read"))
+            .expect("registry parses");
+        // First entry becomes the default when none was recorded.
+        assert_eq!(registry.default.as_deref(), Some("prod"));
+        let raw = &registry.libraries["prod"];
+        assert_eq!(raw.data_dir(), Path::new("/roots/prod"));
+        assert_eq!(raw.kind(), LibraryKind::Test);
+        assert_eq!(raw.description(), Some("primary"));
+        assert_eq!(raw.index_profile(), Some("qwen3-0.6b-default"));
+        assert_eq!(raw.created_at(), Some("2026-06-30T12:00:00Z"));
+        assert_eq!(raw.uuid(), Some("01890a5d-0000-7000-8000-000000000000"));
     }
 
     #[test]

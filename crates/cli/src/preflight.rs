@@ -25,9 +25,10 @@
 //!     is the side the lock lacks
 //!
 //! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
-//! `distill`, `runs`) bypass this check entirely — for them the flag
-//! is a real switch into a different data root, not an assertion
-//! about the running daemon.
+//! `distill`, `runs`, `libraries default`) bypass this check entirely
+//! — for them the flag is a real switch into a different data root, or
+//! an offline registry write, not an assertion about the running
+//! daemon.
 
 use std::path::{Path, PathBuf};
 

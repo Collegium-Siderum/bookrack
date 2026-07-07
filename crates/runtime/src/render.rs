@@ -293,13 +293,14 @@ pub fn libraries_list(entries: Option<&[LibraryEntry]>) {
         println!("Registry has no library entries.");
         return;
     }
-    println!("{:<20}  {:<10}  data_dir", "name", "default");
+    println!("{:<20}  {:<10}  {:<8}  data_dir", "name", "default", "kind");
     for entry in entries {
         let default_mark = if entry.is_default { "yes" } else { "" };
         println!(
-            "{:<20}  {:<10}  {}",
+            "{:<20}  {:<10}  {:<8}  {}",
             entry.name,
             default_mark,
+            entry.kind.as_str(),
             entry.data_dir.display(),
         );
     }
@@ -320,6 +321,8 @@ pub fn libraries_list_json(entries: Option<&[LibraryEntry]>) {
         write_string_field(&mut out, "name", &entry.name);
         out.push(',');
         write_string_field(&mut out, "data_dir", &entry.data_dir.display().to_string());
+        out.push(',');
+        write_string_field(&mut out, "kind", entry.kind.as_str());
         out.push(',');
         out.push_str(&format!("\"is_default\":{}", entry.is_default));
         out.push('}');

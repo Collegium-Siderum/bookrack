@@ -108,6 +108,14 @@ pub enum BookrackCliError {
          argument entirely for tools that take no arguments. invalid JSON: {detail}"
     )]
     ExecParamsInvalid { method: String, detail: String },
+
+    /// A locally-resolved command (one that acts on the registry or a
+    /// data root without a daemon, e.g. `libraries default <name>`
+    /// naming a library the registry does not define) rejected the
+    /// operator's input. Shares the exit-2 user-error bucket; carries
+    /// the underlying message verbatim so the reason is self-contained.
+    #[error("{message}")]
+    LocalUserError { message: String },
 }
 
 impl BookrackCliError {
@@ -125,6 +133,7 @@ impl BookrackCliError {
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
             Self::ExecParamsInvalid { .. } => 2,
+            Self::LocalUserError { .. } => 2,
         }
     }
 

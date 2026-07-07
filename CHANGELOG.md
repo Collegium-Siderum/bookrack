@@ -10,6 +10,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli, runtime: the library registry carries per-library
+  metadata and `libraries default` persists.** Registry entries may
+  now be metadata-bearing tables (`[libraries.<name>]` with `data_dir`,
+  `kind`, `description`, `index_profile`, `created_at`, `uuid`)
+  alongside the legacy bare-path form, which stays permanently
+  readable and is treated as `{ data_dir = "<path>", kind = "prod" }`.
+  Any write rewrites the file into the table form atomically
+  (same-directory temp file plus rename) and prints
+  `info: registry upgraded to entry-table format` on stderr the first
+  time it upgrades a legacy file. `bookrack libraries default <name>`
+  now resolves locally and writes the on-disk `default` pointer
+  directly, so it needs no running daemon and the choice survives a
+  restart; naming a library the registry does not define exits 2. The
+  `library.set_default` RPC remains but is documented as affecting only
+  the running daemon session. `libraries list` gains a `kind` column
+  (and `kind` field under `--json`).
+
 - **corpus, catalog, ops, cli: every single-store search invocation is
   recorded against the corpus state that served it.** A new
   `Corpus::compose_corpus_fingerprint` hashes the five corpus stamps

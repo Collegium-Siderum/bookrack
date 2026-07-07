@@ -43,8 +43,10 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             render_library_info(&response);
             Ok(())
         }
-        LibrariesAction::Default { name } => {
-            helpers::call_and_print(&client, "library.set_default", json!({ "name": name })).await
+        LibrariesAction::Default { .. } => {
+            // `libraries default` writes the registry offline; `main`
+            // dispatches it before reaching this daemon-routed path.
+            unreachable!("libraries default is handled offline in main")
         }
         LibrariesAction::Fork {
             new_name,
