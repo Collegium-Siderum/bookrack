@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, ops, runtime: a path-resolved root is identified against the
+  registry.** When the data root is won by a path — the `--data-dir`
+  flag, `BOOKRACK_DATA_DIR`, or the portable layout — `config` now
+  matches it back against the registry, by the root's manifest uuid
+  first and then by path, and claims the registered library name instead
+  of leaving the root anonymous. `bookrack info` reports how the name was
+  identified (`manifest uuid` or `path`), and `bookrack doctor` appends
+  the same fact to its `data root` row; a registry selection reports
+  nothing extra, since the source already conveys it. The `LibraryInfo`
+  DTO gains an optional `library_identification` field, and `config`
+  exposes the `LibraryIdentification` enum and a `find_library_by_uuid`
+  helper. The precedence itself is unchanged; a path-class daemon that
+  previously reported the placeholder name `default` now reports the
+  registered name.
+
 - **config, cli, runtime: a shadowed registry default is now visible.**
   When a path-class source wins the data root — the `--data-dir` flag,
   `BOOKRACK_DATA_DIR`, or the portable exe-neighbour layout — a registry

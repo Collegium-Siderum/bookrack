@@ -22,8 +22,8 @@
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
-    LibrarySelection, ResolutionSource, ShadowedDefault, default_registry_path, locate_pdfium,
-    pdfium_library_filename,
+    LibraryIdentification, LibrarySelection, ResolutionSource, ShadowedDefault,
+    default_registry_path, locate_pdfium, pdfium_library_filename,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use eyre::{Context, Result};
@@ -475,7 +475,12 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
         Ok(cfg) => {
             let value = cfg.data_dir().display().to_string();
             let source = resolution_source_label(cfg.source());
-            let status = data_root_status(source, cfg.shadowed_default());
+            let identified = cfg
+                .library_identification()
+                .and_then(library_identification_label)
+                .zip(cfg.library())
+                .map(|(label, name)| format!("identified as '{name}' by {label}"));
+            let status = data_root_status(source, cfg.shadowed_default(), identified.as_deref());
             rows.push(Row {
                 label: "data root".to_string(),
                 value,
@@ -510,24 +515,26 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
     }
 }
 
-/// Build the `data root` row's status. A clean resolution is `Ok` with a
-/// "resolved via <source>" note; a path-class root that eclipses a
-/// registry default is a `Warn` naming the shadowed default and how to
-/// serve it. Pure over its inputs so the decision can be tested without
-/// mutating the process environment.
-fn data_root_status(source: &str, shadowed: Option<&ShadowedDefault>) -> Status {
+fn data_root_status(
+    source: &str,
+    shadowed: Option<&ShadowedDefault>,
+    identified: Option<&str>,
+) -> Status {
+    let suffix = identified
+        .map(|note| format!("; {note}"))
+        .unwrap_or_default();
     match shadowed {
         Some(shadowed) => Status::Warn {
             note: format!(
                 "registry default '{}' ({}) is shadowed by {source}; unset it or \
-                 pass --library {} to serve the registered library",
+                 pass --library {} to serve the registered library{suffix}",
                 shadowed.name,
                 shadowed.data_dir.display(),
                 shadowed.name,
             ),
         },
         None => Status::Ok {
-            note: Some(format!("resolved via {source}")),
+            note: Some(format!("resolved via {source}{suffix}")),
         },
     }
 }
@@ -725,6 +732,19 @@ fn resolution_source_label(source: ResolutionSource) -> &'static str {
     }
 }
 
+/// Render a [`LibraryIdentification`] as the note appended to the data
+/// root row, or `None` when there is nothing worth surfacing.
+/// `Selected` yields `None`: a registry selection is already conveyed by
+/// the resolution source, so only a path-class root claimed after the
+/// fact carries a note.
+fn library_identification_label(id: LibraryIdentification) -> Option<&'static str> {
+    match id {
+        LibraryIdentification::Selected => None,
+        LibraryIdentification::ManifestUuid => Some("manifest uuid"),
+        LibraryIdentification::Path => Some("path"),
+    }
+}
+
 fn render_text(report: &Report) {
     // Column widths chosen so a typical row fits in 100 columns. Long
     // values still wrap to a single line; the operator sees the noun
@@ -865,7 +885,7 @@ mod tests {
 
     #[test]
     fn data_root_status_is_ok_when_nothing_is_shadowed() {
-        let status = data_root_status("--data-dir flag", None);
+        let status = data_root_status("--data-dir flag", None, None);
         match status {
             Status::Ok { note } => {
                 assert_eq!(note.as_deref(), Some("resolved via --data-dir flag"));
@@ -875,12 +895,74 @@ mod tests {
     }
 
     #[test]
+    fn data_root_status_appends_the_identification_note() {
+        let status = data_root_status(
+            "BOOKRACK_DATA_DIR env",
+            None,
+            Some("identified as 'hammer' by manifest uuid"),
+        );
+        match status {
+            Status::Ok { note } => {
+                assert_eq!(
+                    note.as_deref(),
+                    Some(
+                        "resolved via BOOKRACK_DATA_DIR env; identified as 'hammer' by manifest uuid"
+                    )
+                );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_root_status_carries_identification_alongside_a_shadow() {
+        let shadowed = ShadowedDefault {
+            name: "eval-data".to_string(),
+            data_dir: std::path::PathBuf::from("/roots/eval-data"),
+        };
+        let status = data_root_status(
+            "BOOKRACK_DATA_DIR env",
+            Some(&shadowed),
+            Some("identified as 'hammer' by path"),
+        );
+        match status {
+            Status::Warn { note } => {
+                assert!(
+                    note.contains("registry default 'eval-data'"),
+                    "missing shadow: {note}"
+                );
+                assert!(
+                    note.ends_with("identified as 'hammer' by path"),
+                    "missing identification: {note}"
+                );
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn library_identification_label_hides_a_registry_selection() {
+        assert_eq!(
+            library_identification_label(LibraryIdentification::Selected),
+            None
+        );
+        assert_eq!(
+            library_identification_label(LibraryIdentification::ManifestUuid),
+            Some("manifest uuid")
+        );
+        assert_eq!(
+            library_identification_label(LibraryIdentification::Path),
+            Some("path")
+        );
+    }
+
+    #[test]
     fn data_root_status_warns_when_a_registry_default_is_shadowed() {
         let shadowed = ShadowedDefault {
             name: "eval-data".to_string(),
             data_dir: std::path::PathBuf::from("/roots/eval-data"),
         };
-        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed));
+        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed), None);
         match status {
             Status::Warn { note } => {
                 assert!(

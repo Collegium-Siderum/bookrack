@@ -26,7 +26,8 @@ use chrono::{DateTime, Utc};
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, EmbedConfig, LibrarySelection, LogConfig, McpConfig, ResolutionSource, SearchConfig,
+    Config, EmbedConfig, LibraryIdentification, LibrarySelection, LogConfig, McpConfig,
+    ResolutionSource, SearchConfig,
 };
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
@@ -405,6 +406,10 @@ impl DaemonRuntime {
                     resolution_source_label(cfg.source())
                 )
             }),
+            library_identification: cfg
+                .library_identification()
+                .and_then(library_identification_label)
+                .map(str::to_string),
             ollama_url: cfg.ollama_url().to_string(),
             embed_model_configured: embed_cfg.model.clone(),
             mcp_addr: mcp_label.clone(),
@@ -821,6 +826,19 @@ pub fn resolution_source_label(source: ResolutionSource) -> &'static str {
         ResolutionSource::RegistryDefault => "registry default",
         ResolutionSource::DefaultRegistryDefault => "default registry default",
         ResolutionSource::Explicit => "explicit",
+    }
+}
+
+/// Render a [`LibraryIdentification`] as the note woven beside the
+/// resolution source in `library.info`, or `None` when there is nothing
+/// worth surfacing. `Selected` yields `None`: a registry selection is
+/// already conveyed by the library name and resolution source, so only a
+/// path-class root claimed after the fact carries a note.
+pub fn library_identification_label(id: LibraryIdentification) -> Option<&'static str> {
+    match id {
+        LibraryIdentification::Selected => None,
+        LibraryIdentification::ManifestUuid => Some("manifest uuid"),
+        LibraryIdentification::Path => Some("path"),
     }
 }
 

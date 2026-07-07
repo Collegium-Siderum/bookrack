@@ -26,6 +26,12 @@ pub struct LibraryInfo {
     /// default is eclipsed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shadowed_default: Option<String>,
+    /// How the open library's name was identified against the registry
+    /// when a path-class root was resolved, pre-rendered as a note (e.g.
+    /// `manifest uuid`). Absent when the root is anonymous or the name
+    /// came straight from a registry selection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_identification: Option<String>,
     /// Ollama HTTP endpoint the daemon will reach for embeddings.
     pub ollama_url: String,
     /// Model tag the daemon is configured to embed with.

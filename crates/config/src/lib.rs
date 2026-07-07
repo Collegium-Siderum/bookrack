@@ -64,6 +64,7 @@ pub struct Config {
     source: ResolutionSource,
     root_config: RootConfig,
     shadowed_default: Option<ShadowedDefault>,
+    library_identification: Option<LibraryIdentification>,
 }
 
 /// A registry `default` library that a path-class resolution silently
@@ -109,6 +110,32 @@ pub enum ResolutionSource {
     DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
+}
+
+/// How a resolved [`Config`]'s library name was determined — a second
+/// axis orthogonal to [`ResolutionSource`], which records how the *root*
+/// was chosen rather than who the root is.
+///
+/// A registry-class source (`--library` or a registry `default`) carries
+/// its name straight from the selection, reported as
+/// [`LibraryIdentification::Selected`]. A path-class root — the
+/// `--data-dir` flag, [`DATA_DIR_ENV`], or the portable layout — is
+/// anonymous at selection time; [`Config::resolve`] matches it back
+/// against the registry, claiming a name by manifest uuid
+/// ([`LibraryIdentification::ManifestUuid`]) or, failing that, by path
+/// ([`LibraryIdentification::Path`]). A root that matches no entry stays
+/// anonymous and has no identification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryIdentification {
+    /// The name came directly from the registry selection: `--library`
+    /// or a registry `default` entry.
+    Selected,
+    /// A path-class root was claimed by matching its manifest uuid to a
+    /// registry entry.
+    ManifestUuid,
+    /// A path-class root was claimed by matching its path to a registry
+    /// entry — the root has no manifest, or its uuid matched no entry.
+    Path,
 }
 
 /// How the data root to operate on was selected on the command line.
@@ -200,18 +227,6 @@ impl Config {
         Config::resolve(&LibrarySelection::default())
     }
 
-    /// Resolve configuration for the selected library, loading a `.env`
-    /// file first if one is present.
-    ///
-    /// The data root is chosen by precedence: `--data-dir`, then
-    /// `--library` (looked up in the registry), then [`DATA_DIR_ENV`],
-    /// then a `bookrack-data` directory beside the running binary, then
-    /// the registry's default library, then the platform-default
-    /// registry's default. Fails if no source yields a root, the chosen
-    /// root is not an existing directory, or a `--library` name is not
-    /// registered. The Ollama endpoint falls back to
-    /// [`DEFAULT_OLLAMA_URL`] when neither the env var nor the data
-    /// root's `config.toml` sets it.
     pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
         // A missing .env is fine: the variables may be set directly.
         dotenvy::dotenv().ok();
@@ -235,14 +250,22 @@ impl Config {
             registry.as_ref(),
             default_registry.as_ref(),
         );
+        // A path-class root arrives anonymous; claim its registry name by
+        // manifest uuid, then by path. Orthogonal to the shadow above and
+        // never fails — an unmatched or unreadable root stays anonymous.
+        let (identified, identification) = identify_library(
+            config.source,
+            &config.data_dir,
+            registry.as_ref(),
+            default_registry.as_ref(),
+        );
+        if identified.is_some() {
+            config.library = identified;
+        }
+        config.library_identification = identification;
         Ok(config)
     }
 
-    /// Construct from an explicit data root, for callers that resolve
-    /// the root themselves (e.g. a CLI flag). Performs no filesystem
-    /// check — the caller vouches for the path. The resulting [`Config`]
-    /// has no library name and its source is reported as
-    /// [`ResolutionSource::Explicit`].
     pub fn new(data_dir: PathBuf, ollama_url: String) -> Config {
         Config {
             data_dir,
@@ -251,6 +274,7 @@ impl Config {
             source: ResolutionSource::Explicit,
             root_config: RootConfig::default(),
             shadowed_default: None,
+            library_identification: None,
         }
     }
 
@@ -294,6 +318,17 @@ impl Config {
     /// visible instead of inferred.
     pub fn shadowed_default(&self) -> Option<&ShadowedDefault> {
         self.shadowed_default.as_ref()
+    }
+
+    /// How the resolved library name was determined — `Selected` for a
+    /// registry selection, `ManifestUuid` or `Path` when a path-class
+    /// root was claimed against the registry after selection. `Some`
+    /// exactly when [`Config::library`] is, and `None` for an anonymous
+    /// path-class root or [`Config::new`]. The second axis alongside
+    /// [`Config::source`]: source says how the root was chosen,
+    /// identification says who the root turned out to be.
+    pub fn library_identification(&self) -> Option<LibraryIdentification> {
+        self.library_identification
     }
 
     /// Directory of user-provided original book files awaiting intake.
@@ -1004,6 +1039,86 @@ fn registry_default_root(registry: &Registry) -> Option<(String, PathBuf)> {
     Some((name, data_dir))
 }
 
+/// Determine the resolved root's library name and how it was identified,
+/// run after [`select_root`] and [`finish`]. Pure over its inputs and,
+/// like [`detect_shadowed_default`], a bypass enrichment that never fails
+/// and never changes which root won.
+///
+/// A registry-class source (`--library`, either registry `default`) has
+/// its name already in hand from selection, so this reports
+/// [`LibraryIdentification::Selected`] without re-deriving it (the name
+/// component is `None`, leaving the selected name untouched). A
+/// path-class source is anonymous, so the effective root's manifest is
+/// matched back against the registry: an `Ok(Some(_))` manifest is tried
+/// by uuid first ([`LibraryIdentification::ManifestUuid`]); an absent
+/// manifest, or a uuid that matches no entry, falls back to a path match
+/// ([`LibraryIdentification::Path`]). A manifest that fails to read
+/// yields no claim at all — the root stays anonymous rather than being
+/// claimed on shaky identity. The registry is consulted before the
+/// platform-default registry, matching [`select_root`]'s precedence.
+fn identify_library(
+    source: ResolutionSource,
+    resolved_dir: &Path,
+    registry: Option<&Registry>,
+    default_registry: Option<&Registry>,
+) -> (Option<String>, Option<LibraryIdentification>) {
+    match source {
+        ResolutionSource::LibraryFlag
+        | ResolutionSource::RegistryDefault
+        | ResolutionSource::DefaultRegistryDefault => {
+            return (None, Some(LibraryIdentification::Selected));
+        }
+        ResolutionSource::Explicit => return (None, None),
+        ResolutionSource::DataDirFlag
+        | ResolutionSource::EnvVar
+        | ResolutionSource::PortableExeNeighbor => {}
+    }
+    let registries: Vec<&Registry> = [registry, default_registry].into_iter().flatten().collect();
+    match load_manifest(resolved_dir) {
+        Ok(Some(manifest)) => {
+            for reg in &registries {
+                if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
+                    return (Some(entry.name), Some(LibraryIdentification::ManifestUuid));
+                }
+            }
+            claim_root_by_path(&registries, resolved_dir)
+        }
+        Ok(None) => claim_root_by_path(&registries, resolved_dir),
+        Err(_) => (None, None),
+    }
+}
+
+/// Claim a registry name for `resolved_dir` by matching an entry's data
+/// root to it, registry before platform-default registry. Both sides are
+/// canonicalized best-effort before comparison — a failure to
+/// canonicalize (a nonexistent or unreadable path) falls back to a raw
+/// comparison — so a mount alias or symlink still matches.
+fn claim_root_by_path(
+    registries: &[&Registry],
+    resolved_dir: &Path,
+) -> (Option<String>, Option<LibraryIdentification>) {
+    for reg in registries {
+        if let Some(entry) = library_entries(reg)
+            .into_iter()
+            .find(|entry| same_root(&entry.data_dir, resolved_dir))
+        {
+            return (Some(entry.name), Some(LibraryIdentification::Path));
+        }
+    }
+    (None, None)
+}
+
+/// Whether two paths name the same root, comparing canonicalized forms
+/// and falling back to a raw comparison when canonicalization fails.
+fn same_root(a: &Path, b: &Path) -> bool {
+    let ca = a.canonicalize();
+    let cb = b.canonicalize();
+    match (ca, cb) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
 /// Validate the chosen root and build a [`Config`]. The root must be an
 /// existing directory. The Ollama endpoint is resolved by precedence
 /// `env var > <data_root>/config.toml > hardcoded default`, so a
@@ -1029,6 +1144,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         source,
         root_config,
         shadowed_default: None,
+        library_identification: None,
     })
 }
 
@@ -1327,9 +1443,8 @@ where
             wrote_manifest = true;
             (Some(fresh.uuid), fresh.created_at)
         } else {
-            if let Some(clash) = entries
-                .iter()
-                .find(|e| e.uuid.as_deref() == Some(manifest.uuid.as_str()) && e.name != key)
+            if let Some(clash) =
+                find_library_by_uuid(&registry, &manifest.uuid).filter(|e| e.name != key)
             {
                 return Ok(AddOutcome::UuidClash {
                     uuid: manifest.uuid.clone(),
@@ -1513,6 +1628,17 @@ pub fn find_library(path: &Path, name: &str) -> Result<Option<LibraryEntry>, Con
     Ok(library_entries(&registry)
         .into_iter()
         .find(|entry| entry.name == name))
+}
+
+/// Look up one registry entry by manifest uuid, returning `None` when no
+/// entry carries a matching uuid. The uuid-keyed counterpart to
+/// [`find_library`]: [`add_library`] uses it to detect a uuid already
+/// registered under another name, and [`Config::resolve`] to claim a
+/// path-class root's registry name.
+pub fn find_library_by_uuid(registry: &Registry, uuid: &str) -> Option<LibraryEntry> {
+    library_entries(registry)
+        .into_iter()
+        .find(|entry| entry.uuid.as_deref() == Some(uuid))
 }
 
 /// Load the registry at `path` as a strongly typed [`Registry`]. A
@@ -2167,6 +2293,143 @@ mod tests {
         .expect("the platform default is eclipsed");
         assert_eq!(shadow.name, "platform");
         assert_eq!(shadow.data_dir, PathBuf::from("/roots/platform"));
+    }
+
+    #[test]
+    fn identify_claims_a_path_class_root_by_manifest_uuid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
+        write_manifest(root, &manifest).expect("write manifest");
+        // The registry entry points elsewhere but shares the uuid: the
+        // uuid match claims it regardless of the recorded path.
+        let registry = parse_registry(&format!(
+            "[libraries.hammer]\ndata_dir = \"/roots/elsewhere\"\nuuid = \"{}\"\n",
+            manifest.uuid
+        ))
+        .expect("registry parses");
+        let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
+        assert_eq!(name.as_deref(), Some("hammer"));
+        assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
+    }
+
+    #[test]
+    fn identify_falls_back_to_a_path_match_when_no_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let registry = parse_registry(&format!(
+            "[libraries.hammer]\ndata_dir = \"{}\"\n",
+            root.display()
+        ))
+        .expect("registry parses");
+        let (name, id) =
+            identify_library(ResolutionSource::DataDirFlag, root, Some(&registry), None);
+        assert_eq!(name.as_deref(), Some("hammer"));
+        assert_eq!(id, Some(LibraryIdentification::Path));
+    }
+
+    #[test]
+    fn identify_yields_nothing_when_neither_uuid_nor_path_matches() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let registry = parse_registry(
+            "[libraries.other]\ndata_dir = \"/roots/other\"\nuuid = \"unrelated-uuid\"\n",
+        )
+        .expect("registry parses");
+        let (name, id) = identify_library(
+            ResolutionSource::PortableExeNeighbor,
+            root,
+            Some(&registry),
+            None,
+        );
+        assert_eq!(name, None);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn identify_makes_no_claim_when_the_manifest_is_unreadable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // A file whose magic does not match makes load_manifest return
+        // Err; even a path entry pointing at this root does not rescue it.
+        std::fs::write(root.join(MANIFEST_FILENAME), "format = \"not-bookrack\"\n")
+            .expect("write foreign manifest");
+        let registry = parse_registry(&format!(
+            "[libraries.hammer]\ndata_dir = \"{}\"\n",
+            root.display()
+        ))
+        .expect("registry parses");
+        let (name, id) = identify_library(ResolutionSource::EnvVar, root, Some(&registry), None);
+        assert_eq!(name, None);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn identify_reports_selected_for_a_registry_source_without_reading_disk() {
+        // A registry-class source keeps its selected name; passing a
+        // nonexistent root and no registries proves no manifest is read.
+        let (name, id) = identify_library(
+            ResolutionSource::LibraryFlag,
+            Path::new("/does/not/exist"),
+            None,
+            None,
+        );
+        assert_eq!(name, None);
+        assert_eq!(id, Some(LibraryIdentification::Selected));
+    }
+
+    #[test]
+    fn identify_reports_nothing_for_an_explicit_config() {
+        let (name, id) = identify_library(
+            ResolutionSource::Explicit,
+            Path::new("/anywhere"),
+            None,
+            None,
+        );
+        assert_eq!(name, None);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn identify_prefers_the_registry_over_the_platform_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let manifest = new_manifest("birth-name", LibraryKind::Prod, None);
+        write_manifest(root, &manifest).expect("write manifest");
+        // Both registries carry the uuid under different names; the
+        // primary registry wins, in step with select_root's precedence.
+        let registry = parse_registry(&format!(
+            "[libraries.primary]\ndata_dir = \"/roots/primary\"\nuuid = \"{}\"\n",
+            manifest.uuid
+        ))
+        .expect("registry parses");
+        let default_registry = parse_registry(&format!(
+            "[libraries.platform]\ndata_dir = \"/roots/platform\"\nuuid = \"{}\"\n",
+            manifest.uuid
+        ))
+        .expect("platform-default registry parses");
+        let (name, id) = identify_library(
+            ResolutionSource::EnvVar,
+            root,
+            Some(&registry),
+            Some(&default_registry),
+        );
+        assert_eq!(name.as_deref(), Some("primary"));
+        assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
+    }
+
+    #[test]
+    fn find_library_by_uuid_matches_the_entry_carrying_the_uuid() {
+        let registry = parse_registry(
+            "[libraries.a]\ndata_dir = \"/roots/a\"\nuuid = \"uuid-a\"\n\
+             [libraries.b]\ndata_dir = \"/roots/b\"\nuuid = \"uuid-b\"\n",
+        )
+        .expect("registry parses");
+        assert_eq!(
+            find_library_by_uuid(&registry, "uuid-b").map(|e| e.name),
+            Some("b".to_string())
+        );
+        assert_eq!(find_library_by_uuid(&registry, "uuid-z"), None);
     }
 
     #[test]
