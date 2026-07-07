@@ -243,30 +243,40 @@ fn merge_overlay(data: &mut AuditData, raw: &str, path: &Path) -> Result<(), Dat
     Ok(())
 }
 
+/// Drop entries that are empty or whitespace-only. A blank token in a
+/// substring list matches every value, so filtering it here keeps a
+/// stray overlay entry from collapsing an entire field to a match.
+fn non_empty_tokens(tokens: Vec<String>) -> Vec<String> {
+    tokens
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
 fn apply_overlay(data: &mut AuditData, file: DataFile) {
     if let Some(s) = file.publishers
         && let Some(v) = s.whitelist
     {
-        data.publisher_whitelist = v;
+        data.publisher_whitelist = non_empty_tokens(v);
     }
     if let Some(s) = file.watermarks {
         if let Some(v) = s.url_substrings {
-            data.watermark_url_substrings = v;
+            data.watermark_url_substrings = non_empty_tokens(v);
         }
         if let Some(v) = s.email_substrings {
-            data.watermark_email_substrings = v;
+            data.watermark_email_substrings = non_empty_tokens(v);
         }
         if let Some(v) = s.contact_tokens {
-            data.contact_tokens = v;
+            data.contact_tokens = non_empty_tokens(v);
         }
         if let Some(v) = s.promo_tokens {
-            data.promo_tokens = v;
+            data.promo_tokens = non_empty_tokens(v);
         }
         if let Some(v) = s.ascii_distribution_tokens {
-            data.ascii_distribution_tokens = v;
+            data.ascii_distribution_tokens = non_empty_tokens(v);
         }
         if let Some(v) = s.cjk_tokens {
-            data.watermark_cjk_tokens = v;
+            data.watermark_cjk_tokens = non_empty_tokens(v);
         }
     }
     if let Some(v) = file.abbreviations {
@@ -387,6 +397,22 @@ mod tests {
         assert!(loaded.watermark_url_substrings.is_empty());
         // Other watermark fields keep the shipped default.
         assert!(loaded.watermark_email_substrings.iter().any(|s| s == "@"));
+    }
+
+    #[test]
+    fn overlay_drops_blank_token_entries() {
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            DATA_OVERLAY_FILE,
+            "schema_version = 1\n\
+             [watermarks]\n\
+             contact_tokens = [\"qq:\", \"\", \"   \"]\n",
+        );
+        let loaded = AuditData::load_from(dir.path()).unwrap();
+        // The blank and whitespace-only entries are filtered so a stray
+        // overlay token cannot match every value via `contains("")`.
+        assert_eq!(loaded.contact_tokens, vec!["qq:"]);
     }
 
     #[test]

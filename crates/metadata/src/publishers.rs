@@ -151,28 +151,28 @@ fn classify_watermark(value: &str, data: &AuditData, url_watermark: bool) -> Opt
     let lower: String = value.to_lowercase();
     if url_watermark {
         for needle in &data.watermark_url_substrings {
-            if lower.contains(&needle.to_lowercase()) {
+            if !needle.is_empty() && lower.contains(&needle.to_lowercase()) {
                 return Some(WatermarkKind::UrlSubstring);
             }
         }
         for needle in &data.watermark_email_substrings {
-            if lower.contains(&needle.to_lowercase()) {
+            if !needle.is_empty() && lower.contains(&needle.to_lowercase()) {
                 return Some(WatermarkKind::EmailSubstring);
             }
         }
     }
     for token in &data.contact_tokens {
-        if lower.contains(&token.to_lowercase()) {
+        if !token.is_empty() && lower.contains(&token.to_lowercase()) {
             return Some(WatermarkKind::ContactToken);
         }
     }
     for token in &data.promo_tokens {
-        if lower.contains(&token.to_lowercase()) {
+        if !token.is_empty() && lower.contains(&token.to_lowercase()) {
             return Some(WatermarkKind::PromoToken);
         }
     }
     for token in &data.ascii_distribution_tokens {
-        if lower.contains(&token.to_lowercase()) {
+        if !token.is_empty() && lower.contains(&token.to_lowercase()) {
             return Some(WatermarkKind::AsciiDistribution);
         }
     }
@@ -181,7 +181,7 @@ fn classify_watermark(value: &str, data: &AuditData, url_watermark: bool) -> Opt
     // the substring check to run against the same bytes the user
     // configured.
     for token in &data.watermark_cjk_tokens {
-        if value.contains(token.as_str()) {
+        if !token.is_empty() && value.contains(token.as_str()) {
             return Some(WatermarkKind::CjkToken);
         }
     }
@@ -454,6 +454,30 @@ mod tests {
             evaluate(&input, &data, true, true),
             PublisherVerdict::Watermark {
                 kind: WatermarkKind::CjkToken
+            }
+        );
+    }
+
+    #[test]
+    fn blank_token_does_not_flag_every_value() {
+        // A stray empty entry in any substring list would make
+        // `contains("")` fire for every value; the guard keeps a normal
+        // publisher neutral while a real token in the same list still hits.
+        let data = AuditData {
+            contact_tokens: vec![String::new(), "qq:".to_string()],
+            promo_tokens: vec![String::new()],
+            ascii_distribution_tokens: vec![String::new()],
+            watermark_cjk_tokens: vec![String::new()],
+            ..AuditData::empty()
+        };
+        assert_eq!(
+            evaluate("Oxford University Press", &data, true, true),
+            PublisherVerdict::Neutral
+        );
+        assert_eq!(
+            evaluate("scanned by anon, qq: 1234", &data, true, true),
+            PublisherVerdict::Watermark {
+                kind: WatermarkKind::ContactToken
             }
         );
     }

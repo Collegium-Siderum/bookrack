@@ -216,6 +216,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **metadata: a blank watermark token no longer flags every publisher.**
+  The audit-data overlay merged operator token lists verbatim, so a
+  stray empty or whitespace-only entry in any watermark list made
+  `classify_watermark` match every value through `contains("")`,
+  silently grading the whole corpus as watermarked. The overlay loader
+  now drops empty and whitespace-only entries from every token list, and
+  `classify_watermark` guards each substring check against an empty
+  token.
+
 - **extract: a bare number in the body flow is no longer dropped as a
   page number.** The PDF block assembler treated every short all-digit
   paragraph as a page number and discarded it, so a year or list value
