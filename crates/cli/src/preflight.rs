@@ -25,7 +25,8 @@
 //!     is the side the lock lacks
 //!
 //! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
-//! `distill`, `runs`, `libraries default`/`detect`/`scan`) bypass this
+//! `distill`, `runs`, and the offline `libraries` verbs —
+//! `default`/`detect`/`scan`/`add`/`register`/`remove`) bypass this
 //! check entirely — for them the flag is a real switch into a different
 //! data root, or an offline registry read/write, not an assertion about
 //! the running daemon.

@@ -441,7 +441,104 @@ pub(crate) enum LibrariesAction {
         /// Scan mounted volumes instead of a parent directory.
         #[arg(long)]
         volumes: bool,
+        /// Register every confirmed data root found. Probable roots are
+        /// listed but skipped — bring those in with an explicit `add`.
+        #[arg(long)]
+        register: bool,
+        /// Kind recorded for roots registered with `--register`,
+        /// overriding what each manifest declares.
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
     },
+    /// Register an existing data root under an explicit name.
+    ///
+    /// Resolves locally with no daemon. Writes an identity manifest to
+    /// the root when it has none (previewed and confirmed first, unless
+    /// `--yes`), then records the registry entry.
+    Add {
+        /// Registry name to record the root under. Wins over the
+        /// manifest's birth name; a mismatch is a legal alias.
+        name: String,
+        /// Data root to register.
+        path: std::path::PathBuf,
+        /// Library kind for the entry, overriding the manifest's.
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
+        /// Free-form description for the entry.
+        #[arg(long)]
+        description: Option<String>,
+        /// Re-mint the root's identity uuid before registering, so a
+        /// copied data root registers as a distinct library.
+        #[arg(long)]
+        new_uuid: bool,
+        /// Skip the manifest-write confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Register an existing data root; the name is taken from its
+    /// manifest (or directory name when it has no manifest).
+    ///
+    /// Resolves locally with no daemon. Give `--name` to register under
+    /// an alias when the derived name is already taken.
+    Register {
+        /// Data root to register.
+        path: std::path::PathBuf,
+        /// Alias to register under, when the derived name collides.
+        #[arg(long)]
+        name: Option<String>,
+        /// Library kind for the entry, overriding the manifest's.
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
+        /// Free-form description for the entry.
+        #[arg(long)]
+        description: Option<String>,
+        /// Re-mint the root's identity uuid before registering.
+        #[arg(long)]
+        new_uuid: bool,
+        /// Skip the manifest-write confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Drop a registry entry. The data root stays on disk unless
+    /// `--purge` is given.
+    ///
+    /// Resolves locally with no daemon. `--purge` additionally deletes
+    /// the data root, gated on a confirmed/probable detect verdict and a
+    /// typed confirmation.
+    Remove {
+        /// Registry name to forget.
+        name: String,
+        /// Also delete the data root from disk. Irreversible.
+        #[arg(long)]
+        purge: bool,
+        /// Skip the confirmation prompt (`--purge` still requires the
+        /// detect gate to pass).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// CLI mirror of [`bookrack_config::LibraryKind`], deriving clap's
+/// `ValueEnum` so `--kind` lists its choices and completes without the
+/// foundational `config` crate taking a clap dependency.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum KindArg {
+    /// A primary, long-lived library.
+    Prod,
+    /// A library used for testing or evaluation.
+    Test,
+    /// A disposable scratch library.
+    Scratch,
+}
+
+impl From<KindArg> for bookrack_config::LibraryKind {
+    fn from(kind: KindArg) -> Self {
+        match kind {
+            KindArg::Prod => bookrack_config::LibraryKind::Prod,
+            KindArg::Test => bookrack_config::LibraryKind::Test,
+            KindArg::Scratch => bookrack_config::LibraryKind::Scratch,
+        }
+    }
 }
 
 /// clap's default "did you mean" tip only sees top-level subcommand
@@ -643,6 +740,9 @@ async fn run() -> Result<()> {
                 action: LibrariesAction::Default { .. }
                     | LibrariesAction::Detect { .. }
                     | LibrariesAction::Scan { .. }
+                    | LibrariesAction::Add { .. }
+                    | LibrariesAction::Register { .. }
+                    | LibrariesAction::Remove { .. }
             }
     ) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
@@ -806,8 +906,49 @@ async fn run() -> Result<()> {
                 // `detect` / `scan` are read-only and resolve locally,
                 // never touching a daemon.
                 LibrariesAction::Detect { path } => bookrack_cli::libraries_local::detect(path),
-                LibrariesAction::Scan { parent, volumes } => {
-                    bookrack_cli::libraries_local::scan(parent, volumes)
+                LibrariesAction::Scan {
+                    parent,
+                    volumes,
+                    register,
+                    kind,
+                } => bookrack_cli::libraries_local::scan(
+                    parent,
+                    volumes,
+                    register,
+                    kind.map(Into::into),
+                ),
+                LibrariesAction::Add {
+                    name,
+                    path,
+                    kind,
+                    description,
+                    new_uuid,
+                    yes,
+                } => bookrack_cli::libraries_local::add(
+                    Some(name),
+                    path,
+                    kind.map(Into::into),
+                    description,
+                    new_uuid,
+                    yes,
+                ),
+                LibrariesAction::Register {
+                    path,
+                    name,
+                    kind,
+                    description,
+                    new_uuid,
+                    yes,
+                } => bookrack_cli::libraries_local::add(
+                    name,
+                    path,
+                    kind.map(Into::into),
+                    description,
+                    new_uuid,
+                    yes,
+                ),
+                LibrariesAction::Remove { name, purge, yes } => {
+                    bookrack_cli::libraries_local::remove(name, purge, yes)
                 }
                 other => cmd::cli_client::libraries::run(other, None).await,
             }
@@ -935,6 +1076,111 @@ mod tests {
     fn libraries_default_requires_a_name() {
         let parsed = Cli::try_parse_from(["bookrack", "libraries", "default"]);
         assert!(parsed.is_err(), "the name argument is required");
+    }
+
+    #[test]
+    fn libraries_add_parses_name_path_and_flags() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "libraries",
+            "add",
+            "prod",
+            "/roots/prod",
+            "--kind",
+            "test",
+            "--new-uuid",
+            "--yes",
+        ])
+        .expect("`libraries add` parses");
+        match cli.command {
+            Command::Libraries {
+                action:
+                    LibrariesAction::Add {
+                        name,
+                        path,
+                        kind,
+                        new_uuid,
+                        yes,
+                        ..
+                    },
+            } => {
+                assert_eq!(name, "prod");
+                assert_eq!(path, std::path::PathBuf::from("/roots/prod"));
+                assert!(matches!(kind, Some(KindArg::Test)));
+                assert!(new_uuid);
+                assert!(yes);
+            }
+            _ => panic!("expected `libraries add`"),
+        }
+    }
+
+    #[test]
+    fn libraries_add_requires_name_and_path() {
+        assert!(
+            Cli::try_parse_from(["bookrack", "libraries", "add", "prod"]).is_err(),
+            "add needs both a name and a path"
+        );
+    }
+
+    #[test]
+    fn libraries_register_takes_an_optional_alias() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "libraries",
+            "register",
+            "/roots/prod",
+            "--name",
+            "alias",
+        ])
+        .expect("`libraries register` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Register { path, name, .. },
+            } => {
+                assert_eq!(path, std::path::PathBuf::from("/roots/prod"));
+                assert_eq!(name.as_deref(), Some("alias"));
+            }
+            _ => panic!("expected `libraries register`"),
+        }
+    }
+
+    #[test]
+    fn libraries_remove_parses_purge_and_yes() {
+        let cli = Cli::try_parse_from(["bookrack", "libraries", "remove", "prod", "--purge"])
+            .expect("`libraries remove` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Remove { name, purge, yes },
+            } => {
+                assert_eq!(name, "prod");
+                assert!(purge);
+                assert!(!yes);
+            }
+            _ => panic!("expected `libraries remove`"),
+        }
+    }
+
+    #[test]
+    fn libraries_scan_accepts_register_and_kind() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "libraries",
+            "scan",
+            "/parent",
+            "--register",
+            "--kind",
+            "prod",
+        ])
+        .expect("`libraries scan --register` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Scan { register, kind, .. },
+            } => {
+                assert!(register);
+                assert!(matches!(kind, Some(KindArg::Prod)));
+            }
+            _ => panic!("expected `libraries scan`"),
+        }
     }
 
     #[test]

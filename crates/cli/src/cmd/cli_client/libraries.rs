@@ -53,6 +53,13 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             // dispatches them before reaching this daemon-routed path.
             unreachable!("libraries detect/scan are handled offline in main")
         }
+        LibrariesAction::Add { .. }
+        | LibrariesAction::Register { .. }
+        | LibrariesAction::Remove { .. } => {
+            // `add` / `register` / `remove` write the registry offline;
+            // `main` dispatches them before reaching this daemon path.
+            unreachable!("libraries add/register/remove are handled offline in main")
+        }
         LibrariesAction::Fork {
             new_name,
             data_dir,

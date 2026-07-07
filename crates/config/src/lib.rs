@@ -25,7 +25,7 @@ pub use detect::{
 };
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
-    load_manifest, new_manifest, write_manifest,
+    load_manifest, new_manifest, render_manifest_toml, write_manifest,
 };
 pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
@@ -992,34 +992,11 @@ pub fn set_default_library(path: &Path, name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Remove the library named `name` from the registry, writing the
-/// change straight to disk. When the removed library was the recorded
-/// default, the `default` pointer is dropped so it never dangles.
-/// Errors with [`ConfigError::UnknownLibrary`] when no such entry
-/// exists. Removing a registry entry never touches the library's data
-/// root — it only forgets the name.
+/// Remove the library named `name` from the registry, discarding the
+/// [`RemoveReport`]. The unit-returning form of [`remove_library`] for
+/// callers that need only the side effect.
 pub fn remove_library_from_registry(path: &Path, name: &str) -> Result<(), ConfigError> {
-    let mut doc = read_registry_table(path)?;
-    let upgraded = normalize_registry_entries(&mut doc, path)?;
-    let removed = doc
-        .get_mut("libraries")
-        .and_then(toml::Value::as_table_mut)
-        .map(|libraries| libraries.remove(name).is_some())
-        .unwrap_or(false);
-    if !removed {
-        return Err(ConfigError::UnknownLibrary {
-            name: name.to_string(),
-            available: registry_library_names(&doc),
-        });
-    }
-    if doc.get("default").and_then(toml::Value::as_str) == Some(name) {
-        doc.remove("default");
-    }
-    write_registry_table(path, &doc)?;
-    if upgraded {
-        emit_registry_upgrade_notice();
-    }
-    Ok(())
+    remove_library(path, name).map(|_| ())
 }
 
 /// Insert or replace a full registry entry, writing every metadata
@@ -1093,6 +1070,380 @@ impl LibraryEntryFields {
         }
         table
     }
+}
+
+/// Why a high-level registration operation ([`add_library`]) could not
+/// proceed. Kept distinct from [`ConfigError`] so the CLI maps an
+/// operator-input fault (a bad target, an unreadable identity) to its
+/// user-error exit code while a genuine registry or manifest I/O failure
+/// keeps the internal-error one.
+#[derive(Debug, thiserror::Error)]
+pub enum LibraryOpError {
+    /// The target path does not exist or is not a directory.
+    #[error("{0}")]
+    BadTarget(String),
+    /// The target directory carries an identity manifest that cannot be
+    /// read (foreign magic or a future schema version). Registration
+    /// refuses to guess; the operator repairs the manifest or re-mints
+    /// it with `--new-uuid`.
+    #[error("{path} has an unreadable identity manifest: {reason}", path = .path.display())]
+    UnreadableTarget {
+        /// The target data root.
+        path: PathBuf,
+        /// The manifest read failure, formatted.
+        reason: String,
+    },
+    /// Reading the manifest-write confirmation response failed.
+    #[error("failed to read confirmation: {0}")]
+    Confirm(#[source] std::io::Error),
+    /// A registry read or write failed.
+    #[error(transparent)]
+    Registry(#[from] ConfigError),
+    /// Writing or re-minting the target's identity manifest failed for a
+    /// reason other than a read-only volume.
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+}
+
+/// Options for [`add_library`] beyond the entry fields.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AddOptions {
+    /// Re-mint a fresh uuid for the target root before registering,
+    /// rewriting its identity manifest. Resolves a uuid clash by turning
+    /// the new root into a genuine copy with its own identity.
+    pub new_uuid: bool,
+}
+
+/// The result of an [`add_library`] call: either a completed
+/// registration, or the ambiguity the CLI must resolve interactively
+/// before anything is written.
+#[derive(Debug)]
+pub enum AddOutcome {
+    /// The library was registered.
+    Registered(AddReport),
+    /// The manifest-write confirmation was declined; nothing was written.
+    Aborted,
+    /// A key derived from the manifest or directory name already belongs
+    /// to a different library. The operator must pick an explicit alias.
+    KeyTaken {
+        /// The contested key.
+        key: String,
+        /// The data root the key already maps to.
+        existing_path: PathBuf,
+    },
+    /// The target root's identity uuid already belongs to a registered
+    /// library. The operator chooses between repointing the existing
+    /// entry (a move) and re-minting the uuid (a copy, `--new-uuid`).
+    UuidClash {
+        /// The shared uuid.
+        uuid: String,
+        /// The name of the entry that already carries it.
+        existing_key: String,
+        /// The data root that entry maps to.
+        existing_path: PathBuf,
+    },
+}
+
+/// What [`add_library`] did, for the CLI to render.
+#[derive(Debug)]
+pub struct AddReport {
+    /// The key the entry was recorded under.
+    pub key: String,
+    /// The data root registered.
+    pub data_dir: PathBuf,
+    /// The uuid cached into the entry, or `None` when the manifest could
+    /// not be written (a read-only root).
+    pub uuid: Option<String>,
+    /// True when a fresh identity manifest was written to the root.
+    pub wrote_manifest: bool,
+    /// True when the manifest write was skipped because the root is
+    /// read-only, so the entry carries no uuid cache.
+    pub read_only_degraded: bool,
+    /// True when this entry became the registry default (none was
+    /// recorded before).
+    pub became_default: bool,
+}
+
+/// Register a data root under the registry at `registry_path`, writing an
+/// identity manifest to the root first when it has none.
+///
+/// `key` is the explicit registry name (`add <name>`, or `register
+/// --name <alias>`); `None` derives the key from the root's manifest
+/// birth name, or its directory basename when there is no manifest.
+///
+/// The operation stops without writing when it needs an operator
+/// decision: a derived key that already names a different library
+/// ([`AddOutcome::KeyTaken`]), or a manifest uuid already registered
+/// under another name ([`AddOutcome::UuidClash`]). When the root has no
+/// manifest, `confirm_manifest` is called with the manifest that would
+/// be written; returning `Ok(false)` yields [`AddOutcome::Aborted`]. A
+/// manifest write that fails because the root is read-only degrades to a
+/// uuid-less registration rather than an error, so a snapshot or optical
+/// volume can still be registered.
+pub fn add_library<C>(
+    registry_path: &Path,
+    key: Option<&str>,
+    data_dir: &Path,
+    kind: Option<LibraryKind>,
+    description: Option<String>,
+    opts: AddOptions,
+    confirm_manifest: C,
+) -> Result<AddOutcome, LibraryOpError>
+where
+    C: FnOnce(&LibraryManifest) -> std::io::Result<bool>,
+{
+    let verdict = detect_library(data_dir).map_err(|e| LibraryOpError::BadTarget(e.to_string()))?;
+    let existing = match verdict {
+        DetectVerdict::Confirmed(manifest) => Some(manifest),
+        DetectVerdict::Probable { .. } | DetectVerdict::NotALibrary { .. } => None,
+        DetectVerdict::Unreadable { reason } => {
+            return Err(LibraryOpError::UnreadableTarget {
+                path: data_dir.to_path_buf(),
+                reason,
+            });
+        }
+    };
+
+    let explicit_key = key.is_some();
+    let key = resolve_add_key(key, existing.as_ref(), data_dir);
+    let registry = load_registry_at(registry_path)?;
+    let entries = library_entries(&registry);
+    let became_default = registry.default.is_none();
+
+    // A derived key that already names a root at a different path is a
+    // collision the operator must break with an explicit alias. An
+    // explicit key always wins — it overwrites its own entry by design.
+    if !explicit_key
+        && let Some(other) = entries
+            .iter()
+            .find(|e| e.name == key && e.data_dir != *data_dir)
+    {
+        return Ok(AddOutcome::KeyTaken {
+            key,
+            existing_path: other.data_dir.clone(),
+        });
+    }
+
+    // Entry kind and description: an explicit flag wins over the manifest.
+    let kind = kind
+        .or_else(|| existing.as_ref().map(|m| m.kind))
+        .unwrap_or_default();
+    let description = description.or_else(|| existing.as_ref().and_then(|m| m.description.clone()));
+
+    let mut wrote_manifest = false;
+    let mut read_only_degraded = false;
+    let (uuid, created_at) = if let Some(manifest) = &existing {
+        if opts.new_uuid {
+            let fresh = regenerate_manifest_uuid(data_dir)?;
+            wrote_manifest = true;
+            (Some(fresh.uuid), fresh.created_at)
+        } else {
+            if let Some(clash) = entries
+                .iter()
+                .find(|e| e.uuid.as_deref() == Some(manifest.uuid.as_str()) && e.name != key)
+            {
+                return Ok(AddOutcome::UuidClash {
+                    uuid: manifest.uuid.clone(),
+                    existing_key: clash.name.clone(),
+                    existing_path: clash.data_dir.clone(),
+                });
+            }
+            (Some(manifest.uuid.clone()), manifest.created_at.clone())
+        }
+    } else {
+        let manifest = new_manifest(key.clone(), kind, description.clone());
+        match confirm_manifest(&manifest) {
+            Ok(true) => {}
+            Ok(false) => return Ok(AddOutcome::Aborted),
+            Err(e) => return Err(LibraryOpError::Confirm(e)),
+        }
+        match write_manifest(data_dir, &manifest) {
+            Ok(()) => {
+                wrote_manifest = true;
+                (Some(manifest.uuid), manifest.created_at)
+            }
+            Err(ManifestError::Io { error, .. }) if is_read_only(&error) => {
+                read_only_degraded = true;
+                (None, None)
+            }
+            Err(e) => return Err(LibraryOpError::Manifest(e)),
+        }
+    };
+
+    let fields = LibraryEntryFields {
+        data_dir: data_dir.to_path_buf(),
+        kind,
+        description,
+        index_profile: None,
+        created_at,
+        uuid: uuid.clone(),
+    };
+    upsert_library_entry(registry_path, &key, &fields)?;
+
+    Ok(AddOutcome::Registered(AddReport {
+        key,
+        data_dir: data_dir.to_path_buf(),
+        uuid,
+        wrote_manifest,
+        read_only_degraded,
+        became_default,
+    }))
+}
+
+/// The registry key an [`add_library`] call records under: an explicit
+/// name wins, else the manifest birth name, else the directory basename.
+fn resolve_add_key(
+    explicit: Option<&str>,
+    manifest: Option<&LibraryManifest>,
+    data_dir: &Path,
+) -> String {
+    if let Some(key) = explicit {
+        return key.to_string();
+    }
+    if let Some(manifest) = manifest {
+        return manifest.name.clone();
+    }
+    data_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "library".to_string())
+}
+
+/// Whether an I/O error means the target filesystem rejects writes —
+/// a read-only volume or a directory the caller cannot write to. Such a
+/// manifest write degrades to a uuid-less registration instead of
+/// failing outright.
+fn is_read_only(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+/// Regenerate the identity uuid of the manifest at `data_dir`, writing
+/// the rewritten manifest back atomically and returning it. The root
+/// must already carry a readable manifest; the birth name, kind,
+/// description, and creation timestamp are preserved.
+pub fn regenerate_manifest_uuid(data_dir: &Path) -> Result<LibraryManifest, ManifestError> {
+    let mut manifest = load_manifest(data_dir)?.ok_or_else(|| ManifestError::NotALibrary {
+        path: data_dir.join(MANIFEST_FILENAME),
+    })?;
+    manifest.uuid = uuid::Uuid::now_v7().to_string();
+    write_manifest(data_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Point an existing registry entry at a new data root, leaving its other
+/// metadata untouched. The move branch of a uuid clash: a library that
+/// reappeared at a new path keeps its single entry, which follows it,
+/// rather than gaining a duplicate.
+pub fn repoint_library(
+    registry_path: &Path,
+    name: &str,
+    new_data_dir: &Path,
+) -> Result<(), ConfigError> {
+    let mut doc = read_registry_table(registry_path)?;
+    let upgraded = normalize_registry_entries(&mut doc, registry_path)?;
+    if !registry_has_library(&doc, name) {
+        return Err(ConfigError::UnknownLibrary {
+            name: name.to_string(),
+            available: registry_library_names(&doc),
+        });
+    }
+    let entry = doc
+        .get_mut("libraries")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|libraries| libraries.get_mut(name))
+        .and_then(toml::Value::as_table_mut)
+        .expect("registry_has_library confirmed a table entry");
+    entry.insert(
+        "data_dir".to_string(),
+        toml::Value::String(new_data_dir.display().to_string()),
+    );
+    write_registry_table(registry_path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(())
+}
+
+/// What [`remove_library`] removed, for the CLI to act on.
+#[derive(Debug)]
+pub struct RemoveReport {
+    /// The data root the forgotten entry mapped to. `--purge` deletes it
+    /// after the entry is dropped.
+    pub data_dir: PathBuf,
+    /// True when the removed entry was the registry default, so the
+    /// `default` pointer was cleared to avoid a dangling reference.
+    pub default_cleared: bool,
+}
+
+/// Remove the library named `name` from the registry, returning the data
+/// root it mapped to and whether the default pointer was cleared. The
+/// data root itself is never touched. Errors with
+/// [`ConfigError::UnknownLibrary`] when no such entry exists.
+pub fn remove_library(registry_path: &Path, name: &str) -> Result<RemoveReport, ConfigError> {
+    let mut doc = read_registry_table(registry_path)?;
+    let upgraded = normalize_registry_entries(&mut doc, registry_path)?;
+    let removed = doc
+        .get_mut("libraries")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|libraries| libraries.remove(name));
+    let Some(removed) = removed else {
+        return Err(ConfigError::UnknownLibrary {
+            name: name.to_string(),
+            available: registry_library_names(&doc),
+        });
+    };
+    let data_dir = removed
+        .as_table()
+        .and_then(|entry| entry.get("data_dir"))
+        .and_then(toml::Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let default_cleared = doc.get("default").and_then(toml::Value::as_str) == Some(name);
+    if default_cleared {
+        doc.remove("default");
+    }
+    write_registry_table(registry_path, &doc)?;
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(RemoveReport {
+        data_dir,
+        default_cleared,
+    })
+}
+
+/// Look up one registry entry by name at `path`, returning `None` when
+/// the registry defines no such entry (or no registry file exists). The
+/// read-side counterpart the CLI uses to inspect an entry — its data
+/// root, its detect verdict — before a destructive `remove --purge`.
+pub fn find_library(path: &Path, name: &str) -> Result<Option<LibraryEntry>, ConfigError> {
+    let registry = load_registry_at(path)?;
+    Ok(library_entries(&registry)
+        .into_iter()
+        .find(|entry| entry.name == name))
+}
+
+/// Load the registry at `path` as a strongly typed [`Registry`]. A
+/// missing file resolves to an empty registry so the caller can check a
+/// fresh location without a separate branch.
+fn load_registry_at(path: &Path) -> Result<Registry, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(ConfigError::RegistryUnreadable {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    parse_registry(&text).map_err(|source| ConfigError::RegistryMalformed {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Read the registry at `path` as a free-form TOML table. A missing
@@ -2418,5 +2769,326 @@ mod tests {
             matches!(err, ConfigError::RegistryMalformed { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn add_library_registers_a_manifestless_root_and_makes_it_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let root = tmp.path().join("alpha");
+        std::fs::create_dir_all(&root).expect("root");
+        let outcome = add_library(
+            &registry,
+            Some("alpha"),
+            &root,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("add");
+        let report = match outcome {
+            AddOutcome::Registered(report) => report,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        assert!(report.became_default);
+        assert!(report.wrote_manifest);
+        assert!(report.uuid.is_some());
+        // The identity manifest landed and the entry carries its uuid.
+        assert!(load_manifest(&root).expect("load").is_some());
+        let parsed =
+            parse_registry(&std::fs::read_to_string(&registry).expect("read")).expect("reg");
+        assert_eq!(parsed.default.as_deref(), Some("alpha"));
+        assert_eq!(parsed.libraries["alpha"].uuid(), report.uuid.as_deref());
+    }
+
+    #[test]
+    fn add_library_aborts_when_manifest_write_is_declined() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let root = tmp.path().join("alpha");
+        std::fs::create_dir_all(&root).expect("root");
+        let outcome = add_library(
+            &registry,
+            Some("alpha"),
+            &root,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(false),
+        )
+        .expect("add");
+        assert!(matches!(outcome, AddOutcome::Aborted));
+        assert!(load_manifest(&root).expect("load").is_none());
+        assert!(!registry.exists(), "a declined add writes nothing");
+    }
+
+    #[test]
+    fn add_library_reports_key_taken_for_a_derived_name_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let first = tmp.path().join("a").join("lib");
+        let second = tmp.path().join("b").join("lib");
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+        add_library(
+            &registry,
+            None,
+            &first,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("first");
+        // The second root derives the same key at a different path.
+        let outcome = add_library(
+            &registry,
+            None,
+            &second,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("second");
+        match outcome {
+            AddOutcome::KeyTaken { key, existing_path } => {
+                assert_eq!(key, "lib");
+                assert_eq!(existing_path, first);
+            }
+            other => panic!("expected KeyTaken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_library_with_an_explicit_key_overwrites_rather_than_conflicts() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        std::fs::create_dir_all(&first).expect("first");
+        std::fs::create_dir_all(&second).expect("second");
+        add_library(
+            &registry,
+            Some("lib"),
+            &first,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("first");
+        let outcome = add_library(
+            &registry,
+            Some("lib"),
+            &second,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("second");
+        assert!(matches!(outcome, AddOutcome::Registered(_)));
+        let parsed =
+            parse_registry(&std::fs::read_to_string(&registry).expect("read")).expect("reg");
+        assert_eq!(parsed.libraries["lib"].data_dir(), second);
+    }
+
+    #[test]
+    fn add_library_reports_a_uuid_clash_against_a_registered_identity() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let orig = tmp.path().join("orig");
+        std::fs::create_dir_all(&orig).expect("orig");
+        let manifest = new_manifest("orig", LibraryKind::Prod, None);
+        write_manifest(&orig, &manifest).expect("manifest");
+        add_library(
+            &registry,
+            Some("orig"),
+            &orig,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("register orig");
+        // A second root carrying the very same manifest (same uuid).
+        let copy = tmp.path().join("copy");
+        std::fs::create_dir_all(&copy).expect("copy");
+        write_manifest(&copy, &manifest).expect("copy manifest");
+        let outcome = add_library(
+            &registry,
+            Some("copy"),
+            &copy,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("add copy");
+        match outcome {
+            AddOutcome::UuidClash {
+                uuid,
+                existing_key,
+                existing_path,
+            } => {
+                assert_eq!(uuid, manifest.uuid);
+                assert_eq!(existing_key, "orig");
+                assert_eq!(existing_path, orig);
+            }
+            other => panic!("expected UuidClash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_library_new_uuid_remints_and_registers_the_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let orig = tmp.path().join("orig");
+        std::fs::create_dir_all(&orig).expect("orig");
+        let manifest = new_manifest("orig", LibraryKind::Prod, None);
+        write_manifest(&orig, &manifest).expect("manifest");
+        add_library(
+            &registry,
+            Some("orig"),
+            &orig,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("register orig");
+        let copy = tmp.path().join("copy");
+        std::fs::create_dir_all(&copy).expect("copy");
+        write_manifest(&copy, &manifest).expect("copy manifest");
+        let outcome = add_library(
+            &registry,
+            Some("copy"),
+            &copy,
+            None,
+            None,
+            AddOptions { new_uuid: true },
+            |_m| Ok(true),
+        )
+        .expect("add copy");
+        let report = match outcome {
+            AddOutcome::Registered(report) => report,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        assert_ne!(report.uuid.as_deref(), Some(manifest.uuid.as_str()));
+        // The copy's manifest on disk now carries the fresh uuid.
+        let rewritten = load_manifest(&copy).expect("load").expect("present");
+        assert_eq!(Some(rewritten.uuid.as_str()), report.uuid.as_deref());
+        assert_ne!(rewritten.uuid, manifest.uuid);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_library_degrades_on_a_read_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = tmp.path().join("registry.toml");
+        let root = tmp.path().join("ro");
+        std::fs::create_dir_all(&root).expect("root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        // If the effective user can write anyway (running as root), the
+        // degrade branch is unreachable; skip rather than assert a false
+        // state.
+        if tempfile::NamedTempFile::new_in(&root).is_ok() {
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).ok();
+            return;
+        }
+        let outcome = add_library(
+            &registry,
+            Some("ro"),
+            &root,
+            None,
+            None,
+            AddOptions::default(),
+            |_m| Ok(true),
+        )
+        .expect("add");
+        let report = match outcome {
+            AddOutcome::Registered(report) => report,
+            other => panic!("expected Registered, got {other:?}"),
+        };
+        assert!(report.read_only_degraded);
+        assert!(report.uuid.is_none());
+        assert!(!report.wrote_manifest);
+        let parsed =
+            parse_registry(&std::fs::read_to_string(&registry).expect("read")).expect("reg");
+        assert_eq!(parsed.libraries["ro"].uuid(), None);
+        // Restore perms so tempdir teardown can remove the directory.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    #[test]
+    fn remove_library_returns_the_data_root_and_clears_a_dangling_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(
+            &path,
+            "default = \"alpha\"\n\
+             [libraries]\n\
+             alpha = \"/roots/alpha\"\n\
+             beta = \"/roots/beta\"\n",
+        )
+        .expect("seed");
+        let report = remove_library(&path, "alpha").expect("remove");
+        assert_eq!(report.data_dir, PathBuf::from("/roots/alpha"));
+        assert!(report.default_cleared);
+        let parsed = parse_registry(&std::fs::read_to_string(&path).expect("read")).expect("reg");
+        assert_eq!(parsed.default, None);
+        assert!(!parsed.libraries.contains_key("alpha"));
+    }
+
+    #[test]
+    fn regenerate_manifest_uuid_changes_only_the_uuid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let m = new_manifest("lib", LibraryKind::Test, Some("desc".to_string()));
+        write_manifest(tmp.path(), &m).expect("write");
+        let fresh = regenerate_manifest_uuid(tmp.path()).expect("regen");
+        assert_ne!(fresh.uuid, m.uuid);
+        assert_eq!(fresh.name, m.name);
+        assert_eq!(fresh.kind, m.kind);
+        assert_eq!(fresh.description, m.description);
+        let reloaded = load_manifest(tmp.path()).expect("load").expect("present");
+        assert_eq!(reloaded.uuid, fresh.uuid);
+    }
+
+    #[test]
+    fn find_library_returns_the_entry_or_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("seed");
+        let found = find_library(&path, "alpha")
+            .expect("find")
+            .expect("present");
+        assert_eq!(found.data_dir, PathBuf::from("/roots/alpha"));
+        assert!(find_library(&path, "ghost").expect("find").is_none());
+        // A missing registry file resolves to `None`, not an error.
+        assert!(
+            find_library(&tmp.path().join("absent.toml"), "alpha")
+                .expect("find")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repoint_library_moves_an_entry_to_a_new_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("seed");
+        repoint_library(&path, "alpha", Path::new("/roots/moved")).expect("repoint");
+        let parsed = parse_registry(&std::fs::read_to_string(&path).expect("read")).expect("reg");
+        assert_eq!(
+            parsed.libraries["alpha"].data_dir(),
+            Path::new("/roots/moved")
+        );
+        assert!(matches!(
+            repoint_library(&path, "ghost", Path::new("/x")),
+            Err(ConfigError::UnknownLibrary { .. })
+        ));
     }
 }

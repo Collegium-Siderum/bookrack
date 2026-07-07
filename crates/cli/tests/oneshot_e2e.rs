@@ -370,6 +370,245 @@ async fn libraries_scan_requires_a_target() -> Result<()> {
     Ok(())
 }
 
+/// Write a minimal valid v1 identity manifest with an explicit uuid, so
+/// two roots can be given distinct identities.
+fn write_manifest_uuid(dir: &std::path::Path, name: &str, uuid: &str) {
+    std::fs::write(
+        dir.join("bookrack-library.toml"),
+        format!(
+            "format = \"bookrack-library\"\n\
+             format_version = 1\n\
+             uuid = \"{uuid}\"\n\
+             name = \"{name}\"\n\
+             kind = \"prod\"\n"
+        ),
+    )
+    .expect("write manifest");
+}
+
+/// `libraries scan --register` recovers a lost registry: pointed at a
+/// parent of confirmed roots with no registry file present, it registers
+/// each one, so a reinstall rebuilds the registry from the manifests on
+/// disk in a single command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    // The registry file does not exist yet — as after a reinstall.
+    let registry_path = registry_dir.path().join("registry.toml");
+    let parent = tempfile::tempdir()?;
+    let a = parent.path().join("lib-a");
+    let b = parent.path().join("lib-b");
+    std::fs::create_dir(&a)?;
+    std::fs::create_dir(&b)?;
+    write_manifest_uuid(&a, "alpha", "01890a5d-0000-7000-8000-00000000000a");
+    write_manifest_uuid(&b, "beta", "01890a5d-0000-7000-8000-00000000000b");
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "scan"])
+        .arg(parent.path())
+        .arg("--register")
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "scan --register should exit 0 offline; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let written = std::fs::read_to_string(&registry_path)?;
+    for needle in [
+        "alpha",
+        "beta",
+        "01890a5d-0000-7000-8000-00000000000a",
+        "01890a5d-0000-7000-8000-00000000000b",
+    ] {
+        assert!(
+            written.contains(needle),
+            "rebuilt registry missing {needle:?}: {written}",
+        );
+    }
+    Ok(())
+}
+
+/// `libraries register` on a read-only root cannot write the identity
+/// manifest, but degrades to a uuid-less entry rather than failing, so a
+/// snapshot or optical volume is still registrable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let root = tempfile::tempdir()?;
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o555))?;
+    // A user who can write despite the mode bits (running as root) would
+    // never hit the degrade path; skip rather than assert a false state.
+    if std::fs::File::create(root.path().join(".probe")).is_ok() {
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
+        return Ok(());
+    }
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "register"])
+        .arg(root.path())
+        .args(["--name", "ro", "--yes"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    // Restore write permission so tempdir teardown can remove the root.
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a read-only root should still register (exit 0); stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("read-only"),
+        "stderr should warn about the read-only root: {stderr}",
+    );
+    let written = std::fs::read_to_string(&registry_path)?;
+    assert!(written.contains("ro"), "entry not recorded: {written}");
+    assert!(
+        !written.contains("uuid"),
+        "a degraded entry must carry no uuid cache: {written}",
+    );
+    Ok(())
+}
+
+/// `libraries remove --purge` refuses to delete a target that no longer
+/// detects as a data root, so an entry pointing at the wrong directory
+/// cannot destroy it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_refuses_a_non_library_target() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let target = tempfile::tempdir()?;
+    std::fs::write(
+        &registry_path,
+        format!("[libraries]\nvictim = \"{}\"\n", target.path().display()),
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "remove", "victim", "--purge", "--yes"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "purge of a non-library target is a user error (exit 2); stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        target.path().exists(),
+        "the gate must leave a non-library directory on disk",
+    );
+    Ok(())
+}
+
+/// `libraries remove --purge` on a confirmed root deletes the data and
+/// forgets the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let holder = tempfile::tempdir()?;
+    let root = holder.path().join("data");
+    std::fs::create_dir(&root)?;
+    write_manifest_uuid(&root, "gone", "01890a5d-0000-7000-8000-00000000000c");
+    std::fs::write(
+        &registry_path,
+        format!("[libraries]\ngone = \"{}\"\n", root.display()),
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "remove", "gone", "--purge", "--yes"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "purge of a confirmed root should exit 0; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!root.exists(), "the data root should be deleted");
+    let written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        !written.contains("gone"),
+        "the entry should be forgotten: {written}",
+    );
+    Ok(())
+}
+
+/// `libraries register` refuses a derived name that already belongs to a
+/// different library: the operator must pick an explicit alias (exit 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let first = tempfile::tempdir()?;
+    let second = tempfile::tempdir()?;
+    write_manifest_uuid(first.path(), "dup", "01890a5d-0000-7000-8000-000000000001");
+    write_manifest_uuid(second.path(), "dup", "01890a5d-0000-7000-8000-000000000002");
+    let register = |root: &std::path::Path| {
+        tokio::process::Command::new(bookrack_bin())
+            .args(["libraries", "register"])
+            .arg(root)
+            .arg("--yes")
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+            .env("BOOKRACK_REGISTRY", &registry_path)
+            .env_remove("BOOKRACK_DATA_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    };
+    let first_out = register(first.path()).await?;
+    assert_eq!(
+        first_out.status.code(),
+        Some(0),
+        "the first register should succeed; stderr={:?}",
+        String::from_utf8_lossy(&first_out.stderr),
+    );
+    let second_out = register(second.path()).await?;
+    assert_eq!(
+        second_out.status.code(),
+        Some(2),
+        "a derived-name clash is a user error (exit 2); stderr={:?}",
+        String::from_utf8_lossy(&second_out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&second_out.stderr);
+    assert!(
+        stderr.contains("already"),
+        "stderr should explain the name clash: {stderr}",
+    );
+    Ok(())
+}
+
 enum CaseExpect {
     NotRunning,
     Quit,

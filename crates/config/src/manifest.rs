@@ -181,8 +181,10 @@ pub fn write_manifest(data_dir: &Path, m: &LibraryManifest) -> Result<(), Manife
 }
 
 /// Render a manifest into TOML, including the `format` magic and
-/// `format_version`, and only the optional fields that are set.
-fn render_manifest_toml(m: &LibraryManifest) -> String {
+/// `format_version`, and only the optional fields that are set. Public
+/// so a registration command can preview the exact file it is about to
+/// write before an operator confirms.
+pub fn render_manifest_toml(m: &LibraryManifest) -> String {
     let mut table = toml::Table::new();
     table.insert(
         "format".to_string(),

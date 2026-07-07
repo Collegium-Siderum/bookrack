@@ -10,6 +10,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli: offline `libraries add`, `register`, and `remove`, plus
+  `scan --register`.** Three write verbs bring an existing data root into
+  the registry with no daemon. `libraries add <name> <path>` registers
+  under an explicit name; `libraries register <path>` derives the name
+  from the root's manifest (or its directory), taking `--name <alias>`
+  when the derived name is taken. Both write a fresh identity manifest to
+  a root that has none — previewed and confirmed first, unless `--yes` —
+  and degrade to a uuid-less entry rather than failing on a read-only
+  volume. A registration whose identity uuid already belongs to another
+  entry stops for a decision: interactively, move the existing entry to
+  the new path; non-interactively, exit with the exact move/`--new-uuid`
+  commands. `libraries remove <name>` forgets an entry and keeps the
+  data; `--purge` additionally deletes the data root behind a detect gate
+  and a typed confirmation. `libraries scan --register` registers every
+  confirmed root it finds — turning `scan --volumes --register` into a
+  one-command registry rebuild after a reinstall — and skips probable
+  roots with a note to add them by hand.
+
 - **config, cli: offline `libraries detect` and `libraries scan`.** Two
   read-only, daemon-free subcommands answer "is this path a bookrack
   data root?". `libraries detect <path>` returns a three-way verdict —
