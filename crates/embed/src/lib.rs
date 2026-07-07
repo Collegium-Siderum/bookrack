@@ -192,18 +192,29 @@ impl OllamaEmbedClient {
         };
         let response = match self.http.post(&url).json(&request).send().await {
             Ok(response) => response,
-            // Connection refused, DNS failure and read timeout all land
-            // here; none is a definite out-of-memory signal, so all are
-            // transient. A genuine OOM surfaces as HTTP 5xx below.
+            // A connection-time failure — refused, DNS, TLS, or a timeout
+            // before the response head arrives — lands here; none is a
+            // definite out-of-memory signal, so all are transient. A
+            // genuine OOM surfaces as HTTP 5xx below; a timeout while
+            // reading the body is classified at the decode step.
             Err(e) => return Err(EmbedError::Unreachable(e.to_string())),
         };
 
         let status = response.status();
         if status.is_success() {
-            let parsed: EmbedResponse = response
-                .json()
-                .await
-                .map_err(|e| EmbedError::MalformedResponse(e.to_string()))?;
+            let parsed: EmbedResponse = response.json().await.map_err(|e| {
+                // A timeout or connection failure while reading the body is
+                // a transient blip worth a retry. `reqwest` reports such a
+                // read failure with the same decode kind as genuinely
+                // unparseable bytes, so the timeout / connect source is
+                // what separates the two: only a real decode of a fully
+                // received body stays a malformed response.
+                if e.is_timeout() || e.is_connect() {
+                    EmbedError::Unreachable(e.to_string())
+                } else {
+                    EmbedError::MalformedResponse(e.to_string())
+                }
+            })?;
             if parsed.embeddings.len() != texts.len() {
                 return Err(EmbedError::MalformedResponse(format!(
                     "got {} vectors for {} inputs",
@@ -324,6 +335,42 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// A client with a short request timeout and no retries, for the
+    /// body-read-timeout path.
+    fn short_timeout_client(base_url: &str) -> OllamaEmbedClient {
+        OllamaEmbedClient::new(
+            base_url,
+            "test-model",
+            Duration::from_millis(200),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds")
+    }
+
+    /// Spawn a mock that returns 2xx headers advertising a body it never
+    /// finishes sending, then holds the connection open so the client's
+    /// body read hits the request timeout rather than a decode error.
+    async fn mock_headers_then_stall() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut scratch = [0u8; 8192];
+            let _ = socket.read(&mut scratch).await;
+            // Promise far more body than is ever delivered, then stall.
+            let head = "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: 4096\r\n\r\n{";
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.flush().await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn a_successful_batch_returns_vectors_in_order() {
         let url = mock_once("200 OK", r#"{"embeddings":[[1.0,2.0],[3.0,4.0]]}"#).await;
@@ -394,6 +441,20 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, EmbedError::Unreachable(_)), "got {err:?}");
         assert!(err.is_transient());
+    }
+
+    #[tokio::test]
+    async fn a_body_read_timeout_is_transient_not_malformed() {
+        // Headers arrive (so `send()` succeeds) but the body never
+        // completes: the request timeout fires during the body read. That
+        // is a transient blip, not a malformed response, and must retry.
+        let url = mock_headers_then_stall().await;
+        let err = short_timeout_client(&url)
+            .embed_batch(&["x".to_string()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unreachable(_)), "got {err:?}");
+        assert!(err.is_transient(), "got {err:?}");
     }
 
     #[tokio::test]
@@ -505,6 +566,18 @@ mod tests {
             matches!(err, ProbeError::MalformedResponse(_)),
             "got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn probe_resolves_a_body_read_timeout_to_unreachable() {
+        // A daemon whose headers arrive but whose body stalls past the
+        // timeout is reachable-but-not-usable, not a protocol mismatch.
+        let url = mock_headers_then_stall().await;
+        let report = probe_ollama_with_timeout(&url, Duration::from_millis(200))
+            .await
+            .expect("probe returns ok");
+        assert!(!report.reachable);
+        assert!(report.models.is_empty());
     }
 
     #[tokio::test]

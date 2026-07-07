@@ -81,10 +81,17 @@ pub async fn probe_ollama_with_timeout(
     if !response.status().is_success() {
         return Ok(unreachable_report());
     }
-    let body: TagsResponse = response
-        .json()
-        .await
-        .map_err(|e| ProbeError::MalformedResponse(e.to_string()))?;
+    let body: TagsResponse = match response.json().await {
+        Ok(body) => body,
+        // A timeout or connection failure while reading the body means the
+        // daemon is reachable but not usable — the same "not usable"
+        // outcome as the send() and non-2xx arms above. `reqwest` reports
+        // such a read failure with the same decode kind as genuinely
+        // unparseable bytes, so the timeout / connect source is what
+        // separates a real protocol mismatch from a transport blip.
+        Err(e) if e.is_timeout() || e.is_connect() => return Ok(unreachable_report()),
+        Err(e) => return Err(ProbeError::MalformedResponse(e.to_string())),
+    };
     Ok(ProbeReport {
         reachable: true,
         models: body.models.into_iter().map(|m| m.name).collect(),

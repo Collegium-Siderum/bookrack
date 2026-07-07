@@ -216,6 +216,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **embed: a timeout while reading the response body is retried, not
+  reported as a malformed response.** `reqwest`'s request timeout spans
+  the body read, so a daemon that returns 2xx headers and then stalls
+  surfaced from `response.json()` as `MalformedResponse` — a
+  non-transient error that failed the ingest with no retry and mislabeled
+  a reachable-but-slow daemon as speaking the wrong protocol. Both the
+  embed client and the `/api/tags` probe now inspect the error: a timeout
+  or connection failure becomes a transient `Unreachable` (client) or a
+  `reachable: false` report (probe), while a genuine decode of a fully
+  received body stays a malformed response.
+
 - **metadata: a blank watermark token no longer flags every publisher.**
   The audit-data overlay merged operator token lists verbatim, so a
   stray empty or whitespace-only entry in any watermark list made
