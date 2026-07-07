@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig, OLLAMA_URL_ENV,
-    ROOT_CONFIG_NAME, default_registry_path, locate_pdfium, merge_library_into_registry,
-    pdfium_library_filename, portable_data_dir, render_root_config_toml,
+    Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig,
+    LibraryEntryFields, LibraryKind, LibraryManifest, MANIFEST_FILENAME, OLLAMA_URL_ENV,
+    ROOT_CONFIG_NAME, default_registry_path, load_manifest, locate_pdfium, new_manifest,
+    pdfium_library_filename, portable_data_dir, render_root_config_toml, upsert_library_entry,
+    write_manifest,
 };
 
 use bookrack_corpus::Corpus;
@@ -269,11 +271,14 @@ fn finalize(
 ) -> Result<FinalizeSummary> {
     create_data_root_skeleton(data_root)?;
     let (config_path, config_kept) = write_root_config(data_root, ollama_url, embed_model, force)?;
-    let registry = write_default_registry(data_root)?;
+    let (manifest, manifest_kept) = ensure_library_manifest(data_root, "default")?;
+    let registry = write_default_registry(data_root, &manifest)?;
     Ok(FinalizeSummary {
         data_root: data_root.to_path_buf(),
         config_path,
         config_kept,
+        manifest_path: data_root.join(MANIFEST_FILENAME),
+        manifest_kept,
         registry,
     })
 }
@@ -304,15 +309,42 @@ fn write_root_config(
     Ok((path, false))
 }
 
-/// Merge `default = <data_root>` into the platform-default registry.
-/// Returns `None` when no platform config directory could be located;
-/// the driver renders the `BOOKRACK_DATA_DIR` fallback hint.
-fn write_default_registry(data_root: &Path) -> Result<Option<PathBuf>> {
+/// Ensure the data root carries an identity manifest, returning it. An
+/// existing manifest is preserved so the library's uuid stays stable
+/// across reruns — the manifest is identity, not configuration, so
+/// `force` never regenerates it; only a root without one gets a freshly
+/// generated uuid. The bool reports whether an existing manifest was
+/// kept.
+fn ensure_library_manifest(data_root: &Path, name: &str) -> Result<(LibraryManifest, bool)> {
+    if let Some(existing) = load_manifest(data_root)
+        .with_context(|| format!("read manifest in {}", data_root.display()))?
+    {
+        return Ok((existing, true));
+    }
+    let manifest = new_manifest(name, LibraryKind::Prod, None);
+    write_manifest(data_root, &manifest)
+        .with_context(|| format!("write manifest in {}", data_root.display()))?;
+    Ok((manifest, false))
+}
+
+/// Register `default = <data_root>` in the platform-default registry,
+/// caching the manifest's identity fields in the entry. Returns `None`
+/// when no platform config directory could be located; the driver
+/// renders the `BOOKRACK_DATA_DIR` fallback hint.
+fn write_default_registry(data_root: &Path, manifest: &LibraryManifest) -> Result<Option<PathBuf>> {
     let Some(path) = default_registry_path() else {
         return Ok(None);
     };
-    merge_library_into_registry(&path, "default", data_root)
-        .with_context(|| format!("merge {} into registry", data_root.display()))?;
+    let entry = LibraryEntryFields {
+        data_dir: data_root.to_path_buf(),
+        kind: manifest.kind,
+        description: manifest.description.clone(),
+        index_profile: None,
+        created_at: manifest.created_at.clone(),
+        uuid: Some(manifest.uuid.clone()),
+    };
+    upsert_library_entry(&path, "default", &entry)
+        .with_context(|| format!("register {} into registry", data_root.display()))?;
     Ok(Some(path))
 }
 
@@ -382,6 +414,21 @@ mod tests {
         for sub in SKELETON_SUBDIRS {
             assert!(root.join(sub).is_dir(), "{sub} not created");
         }
+    }
+
+    #[test]
+    fn ensure_library_manifest_writes_a_new_manifest_and_preserves_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (first, kept) = ensure_library_manifest(tmp.path(), "default").expect("first");
+        assert!(!kept, "a fresh root writes a new manifest");
+        assert_eq!(first.name, "default");
+        assert_eq!(first.kind, LibraryKind::Prod);
+        assert!(load_manifest(tmp.path()).expect("load").is_some());
+        // A rerun keeps the same identity — the uuid never regenerates.
+        let (second, kept) = ensure_library_manifest(tmp.path(), "renamed").expect("second");
+        assert!(kept, "an existing manifest is kept");
+        assert_eq!(second.uuid, first.uuid);
+        assert_eq!(second.name, "default");
     }
 
     #[test]

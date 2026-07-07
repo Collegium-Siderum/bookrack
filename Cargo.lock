@@ -905,12 +905,14 @@ dependencies = [
 name = "bookrack-config"
 version = "0.8.0-dev"
 dependencies = [
+ "chrono",
  "dirs 5.0.1",
  "dotenvy",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
+ "uuid",
 ]
 
 [[package]]

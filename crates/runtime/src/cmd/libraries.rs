@@ -10,7 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use bookrack_config::Config;
+use bookrack_config::{
+    Config, LibraryEntryFields, LibraryKind, load_manifest, new_manifest, upsert_library_entry,
+    write_manifest,
+};
 use eyre::{Context, ContextCompat, Result, bail, eyre};
 
 use crate::render;
@@ -136,7 +139,26 @@ where
         )
     })?;
 
-    bookrack_config::merge_library_into_registry(&registry_path, new_name, target)
+    // Fork is by definition a new library: it gets a freshly generated
+    // uuid and its own manifest, never a copy of the source's. Kind is
+    // inherited from the source when it carries a manifest, else `prod`.
+    let source_kind = load_manifest(cfg.data_dir())
+        .with_context(|| format!("read source manifest in {}", cfg.data_dir().display()))?
+        .map(|m| m.kind)
+        .unwrap_or(LibraryKind::Prod);
+    let manifest = new_manifest(new_name, source_kind, None);
+    write_manifest(target, &manifest)
+        .with_context(|| format!("write manifest in {}", target.display()))?;
+
+    let entry = LibraryEntryFields {
+        data_dir: target.to_path_buf(),
+        kind: manifest.kind,
+        description: manifest.description.clone(),
+        index_profile: None,
+        created_at: manifest.created_at.clone(),
+        uuid: Some(manifest.uuid.clone()),
+    };
+    upsert_library_entry(&registry_path, new_name, &entry)
         .with_context(|| format!("register '{}' in {}", new_name, registry_path.display()))?;
 
     println!();

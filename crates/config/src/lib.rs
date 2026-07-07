@@ -15,8 +15,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod manifest;
 mod registry;
 
+pub use manifest::{
+    LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
+    load_manifest, new_manifest, write_manifest,
+};
 pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
 
@@ -1218,46 +1223,27 @@ fn emit_registry_upgrade_notice() {
 /// parent directory as needed.
 fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigError> {
     let serialised = toml::to_string_pretty(doc).expect("toml::Table is always serialisable");
-    write_atomically(path, &serialised)
+    write_atomically(path, &serialised).map_err(|source| ConfigError::RegistryUnreadable {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Write `contents` to `path` atomically: stage a temporary file in the
 /// same directory, flush it, then rename it over the target. A reader
 /// racing the write sees either the old file or the new one, never a
-/// truncated one. Errors map to [`ConfigError::RegistryUnreadable`] so
-/// the caller renders one uniform reason regardless of which I/O step
-/// failed.
-fn write_atomically(path: &Path, contents: &str) -> Result<(), ConfigError> {
+/// truncated one. The single I/O error is returned raw so each caller
+/// wraps it in its own error type.
+pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    std::fs::create_dir_all(&parent).map_err(|source| ConfigError::RegistryUnreadable {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut tmp = tempfile::NamedTempFile::new_in(&parent).map_err(|source| {
-        ConfigError::RegistryUnreadable {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
-    tmp.write_all(contents.as_bytes())
-        .map_err(|source| ConfigError::RegistryUnreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    tmp.as_file()
-        .sync_all()
-        .map_err(|source| ConfigError::RegistryUnreadable {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    tmp.persist(path)
-        .map_err(|e| ConfigError::RegistryUnreadable {
-            path: path.to_path_buf(),
-            source: e.error,
-        })?;
+    std::fs::create_dir_all(&parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(&parent)?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 

@@ -110,6 +110,8 @@ pub struct FinalizeSummary {
     pub data_root: PathBuf,
     pub config_path: PathBuf,
     pub config_kept: bool,
+    pub manifest_path: PathBuf,
+    pub manifest_kept: bool,
     pub registry: Option<PathBuf>,
 }
 

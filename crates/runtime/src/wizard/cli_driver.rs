@@ -181,6 +181,11 @@ impl WizardDriver for CliWizardDriver {
         } else {
             println!("      Wrote {}", summary.config_path.display());
         }
+        if summary.manifest_kept {
+            println!("      Kept existing {}", summary.manifest_path.display());
+        } else {
+            println!("      Wrote {}", summary.manifest_path.display());
+        }
         match &summary.registry {
             Some(path) => {
                 println!("      Wrote {} (default = \"default\")", path.display());

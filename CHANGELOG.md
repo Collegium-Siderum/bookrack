@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, runtime: data roots carry a self-describing library
+  manifest.** Every data root now holds a `bookrack-library.toml`
+  naming the library and its stable UUIDv7 identity (`format`,
+  `format_version`, `uuid`, `name`, `kind`, `description`,
+  `created_at`), so a library describes itself and the registry becomes
+  a regenerable cache over the manifests rather than the sole record of
+  identity. `bookrack init` writes one for the new root and caches the
+  uuid into the registry entry; `libraries fork` writes the fork its own
+  manifest with a freshly generated uuid. A root without a manifest
+  stays valid, and a v1 reader tolerates unknown keys within v1.x.
+
 - **config, cli, runtime: the library registry carries per-library
   metadata and `libraries default` persists.** Registry entries may
   now be metadata-bearing tables (`[libraries.<name>]` with `data_dir`,
