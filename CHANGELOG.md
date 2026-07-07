@@ -216,6 +216,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: a queue enqueue or cancel that fails to persist no longer
+  leaves the mutation live in memory.** The `ingest.submit`,
+  `glean.submit`, `intake.ocr`, and `ingest.cancel` handlers mutated the
+  in-memory queue and then persisted, so a `save_atomic` failure returned
+  an error to the caller while the added job stayed in the worker's queue
+  (or the cancellation was kept in memory but lost from disk). The four
+  handlers now route through a shared helper that snapshots the jobs list,
+  applies the mutation, and restores it if the persist fails, matching the
+  rollback the `queue.clear` and `queue.pause` paths already had.
+
 - **embed: a timeout while reading the response body is retried, not
   reported as a malformed response.** `reqwest`'s request timeout spans
   the body read, so a daemon that returns 2xx headers and then stalls

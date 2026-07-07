@@ -19,7 +19,7 @@ use ts_rs::TS;
 use super::MethodContext;
 use super::ingest::PriorityRepr;
 use crate::control::events::Event;
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 use crate::queue;
 
 #[derive(Debug, Deserialize)]
@@ -53,30 +53,26 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         .priority
         .map(PriorityRepr::into_priority)
         .unwrap_or_default();
-    let ids = {
-        let mut guard = ctx
-            .queue_state
-            .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
-        // The paper pipeline reads its audit profile from the daemon's
-        // `glean_params_template` (paper_audit_profile). The book-side
-        // per-job override on `QueueJob` is not consumed for paper jobs,
-        // so pass `None` here.
-        let ids = queue::enqueue_files(
-            &mut guard,
-            &parsed.paths,
-            &library,
-            bookrack_core::ItemKind::Paper,
-            priority,
-            parsed.force,
-            false,
-            None,
-        );
-        queue::save_atomic(&guard, &ctx.queue_state_path)
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;
-        let tick = super::ingest::derive_tick(&guard, None);
-        ctx.event_stream.publish(Event::QueueTick(tick));
-        ids
-    };
+    let (ids, tick) = super::queue_writes::mutate_jobs_and_persist(
+        &ctx.queue_state,
+        &ctx.queue_state_path,
+        |guard| {
+            // The paper pipeline reads its audit profile from the daemon's
+            // `glean_params_template` (paper_audit_profile). The book-side
+            // per-job override on `QueueJob` is not consumed for paper
+            // jobs, so pass `None` here.
+            Ok(queue::enqueue_files(
+                guard,
+                &parsed.paths,
+                &library,
+                bookrack_core::ItemKind::Paper,
+                priority,
+                parsed.force,
+                false,
+                None,
+            ))
+        },
+    )?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_ids": ids }))
 }

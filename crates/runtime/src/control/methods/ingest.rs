@@ -19,9 +19,9 @@ use serde_json::{Value, json};
 use ts_rs::TS;
 
 use super::MethodContext;
-use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
+use crate::control::events::Event;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
-use crate::queue::{self, JobState, Priority};
+use crate::queue::{self, Priority};
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(TS))]
@@ -119,27 +119,23 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             "no supported files found in submitted paths",
         ));
     }
-    let ids = {
-        let mut guard = ctx
-            .queue_state
-            .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
-        let ids = queue::enqueue_files(
-            &mut guard,
-            &expanded,
-            &library,
-            bookrack_core::ItemKind::Book,
-            priority,
-            parsed.force,
-            parsed.hold_for_metadata,
-            parsed.audit_profile.clone(),
-        );
-        queue::save_atomic(&guard, &ctx.queue_state_path)
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;
-        let tick = derive_tick(&guard, None);
-        ctx.event_stream.publish(Event::QueueTick(tick));
-        ids
-    };
+    let (ids, tick) = super::queue_writes::mutate_jobs_and_persist(
+        &ctx.queue_state,
+        &ctx.queue_state_path,
+        |guard| {
+            Ok(queue::enqueue_files(
+                guard,
+                &expanded,
+                &library,
+                bookrack_core::ItemKind::Book,
+                priority,
+                parsed.force,
+                parsed.hold_for_metadata,
+                parsed.audit_profile.clone(),
+            ))
+        },
+    )?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_ids": ids }))
 }
 
@@ -162,55 +158,18 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             ));
         }
     };
-    let outcome = {
-        let mut guard = ctx
-            .queue_state
-            .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
-        match queue::cancel_with_prefix(&mut guard, &parsed.job_id) {
-            Ok(_) => {
-                queue::save_atomic(&guard, &ctx.queue_state_path).map_err(|e| {
-                    RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}"))
-                })?;
-                let tick = derive_tick(&guard, None);
-                ctx.event_stream.publish(Event::QueueTick(tick));
-                Ok(true)
-            }
-            Err(err) => Err(err),
-        }
-    };
-    match outcome {
-        Ok(_) => Ok(json!({ "ok": true })),
-        Err(err) => Err(RpcError::new(
-            crate::control::jsonrpc::JOB_NOT_FOUND,
-            format!("ingest.cancel: {err}"),
-        )),
-    }
-}
-
-pub(super) fn derive_tick(
-    state: &crate::queue::QueueState,
-    last_finished: Option<JobOutcomeSummary>,
-) -> QueueTick {
-    let mut pending = 0u32;
-    let mut running = 0u32;
-    let mut current = None;
-    for job in &state.jobs {
-        match job.state {
-            JobState::Pending => pending += 1,
-            JobState::Running => {
-                running += 1;
-                if current.is_none() {
-                    current = Some(job.id.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    QueueTick {
-        current,
-        pending,
-        running,
-        last_finished,
-    }
+    let (_full_id, tick) = super::queue_writes::mutate_jobs_and_persist(
+        &ctx.queue_state,
+        &ctx.queue_state_path,
+        |guard| {
+            queue::cancel_with_prefix(guard, &parsed.job_id).map_err(|err| {
+                RpcError::new(
+                    crate::control::jsonrpc::JOB_NOT_FOUND,
+                    format!("ingest.cancel: {err}"),
+                )
+            })
+        },
+    )?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
+    Ok(json!({ "ok": true }))
 }

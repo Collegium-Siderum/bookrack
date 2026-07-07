@@ -122,6 +122,39 @@ fn apply_pause(
     Ok(tick)
 }
 
+/// Apply `mutate` to the locked queue, persist the result, and restore
+/// the jobs list if the persist fails — so a job the caller was told was
+/// rejected never survives in memory for the worker to run. `mutate` may
+/// itself fail (e.g. an ambiguous cancel prefix); that error is returned
+/// after rolling back, with no persist attempted. On success returns
+/// `mutate`'s value together with the fresh tick to publish.
+pub(super) fn mutate_jobs_and_persist<T>(
+    queue_state: &Mutex<QueueState>,
+    queue_state_path: &Path,
+    mutate: impl FnOnce(&mut QueueState) -> Result<T, RpcError>,
+) -> Result<(T, QueueTick), RpcError> {
+    let mut guard = queue_state
+        .lock()
+        .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
+    let prev_jobs = guard.jobs.clone();
+    let out = match mutate(&mut guard) {
+        Ok(out) => out,
+        Err(e) => {
+            guard.jobs = prev_jobs;
+            return Err(e);
+        }
+    };
+    if let Err(e) = save_atomic(&guard, queue_state_path) {
+        guard.jobs = prev_jobs;
+        return Err(RpcError::new(
+            INTERNAL_ERROR,
+            format!("persist queue state: {e:#}"),
+        ));
+    }
+    let tick = derive_tick(&guard, None);
+    Ok((out, tick))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +196,78 @@ mod tests {
         assert!(
             !queue_state.lock().unwrap().paused,
             "in-memory QueueState::paused must be restored to its prior value"
+        );
+    }
+
+    fn enqueue_one(guard: &mut QueueState) -> Vec<String> {
+        crate::queue::enqueue_files(
+            guard,
+            &[std::path::PathBuf::from("book.epub")],
+            "lib",
+            bookrack_core::ItemKind::Book,
+            crate::queue::Priority::Normal,
+            false,
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn mutate_jobs_and_persist_persists_and_returns_tick_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let queue_state = Mutex::new(QueueState::default());
+
+        let (ids, tick) =
+            mutate_jobs_and_persist(&queue_state, &path, |g| Ok::<_, RpcError>(enqueue_one(g)))
+                .expect("persist succeeds");
+
+        assert_eq!(ids.len(), 1);
+        assert_eq!(tick.pending, 1);
+        assert_eq!(queue_state.lock().unwrap().jobs.len(), 1);
+        assert!(path.exists(), "save_atomic must have written the document");
+    }
+
+    #[test]
+    fn mutate_jobs_and_persist_rolls_back_jobs_when_save_fails() {
+        // Parent is a regular file, so save_atomic fails on every platform.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").expect("seed blocker file");
+        let path = blocker.join("queue.json");
+        let queue_state = Mutex::new(QueueState::default());
+
+        let err =
+            mutate_jobs_and_persist(&queue_state, &path, |g| Ok::<_, RpcError>(enqueue_one(g)))
+                .expect_err("save_atomic must fail under a file-shaped parent");
+
+        assert_eq!(err.code, INTERNAL_ERROR);
+        assert!(
+            queue_state.lock().unwrap().jobs.is_empty(),
+            "the enqueued job must be rolled back so the worker never runs it"
+        );
+    }
+
+    #[test]
+    fn mutate_jobs_and_persist_returns_mutation_error_without_persisting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let queue_state = Mutex::new(QueueState::default());
+
+        let err = mutate_jobs_and_persist(&queue_state, &path, |g| {
+            enqueue_one(g);
+            Err::<(), _>(RpcError::new(INTERNAL_ERROR, "mutation refused"))
+        })
+        .expect_err("mutation error propagates");
+
+        assert_eq!(err.code, INTERNAL_ERROR);
+        assert!(
+            queue_state.lock().unwrap().jobs.is_empty(),
+            "a mutation that returns an error must be rolled back in full"
+        );
+        assert!(
+            !path.exists(),
+            "a failed mutation must not persist the queue document"
         );
     }
 }

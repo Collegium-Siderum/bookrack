@@ -17,9 +17,9 @@ use serde_json::{Value, json};
 use ts_rs::TS;
 
 use super::MethodContext;
-use super::ingest::{PriorityRepr, derive_tick};
+use super::ingest::PriorityRepr;
 use crate::control::events::Event;
-use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 use crate::queue::{self, IntakeOcrInfo};
 
 #[derive(Debug, Deserialize)]
@@ -96,26 +96,22 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         expected_pages: parsed.expected_pages,
         allow_partial: parsed.allow_partial,
     };
-    let id = {
-        let mut guard = ctx
-            .queue_state
-            .lock()
-            .map_err(|_| RpcError::new(INTERNAL_ERROR, "queue state lock poisoned"))?;
-        let id = queue::enqueue_ocr_intake(
-            &mut guard,
-            parsed.ocr_md,
-            info,
-            &library,
-            priority,
-            parsed.force,
-            parsed.hold_for_metadata,
-            parsed.audit_profile.clone(),
-        );
-        queue::save_atomic(&guard, &ctx.queue_state_path)
-            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("persist queue state: {e}")))?;
-        let tick = derive_tick(&guard, None);
-        ctx.event_stream.publish(Event::QueueTick(tick));
-        id
-    };
+    let (id, tick) = super::queue_writes::mutate_jobs_and_persist(
+        &ctx.queue_state,
+        &ctx.queue_state_path,
+        |guard| {
+            Ok(queue::enqueue_ocr_intake(
+                guard,
+                parsed.ocr_md,
+                info,
+                &library,
+                priority,
+                parsed.force,
+                parsed.hold_for_metadata,
+                parsed.audit_profile.clone(),
+            ))
+        },
+    )?;
+    ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_id": id }))
 }
