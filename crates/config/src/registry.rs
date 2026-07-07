@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A parsed registry: named libraries and an optional default.
 #[derive(Debug, Clone, Deserialize)]
@@ -91,7 +91,7 @@ pub struct RegistryEntryTable {
 /// What a library is for. Advisory today; carried so tooling can
 /// distinguish a production library from a throwaway test or scratch
 /// root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LibraryKind {
     /// A primary, long-lived library.

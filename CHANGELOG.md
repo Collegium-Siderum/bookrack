@@ -10,6 +10,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli: offline `libraries detect` and `libraries scan`.** Two
+  read-only, daemon-free subcommands answer "is this path a bookrack
+  data root?". `libraries detect <path>` returns a three-way verdict —
+  *confirmed* (a readable identity manifest), *probable* (no manifest
+  but the `catalog.db` + `corpus.db` pair is present), or *not a
+  library* — reporting an unreadable manifest (foreign magic or a future
+  schema version) as its own distinct outcome; it exits 0 for
+  confirmed/probable, 1 otherwise, and 2 for a missing or non-directory
+  path. `libraries scan <parent>` walks a parent directory's immediate
+  children (or, with `--volumes`, mounted volumes two levels deep),
+  lists the data roots found, prunes at each hit, and always reports how
+  many entries it skipped. Both honour `--json`.
+
 - **config, runtime: data roots carry a self-describing library
   manifest.** Every data root now holds a `bookrack-library.toml`
   naming the library and its stable UUIDv7 identity (`format`,

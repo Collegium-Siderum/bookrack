@@ -15,9 +15,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod detect;
 mod manifest;
 mod registry;
 
+pub use detect::{
+    DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
+    scan_for_libraries,
+};
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
     load_manifest, new_manifest, write_manifest,

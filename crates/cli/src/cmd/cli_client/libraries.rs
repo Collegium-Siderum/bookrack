@@ -48,6 +48,11 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             // dispatches it before reaching this daemon-routed path.
             unreachable!("libraries default is handled offline in main")
         }
+        LibrariesAction::Detect { .. } | LibrariesAction::Scan { .. } => {
+            // `detect` / `scan` are read-only and resolve locally; `main`
+            // dispatches them before reaching this daemon-routed path.
+            unreachable!("libraries detect/scan are handled offline in main")
+        }
         LibrariesAction::Fork {
             new_name,
             data_dir,

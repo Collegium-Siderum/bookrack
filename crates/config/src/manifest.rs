@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::LibraryKind;
 use crate::write_atomically;
@@ -31,7 +31,7 @@ pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// A data root's identity, read from or written to its manifest. The
 /// `format` magic is validated at the parse boundary and dropped; it is
 /// not carried on the struct.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LibraryManifest {
     /// Schema version the file declared.
     pub format_version: u32,

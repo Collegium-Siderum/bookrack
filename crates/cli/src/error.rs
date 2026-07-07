@@ -116,6 +116,13 @@ pub enum BookrackCliError {
     /// the underlying message verbatim so the reason is self-contained.
     #[error("{message}")]
     LocalUserError { message: String },
+
+    /// `libraries detect <path>` determined the path is not a confirmed
+    /// or probable bookrack data root — a plain not-a-library verdict or
+    /// an unreadable manifest. The renderer already printed the verdict;
+    /// the reporter only needs a non-zero (exit 1) code.
+    #[error("detect: {} is not a bookrack data root", .0.display())]
+    DetectNegative(PathBuf),
 }
 
 impl BookrackCliError {
@@ -134,6 +141,7 @@ impl BookrackCliError {
             Self::IngestPartialFailure { .. } => 5,
             Self::ExecParamsInvalid { .. } => 2,
             Self::LocalUserError { .. } => 2,
+            Self::DetectNegative(_) => 1,
         }
     }
 
@@ -143,7 +151,7 @@ impl BookrackCliError {
     pub fn is_self_reported(&self) -> bool {
         matches!(
             self,
-            Self::DoctorUnhealthy | Self::IngestPartialFailure { .. }
+            Self::DoctorUnhealthy | Self::IngestPartialFailure { .. } | Self::DetectNegative(_)
         )
     }
 

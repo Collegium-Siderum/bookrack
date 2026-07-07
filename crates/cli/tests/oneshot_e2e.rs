@@ -220,6 +220,156 @@ async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
     Ok(())
 }
 
+/// Write a minimal valid v1 identity manifest into `dir`.
+fn write_manifest(dir: &std::path::Path, name: &str) {
+    std::fs::write(
+        dir.join("bookrack-library.toml"),
+        format!(
+            "format = \"bookrack-library\"\n\
+             format_version = 1\n\
+             uuid = \"01890a5d-0000-7000-8000-000000000000\"\n\
+             name = \"{name}\"\n\
+             kind = \"prod\"\n"
+        ),
+    )
+    .expect("write manifest");
+}
+
+/// `libraries detect` on a manifest-bearing root resolves locally,
+/// prints a confirmed verdict, and exits 0 with no daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_detect_confirms_a_manifest_root_offline() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    write_manifest(root.path(), "alpha");
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "detect"])
+        .arg(root.path())
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "detect on a confirmed root should exit 0; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("confirmed"),
+        "stdout missing verdict: {stdout}"
+    );
+    Ok(())
+}
+
+/// `libraries detect` on a directory that is not a data root exits 1
+/// (a determination, not the daemon-not-running code 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_detect_on_a_plain_dir_exits_1() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "detect"])
+        .arg(root.path())
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "detect on a plain directory should exit 1; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
+
+/// `libraries detect` on a missing path is a caller-input fault: exit 2.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_detect_on_a_missing_path_exits_2() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "detect"])
+        .arg(root.path().join("nope"))
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "detect on a missing path should exit 2; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    Ok(())
+}
+
+/// `libraries scan <parent>` walks a parent directory, lists the data
+/// roots below it, and exits 0 offline. `--json` carries the found root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_scan_lists_child_roots_offline() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let parent = tempfile::tempdir()?;
+    let lib = parent.path().join("lib-a");
+    std::fs::create_dir(&lib)?;
+    write_manifest(&lib, "alpha");
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["--json", "libraries", "scan"])
+        .arg(parent.path())
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "scan should exit 0 offline; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"confirmed\"") && stdout.contains("lib-a"),
+        "scan --json should list the confirmed child root: {stdout}",
+    );
+    Ok(())
+}
+
+/// `libraries scan` with neither a parent nor `--volumes` is a clap
+/// argument error (exit 2): exactly one target is required.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_scan_requires_a_target() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "scan"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "scan with no target should be a clap usage error (exit 2)",
+    );
+    Ok(())
+}
+
 enum CaseExpect {
     NotRunning,
     Quit,

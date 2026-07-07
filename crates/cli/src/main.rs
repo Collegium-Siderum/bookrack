@@ -419,6 +419,29 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Probe whether a path looks like a bookrack data root (read-only).
+    ///
+    /// Resolves locally with no daemon. Exits 0 when the path is a
+    /// confirmed or probable data root, 1 when it is not (or its
+    /// manifest is unreadable), and 2 for a missing or non-directory
+    /// path.
+    Detect {
+        /// Path to probe.
+        path: std::path::PathBuf,
+    },
+    /// Walk a parent directory (or mounted volumes) and list the
+    /// bookrack data roots found (read-only).
+    ///
+    /// Resolves locally with no daemon and always exits 0. Give exactly
+    /// one of a parent directory or `--volumes`.
+    #[command(group(clap::ArgGroup::new("scan_target").required(true).args(["parent", "volumes"])))]
+    Scan {
+        /// Parent directory whose immediate subdirectories are probed.
+        parent: Option<std::path::PathBuf>,
+        /// Scan mounted volumes instead of a parent directory.
+        #[arg(long)]
+        volumes: bool,
+    },
 }
 
 /// clap's default "did you mean" tip only sees top-level subcommand
@@ -603,8 +626,9 @@ async fn run() -> Result<()> {
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
     // root locally (`run`, `init`, `audit-profile`, `distill`,
-    // `runs`, `libraries default`): the flag is a real switch there,
-    // not an assertion. Silent when no daemon is running, when no
+    // `runs`, `libraries default`/`detect`/`scan`): the flag is a real
+    // switch there, not an assertion. Silent when no daemon is running,
+    // when no
     // selection was given, or when the lock predates the identity
     // fields that make the comparison possible.
     if !matches!(
@@ -617,6 +641,8 @@ async fn run() -> Result<()> {
             | Command::Retrieval { .. }
             | Command::Libraries {
                 action: LibrariesAction::Default { .. }
+                    | LibrariesAction::Detect { .. }
+                    | LibrariesAction::Scan { .. }
             }
     ) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
@@ -735,47 +761,55 @@ async fn run() -> Result<()> {
             if let LibrariesAction::List { json } = &mut action {
                 *json = *json || json_global;
             }
-            if let LibrariesAction::Default { name } = &action {
-                // `libraries default` writes the registry directly, so
-                // it works with no daemon and the pointer persists
-                // across restarts. Resolve the registry file the same
-                // way the daemon's fork helper does.
-                let registry_path = bookrack_config::registry_target_path().ok_or_else(|| {
-                    eyre::eyre!(
-                        "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the \
-                         platform config directory is available"
-                    )
-                })?;
-                bookrack_config::set_default_library(&registry_path, name).map_err(|err| {
-                    match err {
-                        // An unknown name is operator input, not a
-                        // system fault: exit 2, not the exit-1 fallback.
-                        ConfigError::UnknownLibrary { .. } => eyre::Report::new(
-                            bookrack_cli::error::BookrackCliError::LocalUserError {
-                                message: err.to_string(),
-                            },
-                        ),
-                        other => eyre::Report::new(other),
+            match action {
+                LibrariesAction::Default { name } => {
+                    // `libraries default` writes the registry directly,
+                    // so it works with no daemon and the pointer persists
+                    // across restarts. Resolve the registry file the same
+                    // way the daemon's fork helper does.
+                    let registry_path =
+                        bookrack_config::registry_target_path().ok_or_else(|| {
+                            eyre::eyre!(
+                                "no registry location: set BOOKRACK_REGISTRY=<path> or ensure \
+                                 the platform config directory is available"
+                            )
+                        })?;
+                    bookrack_config::set_default_library(&registry_path, &name).map_err(|err| {
+                        match err {
+                            // An unknown name is operator input, not a
+                            // system fault: exit 2, not the exit-1 fallback.
+                            ConfigError::UnknownLibrary { .. } => eyre::Report::new(
+                                bookrack_cli::error::BookrackCliError::LocalUserError {
+                                    message: err.to_string(),
+                                },
+                            ),
+                            other => eyre::Report::new(other),
+                        }
+                    })?;
+                    if bookrack_cli::render::ctx().is_json() {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "ok": true,
+                                "name": name,
+                                "registry": registry_path.display().to_string(),
+                            })
+                        );
+                    } else if !bookrack_cli::render::ctx().is_quiet() {
+                        println!(
+                            "default library set to '{name}' ({})",
+                            registry_path.display()
+                        );
                     }
-                })?;
-                if bookrack_cli::render::ctx().is_json() {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "ok": true,
-                            "name": name,
-                            "registry": registry_path.display().to_string(),
-                        })
-                    );
-                } else if !bookrack_cli::render::ctx().is_quiet() {
-                    println!(
-                        "default library set to '{name}' ({})",
-                        registry_path.display()
-                    );
+                    Ok(())
                 }
-                Ok(())
-            } else {
-                cmd::cli_client::libraries::run(action, None).await
+                // `detect` / `scan` are read-only and resolve locally,
+                // never touching a daemon.
+                LibrariesAction::Detect { path } => bookrack_cli::libraries_local::detect(path),
+                LibrariesAction::Scan { parent, volumes } => {
+                    bookrack_cli::libraries_local::scan(parent, volumes)
+                }
+                other => cmd::cli_client::libraries::run(other, None).await,
             }
         }
         Command::Diagnose {
