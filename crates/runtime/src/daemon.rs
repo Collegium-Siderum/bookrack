@@ -398,6 +398,13 @@ impl DaemonRuntime {
             data_dir: cfg.data_dir().display().to_string(),
             library_name: cfg.library().map(str::to_string),
             resolution_source: resolution_source_label(cfg.source()).to_string(),
+            shadowed_default: cfg.shadowed_default().map(|shadowed| {
+                format!(
+                    "registry default '{}' is shadowed by {}",
+                    shadowed.name,
+                    resolution_source_label(cfg.source())
+                )
+            }),
             ollama_url: cfg.ollama_url().to_string(),
             embed_model_configured: embed_cfg.model.clone(),
             mcp_addr: mcp_label.clone(),

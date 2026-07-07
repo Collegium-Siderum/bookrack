@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli, runtime: a shadowed registry default is now visible.**
+  When a path-class source wins the data root — the `--data-dir` flag,
+  `BOOKRACK_DATA_DIR`, or the portable exe-neighbour layout — a registry
+  `default` the operator set still applies on disk but has no effect on
+  which root is served. `config` now computes that eclipse once and
+  surfaces it three ways: `bookrack info` adds a `shadowed_default` line
+  (`registry default '<name>' is shadowed by <source>`), `bookrack
+  doctor` turns the `data root` row from OK to WARN with the same fact
+  and the remedy (unset the variable or pass `--library <name>`), and
+  `libraries default <name>` warns on stderr when `BOOKRACK_DATA_DIR` is
+  set to another root and will shadow the default just written. The
+  precedence itself is unchanged; only the diagnostics are new. The
+  `LibraryInfo` DTO gains an optional `shadowed_default` field.
+
 - **config, cli: offline `libraries add`, `register`, and `remove`, plus
   `scan --register`.** Three write verbs bring an existing data root into
   the registry with no daemon. `libraries add <name> <path>` registers

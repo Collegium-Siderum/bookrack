@@ -156,6 +156,7 @@ async fn record_call_async_writes_one_ok_row() {
         data_dir: fx.catalog_db.display().to_string(),
         library_name: None,
         resolution_source: "test".to_string(),
+        shadowed_default: None,
         ollama_url: "http://localhost:0/".to_string(),
         embed_model_configured: "test-model".to_string(),
         mcp_addr: String::new(),

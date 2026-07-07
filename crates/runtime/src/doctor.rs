@@ -22,7 +22,7 @@
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
-    LibrarySelection, ResolutionSource, default_registry_path, locate_pdfium,
+    LibrarySelection, ResolutionSource, ShadowedDefault, default_registry_path, locate_pdfium,
     pdfium_library_filename,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
@@ -473,15 +473,13 @@ pub fn render_backfill_report(report: &BackfillReport, json: bool) {
 fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Option<Config> {
     match Config::resolve(selection) {
         Ok(cfg) => {
-            let label = "data root";
             let value = cfg.data_dir().display().to_string();
             let source = resolution_source_label(cfg.source());
+            let status = data_root_status(source, cfg.shadowed_default());
             rows.push(Row {
-                label: label.to_string(),
+                label: "data root".to_string(),
                 value,
-                status: Status::Ok {
-                    note: Some(format!("resolved via {source}")),
-                },
+                status,
             });
             Some(cfg)
         }
@@ -509,6 +507,28 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
             });
             None
         }
+    }
+}
+
+/// Build the `data root` row's status. A clean resolution is `Ok` with a
+/// "resolved via <source>" note; a path-class root that eclipses a
+/// registry default is a `Warn` naming the shadowed default and how to
+/// serve it. Pure over its inputs so the decision can be tested without
+/// mutating the process environment.
+fn data_root_status(source: &str, shadowed: Option<&ShadowedDefault>) -> Status {
+    match shadowed {
+        Some(shadowed) => Status::Warn {
+            note: format!(
+                "registry default '{}' ({}) is shadowed by {source}; unset it or \
+                 pass --library {} to serve the registered library",
+                shadowed.name,
+                shadowed.data_dir.display(),
+                shadowed.name,
+            ),
+        },
+        None => Status::Ok {
+            note: Some(format!("resolved via {source}")),
+        },
     }
 }
 
@@ -841,6 +861,43 @@ mod tests {
         assert!(serialised.contains(r#""label":"data root""#));
         assert!(serialised.contains(r#""status":"ok""#));
         assert!(serialised.contains(r#""note":"via flag""#));
+    }
+
+    #[test]
+    fn data_root_status_is_ok_when_nothing_is_shadowed() {
+        let status = data_root_status("--data-dir flag", None);
+        match status {
+            Status::Ok { note } => {
+                assert_eq!(note.as_deref(), Some("resolved via --data-dir flag"));
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_root_status_warns_when_a_registry_default_is_shadowed() {
+        let shadowed = ShadowedDefault {
+            name: "eval-data".to_string(),
+            data_dir: std::path::PathBuf::from("/roots/eval-data"),
+        };
+        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed));
+        match status {
+            Status::Warn { note } => {
+                assert!(
+                    note.contains("registry default 'eval-data' (/roots/eval-data)"),
+                    "missing name and path: {note}"
+                );
+                assert!(
+                    note.contains("is shadowed by BOOKRACK_DATA_DIR env"),
+                    "missing source: {note}"
+                );
+                assert!(
+                    note.contains("pass --library eval-data"),
+                    "missing remedy: {note}"
+                );
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
     }
 
     #[test]

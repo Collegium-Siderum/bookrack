@@ -33,6 +33,10 @@ pub struct LibraryInfoContext {
     pub library_name: Option<String>,
     /// How the data-dir was resolved.
     pub resolution_source: String,
+    /// A registry `default` library eclipsed by a path-class
+    /// resolution, pre-rendered for the card, or `None` when no default
+    /// is silently overridden.
+    pub shadowed_default: Option<String>,
     /// Ollama HTTP endpoint the daemon will reach.
     pub ollama_url: String,
     /// Model tag the daemon is configured to embed with.
@@ -79,6 +83,7 @@ pub async fn show_library_info<E: Embedder>(
             data_dir: ctx.data_dir,
             library_name: ctx.library_name,
             resolution_source: ctx.resolution_source,
+            shadowed_default: ctx.shadowed_default,
             ollama_url: ctx.ollama_url,
             embed_model_configured: ctx.embed_model_configured,
             corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,

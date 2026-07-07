@@ -18,7 +18,7 @@ mod preflight;
 mod run;
 mod util;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
     CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction,
@@ -901,6 +901,23 @@ async fn run() -> Result<()> {
                             registry_path.display()
                         );
                     }
+                    // The write persists across restarts, but a set
+                    // BOOKRACK_DATA_DIR outranks the registry default on
+                    // the next resolve. Warn at the moment the mistaken
+                    // expectation forms — CLI-local, no daemon involved.
+                    let default_root = bookrack_config::find_library(&registry_path, &name)?
+                        .map(|entry| entry.data_dir);
+                    if !bookrack_cli::render::ctx().is_quiet()
+                        && env_data_dir_shadows_default(
+                            std::env::var(bookrack_config::DATA_DIR_ENV).ok(),
+                            default_root.as_deref(),
+                        )
+                    {
+                        eprintln!(
+                            "note: {} is set and will shadow this default until it is unset",
+                            bookrack_config::DATA_DIR_ENV
+                        );
+                    }
                     Ok(())
                 }
                 // `detect` / `scan` are read-only and resolve locally,
@@ -1033,6 +1050,22 @@ fn accepts_audit_profile(command: &Command) -> bool {
     }
 }
 
+/// Whether a set `BOOKRACK_DATA_DIR` will shadow a freshly written
+/// registry default on the next resolve. True when the variable is set
+/// to a non-blank path other than `default_root` — the case where the
+/// env root outranks the registry default and points somewhere else.
+/// Pure over its inputs so the decision is tested without mutating the
+/// process environment.
+fn env_data_dir_shadows_default(env: Option<String>, default_root: Option<&Path>) -> bool {
+    let Some(dir) = env.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    match default_root {
+        Some(root) => Path::new(&dir) != root,
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,6 +1109,35 @@ mod tests {
     fn libraries_default_requires_a_name() {
         let parsed = Cli::try_parse_from(["bookrack", "libraries", "default"]);
         assert!(parsed.is_err(), "the name argument is required");
+    }
+
+    #[test]
+    fn env_data_dir_shadows_a_default_pointing_elsewhere() {
+        assert!(env_data_dir_shadows_default(
+            Some("/env/root".to_string()),
+            Some(Path::new("/roots/prod")),
+        ));
+    }
+
+    #[test]
+    fn env_data_dir_does_not_shadow_when_unset() {
+        assert!(!env_data_dir_shadows_default(
+            None,
+            Some(Path::new("/roots/prod"))
+        ));
+        // Whitespace-only counts as unset.
+        assert!(!env_data_dir_shadows_default(
+            Some("   ".to_string()),
+            Some(Path::new("/roots/prod")),
+        ));
+    }
+
+    #[test]
+    fn env_data_dir_does_not_shadow_when_it_points_at_the_default_root() {
+        assert!(!env_data_dir_shadows_default(
+            Some("/roots/prod".to_string()),
+            Some(Path::new("/roots/prod")),
+        ));
     }
 
     #[test]

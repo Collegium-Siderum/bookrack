@@ -63,6 +63,26 @@ pub struct Config {
     library: Option<String>,
     source: ResolutionSource,
     root_config: RootConfig,
+    shadowed_default: Option<ShadowedDefault>,
+}
+
+/// A registry `default` library that a path-class resolution silently
+/// overrides.
+///
+/// When the data root is won by a path — the `--data-dir` flag,
+/// [`DATA_DIR_ENV`], or the portable exe-neighbour layout — a registry
+/// `default = "<name>"` set by the operator has no effect on which root
+/// is served, yet stays on disk. This records the eclipsed default so
+/// `bookrack info` and `bookrack doctor` can surface it, instead of the
+/// operator having to infer the eclipse from [`ResolutionSource`] alone.
+/// The precedence itself is unchanged: the path source still wins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowedDefault {
+    /// The registry name the eclipsed `default` points at.
+    pub name: String,
+    /// The data root that name maps to — the root that would have been
+    /// served had no path source pre-empted it.
+    pub data_dir: PathBuf,
 }
 
 /// How the data root in a resolved [`Config`] was selected.
@@ -198,14 +218,24 @@ impl Config {
         let registry = load_registry(std::env::var(REGISTRY_ENV).ok())?;
         let default_registry = load_default_registry()?;
         let portable = portable_data_dir();
-        let data_dir = select_root(
+        let resolved = select_root(
             selection,
             std::env::var(DATA_DIR_ENV).ok(),
             registry.as_ref(),
             portable,
             default_registry.as_ref(),
         )?;
-        finish(data_dir, std::env::var(OLLAMA_URL_ENV).ok())
+        let mut config = finish(resolved, std::env::var(OLLAMA_URL_ENV).ok())?;
+        // A path-class resolution can leave a registry `default` set but
+        // ineffective. Detecting it here — after the root is chosen —
+        // enriches the Config without touching which root won.
+        config.shadowed_default = detect_shadowed_default(
+            config.source,
+            &config.data_dir,
+            registry.as_ref(),
+            default_registry.as_ref(),
+        );
+        Ok(config)
     }
 
     /// Construct from an explicit data root, for callers that resolve
@@ -220,6 +250,7 @@ impl Config {
             library: None,
             source: ResolutionSource::Explicit,
             root_config: RootConfig::default(),
+            shadowed_default: None,
         }
     }
 
@@ -253,6 +284,16 @@ impl Config {
     /// won, instead of guessing.
     pub fn source(&self) -> ResolutionSource {
         self.source
+    }
+
+    /// The registry `default` library eclipsed by a path-class
+    /// resolution, when one is set but has no effect on the served root.
+    /// `None` when the default won, no default is set, or the served
+    /// root already matches the default's root. Surfaced by `bookrack
+    /// info` and `bookrack doctor` so a silently-overridden default is
+    /// visible instead of inferred.
+    pub fn shadowed_default(&self) -> Option<&ShadowedDefault> {
+        self.shadowed_default.as_ref()
     }
 
     /// Directory of user-provided original book files awaiting intake.
@@ -916,6 +957,53 @@ fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigErro
         })
 }
 
+/// Detect a registry `default` library eclipsed by a path-class
+/// resolution. Pure over its inputs — a bypass enrichment run after
+/// [`select_root`] chose the root, so it never influences which root
+/// wins and never fails.
+///
+/// A shadow exists only when the root was won by a path source
+/// ([`ResolutionSource::DataDirFlag`], [`ResolutionSource::EnvVar`], or
+/// [`ResolutionSource::PortableExeNeighbor`]) *and* a registry sets a
+/// `default` that resolves to a root other than `resolved_dir`. A
+/// `--library` selection and the two registry-default rungs are the
+/// operator's intent or the default already winning, so neither shadows.
+/// The default is looked up registry-first, then the platform-default
+/// registry, matching [`select_root`]'s 5th and 6th rungs.
+fn detect_shadowed_default(
+    source: ResolutionSource,
+    resolved_dir: &Path,
+    registry: Option<&Registry>,
+    default_registry: Option<&Registry>,
+) -> Option<ShadowedDefault> {
+    match source {
+        ResolutionSource::DataDirFlag
+        | ResolutionSource::EnvVar
+        | ResolutionSource::PortableExeNeighbor => {}
+        ResolutionSource::LibraryFlag
+        | ResolutionSource::RegistryDefault
+        | ResolutionSource::DefaultRegistryDefault
+        | ResolutionSource::Explicit => return None,
+    }
+    let (name, data_dir) = registry
+        .and_then(registry_default_root)
+        .or_else(|| default_registry.and_then(registry_default_root))?;
+    if data_dir == resolved_dir {
+        None
+    } else {
+        Some(ShadowedDefault { name, data_dir })
+    }
+}
+
+/// The registry's `default` library name paired with its resolved root,
+/// or `None` when no default is set or it names an entry the registry
+/// does not carry. Pure over the registry.
+fn registry_default_root(registry: &Registry) -> Option<(String, PathBuf)> {
+    let name = registry.default.clone()?;
+    let data_dir = lookup_library(registry, &name).ok()?;
+    Some((name, data_dir))
+}
+
 /// Validate the chosen root and build a [`Config`]. The root must be an
 /// existing directory. The Ollama endpoint is resolved by precedence
 /// `env var > <data_root>/config.toml > hardcoded default`, so a
@@ -940,6 +1028,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         library,
         source,
         root_config,
+        shadowed_default: None,
     })
 }
 
@@ -1950,6 +2039,134 @@ mod tests {
         assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
         assert_eq!(resolved.source, ResolutionSource::RegistryDefault);
         assert_eq!(resolved.library.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn env_path_shadows_a_default_that_points_elsewhere() {
+        // The env variable won the root, but the registry still names
+        // `prod` (/roots/prod) as default: an eclipse the operator
+        // should be able to see.
+        let shadow = detect_shadowed_default(
+            ResolutionSource::EnvVar,
+            Path::new("/env/root"),
+            Some(&sample_registry()),
+            None,
+        )
+        .expect("an eclipsed default is detected");
+        assert_eq!(shadow.name, "prod");
+        assert_eq!(shadow.data_dir, PathBuf::from("/roots/prod"));
+    }
+
+    #[test]
+    fn data_dir_flag_shadows_like_the_env_variable() {
+        let shadow = detect_shadowed_default(
+            ResolutionSource::DataDirFlag,
+            Path::new("/explicit/root"),
+            Some(&sample_registry()),
+            None,
+        )
+        .expect("the flag eclipses the default too");
+        assert_eq!(shadow.name, "prod");
+    }
+
+    #[test]
+    fn portable_layout_shadows_like_the_env_variable() {
+        let shadow = detect_shadowed_default(
+            ResolutionSource::PortableExeNeighbor,
+            Path::new("/portable/bookrack-data"),
+            Some(&sample_registry()),
+            None,
+        )
+        .expect("the portable layout eclipses the default too");
+        assert_eq!(shadow.name, "prod");
+        assert_eq!(shadow.data_dir, PathBuf::from("/roots/prod"));
+    }
+
+    #[test]
+    fn no_shadow_when_the_default_root_equals_the_resolved_root() {
+        // The env variable points at the very root the default names:
+        // no conflict, so nothing is eclipsed.
+        assert_eq!(
+            detect_shadowed_default(
+                ResolutionSource::EnvVar,
+                Path::new("/roots/prod"),
+                Some(&sample_registry()),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn no_shadow_for_an_explicit_library_selection() {
+        // `--library` is the operator naming a root outright; it never
+        // reads as an eclipse.
+        assert_eq!(
+            detect_shadowed_default(
+                ResolutionSource::LibraryFlag,
+                Path::new("/roots/test"),
+                Some(&sample_registry()),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn no_shadow_when_no_default_is_set() {
+        let registry = parse_registry("[libraries]\nprod = \"/roots/prod\"\n")
+            .expect("registry without a default parses");
+        assert_eq!(
+            detect_shadowed_default(
+                ResolutionSource::EnvVar,
+                Path::new("/env/root"),
+                Some(&registry),
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shadow_takes_the_registry_default_over_the_platform_default() {
+        // Both registries set a default; the primary registry wins, in
+        // step with select_root's 5th-before-6th precedence.
+        let default_registry = parse_registry(
+            "default = \"platform\"\n\
+             [libraries]\n\
+             platform = \"/roots/platform\"\n",
+        )
+        .expect("platform-default registry parses");
+        let shadow = detect_shadowed_default(
+            ResolutionSource::EnvVar,
+            Path::new("/env/root"),
+            Some(&sample_registry()),
+            Some(&default_registry),
+        )
+        .expect("a shadow is detected");
+        assert_eq!(shadow.name, "prod");
+        assert_eq!(shadow.data_dir, PathBuf::from("/roots/prod"));
+    }
+
+    #[test]
+    fn shadow_falls_to_the_platform_default_when_the_registry_has_none() {
+        let registry = parse_registry("[libraries]\nprod = \"/roots/prod\"\n")
+            .expect("registry without a default parses");
+        let default_registry = parse_registry(
+            "default = \"platform\"\n\
+             [libraries]\n\
+             platform = \"/roots/platform\"\n",
+        )
+        .expect("platform-default registry parses");
+        let shadow = detect_shadowed_default(
+            ResolutionSource::EnvVar,
+            Path::new("/env/root"),
+            Some(&registry),
+            Some(&default_registry),
+        )
+        .expect("the platform default is eclipsed");
+        assert_eq!(shadow.name, "platform");
+        assert_eq!(shadow.data_dir, PathBuf::from("/roots/platform"));
     }
 
     #[test]

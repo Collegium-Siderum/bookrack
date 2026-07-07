@@ -21,6 +21,11 @@ pub struct LibraryInfo {
     /// How the data-dir was resolved (database flag / env / registry
     /// default / ...).
     pub resolution_source: String,
+    /// A registry `default` library that a path-class resolution
+    /// silently overrides, pre-rendered as a note. Absent when no
+    /// default is eclipsed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_default: Option<String>,
     /// Ollama HTTP endpoint the daemon will reach for embeddings.
     pub ollama_url: String,
     /// Model tag the daemon is configured to embed with.
