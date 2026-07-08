@@ -301,6 +301,58 @@ release workflow extracts the matching section verbatim from this file.
   CI checks and parameter sweeps. Catalog schema advances to
   `user_version` 10.
 
+- **distill: `bookrack distill lint` validates a `book.toml` fast,
+  without a full build.** `distill build --dry-run` was the only way to
+  ask "does this configuration load and roughly work?", and it grinds
+  the whole source first. `lint` splits the question: it parses each
+  `book.toml` and runs the catalog-driven and `load_pipeline` checks
+  upfront, then feeds the source truncated to `--sample-lines` (300 by
+  default; `0` disables the sample) through the pipeline so the
+  per-stage retention table prints within seconds even on a
+  multi-megabyte OCR product. It continues across books on failure,
+  prints one `slug: lint OK|FAIL` line each, and exits non-zero when any
+  book fails.
+
+- **distill (preview): the reference pipeline handles marker-less
+  sources and one-line bilingual dictionary rows, and scores coverage
+  honestly.** Four refinements to the preview surface: a source with no
+  `<!-- page … -->` markers now collapses to a single synthetic page
+  instead of stranding plain TXT / EPUB text dumps; the latin-headword
+  rule admits a row that packs the headword, a CJK gloss, and a
+  bracketed tag onto one line; `extract_year_span` /
+  `extract_gender_tag` / `extract_quotes` take a `search_in` target so
+  they can scan the headword or both fields (catalog default stays
+  `body`); and each `Stage::run` records a `StageReport` of
+  input/output cardinality, so a stage that silently drops most of its
+  candidates is caught rather than scoring `coverage_pct` at 100 % while
+  an early stage filtered 95 % of the rows.
+
+- **query, mcp: `library.show_book` surfaces the source path and
+  identity.** The per-book detail now carries `source_path`,
+  `source_filename`, `source_sha256`, and `intake_at` alongside the
+  bibliographic view; `source_path` is the path recorded at intake time
+  verbatim, so it may be relative or no longer exist on disk. All four
+  project from the `Intake` row `show_book` already loads, so the read
+  issues no extra queries.
+
+- **cli: `bookrack ingest` and `bookrack intake ocr` forward the queue
+  priority and ingest flags.** `ingest` gains `--priority`; `intake ocr`
+  gains `--priority`, `--force`, and `--hold-for-metadata`. The CLI
+  forwards each onto the matching `ingest.submit` / `intake.ocr` RPC
+  field, aligning the book and OCR surface with the papers ingest
+  grammar that already carried them.
+
+- **audit-profile, ingest: an obviously-garbage extracted title is
+  dropped before the filename fallback.** `AuditData` gains two
+  operator-curated lists — `garbage_substrings` and `garbage_regexes` —
+  shipped empty and merged from the `audit_data.toml` overlay like the
+  publisher whitelist. When the extracted title matches any of
+  `placeholder_titles`, `garbage_substrings`, or `garbage_regexes`, the
+  ingest base-attrs stage drops it before `merge_from_filename` runs, so
+  the filename parser can fill the slot; the rule kind is stamped on the
+  action trail as `drop_garbage_title:{placeholder,substring,regex}`.
+  Unparseable regexes are skipped with a warning.
+
 ### Changed
 
 - **cli: `bookrack ingest`, `bookrack papers ingest`, and `bookrack
@@ -350,6 +402,14 @@ release workflow extracts the matching section verbatim from this file.
   `docs/control-plane.md` is updated to list every method covered.
 
 ### Fixed
+
+- **runtime: a Reference job in the ingest queue no longer panics the
+  worker.** The queue worker's runner hit an `unreachable!` on
+  `ItemKind::Reference` — a submission-side bug, since the distill
+  pipeline is not yet routed through the worker, but it panicked the
+  blocking task and got misclassified as a book failure. It now returns
+  a typed per-item error carrying the offending path, so the worker
+  records the failure and continues with the remaining pending jobs.
 
 - **runtime: a queue enqueue or cancel that fails to persist no longer
   leaves the mutation live in memory.** The `ingest.submit`,
