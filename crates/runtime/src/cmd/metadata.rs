@@ -5,7 +5,7 @@
 //! siblings; this module covers only the write surface.
 
 use bookrack_catalog::Catalog;
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_core::PartitionIdx;
 use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
@@ -336,7 +336,7 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
 }
 
 async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<()> {
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;

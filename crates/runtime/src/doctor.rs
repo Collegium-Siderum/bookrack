@@ -26,11 +26,9 @@ use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, LibraryEntry,
     LibraryIdentification, LibrarySelection, ManifestError, ResolutionSource, ShadowedDefault,
     default_registry_path, list_libraries, load_manifest, locate_pdfium, pdfium_library_filename,
-    registry_target_path,
 };
-use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
-use bookrack_index_profile::{USER_PROFILE_DIR_NAME, has_errors, resolve, validate};
+use bookrack_index_profile::{has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
 
@@ -758,20 +756,13 @@ fn push_registry_consistency_rows(rows: &mut Vec<Row>) {
 
 /// The per-user index-profile directory, beside `registry.toml`.
 fn index_profile_dir() -> Option<std::path::PathBuf> {
-    registry_target_path()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .map(|d| d.join(USER_PROFILE_DIR_NAME))
+    crate::profile::user_profile_dir()
 }
 
-/// The built index stamps relevant to a profile: the embed model and the
-/// vector dimension recorded in the corpus, or `None` when the corpus is
-/// missing, unbuilt, or cannot be opened (so the check skips rather than
-/// racing a live writer).
+/// The built index stamps relevant to a profile; see
+/// [`crate::profile::built_stamps`].
 fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
-    let corpus = Corpus::open_read_only(&data_dir.join("corpus.db")).ok()?;
-    let model = corpus.meta_get(EMBED_MODEL_KEY).ok()??;
-    let dim = corpus.meta_get(VECTOR_DIM_KEY).ok()??.parse::<u32>().ok()?;
-    Some((model, dim))
+    crate::profile::built_stamps(data_dir)
 }
 
 /// Classify one entry's index-profile reference against its resolution
@@ -873,9 +864,20 @@ fn ollama_url_for_probe(cfg: Option<&Config>) -> String {
         .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
 }
 
+/// The embed model the Ollama probe should look for, by the resolution
+/// chain the daemon applies: env var > `config.toml` > (best-effort) the
+/// effective index profile > default. Profile resolution failures fall
+/// through silently — the coherence rows report them; the probe only
+/// needs a model name to ask about.
 fn embed_model_for_probe(cfg: Option<&Config>) -> String {
-    cfg.and_then(|c| c.root_config().embed_model.clone())
-        .or_else(|| std::env::var(EMBED_MODEL_ENV).ok())
+    std::env::var(EMBED_MODEL_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| cfg.and_then(|c| c.root_config().embed_model.clone()))
+        .or_else(|| {
+            let profile = cfg.and_then(|c| crate::profile::effective_index_profile(c).ok())??;
+            Some(profile.profile.embed.model)
+        })
         .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string())
 }
 

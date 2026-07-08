@@ -3,14 +3,14 @@
 //! `bookrack stamps reconcile` — write the binary's current index
 //! stamps onto the corpus, useful after a model swap.
 
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, ContextCompat, Result};
 
 use crate::embed_helpers::embedder;
 
 pub async fn reconcile(cfg: &Config) -> Result<()> {
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder = embedder(cfg, &embed_cfg)?;
     // Probe the embedder once for its current vector dimension. The
     // probe is the only network call this command makes; the corpus

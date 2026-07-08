@@ -4,14 +4,14 @@
 //! name and vector dimension into `papers_corpus.db`'s `index_meta`
 //! table. Peer of [`crate::cmd::stamps`] for the paper pipeline.
 
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, ContextCompat, Result};
 
 use crate::embed_helpers::embedder;
 
 pub async fn reconcile(cfg: &Config) -> Result<()> {
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder = embedder(cfg, &embed_cfg)?;
     let probe = embedder
         .embed_batch(&["dimension probe".to_string()])

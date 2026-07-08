@@ -302,6 +302,34 @@ pub fn list_profiles(dir: &Path) -> Vec<ProfileEntry> {
         .collect()
 }
 
+/// A profile demands the reranker stage before the implementation
+/// exists. Static validation only notes a reranker section; a consumer
+/// about to *run* the profile raises this instead, because silently
+/// skipping the stage would deliver half the combination the profile
+/// promises.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index profile '{profile}' enables a reranker stage, which is not implemented: \
+     the reranker stage lands in a later release; use a profile without a reranker \
+     section for now"
+)]
+pub struct RerankerNotImplemented {
+    /// The profile that names a reranker.
+    pub profile: String,
+}
+
+/// Refuse a profile whose reranker section demands a stage the current
+/// release cannot run. `kind = "none"` (or an absent section) passes.
+pub fn ensure_reranker_supported(profile: &IndexProfile) -> Result<(), RerankerNotImplemented> {
+    if profile.reranker.kind == RerankerKind::None {
+        Ok(())
+    } else {
+        Err(RerankerNotImplemented {
+            profile: profile.name.clone(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +351,20 @@ mod tests {
                 "built-in {name} has validation errors: {errors:?}",
             );
         }
+    }
+
+    #[test]
+    fn reranker_gate_splits_the_two_built_ins() {
+        // The default profile carries no reranker and runs anywhere.
+        let default = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in");
+        assert!(ensure_reranker_supported(&default).is_ok());
+
+        // The quality profile stays a validatable-but-not-runnable
+        // spec target until the reranker stage lands.
+        let quality = IndexProfile::from_named(PROFILE_QWEN3_4B_QUALITY).expect("built-in");
+        let err = ensure_reranker_supported(&quality).expect_err("reranker refused");
+        assert!(err.to_string().contains(PROFILE_QWEN3_4B_QUALITY));
+        assert!(err.to_string().contains("later release"));
     }
 
     #[test]

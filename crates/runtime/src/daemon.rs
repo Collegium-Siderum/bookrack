@@ -307,8 +307,15 @@ impl DaemonRuntime {
             Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
         }
 
-        // 5. EmbedConfig + OllamaEmbedClient
-        let embed_cfg = EmbedConfig::from_env();
+        // 5. EmbedConfig + OllamaEmbedClient. The model resolves by the
+        //    full chain (env > config.toml > index profile > default),
+        //    so a profile-reference or embed-model conflict, an
+        //    undefined profile, and a not-yet-implemented reranker
+        //    stage each refuse startup here with the repair spelled
+        //    out, rather than embedding under a combination the
+        //    operator never declared.
+        let embed_cfg = crate::profile::effective_embed_config(&cfg)
+            .context("resolve effective embed configuration")?;
         let embedder = OllamaEmbedClient::new(
             cfg.ollama_url(),
             &embed_cfg.model,
@@ -339,7 +346,7 @@ impl DaemonRuntime {
         //    chunk-version stamp; papers warms unconditionally so the
         //    first glean into an empty data dir lights up the read
         //    path the same way the book side does.
-        let search_cfg = SearchConfig::from_env();
+        let search_cfg = SearchConfig::resolve(cfg.root_config());
         let library = Library::open(
             cfg.corpus_db(),
             cfg.catalog_db(),

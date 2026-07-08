@@ -8,6 +8,41 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **config, cli: `config.toml` gains `index_profile` and a `[search]`
+  table.** A library's per-root config can now name the index profile it
+  runs under and pin the two retrieval knobs (`search.top_k`,
+  `search.weak_threshold`) that were previously env-only. `bookrack
+  libraries config` accepts the three new keys — dotted keys edit the
+  nested `[search]` table, numeric values are written as TOML numbers,
+  and an `index_profile` reference is refused at write time when it does
+  not resolve or fails static validation. The resolution chains are
+  pinned: `BOOKRACK_EMBED_MODEL` > explicit `embed_model` > the
+  profile's model > default, and `BOOKRACK_SEARCH_*` > `[search]` >
+  default.
+
+- **index-profile, runtime: `index-profile current` and `index-profile
+  diff`.** `current [--library <name>]` reports, offline and read-only,
+  the profile a library effectively runs under — the reference's origin
+  (`config.toml`, `registry`, or both), the resolved
+  embed/ann/reranker combination, the effective embed model, and a
+  field-by-field comparison against the built index stamps. `diff <a>
+  <b>` compares two profiles field by field. Both take `--json`.
+
+### Changed
+
+- **runtime: a referenced index profile now takes effect, and conflicts
+  refuse startup.** The daemon (and every offline embedding command)
+  resolves its embed model through the effective index profile. Two
+  declared facts that disagree are a startup error with both values and
+  the repair paths spelled out: an explicit `embed_model` that
+  contradicts the referenced profile's model, or `config.toml` and the
+  registry entry naming different profiles. A profile that enables a
+  reranker stage is also refused at startup (`qwen3-4b-quality` stays a
+  validatable spec target until the reranker lands), and an undefined
+  or unloadable profile reference no longer passes silently.
+
 ## [0.8.0] - 2026-07-08
 
 ### Added

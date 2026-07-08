@@ -375,6 +375,19 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
         return print_root_config(&name, &data_dir);
     }
 
+    // An `index_profile` reference must resolve and pass static
+    // validation before it is written; stamp consistency is not checked
+    // here (that is `index-profile apply`'s job).
+    for (key, value) in &sets {
+        if key == "index_profile"
+            && let Some(refusal) = bookrack_runtime::profile::refuse_bad_profile_reference(value)
+        {
+            return Err(Report::new(BookrackCliError::LocalUserError {
+                message: refusal,
+            }));
+        }
+    }
+
     set_root_config_values(&data_dir, &sets, &unset).map_err(root_config_set_error)?;
     render_config_write(&name, &data_dir, &sets, &unset);
     Ok(())
@@ -435,6 +448,12 @@ fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], u
     if sets.iter().any(|(key, _)| key == "embed_model") {
         eprintln!(
             "warning: changing embed_model requires re-ingestion; see 'bookrack vectors reset'"
+        );
+    }
+    if sets.iter().any(|(key, _)| key == "index_profile") {
+        eprintln!(
+            "note: run 'bookrack index-profile current' to compare the profile against the \
+             built index"
         );
     }
     for (key, _) in sets {

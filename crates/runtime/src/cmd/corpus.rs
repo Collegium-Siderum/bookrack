@@ -8,7 +8,7 @@
 //! into the destructive operation.
 
 use bookrack_catalog::Catalog;
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use eyre::{Context, Result};
 
@@ -92,7 +92,7 @@ pub async fn execute_rebuild_from_plan(
 
     if include_vectors {
         let lancedb_dir = cfg.lancedb_dir();
-        let embed_cfg = EmbedConfig::from_env();
+        let embed_cfg = crate::profile::effective_embed_config(cfg)?;
         let embedder_client = embedder(cfg, &embed_cfg)?;
         let reembed = bookrack_ingest::reembed::reembed_all(
             &catalog,
@@ -117,7 +117,7 @@ pub async fn execute_rebuild_from_plan(
         });
     } else {
         let lancedb_dir = cfg.lancedb_dir();
-        let embed_cfg = EmbedConfig::from_env();
+        let embed_cfg = crate::profile::effective_embed_config(cfg)?;
         let stamped = bookrack_ingest::rebuild::stamp_index_from_existing_chunks(
             &corpus,
             &lancedb_dir,

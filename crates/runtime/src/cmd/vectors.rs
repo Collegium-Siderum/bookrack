@@ -5,7 +5,7 @@
 //! `bookrack exec library.vectors_status`.
 
 use bookrack_catalog::{Catalog, IntakeStatus};
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
 use eyre::{Context, Result};
@@ -106,7 +106,7 @@ pub async fn execute_reembed_from_plan(
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
     bookrack_ingest::reembed::reembed_all(
         &catalog,
@@ -157,7 +157,7 @@ where
     let catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;
     let corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
 
     let embedded_intakes = catalog

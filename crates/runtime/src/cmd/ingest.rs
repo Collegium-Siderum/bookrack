@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_catalog::Catalog;
-use bookrack_config::{Config, EmbedConfig};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_ingest::{IngestParams, ingest_book};
 use eyre::{Context, Result};
@@ -24,7 +24,7 @@ pub async fn run(
     force: bool,
     profile_name: Option<&str>,
 ) -> Result<()> {
-    let embed_cfg = EmbedConfig::from_env();
+    let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let mut corpus = Corpus::open(&cfg.corpus_db()).context("open corpus")?;
     let mut catalog =
         Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir()).context("open catalog")?;

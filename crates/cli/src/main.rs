@@ -905,7 +905,22 @@ async fn run() -> Result<()> {
     let selection = cli.selection();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
-        Command::IndexProfile { action } => bookrack_runtime::cmd::index_profile::run(action),
+        Command::IndexProfile { mut action } => {
+            match &mut action {
+                IndexProfileAction::Current { library, json } => {
+                    // The global `--library` selects the same library the
+                    // subcommand-local flag does; the local one wins when
+                    // both are given.
+                    if library.is_none() {
+                        *library = selection.library.clone();
+                    }
+                    *json = *json || json_global;
+                }
+                IndexProfileAction::Diff { json, .. } => *json = *json || json_global,
+                _ => {}
+            }
+            bookrack_runtime::cmd::index_profile::run(action)
+        }
         Command::Verify => cmd::cli_client::verify::run(None).await,
         Command::Libraries { mut action } => {
             if let LibrariesAction::List { json } = &mut action {
@@ -1379,6 +1394,51 @@ mod tests {
             panic!("--allow-unknown-model must not attach to list");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn index_profile_current_parses_with_and_without_library() {
+        // Without --library the handler falls back to the registry
+        // default; the grammar must accept the bare form.
+        for argv in [
+            vec!["bookrack", "index-profile", "current"],
+            vec!["bookrack", "index-profile", "current", "--json"],
+            vec!["bookrack", "index-profile", "current", "--library", "x"],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            let Command::IndexProfile { action } = cli.command else {
+                panic!("must parse as index-profile");
+            };
+            assert!(matches!(action, IndexProfileAction::Current { .. }));
+        }
+    }
+
+    #[test]
+    fn index_profile_diff_requires_two_names() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "index-profile",
+            "diff",
+            "qwen3-0.6b-default",
+            "qwen3-4b-quality",
+        ])
+        .expect("two names parse");
+        let Command::IndexProfile {
+            action: IndexProfileAction::Diff { a, b, json },
+        } = cli.command
+        else {
+            panic!("must parse as diff");
+        };
+        assert_eq!(a, "qwen3-0.6b-default");
+        assert_eq!(b, "qwen3-4b-quality");
+        assert!(!json);
+
+        let Err(err) = Cli::try_parse_from(["bookrack", "index-profile", "diff", "only-one"])
+        else {
+            panic!("diff must require both names");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
