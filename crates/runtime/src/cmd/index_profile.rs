@@ -580,11 +580,12 @@ impl ApplyPlan {
         self.actions().iter().any(|(_, a)| a.is_destructive())
     }
 
-    /// Whether the plan contains a re-embed step.
-    pub fn has_reembed(&self) -> bool {
+    /// Whether the plan overwrites vectors in place or degrades search
+    /// to a scan — the tier that asks for a soft confirmation.
+    pub fn needs_soft_confirm(&self) -> bool {
         self.actions()
             .iter()
-            .any(|(_, a)| *a == PlannedAction::Reembed)
+            .any(|(_, a)| matches!(a, PlannedAction::Reembed | PlannedAction::DropIndex))
     }
 
     /// Whether every selected pipeline is already consistent or empty.
@@ -736,6 +737,10 @@ fn describe_action(
             "{ns}vectors rebuild — non-destructive; rebuilds the ANN index as {}{}",
             profile.ann.kind.as_str(),
             ann_params(profile)
+        ),
+        PlannedAction::DropIndex => format!(
+            "{ns}vectors drop — non-destructive; drops the ANN index so search runs as \
+             an exhaustive scan (the profile declares brute-force)"
         ),
         PlannedAction::ReconcileStamps => {
             format!("{ns}stamps reconcile — rewrites the four index stamps (metadata only)")

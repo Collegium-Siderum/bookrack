@@ -48,16 +48,23 @@ pub async fn run(
     if dry_run {
         render_apply_plan(&plan, None);
         if plan.is_noop() {
-            println!("nothing to do: the library already matches '{name}'");
+            println!(
+                "nothing to execute: the built index already matches '{name}' \
+                 (apply would still declare the reference)"
+            );
         } else if plan.has_destructive() {
             print_destructive_paths(&plan.entry.name);
         }
         return Ok(());
     }
 
+    // With no action to run the declaration is still the point of the
+    // command: a library whose stamps happen to match a profile it
+    // never referenced gets pinned to it here.
     if plan.is_noop() {
         render_apply_plan(&plan, None);
-        println!("nothing to do: the library already matches '{name}'");
+        declare_target(&plan, name)?;
+        println!("nothing else to do: the built index already matches '{name}'");
         return Ok(());
     }
 
@@ -152,17 +159,18 @@ enum ConfirmStrength {
     /// Only non-destructive index/metadata work: run unprompted, same
     /// as the underlying verbs.
     None,
-    /// A re-embed overwrites vectors in place: a soft `yes`.
+    /// A re-embed overwrites vectors in place, an index drop degrades
+    /// search to a scan: a soft `yes`.
     Soft,
     /// A reset discards data irrecoverably: the library name retyped
     /// verbatim — the confirmation is about this library, not one verb.
     Hard,
 }
 
-fn confirm_strength(has_destructive: bool, has_reembed: bool) -> ConfirmStrength {
+fn confirm_strength(has_destructive: bool, needs_soft: bool) -> ConfirmStrength {
     if has_destructive {
         ConfirmStrength::Hard
-    } else if has_reembed {
+    } else if needs_soft {
         ConfirmStrength::Soft
     } else {
         ConfirmStrength::None
@@ -175,7 +183,7 @@ fn confirm_strength(has_destructive: bool, has_reembed: bool) -> ConfirmStrength
 fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
     use std::io::IsTerminal;
 
-    let mode = match confirm_strength(plan.has_destructive(), plan.has_reembed()) {
+    let mode = match confirm_strength(plan.has_destructive(), plan.needs_soft_confirm()) {
         ConfirmStrength::None => None,
         ConfirmStrength::Hard => Some((
             ConfirmMode::Hard {
@@ -190,8 +198,9 @@ fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
         )),
         ConfirmStrength::Soft => Some((
             ConfirmMode::Soft,
-            "This plan re-embeds existing chunks in place; vectors are overwritten\n\
-             by fresh embeddings. Type 'yes' to continue:"
+            "This plan overwrites vectors in place (re-embed) or drops the ANN index\n\
+             (search degrades to a scan until the next rebuild).\n\
+             Type 'yes' to continue:"
                 .to_string(),
         )),
     };
@@ -319,10 +328,12 @@ fn method_for(pipeline: Pipeline, action: PlannedAction) -> &'static str {
         (Pipeline::Books, PlannedAction::Reset) => "vectors.reset",
         (Pipeline::Books, PlannedAction::Reembed) => "vectors.reembed",
         (Pipeline::Books, PlannedAction::Rebuild) => "vectors.rebuild",
+        (Pipeline::Books, PlannedAction::DropIndex) => "vectors.drop",
         (Pipeline::Books, PlannedAction::ReconcileStamps) => "stamps.reconcile",
         (Pipeline::Papers, PlannedAction::Reset) => "papers.vectors_reset",
         (Pipeline::Papers, PlannedAction::Reembed) => "papers.vectors_reembed",
         (Pipeline::Papers, PlannedAction::Rebuild) => "papers.vectors_rebuild",
+        (Pipeline::Papers, PlannedAction::DropIndex) => "papers.vectors_drop",
         (Pipeline::Papers, PlannedAction::ReconcileStamps) => "papers.stamps_reconcile",
     }
 }
@@ -361,6 +372,9 @@ async fn execute_action(
                 }),
             )
             .await
+        }
+        PlannedAction::DropIndex => {
+            helpers::call_with_progress(Arc::clone(client), method, json!({ "yes": true })).await
         }
         PlannedAction::ReconcileStamps => {
             helpers::call_with_progress(Arc::clone(client), method, Value::Null).await
@@ -429,6 +443,10 @@ mod tests {
             "vectors.rebuild"
         );
         assert_eq!(
+            method_for(Pipeline::Books, PlannedAction::DropIndex),
+            "vectors.drop"
+        );
+        assert_eq!(
             method_for(Pipeline::Books, PlannedAction::ReconcileStamps),
             "stamps.reconcile"
         );
@@ -443,6 +461,10 @@ mod tests {
         assert_eq!(
             method_for(Pipeline::Papers, PlannedAction::Rebuild),
             "papers.vectors_rebuild"
+        );
+        assert_eq!(
+            method_for(Pipeline::Papers, PlannedAction::DropIndex),
+            "papers.vectors_drop"
         );
         assert_eq!(
             method_for(Pipeline::Papers, PlannedAction::ReconcileStamps),

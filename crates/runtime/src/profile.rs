@@ -27,8 +27,8 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, ensure_reranker_supported, has_errors, resolve,
-    validate,
+    AnnKind, AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, ensure_reranker_supported, has_errors,
+    resolve, validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -438,6 +438,10 @@ pub enum PlannedAction {
     /// Rebuild the ANN index with the profile's ANN parameters
     /// (`vectors rebuild`). Non-destructive.
     Rebuild,
+    /// Drop the ANN index so search runs as an exhaustive scan
+    /// (`vectors drop`), for a profile that declares `brute-force`.
+    /// Non-destructive; a rebuild re-creates the index.
+    DropIndex,
     /// Rewrite the four index stamps from a live embedder probe
     /// (`stamps reconcile`). Non-destructive; repairs metadata drift.
     ReconcileStamps,
@@ -450,6 +454,7 @@ impl PlannedAction {
             PlannedAction::Reset => "reset",
             PlannedAction::Reembed => "reembed",
             PlannedAction::Rebuild => "rebuild",
+            PlannedAction::DropIndex => "drop-index",
             PlannedAction::ReconcileStamps => "reconcile-stamps",
         }
     }
@@ -482,12 +487,17 @@ pub enum PipelinePlan {
 ///
 /// 1. A stamped embed model or vector dimension that differs from the
 ///    profile derives a [`PlannedAction::Reset`]. The reset re-chunks
-///    and re-embeds everything, so it absorbs every other action.
+///    and re-embeds everything — absorbing any re-embed or reconcile —
+///    but it also removes `vectors_meta.json` with the chunks table, so
+///    a profile that declares an index gets the follow-up
+///    [`PlannedAction::Rebuild`] that realizes it.
 /// 2. A stamped chunk or normalize version that differs from this
 ///    binary derives a [`PlannedAction::Reembed`].
-/// 3. A persisted ANN configuration that differs from the profile — or
-///    a chunk table with no persisted configuration at all — derives a
-///    [`PlannedAction::Rebuild`].
+/// 3. The declared ANN state is realized: an index-declaring profile
+///    derives a [`PlannedAction::Rebuild`] when the persisted
+///    configuration differs or is absent; a `brute-force` profile
+///    derives a [`PlannedAction::DropIndex`] when an index is
+///    persisted (an absent configuration already is the scan state).
 /// 4. Stamp keys that are missing while every present one matches
 ///    derive a [`PlannedAction::ReconcileStamps`], unless a re-embed is
 ///    already planned (it rewrites the stamps itself).
@@ -509,7 +519,11 @@ pub fn derive_pipeline_plan(
         .is_some_and(|m| m != target.embed_model);
     let dim_diverges = built.vector_dim.is_some_and(|d| d != target.vector_dim);
     if model_diverges || dim_diverges {
-        return PipelinePlan::Run(vec![PlannedAction::Reset]);
+        let mut actions = vec![PlannedAction::Reset];
+        if profile.ann.kind != AnnKind::BruteForce {
+            actions.push(PlannedAction::Rebuild);
+        }
+        return PipelinePlan::Run(actions);
     }
 
     let mut actions = Vec::new();
@@ -523,12 +537,9 @@ pub fn derive_pipeline_plan(
         actions.push(PlannedAction::Reembed);
     }
     if state.has_chunks
-        && !state
-            .ann
-            .as_ref()
-            .is_some_and(|current| ann_matches_profile(current, &profile.ann))
+        && let Some(action) = ann_action(state.ann.as_ref(), &profile.ann)
     {
-        actions.push(PlannedAction::Rebuild);
+        actions.push(action);
     }
     if !built.is_fully_stamped() && !actions.contains(&PlannedAction::Reembed) {
         actions.push(PlannedAction::ReconcileStamps);
@@ -538,6 +549,23 @@ pub fn derive_pipeline_plan(
         PipelinePlan::Consistent
     } else {
         PipelinePlan::Run(actions)
+    }
+}
+
+/// The action (if any) that brings the persisted ANN state to what the
+/// profile declares. `current` is the decoded `vectors_meta.json`;
+/// `None` means no index was ever built, i.e. the exhaustive-scan
+/// state.
+fn ann_action(current: Option<&AnnConfig>, spec: &AnnSpec) -> Option<PlannedAction> {
+    let declares_scan = spec.kind == AnnKind::BruteForce;
+    match current {
+        None => (!declares_scan).then_some(PlannedAction::Rebuild),
+        Some(cur) if declares_scan => {
+            // Parameters are meaningless for a scan; only the kind
+            // decides whether an index must be dropped.
+            (cur.kind.as_str() != AnnKind::BruteForce.as_str()).then_some(PlannedAction::DropIndex)
+        }
+        Some(cur) => (!ann_matches_profile(cur, spec)).then_some(PlannedAction::Rebuild),
     }
 }
 
@@ -776,29 +804,54 @@ mod tests {
             PipelinePlan::Consistent
         );
 
-        // A different stamped model: destructive reset.
+        // A different stamped model: destructive reset. The reset
+        // removes the ANN meta with the chunks table, so realizing the
+        // profile's declared index takes the follow-up rebuild.
         let mut other_model = consistent.clone();
         other_model.built.as_mut().expect("stamps").embed_model = Some("other".to_string());
         assert_eq!(
             derive_pipeline_plan(&profile, &target, &other_model),
-            PipelinePlan::Run(vec![PlannedAction::Reset])
+            PipelinePlan::Run(vec![PlannedAction::Reset, PlannedAction::Rebuild])
         );
 
-        // A different stamped dimension: also a reset.
+        // A different stamped dimension: same plan.
         let mut other_dim = consistent.clone();
         other_dim.built.as_mut().expect("stamps").vector_dim = Some(target.vector_dim + 1);
         assert_eq!(
             derive_pipeline_plan(&profile, &target, &other_dim),
-            PipelinePlan::Run(vec![PlannedAction::Reset])
+            PipelinePlan::Run(vec![PlannedAction::Reset, PlannedAction::Rebuild])
         );
 
-        // Model change combined with an ANN change: the reset absorbs
-        // the rebuild — resetting re-derives the store anyway.
+        // Model change combined with an ANN change: no separate rebuild
+        // beyond the one the reset already entails.
         let mut mixed = other_model.clone();
         mixed.ann.as_mut().expect("ann").num_partitions += 1;
         assert_eq!(
             derive_pipeline_plan(&profile, &target, &mixed),
+            PipelinePlan::Run(vec![PlannedAction::Reset, PlannedAction::Rebuild])
+        );
+
+        // A model change under a brute-force profile: the reset's
+        // post-state (no index, exhaustive scan) is the declared state,
+        // so nothing follows it.
+        let mut scan_profile = profile.clone();
+        scan_profile.ann.kind = AnnKind::BruteForce;
+        assert_eq!(
+            derive_pipeline_plan(&scan_profile, &target, &other_model),
             PipelinePlan::Run(vec![PlannedAction::Reset])
+        );
+
+        // A brute-force profile over a built index: drop it; over a
+        // store with no index meta: already the declared state.
+        assert_eq!(
+            derive_pipeline_plan(&scan_profile, &target, &consistent),
+            PipelinePlan::Run(vec![PlannedAction::DropIndex])
+        );
+        let mut no_index = consistent.clone();
+        no_index.ann = None;
+        assert_eq!(
+            derive_pipeline_plan(&scan_profile, &target, &no_index),
+            PipelinePlan::Consistent
         );
 
         // A stale chunk version under the same model: re-embed.

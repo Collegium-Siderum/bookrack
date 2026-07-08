@@ -37,9 +37,12 @@ release workflow extracts the matching section verbatim from this file.
   would mask it, compare the recorded stamps and the persisted ANN
   configuration per pipeline (books and papers derive independently;
   an unused pipeline is skipped), and derive the action list — a
-  destructive `reset` when the embed model or dimension changed, a
-  `reembed` for a chunking/normalization version bump, a `rebuild` for
-  ANN-only drift, a `stamps reconcile` for missing stamp records.
+  destructive `reset` (followed by the `rebuild` that realizes the
+  declared index) when the embed model or dimension changed, a
+  `reembed` for a chunking/normalization version bump, a `rebuild` or
+  `drop` that realizes the declared ANN state, a `stamps reconcile`
+  for missing stamp records. Applying to an already-consistent library
+  still writes the profile reference.
   `--dry-run` prints the plan offline; executing routes every action
   through the daemon queue in order, one result line per step. A plan
   containing a reset demands the library name retyped (or `--yes`), and
