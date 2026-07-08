@@ -547,6 +547,172 @@ pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
     format!("# bookrack root config. Written by `bookrack init`; safe to edit.\n{body}")
 }
 
+/// The keys `bookrack libraries config` accepts, mirroring the fields of
+/// [`RootConfig`]. A `set` or `unset` of any other key is refused so a
+/// typo cannot silently leave `deny_unknown_fields` to reject the file on
+/// the next load. A test asserts this list stays in lockstep with the
+/// struct's serialized field names.
+pub const ROOT_CONFIG_KEYS: &[&str] = &["ollama_url", "embed_model", "mcp_addr", "log_directive"];
+
+/// Name the environment variable that overrides `key` in the resolution
+/// chain (`env` > `config.toml` > default), or `None` when the key has no
+/// env counterpart. Lets a caller warn that a value it just wrote is
+/// currently shadowed by a set variable.
+pub fn root_config_env_override(key: &str) -> Option<&'static str> {
+    match key {
+        "ollama_url" => Some(OLLAMA_URL_ENV),
+        "embed_model" => Some(EMBED_MODEL_ENV),
+        "mcp_addr" => Some(MCP_ADDR_ENV),
+        "log_directive" => Some(LOG_ENV),
+        _ => None,
+    }
+}
+
+/// Read `<data_root>/config.toml` verbatim, preserving comments and
+/// layout for a human-readable dump. A missing file resolves to an empty
+/// string so a caller can present "no config yet" without a separate
+/// branch; an unreadable file surfaces as
+/// [`ConfigError::RootConfigUnreadable`].
+pub fn read_root_config_text(data_dir: &Path) -> Result<String, ConfigError> {
+    let path = data_dir.join(ROOT_CONFIG_NAME);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(source) => Err(ConfigError::RootConfigUnreadable { path, source }),
+    }
+}
+
+/// Why an edit of `<data_root>/config.toml` could not proceed. Split from
+/// [`ConfigError`] so the CLI maps an operator-input fault (an unknown
+/// key, an unparseable value, a hand-corrupted file) to its user-error
+/// exit code, while a genuine I/O failure keeps the internal-error one.
+#[derive(Debug, thiserror::Error)]
+pub enum RootConfigSetError {
+    /// A `key=value` set (or an `unset`) named a key outside
+    /// [`ROOT_CONFIG_KEYS`].
+    #[error("unknown key '{key}'; accepted keys are {}", ROOT_CONFIG_KEYS.join(", "))]
+    UnknownKey {
+        /// The rejected key.
+        key: String,
+    },
+    /// A value failed the light shape check for its key.
+    #[error("invalid value for '{key}': {reason}")]
+    InvalidValue {
+        /// The key whose value was rejected.
+        key: String,
+        /// A short account of what the value should look like.
+        reason: String,
+    },
+    /// The existing file is not parseable as TOML, so an edit that would
+    /// preserve its comments cannot begin.
+    #[error("the root config at {} is malformed: {reason}", .path.display())]
+    Malformed {
+        /// The config file path.
+        path: PathBuf,
+        /// The parse failure, formatted.
+        reason: String,
+    },
+    /// Reading the existing file failed.
+    #[error(transparent)]
+    Io(#[from] ConfigError),
+    /// Writing the edited file back failed.
+    #[error("cannot write the root config at {}", .path.display())]
+    Write {
+        /// The config file path.
+        path: PathBuf,
+        /// The write failure.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Apply `sets` and `unsets` to `<data_root>/config.toml`, editing the
+/// document in place so hand-written comments and key ordering survive.
+///
+/// Every key is checked against [`ROOT_CONFIG_KEYS`] and every set value
+/// against a light per-key shape check before anything is written, so a
+/// rejected batch leaves the file untouched. A missing file starts from
+/// an empty document, so a data root that predates `config.toml` can
+/// still be configured. The write is atomic.
+pub fn set_root_config_values(
+    data_dir: &Path,
+    sets: &[(String, String)],
+    unsets: &[String],
+) -> Result<(), RootConfigSetError> {
+    for (key, value) in sets {
+        validate_root_config_key(key)?;
+        validate_root_config_value(key, value)?;
+    }
+    for key in unsets {
+        validate_root_config_key(key)?;
+    }
+
+    let path = data_dir.join(ROOT_CONFIG_NAME);
+    let text = read_root_config_text(data_dir)?;
+    let mut doc =
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|source| RootConfigSetError::Malformed {
+                path: path.clone(),
+                reason: source.to_string(),
+            })?;
+
+    for (key, value) in sets {
+        doc[key.as_str()] = toml_edit::value(value.as_str());
+    }
+    for key in unsets {
+        doc.remove(key.as_str());
+    }
+
+    write_atomically(&path, &doc.to_string())
+        .map_err(|source| RootConfigSetError::Write { path, source })
+}
+
+/// Reject a key that is not one bookrack recognizes.
+fn validate_root_config_key(key: &str) -> Result<(), RootConfigSetError> {
+    if ROOT_CONFIG_KEYS.contains(&key) {
+        Ok(())
+    } else {
+        Err(RootConfigSetError::UnknownKey {
+            key: key.to_string(),
+        })
+    }
+}
+
+/// Light per-key value check: `ollama_url` must carry a scheme and an
+/// authority, `mcp_addr` must have a `host:port` shape with a numeric
+/// port. `embed_model` and `log_directive` are free-form — a model tag
+/// has no fixed grammar and a tracing directive is validated by the
+/// runtime that consumes it.
+fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
+    let invalid = |reason: &str| {
+        Err(RootConfigSetError::InvalidValue {
+            key: key.to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    match key {
+        "ollama_url" => {
+            let Some((scheme, rest)) = value.split_once("://") else {
+                return invalid("expected a URL like 'http://host:port'");
+            };
+            if scheme.is_empty() || rest.is_empty() {
+                return invalid("expected a URL like 'http://host:port'");
+            }
+            Ok(())
+        }
+        "mcp_addr" => {
+            let Some((host, port)) = value.rsplit_once(':') else {
+                return invalid("expected a 'host:port' address");
+            };
+            if host.is_empty() || port.parse::<u16>().is_err() {
+                return invalid("expected a 'host:port' address with a numeric port");
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Embedding model served by the local Ollama daemon, used when
 /// [`EmbedConfig`] is left at its default.
 pub const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding:0.6b";
@@ -2976,6 +3142,152 @@ mod tests {
             load_root_config(tmp.path()),
             Err(ConfigError::RootConfigMalformed { .. })
         ));
+    }
+
+    #[test]
+    fn root_config_keys_match_struct_fields() {
+        // Every serialized field of a fully-populated `RootConfig` must
+        // appear in `ROOT_CONFIG_KEYS`, so adding a field without
+        // extending the write whitelist fails here rather than silently
+        // rejecting the key at runtime.
+        let full = RootConfig {
+            ollama_url: Some("http://x:1".to_string()),
+            embed_model: Some("m".to_string()),
+            mcp_addr: Some("127.0.0.1:1".to_string()),
+            log_directive: Some("info".to_string()),
+        };
+        let value = toml::Value::try_from(&full).expect("RootConfig serializes to a table");
+        let mut fields: Vec<String> = value
+            .as_table()
+            .expect("RootConfig is a table")
+            .keys()
+            .cloned()
+            .collect();
+        fields.sort();
+        let mut keys: Vec<String> = ROOT_CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
+        keys.sort();
+        assert_eq!(fields, keys);
+    }
+
+    #[test]
+    fn set_root_config_preserves_comments_and_edits_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(ROOT_CONFIG_NAME),
+            "# hand-written note\nembed_model = \"old-model\"\n",
+        )
+        .expect("seed config");
+        set_root_config_values(
+            tmp.path(),
+            &[("embed_model".to_string(), "new-model".to_string())],
+            &[],
+        )
+        .expect("set applies");
+        let text = read_root_config_text(tmp.path()).expect("read back");
+        assert!(text.contains("# hand-written note"));
+        assert!(text.contains("new-model"));
+        assert!(!text.contains("old-model"));
+    }
+
+    #[test]
+    fn set_root_config_rejects_unknown_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = set_root_config_values(
+            tmp.path(),
+            &[("not_a_key".to_string(), "x".to_string())],
+            &[],
+        )
+        .expect_err("unknown key rejected");
+        assert!(matches!(err, RootConfigSetError::UnknownKey { .. }));
+        // The batch is rejected before any write.
+        assert!(!tmp.path().join(ROOT_CONFIG_NAME).exists());
+    }
+
+    #[test]
+    fn set_root_config_validates_values() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            set_root_config_values(
+                tmp.path(),
+                &[("ollama_url".to_string(), "not-a-url".to_string())],
+                &[],
+            ),
+            Err(RootConfigSetError::InvalidValue { .. })
+        ));
+        assert!(matches!(
+            set_root_config_values(
+                tmp.path(),
+                &[("mcp_addr".to_string(), "host-without-port".to_string())],
+                &[],
+            ),
+            Err(RootConfigSetError::InvalidValue { .. })
+        ));
+        // A well-formed URL and address pass.
+        set_root_config_values(
+            tmp.path(),
+            &[
+                ("ollama_url".to_string(), "http://host:11434".to_string()),
+                ("mcp_addr".to_string(), "127.0.0.1:8765".to_string()),
+            ],
+            &[],
+        )
+        .expect("valid values accepted");
+    }
+
+    #[test]
+    fn set_root_config_starts_from_empty_when_file_absent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        set_root_config_values(
+            tmp.path(),
+            &[("embed_model".to_string(), "m".to_string())],
+            &[],
+        )
+        .expect("write from empty");
+        let cfg = load_root_config(tmp.path()).expect("reloads");
+        assert_eq!(cfg.embed_model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn set_root_config_unset_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(ROOT_CONFIG_NAME), "embed_model = \"m\"\n")
+            .expect("seed config");
+        // Unsetting a key the file never set is a no-op, not an error.
+        set_root_config_values(tmp.path(), &[], &["mcp_addr".to_string()]).expect("unset absent");
+        let cfg = load_root_config(tmp.path()).expect("reloads");
+        assert_eq!(cfg.embed_model.as_deref(), Some("m"));
+        // Unsetting a key that is present removes it.
+        set_root_config_values(tmp.path(), &[], &["embed_model".to_string()])
+            .expect("unset present");
+        let cfg = load_root_config(tmp.path()).expect("reloads");
+        assert!(cfg.embed_model.is_none());
+    }
+
+    #[test]
+    fn set_root_config_rejects_malformed_existing_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(ROOT_CONFIG_NAME), "this is = = not toml\n")
+            .expect("seed garbage");
+        assert!(matches!(
+            set_root_config_values(
+                tmp.path(),
+                &[("embed_model".to_string(), "m".to_string())],
+                &[],
+            ),
+            Err(RootConfigSetError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn root_config_env_override_maps_each_key() {
+        assert_eq!(root_config_env_override("ollama_url"), Some(OLLAMA_URL_ENV));
+        assert_eq!(
+            root_config_env_override("embed_model"),
+            Some(EMBED_MODEL_ENV)
+        );
+        assert_eq!(root_config_env_override("mcp_addr"), Some(MCP_ADDR_ENV));
+        assert_eq!(root_config_env_override("log_directive"), Some(LOG_ENV));
+        assert_eq!(root_config_env_override("nope"), None);
     }
 
     #[test]

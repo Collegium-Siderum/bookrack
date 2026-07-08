@@ -55,10 +55,12 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
         }
         LibrariesAction::Add { .. }
         | LibrariesAction::Register { .. }
-        | LibrariesAction::Remove { .. } => {
-            // `add` / `register` / `remove` write the registry offline;
-            // `main` dispatches them before reaching this daemon path.
-            unreachable!("libraries add/register/remove are handled offline in main")
+        | LibrariesAction::Remove { .. }
+        | LibrariesAction::Config { .. } => {
+            // `add` / `register` / `remove` / `config` edit the registry
+            // or a root's `config.toml` offline; `main` dispatches them
+            // before reaching this daemon path.
+            unreachable!("libraries add/register/remove/config are handled offline in main")
         }
         LibrariesAction::Fork {
             new_name,

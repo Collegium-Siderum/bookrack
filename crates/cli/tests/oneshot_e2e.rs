@@ -609,6 +609,131 @@ async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
     Ok(())
 }
 
+/// `libraries config <name> KEY=VALUE` resolves the root from the
+/// registry offline, edits its `config.toml` in place preserving a
+/// hand-written comment, and warns that an embed-model change needs
+/// re-ingestion and a daemon restart. A subsequent no-pair invocation
+/// dumps the whole file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_config_edits_root_config_offline() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.prod]\ndata_dir = {}\n",
+            toml_escape(root.path()),
+        ),
+    )?;
+    // A hand-written comment the edit must not clobber.
+    std::fs::write(
+        root.path().join("config.toml"),
+        "# operator note: leave this here\nembed_model = \"old-model\"\n",
+    )?;
+
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod", "embed_model=new-model"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .env_remove("BOOKRACK_EMBED_MODEL")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "config edit should resolve offline and exit 0; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires re-ingestion"),
+        "embed_model change should warn about re-ingestion: {stderr}",
+    );
+    assert!(
+        stderr.contains("restart the daemon"),
+        "a write should note the daemon restart: {stderr}",
+    );
+    let written = std::fs::read_to_string(root.path().join("config.toml"))?;
+    assert!(
+        written.contains("# operator note: leave this here"),
+        "the hand-written comment was clobbered: {written}",
+    );
+    assert!(
+        written.contains("new-model") && !written.contains("old-model"),
+        "the key was not updated: {written}",
+    );
+
+    // No pairs: dump the file verbatim, comment included.
+    let dump = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(dump.status.code(), Some(0));
+    let dump_out = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        dump_out.contains("# operator note: leave this here") && dump_out.contains("new-model"),
+        "the dump should print the whole file: {dump_out}",
+    );
+    Ok(())
+}
+
+/// `libraries config` rejects a key outside the whitelist with exit 2
+/// (operator input) and leaves the file untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.prod]\ndata_dir = {}\n",
+            toml_escape(root.path()),
+        ),
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod", "not_a_key=1"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unknown key is operator input (exit 2); stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !root.path().join("config.toml").exists(),
+        "a rejected batch must not create the file",
+    );
+    Ok(())
+}
+
+/// Render a path as a TOML basic string for a registry `data_dir` value.
+/// Test paths from `tempfile` carry no quotes or backslashes on unix, so
+/// wrapping in quotes is sufficient here.
+fn toml_escape(path: &std::path::Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
 enum CaseExpect {
     NotRunning,
     Quit,

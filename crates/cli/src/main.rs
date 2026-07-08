@@ -516,6 +516,41 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         yes: bool,
     },
+    /// Read or edit a registered library's `config.toml`.
+    ///
+    /// Resolves the library's data root from the registry with no
+    /// daemon, then reads or edits its `config.toml` in place. With no
+    /// `KEY=VALUE` arguments (and no `--unset`), prints the file. The
+    /// change does not reach a running daemon until it restarts.
+    Config {
+        /// Registry name whose config is read or edited.
+        name: String,
+        /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
+        /// `embed_model`, `mcp_addr`, `log_directive`.
+        #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
+        sets: Vec<(String, String)>,
+        /// Key to remove from the file. Repeatable.
+        #[arg(long, value_name = "KEY")]
+        unset: Vec<String>,
+    },
+}
+
+/// Split a `KEY=VALUE` argument on its first `=`. Rejects an empty key or
+/// an argument with no `=`, so clap reports the fault and exits 2 before
+/// any dispatch.
+fn parse_key_val(raw: &str) -> Result<(String, String), String> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got '{raw}'"))?;
+    if key.is_empty() {
+        return Err(format!("empty key in '{raw}'"));
+    }
+    if value.is_empty() {
+        return Err(format!(
+            "empty value in '{raw}'; use --unset {key} to clear a key"
+        ));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 /// CLI mirror of [`bookrack_config::LibraryKind`], deriving clap's
@@ -723,7 +758,7 @@ async fn run() -> Result<()> {
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
     // root locally (`run`, `init`, `audit-profile`, `distill`,
-    // `runs`, `libraries default`/`detect`/`scan`): the flag is a real
+    // `runs`, and the offline `libraries` verbs): the flag is a real
     // switch there, not an assertion. Silent when no daemon is running,
     // when no
     // selection was given, or when the lock predates the identity
@@ -743,6 +778,7 @@ async fn run() -> Result<()> {
                     | LibrariesAction::Add { .. }
                     | LibrariesAction::Register { .. }
                     | LibrariesAction::Remove { .. }
+                    | LibrariesAction::Config { .. }
             }
     ) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
@@ -966,6 +1002,9 @@ async fn run() -> Result<()> {
                 ),
                 LibrariesAction::Remove { name, purge, yes } => {
                     bookrack_cli::libraries_local::remove(name, purge, yes)
+                }
+                LibrariesAction::Config { name, sets, unset } => {
+                    bookrack_cli::libraries_local::config(name, sets, unset)
                 }
                 other => cmd::cli_client::libraries::run(other, None).await,
             }
@@ -1219,6 +1258,76 @@ mod tests {
                 assert!(!yes);
             }
             _ => panic!("expected `libraries remove`"),
+        }
+    }
+
+    #[test]
+    fn libraries_config_parses_sets_and_unsets() {
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "libraries",
+            "config",
+            "prod",
+            "embed_model=alt-model",
+            "ollama_url=http://host:11434",
+            "--unset",
+            "mcp_addr",
+            "--unset",
+            "log_directive",
+        ])
+        .expect("`libraries config` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Config { name, sets, unset },
+            } => {
+                assert_eq!(name, "prod");
+                assert_eq!(
+                    sets,
+                    vec![
+                        ("embed_model".to_string(), "alt-model".to_string()),
+                        ("ollama_url".to_string(), "http://host:11434".to_string()),
+                    ]
+                );
+                assert_eq!(
+                    unset,
+                    vec!["mcp_addr".to_string(), "log_directive".to_string()]
+                );
+            }
+            _ => panic!("expected `libraries config`"),
+        }
+    }
+
+    #[test]
+    fn libraries_config_prints_file_with_no_pairs() {
+        let cli = Cli::try_parse_from(["bookrack", "libraries", "config", "prod"])
+            .expect("`libraries config <name>` parses");
+        match cli.command {
+            Command::Libraries {
+                action: LibrariesAction::Config { name, sets, unset },
+            } => {
+                assert_eq!(name, "prod");
+                assert!(sets.is_empty());
+                assert!(unset.is_empty());
+            }
+            _ => panic!("expected `libraries config`"),
+        }
+    }
+
+    #[test]
+    fn libraries_config_rejects_a_pair_without_equals() {
+        for argv in [
+            vec!["bookrack", "libraries", "config", "prod", "embed_model"],
+            vec!["bookrack", "libraries", "config", "prod", "=value"],
+            vec!["bookrack", "libraries", "config", "prod", "embed_model="],
+        ] {
+            let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
+                panic!("a malformed pair must error: {argv:?}");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "argv: {argv:?}"
+            );
         }
     }
 

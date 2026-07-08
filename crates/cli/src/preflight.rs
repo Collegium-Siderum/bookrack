@@ -26,10 +26,10 @@
 //!
 //! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
 //! `distill`, `runs`, and the offline `libraries` verbs —
-//! `default`/`detect`/`scan`/`add`/`register`/`remove`) bypass this
-//! check entirely — for them the flag is a real switch into a different
-//! data root, or an offline registry read/write, not an assertion about
-//! the running daemon.
+//! `default`/`detect`/`scan`/`add`/`register`/`remove`/`config`) bypass
+//! this check entirely — for them the flag is a real switch into a
+//! different data root, or an offline registry read/write, not an
+//! assertion about the running daemon.
 
 use std::path::{Path, PathBuf};
 

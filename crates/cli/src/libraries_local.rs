@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 
 use bookrack_config::{
     AddOptions, AddOutcome, AddReport, ConfigError, DetectError, DetectVerdict, LibraryKind,
-    LibraryManifest, LibraryOpError, ScanOutcome, Signal, add_library, detect_library,
-    find_library, mounted_volumes, registry_target_path, remove_library, render_manifest_toml,
-    repoint_library, scan_for_libraries,
+    LibraryManifest, LibraryOpError, RootConfigSetError, ScanOutcome, Signal, add_library,
+    detect_library, find_library, load_root_config, mounted_volumes, read_root_config_text,
+    registry_target_path, remove_library, render_manifest_toml, repoint_library,
+    root_config_env_override, scan_for_libraries, set_root_config_values,
 };
 use eyre::{Report, Result};
 use serde::Serialize;
@@ -353,6 +354,111 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `libraries config <name> [KEY=VALUE ...] [--unset KEY]`: resolve the
+/// library's data root from the registry, then read or edit its
+/// `config.toml`. With no sets and no unsets, print the file; otherwise
+/// apply the edits in place, preserving comments.
+pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> Result<()> {
+    let registry_path = registry_path()?;
+    let entry = find_library(&registry_path, &name)
+        .map_err(config_error)?
+        .ok_or_else(|| {
+            Report::new(BookrackCliError::LocalUserError {
+                message: format!("no library named '{name}' in the registry"),
+            })
+        })?;
+    let data_dir = entry.data_dir;
+
+    if sets.is_empty() && unset.is_empty() {
+        return print_root_config(&name, &data_dir);
+    }
+
+    set_root_config_values(&data_dir, &sets, &unset).map_err(root_config_set_error)?;
+    render_config_write(&name, &data_dir, &sets, &unset);
+    Ok(())
+}
+
+/// Dump a library's `config.toml`: the parsed [`RootConfig`] for `--json`,
+/// the raw file text (comments and all) for a human reader.
+fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
+    if ctx().is_json() {
+        let cfg = load_root_config(data_dir).map_err(config_error)?;
+        println!(
+            "{}",
+            serde_json::to_string(&cfg).expect("root config serializes")
+        );
+        return Ok(());
+    }
+    if ctx().is_quiet() {
+        return Ok(());
+    }
+    let text = read_root_config_text(data_dir).map_err(config_error)?;
+    if text.trim().is_empty() {
+        println!(
+            "'{name}' has no config.toml at {}",
+            data_dir.join(bookrack_config::ROOT_CONFIG_NAME).display()
+        );
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+/// Report a successful edit: the keys set and unset, plus the advisory
+/// notes an operator needs — an embed-model change implies re-ingestion,
+/// a set env var shadows the file, and the change only reaches a running
+/// daemon on restart.
+fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], unset: &[String]) {
+    if ctx().is_json() {
+        let value = serde_json::json!({
+            "ok": true,
+            "name": name,
+            "data_dir": data_dir.display().to_string(),
+            "set": sets.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+            "unset": unset,
+        });
+        println!("{value}");
+    } else if !ctx().is_quiet() {
+        for (key, value) in sets {
+            println!("set {key} = {value:?}");
+        }
+        for key in unset {
+            println!("unset {key}");
+        }
+    }
+
+    if ctx().is_quiet() {
+        return;
+    }
+    if sets.iter().any(|(key, _)| key == "embed_model") {
+        eprintln!(
+            "warning: changing embed_model requires re-ingestion; see 'bookrack vectors reset'"
+        );
+    }
+    for (key, _) in sets {
+        if let Some(env) = root_config_env_override(key)
+            && std::env::var_os(env).is_some_and(|v| !v.is_empty())
+        {
+            eprintln!("note: {env} is set and overrides this value");
+        }
+    }
+    eprintln!("note: restart the daemon (or re-run 'bookrack run') to apply");
+}
+
+/// Map a [`RootConfigSetError`] to the right exit code: an operator-input
+/// fault (unknown key, invalid value, hand-corrupted file) is a user
+/// error (exit 2); an I/O failure keeps the generic internal-error path.
+fn root_config_set_error(err: RootConfigSetError) -> Report {
+    match &err {
+        RootConfigSetError::UnknownKey { .. }
+        | RootConfigSetError::InvalidValue { .. }
+        | RootConfigSetError::Malformed { .. } => Report::new(BookrackCliError::LocalUserError {
+            message: err.to_string(),
+        }),
+        RootConfigSetError::Io(_) | RootConfigSetError::Write { .. } => Report::new(err),
+    }
 }
 
 /// The detect gate for `remove --purge`: the target must look like a

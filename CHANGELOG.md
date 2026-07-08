@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli: offline `libraries config` reads and edits a library's
+  `config.toml`.** `libraries config <name>` resolves the library's data
+  root from the registry with no daemon and prints its `config.toml`
+  (the parsed knobs under `--json`, the raw file otherwise);
+  `libraries config <name> KEY=VALUE ...` and `--unset KEY` edit the
+  file in place, preserving hand-written comments and layout. Accepted
+  keys are the four `RootConfig` knobs — `ollama_url`, `embed_model`,
+  `mcp_addr`, `log_directive` — and an unknown key or a malformed
+  `ollama_url` / `mcp_addr` value is refused (exit 2) before anything is
+  written. A missing `config.toml` is created on first write. Editing
+  `embed_model` warns that re-ingestion is required; a set value already
+  shadowed by an environment variable, and the need to restart a running
+  daemon, are noted. `config` exposes `set_root_config_values`,
+  `read_root_config_text`, `ROOT_CONFIG_KEYS`, and
+  `root_config_env_override`.
+
 - **config, ops, runtime: a path-resolved root is identified against the
   registry.** When the data root is won by a path — the `--data-dir`
   flag, `BOOKRACK_DATA_DIR`, or the portable layout — `config` now
