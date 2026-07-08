@@ -37,11 +37,29 @@ earlier ones already happened.
 | `bookrack_glean::CHUNK_VERSION` | `chunk_version` on the papers store | papers chunks → papers vectors | `bookrack papers vectors reset` |
 | `bookrack_normalize::NORMALIZE_VERSION` | `normalize_version` | chunks → vectors | `bookrack vectors reembed` (books); `bookrack papers vectors reembed` (papers) |
 | Embedding model name or vector width | `embed_model` / `vector_dim` | chunks → vectors | `bookrack libraries fork` (try it side by side) or `bookrack vectors reset` + `bookrack papers vectors reset` (in place) — see [Switching the embedding model](#switching-the-embedding-model) |
-| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place | open the library (migration is automatic) |
+| `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
+
+### Stamps that advance without a refresh command
+
+Some version dimensions move without invalidating anything on disk, so
+they carry no runbook step:
+
+- **Queue document schema** (`QUEUE_SCHEMA_VERSION`, now `6`) — the
+  persistent ingest queue is versioned on its own track. An older
+  document loads unchanged in a newer binary; the bump is one-way, so
+  an older binary will not read a queue document a newer one wrote.
+- **Corpus fingerprint** — a 16-hex digest of the five corpus stamps
+  (`embed_model` / `vector_dim` / `chunk_version` / `normalize_version`
+  / ANN kind) recorded per search in `retrieval_calls`. It is a
+  composition of stamps already gated at serve time and gates nothing
+  itself.
+- **Audit-profile fingerprints** — pin the profile identity that judged
+  each audit row (`node_paper_audit`, `book_distill_audit`). Provenance
+  only; no derived layer depends on them.
 
 ## Commands and when to use each
 
@@ -105,6 +123,17 @@ against the OCR markdown the user produced — the original product is
 the source of truth for the OCR side. `Catalog::stale_ocr_partitions`
 is the catalog-level equivalent of `stale_partitions` for the OCR
 side; it is exposed as a query but not yet wired to a CLI sweep.
+
+`bookrack doctor --backfill-ocr-derivation` — a one-time offline repair
+for libraries upgraded across the catalog v14 boundary. v14 added the
+`intake.derived_from_sha256` edge that links an OCR product back to the
+scan source it came from; OCR intakes written before v14 lack it, so
+the OCR worklist (`bookrack intake list-ocr-pending`) would re-list
+scan sources that were in fact already processed. The backfill recovers
+the edge by reading each OCR intake's recorded provenance. It is
+refused while a daemon is serving the library, and `--dry-run` opens
+the catalog read-only so a plan never migrates or writes. Libraries
+created at or after v14 never need it.
 
 ## Recommended window
 

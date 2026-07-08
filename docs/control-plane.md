@@ -298,6 +298,9 @@ catalog and corpus handles the daemon already holds.
 - `library.search` / `library.search_in_book` — cited passage search
   across the library or a single book.
 - `library.vectors_status` — vector-store snapshot for the library.
+- `library.list_ocr_pending` — scan sources still awaiting OCR: every
+  `needs_ocr` intake anchor with no successfully-processed OCR product
+  derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
 
 ## Events (Phase 2)
 

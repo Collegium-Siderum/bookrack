@@ -331,8 +331,6 @@ release workflow extracts the matching section verbatim from this file.
   caller's over-large limit was clamped but the result still covered
   every matching row.
 
-### Changed
-
 - **destructive RPC contract: every irreversible write requires
   `yes = true`, including `vectors.drop`, `papers.vectors_drop`,
   and the execute leg of `remove` / `papers.remove`.** Previously
