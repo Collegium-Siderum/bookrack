@@ -184,18 +184,28 @@ pub fn extract_from_text(
     })
 }
 
-/// Strip an optional `---\n…\n---\n` YAML frontmatter prefix. The
-/// content is not interpreted: only its bracketing is recognised. An
-/// unclosed frontmatter leaves the input untouched so the marker scan
-/// can produce a precise diagnostic.
+/// Strip an optional `---`-fenced YAML frontmatter prefix, tolerating
+/// both LF and CRLF line endings. The content is not interpreted: only
+/// its bracketing is recognised. An unclosed frontmatter leaves the
+/// input untouched so the marker scan can produce a precise diagnostic.
 fn strip_frontmatter(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---\n") else {
+    let rest = if let Some(r) = text.strip_prefix("---\n") {
+        r
+    } else if let Some(r) = text.strip_prefix("---\r\n") {
+        r
+    } else {
         return text;
     };
-    let Some(end_off) = rest.find("\n---\n") else {
-        return text;
-    };
-    &rest[end_off + "\n---\n".len()..]
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        if content == "---" {
+            return &rest[offset + line.len()..];
+        }
+        offset += line.len();
+    }
+    text
 }
 
 /// One page extracted from the marker scan, between two consecutive
@@ -212,10 +222,26 @@ const MARKER_PREFIX: &str = "<!-- page ";
 const MARKER_INFIX: &str = " (sheet ";
 const MARKER_SUFFIX: &str = ") -->";
 
+/// Find the next line-anchored `MARKER_PREFIX` at or after `from`. A
+/// marker is only recognised at the start of a line (offset 0, or right
+/// after a newline — which also covers the `\n` of a CRLF pair), so the
+/// literal string quoted in body prose is not mistaken for a page break.
+fn find_marker(text: &str, from: usize) -> Option<usize> {
+    let mut search = from;
+    while let Some(rel) = text[search..].find(MARKER_PREFIX) {
+        let pos = search + rel;
+        if pos == 0 || text.as_bytes()[pos - 1] == b'\n' {
+            return Some(pos);
+        }
+        search = pos + MARKER_PREFIX.len();
+    }
+    None
+}
+
 /// Walk the body after frontmatter removal, splitting it into one
-/// `Page` per `<!-- page <label> (sheet <n>) -->` marker.
+/// `Page` per line-anchored `<!-- page <label> (sheet <n>) -->` marker.
 fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
-    let Some(first) = text.find(MARKER_PREFIX) else {
+    let Some(first) = find_marker(text, 0) else {
         return Err(ExtractError::MalformedPackage {
             detail: "no page markers found".into(),
         });
@@ -230,8 +256,7 @@ fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
 
     let mut out = Vec::new();
     let mut cursor = first;
-    while let Some(prefix_rel) = text[cursor..].find(MARKER_PREFIX) {
-        let abs_prefix = cursor + prefix_rel;
+    while let Some(abs_prefix) = find_marker(text, cursor) {
         let after_prefix = abs_prefix + MARKER_PREFIX.len();
         let Some(infix_off) = text[after_prefix..].find(MARKER_INFIX) else {
             return Err(ExtractError::MalformedPackage {
@@ -251,10 +276,7 @@ fn scan_pages(text: &str) -> Result<Vec<Page>, ExtractError> {
                 detail: format!("marker sheet number not an integer: {sheet_str:?}"),
             })?;
         let body_start = after_infix + suffix_off + MARKER_SUFFIX.len();
-        let body_end = text[body_start..]
-            .find(MARKER_PREFIX)
-            .map(|off| body_start + off)
-            .unwrap_or(text.len());
+        let body_end = find_marker(text, body_start).unwrap_or(text.len());
         out.push(Page {
             sheet,
             body: text[body_start..body_end].to_string(),
@@ -400,6 +422,44 @@ third page body
         let text = "<!-- page 1 (sheet abc) -->\n\nbody\n";
         let err = scan_pages(text).expect_err("must reject non-integer sheet");
         assert!(matches!(err, ExtractError::MalformedPackage { .. }));
+    }
+
+    #[test]
+    fn strip_frontmatter_removes_a_crlf_fenced_block() {
+        let text = "---\r\nschema: 1\r\nengine: x\r\n---\r\nbody\r\n";
+        assert_eq!(strip_frontmatter(text), "body\r\n");
+    }
+
+    #[test]
+    fn scan_pages_ignores_a_marker_quoted_mid_line_in_body() {
+        let text = "\
+<!-- page 1 (sheet 1) -->
+
+The token <!-- page 2 (sheet 9) --> is written inline here.
+
+<!-- page 2 (sheet 2) -->
+
+second page body
+";
+        let pages = scan_pages(text).expect("scan");
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].sheet, 1);
+        assert_eq!(pages[1].sheet, 2);
+        assert!(
+            pages[0].body.contains("is written inline here"),
+            "the quoted marker stays in page one's body",
+        );
+    }
+
+    #[test]
+    fn scan_pages_splits_crlf_markers() {
+        let text = "<!-- page 1 (sheet 1) -->\r\n\r\nfirst\r\n\r\n<!-- page 2 (sheet 2) -->\r\n\r\nsecond\r\n";
+        let pages = scan_pages(text).expect("scan");
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].sheet, 1);
+        assert_eq!(pages[1].sheet, 2);
+        assert!(pages[0].body.contains("first"));
+        assert!(pages[1].body.contains("second"));
     }
 
     #[test]

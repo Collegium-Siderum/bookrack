@@ -403,6 +403,17 @@ release workflow extracts the matching section verbatim from this file.
   footnote / caption context for its kind; a whitespace-only run
   (inter-tag indentation) still collapses to nothing.
 
+- **extract: the OCR-markdown parser tolerates CRLF frontmatter and no
+  longer splits on a marker quoted in body prose.** `strip_frontmatter`
+  matched only the LF-fenced `---` block, so a CRLF-lineended polyocr
+  product had its whole frontmatter fall through as body and failed the
+  scan with `content before the first page marker`; it now recognises
+  both line endings. `scan_pages` located every `<!-- page … -->` with
+  an unanchored substring search, so the marker string quoted inside a
+  page's text was mistaken for a page break; marker detection is now
+  line-anchored (start of text, or right after a newline), leaving a
+  quoted literal in the body.
+
 - **glean: paper-audit report JSON escapes U+2028 and U+2029.** The
   hand-rolled `json_str` serializer in `crates/glean/src/audit/report.rs`
   escaped quotes, backslashes, and control characters below `0x20` but
