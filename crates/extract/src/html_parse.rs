@@ -11,7 +11,9 @@
 //! one `Block` when it has no block-level descendant of its own;
 //! otherwise the walk descends into it. A non-block container with no
 //! block descendants but with text (e.g. a `<div>`-as-paragraph) is
-//! also emitted, so prose is never silently dropped.
+//! also emitted, and loose text sitting directly between the block
+//! children of a descended container is emitted as its own block, so
+//! prose is never silently dropped.
 //!
 //! Anchors (TOC link targets) are collected in document order, each
 //! mapped to the block it falls inside or immediately precedes. This
@@ -85,10 +87,17 @@ pub fn parse_blocks(xhtml: &str, source_unit: u32, html_toggles: &HtmlToggles) -
 }
 
 fn walk(el: ElementRef, ctx: Ctx, st: &mut State, html_toggles: &HtmlToggles) {
+    let mut pending = String::new();
     for child in el.children() {
         let Some(child) = ElementRef::wrap(child) else {
+            if let Some(text) = child.value().as_text() {
+                pending.push_str(text);
+            }
             continue;
         };
+        // Any element closes a run of loose text that preceded it, so the
+        // text lands as its own block ahead of this child.
+        flush_text(&mut pending, ctx, st);
         let name = child.value().name();
         if html_toggles.skip_tags.iter().any(|t| t == name) {
             continue;
@@ -108,6 +117,32 @@ fn walk(el: ElementRef, ctx: Ctx, st: &mut State, html_toggles: &HtmlToggles) {
             emit(child, child_ctx, st);
         }
     }
+    flush_text(&mut pending, ctx, st);
+}
+
+/// Emit a run of loose text collected between block-level children as its
+/// own block, so inter-block prose is not dropped. A whitespace-only run
+/// (inter-tag indentation) collapses to nothing and emits no block. A
+/// text node carries no tag, so the kind follows the inherited context.
+fn flush_text(pending: &mut String, ctx: Ctx, st: &mut State) {
+    let text = collapse_ws(pending);
+    pending.clear();
+    if text.is_empty() {
+        return;
+    }
+    let kind = if ctx.footnote {
+        BlockKind::Footnote
+    } else if ctx.caption {
+        BlockKind::Caption
+    } else {
+        BlockKind::Body
+    };
+    st.blocks.push(Block {
+        kind,
+        text,
+        source_unit: st.source_unit,
+        style: None,
+    });
 }
 
 /// Emit one block for a leaf element. A leaf with no text is skipped.
@@ -178,12 +213,16 @@ fn has_block_descendant(el: ElementRef, html_toggles: &HtmlToggles) -> bool {
     })
 }
 
-/// All descendant text, with runs of whitespace (XML formatting
-/// indentation, line breaks) collapsed to single spaces and trimmed.
-/// This removes markup artefacts only; NFKC / punctuation normalization
-/// is deliberately left to the downstream `normalize` step.
+/// All descendant text of an element, whitespace-collapsed.
 fn collect_text(el: ElementRef) -> String {
     let raw: String = el.text().collect();
+    collapse_ws(&raw)
+}
+
+/// Collapse runs of whitespace to single spaces and trim, so markup
+/// indentation and line breaks leave no trace. NFKC / punctuation
+/// normalization is deliberately left to the downstream `normalize` step.
+fn collapse_ws(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut prev_ws = false;
     for ch in raw.chars() {
@@ -238,4 +277,49 @@ fn is_footnote(el: ElementRef) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_audit_profile::HtmlToggles;
+
+    fn blocks(body: &str) -> Vec<Block> {
+        let doc = format!("<html><body>{body}</body></html>");
+        parse_blocks(&doc, 0, &HtmlToggles::default()).blocks
+    }
+
+    #[test]
+    fn loose_text_between_block_children_becomes_its_own_block() {
+        let bs = blocks("<blockquote>Intro prose without a tag.<p>Quoted line.</p></blockquote>");
+        let texts: Vec<&str> = bs.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["Intro prose without a tag.", "Quoted line."]);
+        assert!(matches!(bs[0].kind, BlockKind::Body));
+    }
+
+    #[test]
+    fn whitespace_between_blocks_emits_no_empty_block() {
+        let bs = blocks("<div><p>a</p>\n  \n<p>b</p></div>");
+        let texts: Vec<&str> = bs.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["a", "b"]);
+    }
+
+    #[test]
+    fn loose_text_inherits_the_footnote_context() {
+        let bs =
+            blocks("<aside epub:type=\"footnote\"><p>Note body.</p> Trailing note text.</aside>");
+        let trailing = bs
+            .iter()
+            .find(|b| b.text == "Trailing note text.")
+            .expect("trailing footnote text is kept");
+        assert!(matches!(trailing.kind, BlockKind::Footnote));
+    }
+
+    #[test]
+    fn div_as_paragraph_stays_a_single_block() {
+        let bs = blocks("<div>Just <em>one</em> paragraph.</div>");
+        let texts: Vec<&str> = bs.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(texts, ["Just one paragraph."]);
+        assert!(matches!(bs[0].kind, BlockKind::Body));
+    }
 }

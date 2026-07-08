@@ -393,6 +393,16 @@ release workflow extracts the matching section verbatim from this file.
   `PageParagraphs`), where page numbers live; a digit run in the body
   is kept.
 
+- **extract: loose text between the block children of an HTML container
+  is no longer dropped.** The XHTML block walk descended into any
+  container with a block-level descendant but skipped every non-element
+  child, so bare prose sitting directly between block children — an
+  untagged sentence before a `<p>`, trailing text after it — never
+  reached a block. The walk now accumulates such text runs and emits
+  each as its own block in document order, taking the surrounding
+  footnote / caption context for its kind; a whitespace-only run
+  (inter-tag indentation) still collapses to nothing.
+
 - **glean: paper-audit report JSON escapes U+2028 and U+2029.** The
   hand-rolled `json_str` serializer in `crates/glean/src/audit/report.rs`
   escaped quotes, backslashes, and control characters below `0x20` but
