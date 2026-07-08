@@ -1,10 +1,10 @@
 # bookrack
 
 A local, offline RAG library. Point bookrack at a collection of
-long-form books and academic papers — EPUB, TXT, or PDF — and it turns them into a
-knowledge base an AI agent can search with precise, cited passages.
-The pipeline runs entirely on your own machine; nothing ever leaves
-the host. An MCP server speaks the standard agent protocol, so
+long-form books and academic papers — EPUB, TXT, or PDF — and it turns
+them into a knowledge base an AI agent can search with precise, cited
+passages. The pipeline runs entirely on your own machine; nothing ever
+leaves the host. An MCP server speaks the standard agent protocol, so
 clients like Claude Code can search the library as a tool.
 
 ## Status
@@ -13,14 +13,10 @@ Pre-release. The end-to-end pipeline — extract, ingest, embed, and
 cited search — runs through the `bookrack run` daemon, driven by
 one-shot subcommands, `bookrack exec` for ad-hoc control-plane RPCs,
 and MCP. Books and academic papers live in two parallel stores under
-one data root and share the same MCP surface; `library.search`
-accepts a `kind` switch to query one store or both. The vector store ships
-with an IVF index family (flat / SQ / PQ and the IVF-HNSW
-variants) selectable through `vectors rebuild`.
-Schema migrations and metadata workflows are still being hardened
-for production use.
+one data root and share the same MCP surface. Schema migrations and
+metadata workflows are still being hardened for production use.
 
-## 30-second install
+## Install
 
 1. **Make sure Ollama is up** and the embedding model is pulled. The
    default is `qwen3-embedding:0.6b`; any Ollama-served embedding
@@ -75,8 +71,7 @@ for production use.
    `127.0.0.1:8765/mcp` and a local control socket where the write
    commands arrive. From a second shell, submit work with the
    one-shot subcommands — `bookrack ingest` streams the queue
-   worker's progress until the job lands — or drive arbitrary
-   control-plane RPCs with `bookrack exec`.
+   worker's progress until the job lands.
 
    macOS / Linux:
 
@@ -93,9 +88,8 @@ for production use.
    ```
 
    Submit a paper through the parallel `papers` subcommand instead;
-   ingest follows the same control-plane streaming, and
-   `--recursive` walks a directory and forwards every `.pdf` it
-   finds:
+   ingest follows the same control-plane streaming, and `--recursive`
+   walks a directory and forwards every supported file it finds:
 
    ```
    ./bookrack papers ingest /path/to/paper.pdf
@@ -104,14 +98,11 @@ for production use.
 
    Papers live in a second cluster (catalog, corpus, vector store,
    source-PDF archive) under the same data root and share the same
-   MCP server; `library.search` queries both stores at once unless
-   a `kind` switch narrows it.
+   MCP server; `library.search` queries both stores at once unless a
+   `kind` switch narrows it.
 
    For a headless deployment — systemd unit, Windows service — run
-   `bookrack-mcp` instead; it serves the same MCP endpoint, and takes
-   `--with-queue-worker` if it should also process ingest jobs. The
-   two are mutually exclusive against one library because each holds
-   the machine-wide session lock; stop one before starting the other.
+   `bookrack-mcp` instead; see the [operating guide](docs/operating.md#the-daemon).
 
 ## Connecting an MCP client
 
@@ -152,229 +143,46 @@ PDFium library (see
 for the pinned version and per-platform download). Without it, PDF
 ingest is unavailable but EPUB and TXT still work.
 
+## Features
+
+- **Books and papers, side by side** — EPUB / TXT / PDF books and
+  academic papers in two parallel stores under one data root;
+  `library.search` queries one store or both.
+- **Cited, fully offline search** — passages return with precise
+  citations, and extraction, embedding, and search all run on the
+  host. Nothing leaves the machine.
+- **MCP-native, with a full CLI** — a streamable-HTTP MCP server
+  exposes the library as a tool to agent clients, backed by a one-shot
+  CLI and a control socket for operators.
+- **Named retrieval profiles** — `index-profile` couples the embedding
+  model, the ANN index shape, and the reranker stage into one named,
+  statically-validated atom.
+- **A managed, daemon-free registry** — `libraries` verbs register,
+  detect, scan, and configure data roots with no daemon running; each
+  root self-describes with an identity manifest.
+- **An OCR worklist** — image-only scans land on a durable worklist
+  instead of failing; run any OCR engine and re-enter the product.
+- **Observable pipelines** — every ingest and search records to
+  queryable run and retrieval logs (`bookrack runs`, `bookrack
+  retrieval`), with a `doctor` health check and a `diagnose` bundle
+  for bug reports.
+
+## Documentation
+
+| Guide | Covers |
+| --- | --- |
+| [Operating](docs/operating.md) | the daemon, ingesting, the queue, the OCR worklist, health checks, observability |
+| [Configuration](docs/configuration.md) | data-root resolution, the library registry, `config.toml`, index profiles, the audit profile |
+| [Upgrading](docs/UPGRADE.md) | the bump-to-refresh matrix and switching the embedding model |
+| [Control plane](docs/control-plane.md) | the JSON-RPC surface behind the CLI and MCP |
+
 ## Troubleshooting
 
-```
-bookrack doctor
-```
-
-A one-screen health check covering every install expectation: data
-root resolved, catalog and corpus schemas openable, PDFium library
-on disk, Ollama daemon reachable, embed model pulled. Each row is
-`OK`, `WARN`, or `FAIL`; any FAIL exits with a non-zero status so a
-script can branch on the result. Pass `--json` for machine-readable
-output suitable for a bug report.
-
-Two doctor sub-commands cover one-off maintenance:
-`bookrack doctor --install-pdfium` downloads the pinned PDFium
-build, verifies its SHA-256, and unpacks it into the per-user
-managed directory the loader searches; `bookrack doctor
---rename-envelopes [--dry-run]` migrates extraction envelopes from
-older libraries into the kind-prefixed filename layout 0.5.0
-introduced.
-
-If something is broken, `bookrack diagnose` bundles crash reports,
-recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
-issue attachments.
-
-## Operating
-
-### Long ingestions
-
-Ingestion is restartable: when a host suspends mid-run the embedding
-step pauses with it and resumes once the host wakes, idempotently.
-The output is unchanged either way; only the wall-clock includes the
-time spent asleep, which makes a run that crossed an idle-sleep
-window read as far slower than it really was.
-
-On every desktop platform the default idle-sleep policy will suspend
-a backgrounded shell. The natural unit to wrap is the `bookrack run`
-daemon itself: submit work with `bookrack ingest <path>` (a single
-file or a directory walked recursively) and leave the daemon running
-while the queue worker grinds away.
-
-macOS — `caffeinate` blocks idle sleep without blocking display sleep:
-
-```
-caffeinate -i ./bookrack run
-```
-
-Linux (systemd) — `systemd-inhibit` takes the same kind of lock the
-desktop environment uses for media playback:
-
-```
-systemd-inhibit --what=idle --why="bookrack" ./bookrack run
-```
-
-Windows (PowerShell) — flip the active power scheme's idle-sleep
-timeout to zero for the duration of the session, then restore it:
-
-```
-powercfg /change standby-timeout-ac 0
-.\bookrack.exe run
-powercfg /change standby-timeout-ac 30   # restore the previous value
-```
-
-For an unattended overnight run, prefer a wrapper that runs the
-restore step even when the session exits with an error.
-
-### Audit profile
-
-The metadata audit, the filename parser, the EPUB / TXT half-rules,
-and the extract-side HTML / quality / language gates read every
-toggle and threshold from an audit profile. Three built-in presets
-ship with the binary:
-
-- `default` — every per-field signal active, every TOC shape signal
-  active, year range 1450–2100. This is the active profile at
-  ingest time.
-- `trust-source` — every toggle off. The audit substep is skipped
-  entirely; the pipeline still seeds the base attrs and writes a
-  `pending` review row stamped `bookrack-ingest:trust-source`, but
-  no signal weakens or strengthens any field. Useful when ingesting
-  "whatever the source says" and deferring every quality call to a
-  human or downstream LLM reviewer.
-- `strict` — same toggle set as `default`; reserved for future
-  upgrades that promote selected signals to higher severities.
-
-Inspect them with the `audit-profile` subcommand:
-
-```
-bookrack audit-profile list
-bookrack audit-profile show trust-source
-bookrack audit-profile diff default strict
-```
-
-The shipped `default` profile is merged with an optional overlay at
-`<data_root>/audit-rules/audit_profile.local.toml` so a deployment
-can adjust individual thresholds, the HTML block / skip tag lists,
-the PDF text-quality cutoffs, or the BCP-47 script buckets without
-recompiling.
-
-Two further on-disk schemas live under the same directory and follow
-the same shipped-default-plus-overlay merge:
-
-- `<data_root>/audit-rules/audit_data.toml` — the reputable-imprint
-  whitelist, the four watermark token lists, the URL / e-mail
-  watermark substrings, the whitelist normalisation abbreviations,
-  the placeholder-title words, and the book-extension lists the
-  ingest dryrun walker and the diagnose scrubber consult. See the
-  shipped default at
-  [crates/audit-profile/data/audit_data.toml](crates/audit-profile/data/audit_data.toml).
-- `<data_root>/audit-rules/headings.toml` — the multi-language
-  chapter / volume marker grammars the TXT adapter dispatches across
-  (Sino, Latin, German families today). Add a unit char, ordinal
-  stem, or first-ordinal spelling for a new language without a
-  recompile. See the shipped default at
-  [crates/audit-profile/data/headings.toml](crates/audit-profile/data/headings.toml).
-
-All three overlays are user-supplied; bookrack falls through to the
-shipped defaults when an overlay is absent or omits a field.
-
-### Upgrading
-
-An upgraded binary may read older derived data exactly, or it may
-need that data rebuilt before it can serve correct results. The
-trigger is whether the upgrade bumps a behaviour-sensitive
-dependency or a stamp constant. Three commands cover every refresh
-case; all dispatch over the running daemon's control plane because
-they take its write scheduler — invoke them as one-shot subcommands
-against a running `bookrack run` daemon:
-
-- `corpus rebuild` — regenerate `corpus.db` from the v1 extraction
-  envelopes. Use this after a corpus schema bump, or to recover
-  from a deleted `corpus.db` when the chunks table is still on disk.
-- `vectors reembed` — re-run the active embedder over the existing
-  chunk text. Use this after bumping the vector width,
-  `CHUNK_VERSION`, or `NORMALIZE_VERSION`. For an embedding-model
-  swap, see [Switching the embedding model](#switching-the-embedding-model).
-- `ingest <file> --force` — re-ingest a source file. The only path
-  that refreshes `extractor_version`. Use this after bumping a
-  behaviour-sensitive parser dependency (`rbook`, `scraper`,
-  `encoding_rs`, `unicode-normalization`, `pdfium-render`).
-
-The `--stale-only` flag on `corpus rebuild` and `vectors reembed`
-scopes the refresh to the partitions whose stored
-`extractor_version` lags this binary's. A reembed that touches every
-book is the most expensive refresh; schedule it for a low-activity
-window and wrap the session with the platform's idle-sleep override
-covered under [Long ingestions](#long-ingestions).
-
-The commands above operate on the book store. The papers cluster
-exposes the same three primitives under a `papers` prefix:
-
-- `papers corpus rebuild` — regenerate `papers_corpus.db` from the
-  envelopes in `papers_dir`. Pass `--include-vectors` to chain a
-  reembed; otherwise the existing chunks are re-stamped against the
-  rebuilt tree.
-- `papers vectors reembed` — re-run the active embedder over each
-  paper's abstract chunks. Use after a `CHUNK_VERSION` /
-  `NORMALIZE_VERSION` bump.
-- `papers vectors reset` — drop the papers chunks table and re-derive
-  every abstract chunk under the env-configured embed model. For an
-  embedding model swap, follow with `papers stamps reconcile`.
-
-See [docs/UPGRADE.md](docs/UPGRADE.md) for the full bump-to-refresh
-matrix and per-command guidance.
-
-### Configuration files and resolution order
-
-bookrack reads its data root in this precedence, highest first:
-
-1. `--data-dir <path>` flag
-2. `--library <name>` flag (looked up in the registry named by
-   `BOOKRACK_REGISTRY`)
-3. `BOOKRACK_DATA_DIR` environment variable
-4. A `bookrack-data/` directory next to the running binary
-5. The `default` entry of the registry named by `BOOKRACK_REGISTRY`
-6. The `default` entry of the platform-default registry at
-   `<config_dir>/bookrack/registry.toml`, where `<config_dir>` is:
-
-   | Platform | `<config_dir>` |
-   | --- | --- |
-   | macOS | `~/Library/Application Support` |
-   | Linux | `$XDG_CONFIG_HOME`, or `~/.config` if unset |
-   | Windows | `%APPDATA%` (the Roaming AppData directory) |
-
-`bookrack init` writes step 6's registry file by default. Operational
-knobs (Ollama endpoint, embed model, MCP listen address, log filter)
-resolve env var > `<data_root>/config.toml` > hardcoded default.
-
-The full keys accepted in `<data_root>/config.toml`:
-
-```toml
-ollama_url    = "http://localhost:11434"
-embed_model   = "qwen3-embedding:0.6b"
-mcp_addr      = "127.0.0.1:8765"
-log_directive = "info,lance=warn"
-```
-
-Every field is optional. Edit by hand; bookrack does not rewrite
-this file outside of `init`.
-
-### Switching the embedding model
-
-`embed_model` is part of the library's identity: stamps in
-`corpus.db` pin the model name and its vector dimension, and both
-embed and query refuse a mismatch. Editing the field on an existing
-library leaves the on-disk vectors orphaned. The supported swaps are:
-
-- **`bookrack libraries fork <name> --data-dir <path>`** — clone
-  the current library into a sibling under `<path>` (envelope store
-  hardlinked, catalog + corpus snapshotted, vector store dropped).
-  Fork dispatches over the running daemon's control plane; then stop
-  that daemon, start one against the clone with the new model
-  (`BOOKRACK_EMBED_MODEL=<model> bookrack --library <name> run`),
-  and run `bookrack vectors reset` to rebuild under it (type `RESET`
-  at the prompt, or pass `--yes`). The original library stays
-  intact; throw the clone away if the new model is worse.
-- **`bookrack vectors reset`** — in place: drops the chunks table
-  and re-embeds every book under the model the daemon's environment
-  resolves. The old vectors are unrecoverable. Use when disk space
-  is tight or the swap is settled.
-
-See [docs/UPGRADE.md](docs/UPGRADE.md#switching-the-embedding-model)
-for the full procedure.
+`bookrack doctor` runs a one-screen health check of every install
+expectation and exits non-zero on any failure; `bookrack diagnose`
+bundles logs and a scrubbed catalog snapshot for a bug report. Both
+are covered in the
+[operating guide](docs/operating.md#health-and-diagnostics).
 
 ## License
 

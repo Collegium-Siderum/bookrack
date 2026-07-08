@@ -141,8 +141,9 @@ A refresh that touches `extractor_version` or the embedding model is
 the most expensive — it re-runs every behaviour-sensitive parser on
 every book, and re-embeds every chunk through the embedding model.
 Allocate a low-activity window for these runs; on macOS, wrap them in
-`caffeinate -i` so the host does not idle-sleep mid-run (see the
-README). A reembed that only changes `CHUNK_VERSION` or
+`caffeinate -i` so the host does not idle-sleep mid-run (see
+[Long ingestions](operating.md#long-ingestions)). A reembed that only
+changes `CHUNK_VERSION` or
 `NORMALIZE_VERSION` re-uses the existing chunk text but still costs
 one embedding pass per book.
 
