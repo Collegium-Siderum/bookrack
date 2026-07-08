@@ -19,13 +19,18 @@
 //! install still produces a row stating that — rather than the resolver
 //! short-circuiting the very diagnosis the user needs.
 
+use std::path::Path;
+
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV,
-    LibraryIdentification, LibrarySelection, ResolutionSource, ShadowedDefault,
-    default_registry_path, locate_pdfium, pdfium_library_filename,
+    Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, LibraryEntry,
+    LibraryIdentification, LibrarySelection, ManifestError, ResolutionSource, ShadowedDefault,
+    default_registry_path, list_libraries, load_manifest, locate_pdfium, pdfium_library_filename,
+    registry_target_path,
 };
+use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
+use bookrack_index_profile::{USER_PROFILE_DIR_NAME, has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
 
@@ -129,6 +134,8 @@ pub async fn gather(selection: &LibrarySelection) -> Report {
         push_catalog_row(&mut rows, cfg);
         push_corpus_row(&mut rows, cfg);
     }
+    push_registry_consistency_rows(&mut rows);
+    push_index_profile_coherence_rows(&mut rows);
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
@@ -635,6 +642,232 @@ fn push_store_row(rows: &mut Vec<Row>, label: &str, path: &std::path::Path) {
     }
 }
 
+/// What probing a registry entry's data root for its identity manifest
+/// found. Kept as a value so the drift classification is a pure function
+/// a test can drive without a filesystem.
+#[derive(Debug, Clone)]
+enum ManifestProbe {
+    /// The data root does not exist on disk.
+    Missing,
+    /// The data root exists but carries no identity manifest.
+    NoManifest,
+    /// The data root exists but its manifest could not be read.
+    Unreadable(String),
+    /// The manifest loaded; the uuid it records.
+    Loaded { uuid: String },
+}
+
+/// Compare one registry entry against its on-disk manifest, returning the
+/// drift note when they disagree, or `None` when consistent. A name
+/// alias and a kind override are legal (04's registration rules), so only
+/// a stale uuid cache, a missing root, or an unreadable manifest is
+/// flagged — the registry caches the uuid, so a mismatch there is the
+/// signal that the cache is stale.
+fn registry_entry_issue(entry: &LibraryEntry, probe: &ManifestProbe) -> Option<String> {
+    let root = entry.data_dir.display();
+    match probe {
+        ManifestProbe::Missing => Some(format!(
+            "'{}' data root {root} not found (moved, or an unmounted volume)",
+            entry.name
+        )),
+        ManifestProbe::Unreadable(reason) => Some(format!(
+            "'{}' identity manifest at {root} is unreadable (corrupt, or an unmounted volume): {reason}",
+            entry.name
+        )),
+        ManifestProbe::NoManifest => entry.uuid.as_ref().map(|_| {
+            format!(
+                "'{}' has a cached uuid but {root} carries no manifest; re-register to refresh",
+                entry.name
+            )
+        }),
+        ManifestProbe::Loaded { uuid } => entry
+            .uuid
+            .as_deref()
+            .filter(|cached| *cached != uuid)
+            .map(|cached| {
+                format!(
+                    "'{}' registry uuid {} is stale; the manifest at {root} records {}. \
+                     Re-register to refresh the cache",
+                    entry.name,
+                    short(cached),
+                    short(uuid),
+                )
+            }),
+    }
+}
+
+/// Probe a data root for its manifest, mapping the filesystem outcomes to
+/// a [`ManifestProbe`].
+fn probe_manifest(data_dir: &Path) -> ManifestProbe {
+    if !data_dir.exists() {
+        return ManifestProbe::Missing;
+    }
+    match load_manifest(data_dir) {
+        Ok(Some(manifest)) => ManifestProbe::Loaded {
+            uuid: manifest.uuid,
+        },
+        Ok(None) => ManifestProbe::NoManifest,
+        Err(e) => ManifestProbe::Unreadable(manifest_error_reason(&e)),
+    }
+}
+
+/// A compact reason string for a manifest read failure.
+fn manifest_error_reason(error: &ManifestError) -> String {
+    match error {
+        ManifestError::Io { .. } => "cannot read the file".to_string(),
+        ManifestError::Parse { .. } => "does not parse".to_string(),
+        ManifestError::SchemaVersion { found, .. } => {
+            format!("schema version {found} is newer than this binary")
+        }
+        ManifestError::NotALibrary { .. } => "not a bookrack manifest".to_string(),
+    }
+}
+
+/// Emit the registry–manifest consistency check. One WARN row per
+/// drifted entry, or a single OK summary when every entry agrees with its
+/// manifest. Skipped entirely when there is no registry or it is empty.
+fn push_registry_consistency_rows(rows: &mut Vec<Row>) {
+    let Ok(Some(entries)) = list_libraries() else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let mut clean = true;
+    for entry in &entries {
+        let probe = probe_manifest(&entry.data_dir);
+        if let Some(note) = registry_entry_issue(entry, &probe) {
+            clean = false;
+            rows.push(Row {
+                label: "registry".to_string(),
+                value: entry.name.clone(),
+                status: Status::Warn { note },
+            });
+        }
+    }
+    if clean {
+        rows.push(Row {
+            label: "registry".to_string(),
+            value: format!("{} entries", entries.len()),
+            status: Status::Ok {
+                note: Some("consistent with their manifests".to_string()),
+            },
+        });
+    }
+}
+
+/// The per-user index-profile directory, beside `registry.toml`.
+fn index_profile_dir() -> Option<std::path::PathBuf> {
+    registry_target_path()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .map(|d| d.join(USER_PROFILE_DIR_NAME))
+}
+
+/// The built index stamps relevant to a profile: the embed model and the
+/// vector dimension recorded in the corpus, or `None` when the corpus is
+/// missing, unbuilt, or cannot be opened (so the check skips rather than
+/// racing a live writer).
+fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
+    let corpus = Corpus::open_read_only(&data_dir.join("corpus.db")).ok()?;
+    let model = corpus.meta_get(EMBED_MODEL_KEY).ok()??;
+    let dim = corpus.meta_get(VECTOR_DIM_KEY).ok()??.parse::<u32>().ok()?;
+    Some((model, dim))
+}
+
+/// Classify one entry's index-profile reference against its resolution
+/// outcome and (optionally) the built stamps. Pure, so a test drives it
+/// without a filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
+/// for a valid profile, `Ok(None)` when the name does not resolve, and
+/// `Err(reason)` when the file failed to load.
+fn coherence_issue(
+    entry_name: &str,
+    profile_name: &str,
+    resolved: Result<Option<(String, u32, bool)>, String>,
+    built: Option<(String, u32)>,
+) -> Option<String> {
+    match resolved {
+        Err(reason) => Some(format!(
+            "'{entry_name}' references index profile '{profile_name}', which failed to load: {reason}"
+        )),
+        Ok(None) => Some(format!(
+            "'{entry_name}' references index profile '{profile_name}', which is not defined"
+        )),
+        Ok(Some((_, _, true))) => Some(format!(
+            "'{entry_name}' references index profile '{profile_name}', which has validation errors \
+             (run `bookrack index-profile validate {profile_name}`)"
+        )),
+        Ok(Some((model, dim, false))) => built.and_then(|(built_model, built_dim)| {
+            (built_model != model || built_dim != dim).then(|| {
+                format!(
+                    "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
+                     the built index is {built_model}/{built_dim}; the daemon will refuse to start"
+                )
+            })
+        }),
+    }
+}
+
+/// Emit the index-profile coherence check: for every registry entry that
+/// records an `index_profile`, resolve and validate it, and compare it
+/// against the library's built index stamps. One WARN row per problem, or
+/// a single OK summary when every referenced profile is coherent. Skipped
+/// entirely when no entry references a profile.
+fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
+    let Ok(Some(entries)) = list_libraries() else {
+        return;
+    };
+    let referencing: Vec<&LibraryEntry> = entries
+        .iter()
+        .filter(|e| e.index_profile.is_some())
+        .collect();
+    if referencing.is_empty() {
+        return;
+    }
+    let dir = index_profile_dir();
+    let mut clean = true;
+    for entry in referencing {
+        let profile_name = entry.index_profile.as_deref().expect("filtered to Some");
+        let resolved = match &dir {
+            Some(dir) => match resolve(dir, profile_name) {
+                Ok(Some(profile)) => Ok(Some((
+                    profile.embed.model.clone(),
+                    profile.embed.dim,
+                    has_errors(&validate(&profile, false)),
+                ))),
+                Ok(None) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            },
+            None => Ok(None),
+        };
+        let built = built_stamps(&entry.data_dir);
+        if let Some(note) = coherence_issue(&entry.name, profile_name, resolved, built) {
+            clean = false;
+            rows.push(Row {
+                label: "index-profile".to_string(),
+                value: entry.name.clone(),
+                status: Status::Warn { note },
+            });
+        }
+    }
+    if clean {
+        rows.push(Row {
+            label: "index-profile".to_string(),
+            value: format!(
+                "{} referenced",
+                entries.iter().filter(|e| e.index_profile.is_some()).count()
+            ),
+            status: Status::Ok {
+                note: Some("coherent with their built indexes".to_string()),
+            },
+        });
+    }
+}
+
+/// The first dash-delimited segment of an identifier, for compact display.
+fn short(id: &str) -> &str {
+    id.split('-').next().unwrap_or(id)
+}
+
 fn ollama_url_for_probe(cfg: Option<&Config>) -> String {
     cfg.map(|c| c.ollama_url().to_string())
         .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string())
@@ -814,6 +1047,106 @@ mod tests {
             value: value.to_string(),
             status,
         }
+    }
+
+    fn entry(name: &str, uuid: Option<&str>) -> LibraryEntry {
+        LibraryEntry {
+            name: name.to_string(),
+            data_dir: std::path::PathBuf::from(format!("/roots/{name}")),
+            is_default: false,
+            kind: bookrack_config::LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: None,
+            uuid: uuid.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn registry_entry_is_clean_when_uuid_matches() {
+        let e = entry("alpha", Some("01890a5d-0000-7000-8000-000000000000"));
+        let probe = ManifestProbe::Loaded {
+            uuid: "01890a5d-0000-7000-8000-000000000000".to_string(),
+        };
+        assert!(registry_entry_issue(&e, &probe).is_none());
+    }
+
+    #[test]
+    fn registry_entry_flags_a_stale_uuid_cache() {
+        let e = entry("alpha", Some("01890a5d-0000-7000-8000-000000000000"));
+        let probe = ManifestProbe::Loaded {
+            uuid: "ffffffff-0000-7000-8000-000000000000".to_string(),
+        };
+        let note = registry_entry_issue(&e, &probe).expect("stale uuid is flagged");
+        assert!(note.contains("stale"), "{note}");
+    }
+
+    #[test]
+    fn registry_entry_name_alias_and_kind_override_are_not_drift() {
+        // A name alias is legal: the manifest's birth name may differ
+        // from the registry key. Only the uuid cache is compared.
+        let e = entry("alias", Some("01890a5d-0000-7000-8000-000000000000"));
+        let probe = ManifestProbe::Loaded {
+            uuid: "01890a5d-0000-7000-8000-000000000000".to_string(),
+        };
+        assert!(registry_entry_issue(&e, &probe).is_none());
+    }
+
+    #[test]
+    fn registry_entry_missing_root_and_unreadable_manifest_differ() {
+        let e = entry("alpha", Some("u"));
+        let missing = registry_entry_issue(&e, &ManifestProbe::Missing).expect("missing flagged");
+        assert!(missing.contains("not found"), "{missing}");
+        let unreadable =
+            registry_entry_issue(&e, &ManifestProbe::Unreadable("does not parse".to_string()))
+                .expect("unreadable flagged");
+        assert!(unreadable.contains("unreadable"), "{unreadable}");
+    }
+
+    #[test]
+    fn registry_entry_no_manifest_flags_only_a_cached_uuid() {
+        // A legacy bare root with no cached uuid is consistent; one that
+        // caches a uuid but has lost its manifest is not.
+        assert!(registry_entry_issue(&entry("legacy", None), &ManifestProbe::NoManifest).is_none());
+        assert!(
+            registry_entry_issue(&entry("cached", Some("u")), &ManifestProbe::NoManifest).is_some()
+        );
+    }
+
+    #[test]
+    fn coherence_unresolved_and_invalid_and_mismatch_are_flagged() {
+        // Unresolved profile.
+        assert!(coherence_issue("lib", "p", Ok(None), None).is_some());
+        // Failed to load.
+        assert!(coherence_issue("lib", "p", Err("boom".to_string()), None).is_some());
+        // Has validation errors.
+        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), None).is_some());
+        // Valid and coherent with the built stamps.
+        assert!(
+            coherence_issue(
+                "lib",
+                "p",
+                Ok(Some(("m".to_string(), 8, false))),
+                Some(("m".to_string(), 8)),
+            )
+            .is_none()
+        );
+        // Valid but disagrees with the built stamps.
+        let note = coherence_issue(
+            "lib",
+            "p",
+            Ok(Some(("m".to_string(), 8, false))),
+            Some(("other".to_string(), 8)),
+        )
+        .expect("mismatch flagged");
+        assert!(note.contains("refuse to start"), "{note}");
+    }
+
+    #[test]
+    fn coherence_skips_the_stamp_check_when_the_index_is_unbuilt() {
+        // No built stamps (corpus missing/unbuilt) and a valid profile is
+        // not a problem — the check simply cannot compare.
+        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), None).is_none());
     }
 
     #[test]

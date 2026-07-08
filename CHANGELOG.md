@@ -29,6 +29,20 @@ release workflow extracts the matching section verbatim from this file.
   consults an offline model registry that `--allow-unknown-model`
   bypasses. A user profile shadows a built-in of the same name.
 
+- **runtime: `bookrack doctor` checks registry–manifest consistency and
+  index-profile coherence.** Two new row groups. The first walks every
+  registry entry and compares it against its on-disk identity manifest,
+  warning when the cached uuid is stale, when the data root is missing (a
+  move or an unmounted volume), or when the manifest is unreadable — a
+  name alias and a kind override stay legal and are not flagged. The
+  second, for every entry that records an `index_profile`, resolves and
+  statically validates the profile and compares its embed model and
+  dimension against the library's built index stamps, warning when a
+  referenced profile is undefined, invalid, or disagrees with the built
+  index (which would make the daemon refuse to start). Both run on the
+  daemon-side and daemon-free doctor paths alike; the coherence check
+  opens the corpus read-only and skips silently when it cannot.
+
 - **config, cli: offline `libraries config` reads and edits a library's
   `config.toml`.** `libraries config <name>` resolves the library's data
   root from the registry with no daemon and prints its `config.toml`
