@@ -214,6 +214,47 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    /// Two configured index-profile facts disagree, so no single
+    /// effective retrieval combination exists. Constructed through
+    /// [`ConfigError::profile_model_conflict`] or
+    /// [`ConfigError::profile_reference_conflict`], which spell out the
+    /// two values and the repair paths.
+    #[error("index profile conflict: {message}")]
+    ProfileConfigConflict { message: String },
+}
+
+impl ConfigError {
+    /// The explicit `embed_model` in `config.toml` and the model the
+    /// referenced index profile declares resolve to different values.
+    /// Neither side is silently preferred; the operator removes the
+    /// explicit field or repoints the profile reference.
+    pub fn profile_model_conflict(
+        profile: &str,
+        profile_model: &str,
+        explicit_model: &str,
+    ) -> ConfigError {
+        ConfigError::ProfileConfigConflict {
+            message: format!(
+                "config.toml sets embed_model = {explicit_model:?} but index profile \
+                 {profile:?} declares {profile_model:?}; unset embed_model \
+                 (`bookrack libraries config <name> --unset embed_model`) or reference \
+                 a profile that declares {explicit_model:?}"
+            ),
+        }
+    }
+
+    /// `config.toml` and the registry entry both name an index profile
+    /// and the names differ. Neither side is treated as newer; the
+    /// operator aligns them explicitly.
+    pub fn profile_reference_conflict(config_value: &str, registry_value: &str) -> ConfigError {
+        ConfigError::ProfileConfigConflict {
+            message: format!(
+                "config.toml references index profile {config_value:?} but the registry \
+                 entry records {registry_value:?}; set both to the same name \
+                 (`bookrack libraries config <name> index_profile=...` edits config.toml)"
+            ),
+        }
+    }
 }
 
 impl Config {
@@ -486,11 +527,11 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 /// Per-data-root configuration loaded from `<data_root>/config.toml`.
 ///
 /// Carries runtime knobs that vary by library: the Ollama endpoint, the
-/// embed model, the MCP listen address, the log filter directive. Each
-/// field is `None` when the file does not set it; the matching env var
-/// (where one exists) overrides this layer, and the hardcoded default
-/// wins when both are absent. Written by `bookrack init`; safe to edit
-/// by hand.
+/// embed model, the MCP listen address, the log filter directive, the
+/// index-profile reference, and the search knobs. Each field is `None`
+/// when the file does not set it; the matching env var (where one
+/// exists) overrides this layer, and the hardcoded default wins when
+/// both are absent. Written by `bookrack init`; safe to edit by hand.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RootConfig {
@@ -506,6 +547,28 @@ pub struct RootConfig {
     /// `EnvFilter` directive for tracing verbosity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_directive: Option<String>,
+    /// Name of the index profile this library runs under. The profile
+    /// resolves outside this crate; the resolved embed model slots into
+    /// the resolution chain below the explicit `embed_model` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index_profile: Option<String>,
+    /// Retrieval knobs, under a `[search]` table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<RootSearchConfig>,
+}
+
+/// The `[search]` table of `<data_root>/config.toml`: the persistent
+/// counterpart of the `BOOKRACK_SEARCH_*` env overrides. Fields are
+/// optional so a file can pin one knob without freezing the other.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RootSearchConfig {
+    /// How many nearest passages a query returns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+    /// Cosine-distance threshold at or above which a hit counts as weak.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weak_threshold: Option<f32>,
 }
 
 /// Read `<data_root>/config.toml`. A missing file resolves to the
@@ -540,8 +603,7 @@ pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
     let cfg = RootConfig {
         ollama_url: Some(ollama_url.to_string()),
         embed_model: Some(embed_model.to_string()),
-        mcp_addr: None,
-        log_directive: None,
+        ..RootConfig::default()
     };
     let body = toml::to_string(&cfg).expect("RootConfig serialization is infallible");
     format!("# bookrack root config. Written by `bookrack init`; safe to edit.\n{body}")
@@ -551,8 +613,17 @@ pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
 /// [`RootConfig`]. A `set` or `unset` of any other key is refused so a
 /// typo cannot silently leave `deny_unknown_fields` to reject the file on
 /// the next load. A test asserts this list stays in lockstep with the
-/// struct's serialized field names.
-pub const ROOT_CONFIG_KEYS: &[&str] = &["ollama_url", "embed_model", "mcp_addr", "log_directive"];
+/// struct's serialized field names. A dotted key addresses a field in a
+/// nested table (`search.top_k` edits `top_k` under `[search]`).
+pub const ROOT_CONFIG_KEYS: &[&str] = &[
+    "ollama_url",
+    "embed_model",
+    "mcp_addr",
+    "log_directive",
+    "index_profile",
+    "search.top_k",
+    "search.weak_threshold",
+];
 
 /// Name the environment variable that overrides `key` in the resolution
 /// chain (`env` > `config.toml` > default), or `None` when the key has no
@@ -564,6 +635,8 @@ pub fn root_config_env_override(key: &str) -> Option<&'static str> {
         "embed_model" => Some(EMBED_MODEL_ENV),
         "mcp_addr" => Some(MCP_ADDR_ENV),
         "log_directive" => Some(LOG_ENV),
+        "search.top_k" => Some(SEARCH_TOP_K_ENV),
+        "search.weak_threshold" => Some(SEARCH_WEAK_THRESHOLD_ENV),
         _ => None,
     }
 }
@@ -656,11 +729,45 @@ pub fn set_root_config_values(
                 reason: source.to_string(),
             })?;
 
+    /// Render a validated value as the TOML type its key requires, so a
+    /// numeric knob round-trips as a number rather than a quoted string.
+    fn root_config_value_item(key: &str, value: &str) -> toml_edit::Item {
+        match key {
+            "search.top_k" => toml_edit::value(value.parse::<i64>().expect("validated integer")),
+            "search.weak_threshold" => {
+                toml_edit::value(value.parse::<f64>().expect("validated number"))
+            }
+            _ => toml_edit::value(value),
+        }
+    }
+
     for (key, value) in sets {
-        doc[key.as_str()] = toml_edit::value(value.as_str());
+        let item = root_config_value_item(key, value);
+        match key.split_once('.') {
+            Some((table, field)) => {
+                let entry = doc.entry(table).or_insert(toml_edit::table());
+                if entry.as_table_like().is_none() {
+                    *entry = toml_edit::table();
+                }
+                entry[field] = item;
+            }
+            None => doc[key.as_str()] = item,
+        }
     }
     for key in unsets {
-        doc.remove(key.as_str());
+        match key.split_once('.') {
+            Some((table, field)) => {
+                if let Some(t) = doc.get_mut(table).and_then(toml_edit::Item::as_table_mut) {
+                    t.remove(field);
+                    if t.is_empty() {
+                        doc.remove(table);
+                    }
+                }
+            }
+            None => {
+                doc.remove(key.as_str());
+            }
+        }
     }
 
     write_atomically(&path, &doc.to_string())
@@ -680,9 +787,12 @@ fn validate_root_config_key(key: &str) -> Result<(), RootConfigSetError> {
 
 /// Light per-key value check: `ollama_url` must carry a scheme and an
 /// authority, `mcp_addr` must have a `host:port` shape with a numeric
-/// port. `embed_model` and `log_directive` are free-form — a model tag
-/// has no fixed grammar and a tracing directive is validated by the
-/// runtime that consumes it.
+/// port, `search.top_k` must be a positive integer, and
+/// `search.weak_threshold` a finite number. `embed_model`,
+/// `log_directive`, and `index_profile` are free-form — a model tag has
+/// no fixed grammar, a tracing directive is validated by the runtime
+/// that consumes it, and a profile reference is checked against the
+/// profile store by the caller that can resolve it.
 fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
     let invalid = |reason: &str| {
         Err(RootConfigSetError::InvalidValue {
@@ -709,6 +819,14 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
             }
             Ok(())
         }
+        "search.top_k" => match value.parse::<i64>() {
+            Ok(n) if n > 0 => Ok(()),
+            _ => invalid("expected a positive integer"),
+        },
+        "search.weak_threshold" => match value.parse::<f32>() {
+            Ok(v) if v.is_finite() => Ok(()),
+            _ => invalid("expected a finite number"),
+        },
         _ => Ok(()),
     }
 }
@@ -852,8 +970,10 @@ impl Default for EmbedConfig {
 }
 
 impl EmbedConfig {
-    /// Resolve from the environment, overriding the operational knobs the
-    /// EMBED stage exposes and leaving every other field at its default.
+    /// Resolve from the environment alone, ignoring the per-root config
+    /// layer. Callers that hold a loaded [`RootConfig`] (and possibly a
+    /// resolved index profile) use [`EmbedConfig::resolve`] instead so
+    /// the file and profile layers participate.
     ///
     /// Only operational knobs are read here: the model tag and the
     /// batching budgets. Content-identity parameters (chunk length,
@@ -861,15 +981,31 @@ impl EmbedConfig {
     /// `CHUNK_VERSION` so a change forces a re-derivation. A malformed or
     /// empty value falls back to the default rather than failing.
     pub fn from_env() -> EmbedConfig {
-        EmbedConfig::resolve_from(|key| std::env::var(key).ok())
+        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), &RootConfig::default(), None)
     }
 
-    /// Pure resolution, factored out of [`EmbedConfig::from_env`] so it can
-    /// be tested without mutating process-global environment variables.
-    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> EmbedConfig {
+    /// Resolve the model by the full precedence chain: env var > explicit
+    /// `config.toml` field > profile-derived value > hardcoded default.
+    /// The index profile resolves outside this crate; `profile_model` is
+    /// the embed model it declares, when a profile is in effect. The
+    /// batching budgets remain env-only knobs.
+    pub fn resolve(root: &RootConfig, profile_model: Option<&str>) -> EmbedConfig {
+        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), root, profile_model)
+    }
+
+    /// Pure resolution, factored out so it can be tested without mutating
+    /// process-global environment variables.
+    fn resolve_from(
+        get: impl Fn(&str) -> Option<String>,
+        root: &RootConfig,
+        profile_model: Option<&str>,
+    ) -> EmbedConfig {
         let d = EmbedConfig::default();
         EmbedConfig {
-            model: env_trimmed(get(EMBED_MODEL_ENV)).unwrap_or(d.model),
+            model: env_trimmed(get(EMBED_MODEL_ENV))
+                .or_else(|| env_trimmed(root.embed_model.clone()))
+                .or_else(|| profile_model.map(str::to_string))
+                .unwrap_or(d.model),
             request_timeout: d.request_timeout,
             max_retries: d.max_retries,
             backoff_base: d.backoff_base,
@@ -911,20 +1047,33 @@ impl Default for SearchConfig {
 }
 
 impl SearchConfig {
-    /// Resolve from the environment, falling back to the default when the
-    /// override is unset or malformed.
+    /// Resolve from the environment alone, ignoring the per-root config
+    /// layer. Callers that hold a loaded [`RootConfig`] use
+    /// [`SearchConfig::resolve`] instead so the `[search]` table
+    /// participates.
     pub fn from_env() -> SearchConfig {
-        SearchConfig::resolve_from(|key| std::env::var(key).ok())
+        SearchConfig::resolve_from(|key| std::env::var(key).ok(), &RootConfig::default())
+    }
+
+    /// Resolve each knob by precedence `env var > config.toml [search] >
+    /// hardcoded default`. A malformed or empty env value falls through
+    /// to the file layer rather than failing.
+    pub fn resolve(root: &RootConfig) -> SearchConfig {
+        SearchConfig::resolve_from(|key| std::env::var(key).ok(), root)
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
-    fn resolve_from(get: impl Fn(&str) -> Option<String>) -> SearchConfig {
+    fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> SearchConfig {
+        let file = root.search.clone().unwrap_or_default();
         SearchConfig {
-            top_k: env_usize(get(SEARCH_TOP_K_ENV), DEFAULT_SEARCH_TOP_K),
+            top_k: env_usize(
+                get(SEARCH_TOP_K_ENV),
+                file.top_k.unwrap_or(DEFAULT_SEARCH_TOP_K),
+            ),
             weak_distance_threshold: env_f32(
                 get(SEARCH_WEAK_THRESHOLD_ENV),
-                DEFAULT_SEARCH_WEAK_THRESHOLD,
+                file.weak_threshold.unwrap_or(DEFAULT_SEARCH_WEAK_THRESHOLD),
             ),
         }
     }
@@ -2693,13 +2842,17 @@ mod tests {
 
     #[test]
     fn embed_config_from_env_overrides_operational_knobs() {
-        let cfg = EmbedConfig::resolve_from(|key| match key {
-            EMBED_MODEL_ENV => Some("custom-model".to_string()),
-            EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
-            EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
-            EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
-            _ => None,
-        });
+        let cfg = EmbedConfig::resolve_from(
+            |key| match key {
+                EMBED_MODEL_ENV => Some("custom-model".to_string()),
+                EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
+                EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
+                EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+            None,
+        );
         assert_eq!(cfg.model, "custom-model");
         assert_eq!(cfg.batch_char_budget, 4_000);
         assert_eq!(cfg.batch_max_chunks, 32);
@@ -2712,6 +2865,100 @@ mod tests {
     }
 
     #[test]
+    fn embed_model_resolution_orders_env_file_profile_default() {
+        let file = RootConfig {
+            embed_model: Some("file-model".to_string()),
+            ..RootConfig::default()
+        };
+        let env = |key: &str| match key {
+            EMBED_MODEL_ENV => Some("env-model".to_string()),
+            _ => None,
+        };
+
+        // Every layer set: the env var wins.
+        let all = EmbedConfig::resolve_from(env, &file, Some("profile-model"));
+        assert_eq!(all.model, "env-model");
+
+        // No env: the explicit config.toml field wins over the profile.
+        let no_env = EmbedConfig::resolve_from(|_| None, &file, Some("profile-model"));
+        assert_eq!(no_env.model, "file-model");
+
+        // No env, no explicit field: the profile-derived value wins.
+        let profile_only =
+            EmbedConfig::resolve_from(|_| None, &RootConfig::default(), Some("profile-model"));
+        assert_eq!(profile_only.model, "profile-model");
+
+        // Nothing set anywhere: the hardcoded default.
+        let bare = EmbedConfig::resolve_from(|_| None, &RootConfig::default(), None);
+        assert_eq!(bare.model, DEFAULT_EMBED_MODEL);
+    }
+
+    #[test]
+    fn search_config_file_layer_sits_between_env_and_default() {
+        let file = RootConfig {
+            search: Some(RootSearchConfig {
+                top_k: Some(7),
+                weak_threshold: Some(0.25),
+            }),
+            ..RootConfig::default()
+        };
+
+        // No env: the [search] table supplies both knobs.
+        let from_file = SearchConfig::resolve_from(|_| None, &file);
+        assert_eq!(from_file.top_k, 7);
+        assert!((from_file.weak_distance_threshold - 0.25).abs() < 1e-6);
+
+        // Env set: it wins over the file.
+        let from_env = SearchConfig::resolve_from(
+            |key| match key {
+                SEARCH_TOP_K_ENV => Some("3".to_string()),
+                _ => None,
+            },
+            &file,
+        );
+        assert_eq!(from_env.top_k, 3);
+        assert!((from_env.weak_distance_threshold - 0.25).abs() < 1e-6);
+
+        // A malformed env value falls through to the file, not the
+        // hardcoded default.
+        let bad_env = SearchConfig::resolve_from(
+            |key| match key {
+                SEARCH_TOP_K_ENV => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            &file,
+        );
+        assert_eq!(bad_env.top_k, 7);
+
+        // A file that pins one knob leaves the other at its default.
+        let partial = RootConfig {
+            search: Some(RootSearchConfig {
+                top_k: Some(9),
+                weak_threshold: None,
+            }),
+            ..RootConfig::default()
+        };
+        let half = SearchConfig::resolve_from(|_| None, &partial);
+        assert_eq!(half.top_k, 9);
+        assert_eq!(half.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD);
+    }
+
+    #[test]
+    fn profile_conflict_messages_carry_both_values_and_a_repair_path() {
+        let model = ConfigError::profile_model_conflict("prof", "profile-model", "file-model");
+        let text = model.to_string();
+        assert!(text.contains("\"file-model\""));
+        assert!(text.contains("\"profile-model\""));
+        assert!(text.contains("--unset embed_model"));
+
+        let reference = ConfigError::profile_reference_conflict("a-prof", "b-prof");
+        let text = reference.to_string();
+        assert!(text.contains("\"a-prof\""));
+        assert!(text.contains("\"b-prof\""));
+        assert!(text.contains("libraries config"));
+    }
+
+    #[test]
     fn embed_config_progress_interval_default_and_override() {
         let d = EmbedConfig::default();
         assert_eq!(
@@ -2719,25 +2966,37 @@ mod tests {
             Duration::from_secs(DEFAULT_EMBED_PROGRESS_INTERVAL_SECS),
         );
 
-        let cfg = EmbedConfig::resolve_from(|key| match key {
-            EMBED_PROGRESS_INTERVAL_ENV => Some("12".to_string()),
-            _ => None,
-        });
+        let cfg = EmbedConfig::resolve_from(
+            |key| match key {
+                EMBED_PROGRESS_INTERVAL_ENV => Some("12".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+            None,
+        );
         assert_eq!(cfg.progress_interval, Duration::from_secs(12));
 
         // A zero-second override opts into a heartbeat after every
         // batch — that is the documented contract of the env var.
-        let burst = EmbedConfig::resolve_from(|key| match key {
-            EMBED_PROGRESS_INTERVAL_ENV => Some("0".to_string()),
-            _ => None,
-        });
+        let burst = EmbedConfig::resolve_from(
+            |key| match key {
+                EMBED_PROGRESS_INTERVAL_ENV => Some("0".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+            None,
+        );
         assert_eq!(burst.progress_interval, Duration::ZERO);
 
         // Non-numeric falls back, never panics.
-        let bad = EmbedConfig::resolve_from(|key| match key {
-            EMBED_PROGRESS_INTERVAL_ENV => Some("not-a-number".to_string()),
-            _ => None,
-        });
+        let bad = EmbedConfig::resolve_from(
+            |key| match key {
+                EMBED_PROGRESS_INTERVAL_ENV => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+            None,
+        );
         assert_eq!(
             bad.progress_interval,
             Duration::from_secs(DEFAULT_EMBED_PROGRESS_INTERVAL_SECS),
@@ -2747,13 +3006,17 @@ mod tests {
     #[test]
     fn embed_config_from_env_falls_back_on_blank_or_malformed() {
         let d = EmbedConfig::default();
-        let cfg = EmbedConfig::resolve_from(|key| match key {
-            // Whitespace-only counts as unset.
-            EMBED_MODEL_ENV => Some("   ".to_string()),
-            // Non-numeric falls back rather than failing.
-            EMBED_BATCH_CHAR_BUDGET_ENV => Some("not-a-number".to_string()),
-            _ => None,
-        });
+        let cfg = EmbedConfig::resolve_from(
+            |key| match key {
+                // Whitespace-only counts as unset.
+                EMBED_MODEL_ENV => Some("   ".to_string()),
+                // Non-numeric falls back rather than failing.
+                EMBED_BATCH_CHAR_BUDGET_ENV => Some("not-a-number".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+            None,
+        );
         assert_eq!(cfg.model, d.model);
         assert_eq!(cfg.batch_char_budget, d.batch_char_budget);
     }
@@ -2766,25 +3029,31 @@ mod tests {
             DEFAULT_SEARCH_WEAK_THRESHOLD,
         );
 
-        let cfg = SearchConfig::resolve_from(|key| match key {
-            SEARCH_TOP_K_ENV => Some("10".to_string()),
-            SEARCH_WEAK_THRESHOLD_ENV => Some("0.42".to_string()),
-            _ => None,
-        });
+        let cfg = SearchConfig::resolve_from(
+            |key| match key {
+                SEARCH_TOP_K_ENV => Some("10".to_string()),
+                SEARCH_WEAK_THRESHOLD_ENV => Some("0.42".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+        );
         assert_eq!(cfg.top_k, 10);
         assert!((cfg.weak_distance_threshold - 0.42).abs() < 1e-6);
 
         // A blank value falls back to the default.
-        let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()));
+        let blank = SearchConfig::resolve_from(|_| Some("  ".to_string()), &RootConfig::default());
         assert_eq!(blank.top_k, DEFAULT_SEARCH_TOP_K);
         assert_eq!(blank.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
 
         // Non-finite values fall back rather than poisoning the
         // threshold comparison downstream.
-        let bad = SearchConfig::resolve_from(|key| match key {
-            SEARCH_WEAK_THRESHOLD_ENV => Some("nan".to_string()),
-            _ => None,
-        });
+        let bad = SearchConfig::resolve_from(
+            |key| match key {
+                SEARCH_WEAK_THRESHOLD_ENV => Some("nan".to_string()),
+                _ => None,
+            },
+            &RootConfig::default(),
+        );
         assert_eq!(bad.weak_distance_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD,);
     }
 
@@ -3105,6 +3374,76 @@ mod tests {
     }
 
     #[test]
+    fn set_root_config_writes_typed_nested_search_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join(ROOT_CONFIG_NAME),
+            "# hand-written note\nembed_model = \"m\"\n",
+        )
+        .expect("seed config");
+        set_root_config_values(
+            tmp.path(),
+            &[
+                ("index_profile".to_string(), "some-profile".to_string()),
+                ("search.top_k".to_string(), "7".to_string()),
+                ("search.weak_threshold".to_string(), "0.4".to_string()),
+            ],
+            &[],
+        )
+        .expect("set nested keys");
+
+        // Numeric knobs land as TOML numbers, not quoted strings, and
+        // the dotted keys land under a `[search]` table.
+        let text = read_root_config_text(tmp.path()).expect("read config");
+        assert!(text.contains("# hand-written note"));
+        assert!(text.contains("[search]"));
+        assert!(text.contains("top_k = 7"));
+        assert!(!text.contains("top_k = \"7\""));
+
+        // The written file round-trips through the typed loader.
+        let cfg = load_root_config(tmp.path()).expect("load config");
+        assert_eq!(cfg.index_profile.as_deref(), Some("some-profile"));
+        let search = cfg.search.expect("search table present");
+        assert_eq!(search.top_k, Some(7));
+        assert!((search.weak_threshold.expect("threshold") - 0.4).abs() < 1e-6);
+
+        // Unsetting both search keys removes the now-empty table.
+        set_root_config_values(
+            tmp.path(),
+            &[],
+            &[
+                "search.top_k".to_string(),
+                "search.weak_threshold".to_string(),
+            ],
+        )
+        .expect("unset nested keys");
+        let text = read_root_config_text(tmp.path()).expect("read config");
+        assert!(!text.contains("[search]"));
+        let cfg = load_root_config(tmp.path()).expect("load config");
+        assert!(cfg.search.is_none());
+        assert_eq!(cfg.index_profile.as_deref(), Some("some-profile"));
+    }
+
+    #[test]
+    fn set_root_config_rejects_bad_search_values() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (key, value) in [
+            ("search.top_k", "0"),
+            ("search.top_k", "not-a-number"),
+            ("search.top_k", "-3"),
+            ("search.weak_threshold", "nan"),
+            ("search.weak_threshold", "inf"),
+            ("search.weak_threshold", "abc"),
+        ] {
+            let err =
+                set_root_config_values(tmp.path(), &[(key.to_string(), value.to_string())], &[])
+                    .expect_err("bad value refused");
+            assert!(matches!(err, RootConfigSetError::InvalidValue { .. }));
+        }
+        // Nothing was written by the rejected batches.
+        assert_eq!(read_root_config_text(tmp.path()).expect("read"), "");
+    }
+    #[test]
     fn root_config_missing_file_is_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = load_root_config(tmp.path()).expect("missing file resolves to default");
@@ -3149,20 +3488,29 @@ mod tests {
         // Every serialized field of a fully-populated `RootConfig` must
         // appear in `ROOT_CONFIG_KEYS`, so adding a field without
         // extending the write whitelist fails here rather than silently
-        // rejecting the key at runtime.
+        // rejecting the key at runtime. A nested table flattens to
+        // dotted keys, matching the whitelist's addressing scheme.
         let full = RootConfig {
             ollama_url: Some("http://x:1".to_string()),
             embed_model: Some("m".to_string()),
             mcp_addr: Some("127.0.0.1:1".to_string()),
             log_directive: Some("info".to_string()),
+            index_profile: Some("p".to_string()),
+            search: Some(RootSearchConfig {
+                top_k: Some(5),
+                weak_threshold: Some(0.5),
+            }),
         };
         let value = toml::Value::try_from(&full).expect("RootConfig serializes to a table");
-        let mut fields: Vec<String> = value
-            .as_table()
-            .expect("RootConfig is a table")
-            .keys()
-            .cloned()
-            .collect();
+        let mut fields: Vec<String> = Vec::new();
+        for (key, item) in value.as_table().expect("RootConfig is a table") {
+            match item.as_table() {
+                Some(nested) => {
+                    fields.extend(nested.keys().map(|inner| format!("{key}.{inner}")));
+                }
+                None => fields.push(key.clone()),
+            }
+        }
         fields.sort();
         let mut keys: Vec<String> = ROOT_CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
         keys.sort();
@@ -3287,6 +3635,16 @@ mod tests {
         );
         assert_eq!(root_config_env_override("mcp_addr"), Some(MCP_ADDR_ENV));
         assert_eq!(root_config_env_override("log_directive"), Some(LOG_ENV));
+        assert_eq!(
+            root_config_env_override("search.top_k"),
+            Some(SEARCH_TOP_K_ENV)
+        );
+        assert_eq!(
+            root_config_env_override("search.weak_threshold"),
+            Some(SEARCH_WEAK_THRESHOLD_ENV)
+        );
+        // The profile reference has no env counterpart by design.
+        assert_eq!(root_config_env_override("index_profile"), None);
         assert_eq!(root_config_env_override("nope"), None);
     }
 
