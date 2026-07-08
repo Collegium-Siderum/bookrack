@@ -142,6 +142,11 @@ rustix = { version = "1.1", features = ["process"] }
 # the same surface. Houses the toggle and threshold set the metadata
 # audit and upstream half-rules read at evaluation time.
 bookrack-audit-profile = { path = "crates/audit-profile" }
+# The index-profile crate, pinned at the workspace level so the runtime
+# and cli crates downstream consume the same surface: the built-in
+# `IndexProfile` presets, the static validator, and the model registry
+# that couples embed × ANN × reranker knobs into one named atom.
+bookrack-index-profile = { path = "crates/index-profile" }
 # The reference-book read store. Pinned at the workspace level so the
 # distill, mcp, and cli crates downstream consume the same surface
 # (the `Refs` handle and the `reference.db` migration target version).

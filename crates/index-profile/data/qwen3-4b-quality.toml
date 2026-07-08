@@ -1,0 +1,27 @@
+# bookrack built-in index profile. Do not edit in place; copy into the
+# per-user index-profiles directory under a new name to customize.
+#
+# The [ann] kind is ivf-hnsw-sq: it favours recall but carries an upstream
+# recall-regression warning on the pinned LanceDB, which `validate`
+# surfaces. Re-verify the warning if LanceDB is upgraded.
+schema_version = 1
+name = "qwen3-4b-quality"
+description = "Quality profile: the larger Qwen3 embedding model with an HNSW index and a cross-encoder reranker stage (planned)."
+
+[embed]
+backend = "ollama"
+model = "qwen3-embedding:4b"
+dim = 2560
+
+[ann]
+kind = "ivf-hnsw-sq"
+num_partitions = 256
+nprobes = 32
+refine_factor = 20
+
+[reranker]
+kind = "cross-encoder"
+backend = "candle"
+model = "Qwen3-Reranker-0.6B"
+top_k_in = 100
+top_k_out = 20

@@ -1,0 +1,21 @@
+# bookrack built-in index profile. Do not edit in place; copy into the
+# per-user index-profiles directory under a new name to customize.
+schema_version = 1
+name = "qwen3-0.6b-default"
+description = "Default profile: the small Qwen3 embedding model with a product-quantized IVF index and no reranker."
+
+[embed]
+backend = "ollama"
+model = "qwen3-embedding:0.6b"
+dim = 1024
+
+[ann]
+kind = "ivf-pq"
+num_partitions = 256
+num_sub_vectors = 128
+num_bits = 8
+nprobes = 16
+refine_factor = 10
+
+[reranker]
+kind = "none"

@@ -10,6 +10,7 @@ pub mod audit_profile;
 pub mod corpus;
 pub mod diagnose;
 pub mod dryrun;
+pub mod index_profile;
 pub mod ingest;
 pub mod intake_ocr;
 pub mod libraries;

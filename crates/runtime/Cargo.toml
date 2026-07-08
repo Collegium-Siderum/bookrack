@@ -15,6 +15,7 @@ bookrack-corpus = { path = "../corpus" }
 bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
 bookrack-embed = { path = "../embed" }
+bookrack-index-profile = { path = "../index-profile" }
 # `pdfium_install` reads the pinned-binary constants published next to
 # the PDF adapter that consumes the library.
 bookrack-extract = { path = "../extract" }

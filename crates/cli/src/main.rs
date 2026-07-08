@@ -26,6 +26,7 @@ use bookrack_cli_grammar::{
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
+use bookrack_runtime::cmd::index_profile::IndexProfileAction;
 use bookrack_runtime::cmd::libraries::CopyMode;
 use eyre::{Context, Result};
 
@@ -131,6 +132,17 @@ enum Command {
     AuditProfile {
         #[command(subcommand)]
         action: AuditProfileAction,
+    },
+    /// List, show, and validate index profiles.
+    ///
+    /// An index profile couples the embedding model, the ANN index
+    /// shape, and the reranker stage into one named, statically-checked
+    /// atom. Pure reflection over the built-in profiles compiled into
+    /// the binary plus any user profiles under the per-user profile
+    /// directory — no library, no MCP session.
+    IndexProfile {
+        #[command(subcommand)]
+        action: IndexProfileAction,
     },
     /// Verify schemas and cross-store counts against the live data root.
     ///
@@ -757,8 +769,8 @@ async fn run() -> Result<()> {
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
-    // root locally (`run`, `init`, `audit-profile`, `distill`,
-    // `runs`, and the offline `libraries` verbs): the flag is a real
+    // root locally (`run`, `init`, `audit-profile`, `index-profile`,
+    // `distill`, `runs`, and the offline `libraries` verbs): the flag is a real
     // switch there, not an assertion. Silent when no daemon is running,
     // when no
     // selection was given, or when the lock predates the identity
@@ -768,6 +780,7 @@ async fn run() -> Result<()> {
         Command::Init { .. }
             | Command::Run { .. }
             | Command::AuditProfile { .. }
+            | Command::IndexProfile { .. }
             | Command::Distill { .. }
             | Command::Runs { .. }
             | Command::Retrieval { .. }
@@ -892,6 +905,7 @@ async fn run() -> Result<()> {
     let selection = cli.selection();
     match cli.command {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
+        Command::IndexProfile { action } => bookrack_runtime::cmd::index_profile::run(action),
         Command::Verify => cmd::cli_client::verify::run(None).await,
         Command::Libraries { mut action } => {
             if let LibrariesAction::List { json } = &mut action {
@@ -1069,6 +1083,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
             }
         ),
         Command::AuditProfile { .. }
+        | Command::IndexProfile { .. }
         | Command::Verify
         | Command::Libraries { .. }
         | Command::Diagnose { .. }
@@ -1329,6 +1344,41 @@ mod tests {
                 "argv: {argv:?}"
             );
         }
+    }
+
+    #[test]
+    fn index_profile_verbs_parse() {
+        for argv in [
+            vec!["bookrack", "index-profile", "list"],
+            vec!["bookrack", "index-profile", "list", "--json"],
+            vec!["bookrack", "index-profile", "show", "qwen3-0.6b-default"],
+            vec![
+                "bookrack",
+                "index-profile",
+                "validate",
+                "qwen3-0.6b-default",
+            ],
+            vec![
+                "bookrack",
+                "index-profile",
+                "validate",
+                "x",
+                "--allow-unknown-model",
+            ],
+        ] {
+            Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+        }
+    }
+
+    #[test]
+    fn index_profile_allow_unknown_model_is_only_on_validate() {
+        let Err(err) =
+            Cli::try_parse_from(["bookrack", "index-profile", "list", "--allow-unknown-model"])
+        else {
+            panic!("--allow-unknown-model must not attach to list");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     #[test]

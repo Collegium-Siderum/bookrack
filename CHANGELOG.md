@@ -10,6 +10,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **index-profile, runtime, cli: `bookrack index-profile` names and
+  statically checks a retrieval configuration.** A new `index-profile`
+  crate couples the three retrieval knobs — the embedding model, the ANN
+  index shape, and the reranker stage — into one named, validatable atom,
+  with two built-in presets compiled into the binary
+  (`qwen3-0.6b-default`, a product-quantized IVF index with no reranker;
+  `qwen3-4b-quality`, an HNSW index with a cross-encoder reranker stage).
+  Three read-only verbs resolve locally with no daemon: `index-profile
+  list` merges the built-ins with any user profiles under the per-user
+  `index-profiles/` directory (marking each `[builtin]`/`[user]` and
+  noting shadows), `index-profile show <name>` prints a profile's source
+  and its validation result, and `index-profile validate <name>` runs the
+  static checks and exits non-zero on any error. Validation enforces the
+  product-quantization constraints (`num_sub_vectors` required, dividing
+  the dimension, with `dim / num_sub_vectors <= 8`), warns on the
+  HNSW recall regression, checks the cross-encoder reranker contract, and
+  consults an offline model registry that `--allow-unknown-model`
+  bypasses. A user profile shadows a built-in of the same name.
+
 - **config, cli: offline `libraries config` reads and edits a library's
   `config.toml`.** `libraries config <name>` resolves the library's data
   root from the registry with no daemon and prints its `config.toml`
