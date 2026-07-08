@@ -47,6 +47,13 @@ stays read-only and tool-scoped.
   behalf — clients must confirm locally and resend with
   `yes = true`. `dry_run` and `resume` paths are exempt where the
   method documents them.)
+- `-32013` plan not found (bookrack-specific; the `plan_id` on a
+  destructive execute leg names no live entry in the server-held plan
+  registry — it expired, was already consumed, or was never minted)
+- `-32014` plan kind mismatch (bookrack-specific; the `plan_id`
+  resolves to a plan minted for a different destructive method)
+- `-32015` plan library mismatch (bookrack-specific; the `plan_id`
+  resolves to a plan minted against a different library)
 
 #### Write-class error mapping
 
@@ -163,7 +170,12 @@ the exit-code bucket does not distinguish the two.
   derives from the source PDF; `allow_partial = true` accepts an OCR
   product that does not cover every page. `audit_profile` overrides
   the worker's book-side audit profile for this job; same semantics as
-  `ingest.submit`. The persistent queue schema is `v4`.
+  `ingest.submit`. The persistent queue schema is `v6`.
+- `glean.submit` — `{ paths, library?, priority?, force? }` →
+  `{ job_ids: [<uuid v7>] }`. The paper-pipeline peer of
+  `ingest.submit`: appends one glean job per path to the same
+  persistent queue, and the worker runs the paper ingest (identify →
+  structure → audit → embed). Directory paths are not expanded here.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
@@ -295,8 +307,18 @@ catalog and corpus handles the daemon already holds.
   paginated review-queue browse.
 - `library.show_audit_trail` / `library.show_pipeline_trail` —
   per-book metadata-edit and pipeline-step audit trails.
-- `library.search` / `library.search_in_book` — cited passage search
-  across the library or a single book.
+- `library.list_papers` / `library.find_papers` — paginated
+  paper-registry browse and filter, peers of the `*_books` pair.
+- `library.show_paper` / `library.show_paper_toc` — per-paper
+  bibliographic record and section outline; `null` when the intake id
+  is unknown.
+- `papers.export_csl` / `papers.fetch_source` — a paper's metadata as a
+  CSL-JSON item, and a reference to its archived source PDF bytes.
+  These two are `papers.*`-namespaced but read-class and take no write
+  mutex.
+- `library.search` / `library.search_in_book` / `library.search_in_paper`
+  — cited passage search across the library, a single book, or a
+  single paper.
 - `library.vectors_status` — vector-store snapshot for the library.
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product
@@ -406,10 +428,10 @@ catalog and corpus handles the daemon already holds.
   no-op and still returns `{ ok: true }` so the contract stays
   stable between CLI-only and GUI builds. `bookrack-mcp` gains a
   `--with-queue-worker` flag: without it, queue-bound write
-  methods (`ingest.submit`, `ingest.cancel`, `vectors.*`,
-  `corpus.rebuild`, `stamps.reconcile`, `remove`, `dryrun`,
-  `papers.corpus_rebuild`, `papers.vectors_*`, `papers.stamps_reconcile`,
-  `papers.dryrun`, `papers.remove`)
+  methods (`ingest.submit`, `ingest.cancel`, `glean.submit`,
+  `vectors.*`, `corpus.rebuild`, `stamps.reconcile`, `remove`,
+  `dryrun`, `papers.corpus_rebuild`, `papers.vectors_*`,
+  `papers.stamps_reconcile`, `papers.dryrun`, `papers.remove`)
   short-circuit at dispatch with JSON-RPC error
   `-32002 queue worker disabled in headless mode` rather than
   enqueueing work no one will run; with it, the headless entry
