@@ -462,6 +462,9 @@ pub enum WriteMetadataAction {
 }
 
 /// Vector-store write commands.
+///
+/// Prefer `bookrack index-profile apply`; this namespace is the
+/// low-level escape hatch.
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteVectorsAction {
     /// Build or rebuild the ANN index.
@@ -592,6 +595,9 @@ pub enum CorpusAction {
 }
 
 /// Index-stamp reconciliation.
+///
+/// Prefer `bookrack index-profile apply`; this namespace is the
+/// low-level escape hatch.
 #[derive(clap::Subcommand, Debug)]
 pub enum StampsAction {
     /// Probe the embedder and stamp `corpus.db`'s `index_meta`.
@@ -654,12 +660,18 @@ pub enum PapersAction {
     },
     /// Paper-side vector-store write commands. Peer of the top-level
     /// `vectors` subcommand for the book pipeline.
+    ///
+    /// Prefer `bookrack index-profile apply`; this namespace is the
+    /// low-level escape hatch.
     Vectors {
         #[command(subcommand)]
         action: PapersVectorsAction,
     },
     /// Paper-side index-stamp reconciliation. Peer of the top-level
     /// `stamps` subcommand for the book pipeline.
+    ///
+    /// Prefer `bookrack index-profile apply`; this namespace is the
+    /// low-level escape hatch.
     Stamps {
         #[command(subcommand)]
         action: PapersStampsAction,
@@ -823,6 +835,9 @@ pub enum PapersCorpusAction {
 }
 
 /// Paper-side vector-store write commands. Peer of [`WriteVectorsAction`].
+///
+/// Prefer `bookrack index-profile apply`; this namespace is the
+/// low-level escape hatch.
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersVectorsAction {
     /// Build or rebuild the ANN index over `lancedb_papers`.
@@ -897,6 +912,9 @@ pub enum PapersVectorsAction {
 }
 
 /// Paper-side index-stamp reconciliation. Peer of [`StampsAction`].
+///
+/// Prefer `bookrack index-profile apply`; this namespace is the
+/// low-level escape hatch.
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersStampsAction {
     /// Probe the embedder for its vector dimension and write the

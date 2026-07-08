@@ -759,10 +759,11 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
     crate::profile::user_profile_dir()
 }
 
-/// The built index stamps relevant to a profile; see
-/// [`crate::profile::built_stamps`].
+/// The built embed-model/dimension stamp pair for the book pipeline;
+/// see [`crate::profile::built_stamps`].
 fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
-    crate::profile::built_stamps(data_dir)
+    crate::profile::built_stamps(&crate::profile::Pipeline::Books.corpus_db(data_dir))
+        .and_then(|b| b.embed_pair())
 }
 
 /// Classify one entry's index-profile reference against its resolution

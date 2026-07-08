@@ -16,6 +16,7 @@ pub mod diagnose;
 pub mod doctor;
 pub mod dryrun;
 pub mod helpers;
+pub mod index_profile;
 pub mod ingest;
 pub mod intake;
 pub mod libraries;

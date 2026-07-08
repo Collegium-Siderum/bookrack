@@ -25,7 +25,9 @@
 //!     is the side the lock lacks
 //!
 //! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
-//! `index-profile`, `distill`, `runs`, and the offline `libraries` verbs —
+//! the `index-profile` verbs other than an executing `apply` (its
+//! `--dry-run` form stays offline and keeps the exemption),
+//! `distill`, `runs`, and the offline `libraries` verbs —
 //! `default`/`detect`/`scan`/`add`/`register`/`remove`/`config`) bypass
 //! this check entirely — for them the flag is a real switch into a
 //! different data root, or an offline registry read/write, not an

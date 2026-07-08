@@ -103,6 +103,10 @@ pub fn status(ctx: &MethodContext) -> Value {
         "state": ctx.event_stream.current_state(),
         "queue_pending": queue_pending,
         "queue_running": queue_running,
+        // `false` on a headless entry point without a queue worker;
+        // clients that would enqueue work (e.g. `index-profile apply`)
+        // check this up front instead of failing on their first call.
+        "queue_worker_enabled": ctx.queue_worker_enabled,
     })
 }
 

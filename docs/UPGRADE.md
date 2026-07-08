@@ -43,6 +43,13 @@ earlier ones already happened.
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
 
+For every row whose stale layers are `chunks → vectors` — a chunking or
+normalization version bump, or an embedding-model / vector-width change
+— prefer `bookrack index-profile apply <profile>`: it derives the row's
+refresh command from the stamp comparison, prints the plan, and runs it
+after one confirmation. The commands named in the matrix remain the
+low-level escape hatch.
+
 ### Stamps that advance without a refresh command
 
 Some version dimensions move without invalidating anything on disk, so
@@ -165,14 +172,23 @@ The chunks table is single-dim and tied to one model: stamps in
 the serve-side gate (every query) refuse anything else. A library is
 not a multi-model index.
 
+The preferred front door is `bookrack index-profile apply <profile>`:
+it declares the target profile in `config.toml` and the registry entry
+before any action runs (handlers re-read the file per call, so the new
+model takes effect without a pre-reset restart), derives the reset from
+the stamp comparison, and demands the library name retyped before
+executing it. To rehearse, fork first and apply on the copy. The
+workflows below drive the same switch through the low-level verbs.
+
 Two supported workflows. Both execute inside the running daemon —
 `vectors reset` is dispatched over its control plane — and the
-embedding model resolves from the daemon process's environment
-(`BOOKRACK_EMBED_MODEL`, then `config.toml`, then the default) at
-the moment the reset runs. Setting the variable on the client
-invocation has no effect: the daemon must be restarted with the new
-model before the reset, and restarted once more afterwards so the
-serve path picks up the new stamps.
+embedding model resolves through the effective chain
+(`BOOKRACK_EMBED_MODEL`, then `config.toml` and its profile reference,
+then the default) at the moment the reset runs. The environment layer
+is process state: setting the variable on the client invocation has no
+effect, and a daemon started under it must be restarted to change it.
+After any model switch, restart the daemon once so the serve path
+picks up the new stamps.
 
 ### Side by side: `libraries fork` then `vectors reset` on the clone
 

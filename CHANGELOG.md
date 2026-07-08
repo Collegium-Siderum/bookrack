@@ -30,7 +30,39 @@ release workflow extracts the matching section verbatim from this file.
   field-by-field comparison against the built index stamps. `diff <a>
   <b>` compares two profiles field by field. Both take `--json`.
 
+- **index-profile, runtime, cli: `index-profile apply` reconciles a
+  library with a profile.** The high-level path for switching embedding
+  models or ANN parameters: statically validate the target profile,
+  refuse when `BOOKRACK_EMBED_MODEL` or an explicit `embed_model` field
+  would mask it, compare the recorded stamps and the persisted ANN
+  configuration per pipeline (books and papers derive independently;
+  an unused pipeline is skipped), and derive the action list — a
+  destructive `reset` when the embed model or dimension changed, a
+  `reembed` for a chunking/normalization version bump, a `rebuild` for
+  ANN-only drift, a `stamps reconcile` for missing stamp records.
+  `--dry-run` prints the plan offline; executing routes every action
+  through the daemon queue in order, one result line per step. A plan
+  containing a reset demands the library name retyped (or `--yes`), and
+  the recommended rehearsal is `libraries fork` → apply on the copy →
+  verify → apply in place. The target declaration (`config.toml` +
+  registry entry) is written after confirmation and before the first
+  action, so an interrupted run reports "declaration ahead of stamps"
+  in `current` and a re-run re-derives only the remaining actions.
+
 ### Changed
+
+- **cli: the `vectors` and `stamps` namespaces (books and papers) are
+  demoted to low-level escape hatches.** Their help now points at
+  `bookrack index-profile apply` first; the verbs themselves are
+  unchanged.
+
+- **runtime: RPC handlers re-read `config.toml` per call when resolving
+  the effective index profile.** The daemon previously served the root
+  config snapshotted at bring-up, so a profile declaration written
+  while it ran was invisible to `vectors`/`stamps` handlers until a
+  restart. The `status` response now also carries
+  `queue_worker_enabled`, letting clients that would enqueue work
+  refuse a headless daemon up front.
 
 - **runtime: a referenced index profile now takes effect, and conflicts
   refuse startup.** The daemon (and every offline embedding command)

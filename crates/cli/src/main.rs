@@ -288,6 +288,9 @@ enum Command {
         action: WriteMetadataAction,
     },
     /// Vector-store writes: rebuild, reembed, reset, or drop.
+    ///
+    /// Prefer `bookrack index-profile apply`; this namespace is the
+    /// low-level escape hatch.
     Vectors {
         #[command(subcommand)]
         action: WriteVectorsAction,
@@ -298,6 +301,9 @@ enum Command {
         action: CorpusAction,
     },
     /// Reconcile corpus index stamps.
+    ///
+    /// Prefer `bookrack index-profile apply`; this namespace is the
+    /// low-level escape hatch.
     Stamps {
         #[command(subcommand)]
         action: StampsAction,
@@ -769,31 +775,41 @@ async fn run() -> Result<()> {
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
-    // root locally (`run`, `init`, `audit-profile`, `index-profile`,
+    // root locally (`run`, `init`, `audit-profile`, the `index-profile`
+    // verbs other than an executing `apply`,
     // `distill`, `runs`, and the offline `libraries` verbs): the flag is a real
     // switch there, not an assertion. Silent when no daemon is running,
     // when no
     // selection was given, or when the lock predates the identity
     // fields that make the comparison possible.
-    if !matches!(
-        cli.command,
-        Command::Init { .. }
-            | Command::Run { .. }
-            | Command::AuditProfile { .. }
-            | Command::IndexProfile { .. }
-            | Command::Distill { .. }
-            | Command::Runs { .. }
-            | Command::Retrieval { .. }
-            | Command::Libraries {
-                action: LibrariesAction::Default { .. }
-                    | LibrariesAction::Detect { .. }
-                    | LibrariesAction::Scan { .. }
-                    | LibrariesAction::Add { .. }
-                    | LibrariesAction::Register { .. }
-                    | LibrariesAction::Remove { .. }
-                    | LibrariesAction::Config { .. }
-            }
-    ) {
+    let index_profile_is_local = match &cli.command {
+        // `apply` executes through the daemon, so only its offline
+        // `--dry-run` form keeps the local-resolve exemption.
+        Command::IndexProfile { action } => {
+            !matches!(action, IndexProfileAction::Apply { dry_run: false, .. })
+        }
+        _ => false,
+    };
+    if !(index_profile_is_local
+        || matches!(
+            cli.command,
+            Command::Init { .. }
+                | Command::Run { .. }
+                | Command::AuditProfile { .. }
+                | Command::Distill { .. }
+                | Command::Runs { .. }
+                | Command::Retrieval { .. }
+                | Command::Libraries {
+                    action: LibrariesAction::Default { .. }
+                        | LibrariesAction::Detect { .. }
+                        | LibrariesAction::Scan { .. }
+                        | LibrariesAction::Add { .. }
+                        | LibrariesAction::Register { .. }
+                        | LibrariesAction::Remove { .. }
+                        | LibrariesAction::Config { .. }
+                }
+        ))
+    {
         preflight::enforce_selection_mismatch(&cli.selection())?;
     }
 
@@ -917,9 +933,34 @@ async fn run() -> Result<()> {
                     *json = *json || json_global;
                 }
                 IndexProfileAction::Diff { json, .. } => *json = *json || json_global,
+                IndexProfileAction::Apply { library, .. } if library.is_none() => {
+                    *library = selection.library.clone();
+                }
                 _ => {}
             }
-            bookrack_runtime::cmd::index_profile::run(action)
+            // `apply` orchestrates control-plane calls (planning offline
+            // under `--dry-run`), so it dispatches to the daemon client;
+            // every other verb resolves locally.
+            if let IndexProfileAction::Apply {
+                name,
+                library,
+                pipeline,
+                dry_run,
+                yes,
+            } = action
+            {
+                cmd::cli_client::index_profile::run(
+                    &name,
+                    library.as_deref(),
+                    pipeline,
+                    dry_run,
+                    yes,
+                    None,
+                )
+                .await
+            } else {
+                bookrack_runtime::cmd::index_profile::run(action)
+            }
         }
         Command::Verify => cmd::cli_client::verify::run(None).await,
         Command::Libraries { mut action } => {
@@ -1437,6 +1478,82 @@ mod tests {
         let Err(err) = Cli::try_parse_from(["bookrack", "index-profile", "diff", "only-one"])
         else {
             panic!("diff must require both names");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn index_profile_apply_grammar_covers_defaults_and_pipeline_enum() {
+        use bookrack_runtime::cmd::index_profile::PipelineFilter;
+
+        // Bare form: every flag at its default.
+        let cli = Cli::try_parse_from(["bookrack", "index-profile", "apply", "some-profile"])
+            .expect("bare apply parses");
+        let Command::IndexProfile {
+            action:
+                IndexProfileAction::Apply {
+                    name,
+                    library,
+                    pipeline,
+                    dry_run,
+                    yes,
+                },
+        } = cli.command
+        else {
+            panic!("must parse as apply");
+        };
+        assert_eq!(name, "some-profile");
+        assert!(library.is_none());
+        assert_eq!(pipeline, PipelineFilter::All);
+        assert!(!dry_run);
+        assert!(!yes);
+
+        // Full form with every flag set.
+        let cli = Cli::try_parse_from([
+            "bookrack",
+            "index-profile",
+            "apply",
+            "some-profile",
+            "--library",
+            "x",
+            "--pipeline",
+            "papers",
+            "--dry-run",
+            "--yes",
+        ])
+        .expect("full apply parses");
+        let Command::IndexProfile {
+            action:
+                IndexProfileAction::Apply {
+                    library,
+                    pipeline,
+                    dry_run,
+                    yes,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("must parse as apply");
+        };
+        assert_eq!(library.as_deref(), Some("x"));
+        assert_eq!(pipeline, PipelineFilter::Papers);
+        assert!(dry_run);
+        assert!(yes);
+
+        // The pipeline filter is a closed enum and the name is required.
+        assert!(
+            Cli::try_parse_from([
+                "bookrack",
+                "index-profile",
+                "apply",
+                "p",
+                "--pipeline",
+                "everything"
+            ])
+            .is_err()
+        );
+        let Err(err) = Cli::try_parse_from(["bookrack", "index-profile", "apply"]) else {
+            panic!("apply must require a profile name");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }

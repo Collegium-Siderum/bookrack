@@ -1,20 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Effective index-profile resolution. A library can reference a profile
-//! from two places — the per-root `config.toml` and its registry entry —
-//! and the profile's embed model competes with the explicit `embed_model`
-//! field and the env override. This module derives the single effective
-//! combination (or refuses with the conflict spelled out), and every
-//! embed-model consumer in this crate goes through it so the
-//! `env > config.toml > profile > default` chain applies uniformly.
+//! Effective index-profile resolution and the apply-plan derivation.
+//!
+//! A library can reference a profile from two places — the per-root
+//! `config.toml` and its registry entry — and the profile's embed model
+//! competes with the explicit `embed_model` field and the env override.
+//! This module derives the single effective combination (or refuses with
+//! the conflict spelled out), and every embed-model consumer in this
+//! crate goes through it so the `env > config.toml > profile > default`
+//! chain applies uniformly.
+//!
+//! The second half of the module is the offline planning layer behind
+//! `index-profile apply`: read the built stamps and the persisted ANN
+//! configuration per pipeline, compare them against a target profile,
+//! and derive the ordered action list that reconciles the difference.
+//! The derivation is pure; executing the actions is the CLI
+//! orchestrator's job.
 
 use std::path::{Path, PathBuf};
 
-use bookrack_config::{Config, ConfigError, EmbedConfig, list_libraries, registry_target_path};
-use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
-use bookrack_index_profile::{
-    IndexProfile, USER_PROFILE_DIR_NAME, ensure_reranker_supported, has_errors, resolve, validate,
+use bookrack_config::{
+    Config, ConfigError, EmbedConfig, LibraryEntry, RootConfig, list_libraries, load_root_config,
+    registry_target_path, root_config_env_override,
 };
+use bookrack_corpus::{
+    CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
+};
+use bookrack_index_profile::{
+    AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, ensure_reranker_supported, has_errors, resolve,
+    validate,
+};
+use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
 
 /// Where a library's effective profile reference was declared.
@@ -71,11 +87,20 @@ pub fn user_profile_dir_or_default() -> PathBuf {
 /// a profile.
 fn registry_profile_ref(cfg: &Config) -> Option<String> {
     let entries = list_libraries().ok().flatten()?;
-    let entry = match cfg.library() {
+    registry_profile_ref_in(&entries, cfg.library(), cfg.data_dir())
+}
+
+/// [`registry_profile_ref`] against an explicit entry list. Pure, so a
+/// test drives the name-match and path-fallback branches without a
+/// registry on disk.
+fn registry_profile_ref_in(
+    entries: &[LibraryEntry],
+    library: Option<&str>,
+    data_dir: &Path,
+) -> Option<String> {
+    let entry = match library {
         Some(name) => entries.iter().find(|e| e.name == name),
-        None => entries
-            .iter()
-            .find(|e| same_dir(&e.data_dir, cfg.data_dir())),
+        None => entries.iter().find(|e| same_dir(&e.data_dir, data_dir)),
     }?;
     entry.index_profile.clone()
 }
@@ -106,6 +131,17 @@ pub(crate) fn effective_reference(
     }
 }
 
+/// The root config re-read from disk at call time, falling back to the
+/// snapshot `cfg` carries when the file cannot be read. Daemon RPC
+/// handlers hold a `Config` captured at bring-up; re-reading keeps a
+/// profile declaration written after bring-up (e.g. by `index-profile
+/// apply`) visible to every handler without a restart. Offline callers
+/// parse a fresh `Config` per process, so for them the two sources
+/// agree.
+fn fresh_root_config(cfg: &Config) -> RootConfig {
+    load_root_config(cfg.data_dir()).unwrap_or_else(|_| cfg.root_config().clone())
+}
+
 /// Resolve the effective index profile for the library `cfg` serves.
 ///
 /// `Ok(None)` when neither `config.toml` nor the registry entry
@@ -116,7 +152,13 @@ pub(crate) fn effective_reference(
 /// ([`ConfigError::ProfileConfigConflict`]), or when the profile enables
 /// the not-yet-implemented reranker stage.
 pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>> {
-    let config_ref = cfg.root_config().index_profile.clone();
+    effective_index_profile_in(cfg, &fresh_root_config(cfg))
+}
+
+/// [`effective_index_profile`] against an already-loaded root config,
+/// so [`effective_embed_config`] reads the file once per call.
+fn effective_index_profile_in(cfg: &Config, root: &RootConfig) -> Result<Option<EffectiveProfile>> {
+    let config_ref = root.index_profile.clone();
     let registry_ref = registry_profile_ref(cfg);
     let Some((name, origin)) = effective_reference(config_ref, registry_ref)? else {
         return Ok(None);
@@ -132,7 +174,7 @@ pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>>
             )
         })?;
 
-    if let Some(explicit) = cfg.root_config().embed_model.as_deref()
+    if let Some(explicit) = root.embed_model.as_deref()
         && explicit != profile.embed.model
     {
         return Err(
@@ -150,9 +192,10 @@ pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>>
 /// itself in conflict, so a handler cannot embed under a configuration
 /// the daemon would refuse to start with.
 pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
-    let effective = effective_index_profile(cfg)?;
+    let root = fresh_root_config(cfg);
+    let effective = effective_index_profile_in(cfg, &root)?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
-    Ok(EmbedConfig::resolve(cfg.root_config(), model))
+    Ok(EmbedConfig::resolve(&root, model))
 }
 
 /// Write gate for an `index_profile` reference: the name must resolve
@@ -177,40 +220,379 @@ pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
     }
 }
 
-/// The built index stamps relevant to a profile: the embed model and the
-/// vector dimension recorded in the corpus, or `None` when the corpus is
-/// missing, unbuilt, or cannot be opened (so a check skips rather than
-/// racing a live writer).
-pub fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
-    let corpus = Corpus::open_read_only(&data_dir.join("corpus.db")).ok()?;
-    let model = corpus.meta_get(EMBED_MODEL_KEY).ok()??;
-    let dim = corpus.meta_get(VECTOR_DIM_KEY).ok()??.parse::<u32>().ok()?;
-    Some((model, dim))
+/// One of the two indexed pipelines a library can carry. The same
+/// profile governs both; each pipeline keeps its own corpus database,
+/// LanceDB directory, and stamp record, so plans derive per pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pipeline {
+    /// The book pipeline: `corpus.db` and `lancedb/`.
+    Books,
+    /// The paper pipeline: `papers_corpus.db` and `lancedb_papers/`.
+    Papers,
 }
 
-/// Field-level mismatches between a profile's embed contract and the
-/// built index stamps. Empty means consistent.
-pub fn profile_stamp_findings(profile: &IndexProfile, built: &(String, u32)) -> Vec<String> {
-    let (built_model, built_dim) = built;
-    let mut findings = Vec::new();
-    if *built_model != profile.embed.model {
-        findings.push(format!(
-            "embed.model: profile declares '{}' but the built index is stamped '{built_model}'",
-            profile.embed.model
-        ));
+impl Pipeline {
+    /// Both pipelines, in rendering order.
+    pub const ALL: [Pipeline; 2] = [Pipeline::Books, Pipeline::Papers];
+
+    /// Stable label for section headers and JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Pipeline::Books => "books",
+            Pipeline::Papers => "papers",
+        }
     }
-    if *built_dim != profile.embed.dim {
-        findings.push(format!(
-            "embed.dim: profile declares {} but the built index is stamped {built_dim}",
-            profile.embed.dim
-        ));
+
+    /// The pipeline's corpus database under `data_dir`. Mirrors
+    /// [`bookrack_config::Config::corpus_db`] and
+    /// [`bookrack_config::Config::papers_corpus_db`], which take a full
+    /// resolved `Config` this registry-driven path does not have.
+    pub fn corpus_db(self, data_dir: &Path) -> PathBuf {
+        match self {
+            Pipeline::Books => data_dir.join("corpus.db"),
+            Pipeline::Papers => data_dir.join("papers_corpus.db"),
+        }
+    }
+
+    /// The pipeline's LanceDB directory under `data_dir`. Mirrors
+    /// [`bookrack_config::Config::lancedb_dir`] and
+    /// [`bookrack_config::Config::papers_lancedb_dir`].
+    pub fn lancedb_dir(self, data_dir: &Path) -> PathBuf {
+        match self {
+            Pipeline::Books => data_dir.join("lancedb"),
+            Pipeline::Papers => data_dir.join("lancedb_papers"),
+        }
+    }
+
+    /// The stamps this binary would record for the pipeline after a
+    /// clean build under `model`/`dim`. The chunking constant differs
+    /// per pipeline: books chunk under `bookrack_ingest`, papers under
+    /// `bookrack_glean`.
+    pub fn target_stamps(self, model: &str, dim: u32) -> IndexStamps {
+        match self {
+            Pipeline::Books => bookrack_ingest::current_index_stamps(model, dim),
+            Pipeline::Papers => bookrack_glean::stamps::current_index_stamps(model, dim),
+        }
+    }
+}
+
+/// The four index stamps as recorded in a corpus database, each `None`
+/// when its key is unset. Distinguishes "stamped with a different
+/// value" (a real divergence) from "not stamped at all" (metadata
+/// drift a `stamps reconcile` repairs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuiltStamps {
+    /// `index_meta` `embed_model`.
+    pub embed_model: Option<String>,
+    /// `index_meta` `vector_dim`.
+    pub vector_dim: Option<u32>,
+    /// `index_meta` `chunk_version`.
+    pub chunk_version: Option<u32>,
+    /// `index_meta` `normalize_version`.
+    pub normalize_version: Option<u32>,
+}
+
+impl BuiltStamps {
+    /// `true` when no stamp key is set at all.
+    pub fn is_unstamped(&self) -> bool {
+        self.embed_model.is_none()
+            && self.vector_dim.is_none()
+            && self.chunk_version.is_none()
+            && self.normalize_version.is_none()
+    }
+
+    /// `true` when every stamp key is set.
+    pub fn is_fully_stamped(&self) -> bool {
+        self.embed_model.is_some()
+            && self.vector_dim.is_some()
+            && self.chunk_version.is_some()
+            && self.normalize_version.is_some()
+    }
+
+    /// The `(embed_model, vector_dim)` pair when both are stamped — the
+    /// two-field view callers that predate the four-stamp record use.
+    pub fn embed_pair(&self) -> Option<(String, u32)> {
+        Some((self.embed_model.clone()?, self.vector_dim?))
+    }
+}
+
+/// The index stamps recorded in the corpus database at `corpus_db`, or
+/// `None` when the database is missing or cannot be opened (so a check
+/// skips rather than racing a live writer). A database that opens but
+/// carries no stamps returns an unstamped record, not `None`.
+pub fn built_stamps(corpus_db: &Path) -> Option<BuiltStamps> {
+    let corpus = Corpus::open_read_only(corpus_db).ok()?;
+    let get = |key: &str| corpus.meta_get(key).ok().flatten();
+    Some(BuiltStamps {
+        embed_model: get(EMBED_MODEL_KEY),
+        vector_dim: get(VECTOR_DIM_KEY).and_then(|v| v.parse().ok()),
+        chunk_version: get(CHUNK_VERSION_KEY).and_then(|v| v.parse().ok()),
+        normalize_version: get(NORMALIZE_VERSION_KEY).and_then(|v| v.parse().ok()),
+    })
+}
+
+/// Field-level differences between the stamps a clean build would
+/// record (`target`) and the stamps actually recorded (`built`). Empty
+/// means consistent. A key that is stamped with another value reports
+/// the divergence; a key that is missing entirely reports the gap.
+pub fn profile_stamp_findings(target: &IndexStamps, built: &BuiltStamps) -> Vec<String> {
+    let mut findings = Vec::new();
+    match built.embed_model.as_deref() {
+        Some(model) if model != target.embed_model => findings.push(format!(
+            "embed.model: profile declares '{}' but the built index is stamped '{model}'",
+            target.embed_model
+        )),
+        Some(_) => {}
+        None => findings.push("embed.model: the built index has no embed_model stamp".to_string()),
+    }
+    match built.vector_dim {
+        Some(dim) if dim != target.vector_dim => findings.push(format!(
+            "embed.dim: profile declares {} but the built index is stamped {dim}",
+            target.vector_dim
+        )),
+        Some(_) => {}
+        None => findings.push("embed.dim: the built index has no vector_dim stamp".to_string()),
+    }
+    match built.chunk_version {
+        Some(v) if v != target.chunk_version => findings.push(format!(
+            "chunk_version: this binary chunks at version {} but the built index \
+             is stamped {v}",
+            target.chunk_version
+        )),
+        Some(_) => {}
+        None => {
+            findings.push("chunk_version: the built index has no chunk_version stamp".to_string())
+        }
+    }
+    match built.normalize_version {
+        Some(v) if v != target.normalize_version => findings.push(format!(
+            "normalize_version: this binary normalizes at version {} but the built \
+             index is stamped {v}",
+            target.normalize_version
+        )),
+        Some(_) => {}
+        None => findings
+            .push("normalize_version: the built index has no normalize_version stamp".to_string()),
     }
     findings
+}
+
+/// Everything the plan derivation reads from one pipeline's on-disk
+/// state. Assembled by [`read_pipeline_state`]; kept as plain data so
+/// the derivation itself stays pure and table-testable.
+#[derive(Debug, Clone, Default)]
+pub struct PipelineState {
+    /// The recorded stamps, or `None` when the corpus database is
+    /// missing or unopenable.
+    pub built: Option<BuiltStamps>,
+    /// The persisted ANN configuration from `vectors_meta.json`, or
+    /// `None` when no meta file exists (a fresh or legacy store).
+    pub ann: Option<AnnConfig>,
+    /// Whether the pipeline's LanceDB chunks table exists on disk.
+    pub has_chunks: bool,
+}
+
+/// Read one pipeline's [`PipelineState`] from disk. Offline and
+/// read-only. A malformed `vectors_meta.json` is an error rather than a
+/// silent "no ANN": deriving a rebuild over a store this binary cannot
+/// interpret would guess where the operator must decide.
+pub fn read_pipeline_state(data_dir: &Path, pipeline: Pipeline) -> Result<PipelineState> {
+    let lancedb_dir = pipeline.lancedb_dir(data_dir);
+    let ann = match bookrack_vectors::meta::load(&lancedb_dir) {
+        Ok(None) => None,
+        Ok(Some(meta)) => Some(AnnConfig::from_meta(&meta).map_err(|e| {
+            eyre!(
+                "{} vectors_meta.json is not readable by this binary: {e}",
+                pipeline.as_str()
+            )
+        })?),
+        Err(e) => {
+            return Err(eyre!(
+                "{} vectors_meta.json failed to load: {e}",
+                pipeline.as_str()
+            ));
+        }
+    };
+    Ok(PipelineState {
+        built: built_stamps(&pipeline.corpus_db(data_dir)),
+        ann,
+        // The chunks table materializes as a `chunks.lance` directory;
+        // checking for it avoids opening the store just to probe
+        // existence.
+        has_chunks: lancedb_dir.join("chunks.lance").is_dir(),
+    })
+}
+
+/// One reconciliation step `index-profile apply` can execute. Ordering
+/// within a plan follows the declaration order of this enum: re-embed
+/// before rebuilding the ANN index, stamp reconciliation last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedAction {
+    /// Drop the chunks table and re-chunk + re-embed from the corpus
+    /// node tree (`vectors reset`). Destructive: the old vectors are
+    /// unrecoverable.
+    Reset,
+    /// Re-derive chunks in place and re-embed them with the target
+    /// model (`vectors reembed`).
+    Reembed,
+    /// Rebuild the ANN index with the profile's ANN parameters
+    /// (`vectors rebuild`). Non-destructive.
+    Rebuild,
+    /// Rewrite the four index stamps from a live embedder probe
+    /// (`stamps reconcile`). Non-destructive; repairs metadata drift.
+    ReconcileStamps,
+}
+
+impl PlannedAction {
+    /// Stable label for plan rendering.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlannedAction::Reset => "reset",
+            PlannedAction::Reembed => "reembed",
+            PlannedAction::Rebuild => "rebuild",
+            PlannedAction::ReconcileStamps => "reconcile-stamps",
+        }
+    }
+
+    /// `true` for actions that discard data irrecoverably.
+    pub fn is_destructive(self) -> bool {
+        matches!(self, PlannedAction::Reset)
+    }
+}
+
+/// What one pipeline needs to reach the target profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelinePlan {
+    /// The pipeline is not in use: its corpus database is absent, or
+    /// nothing is stamped and no chunks exist. No action derives —
+    /// running one would fail against the empty store.
+    Empty,
+    /// Stamps and ANN configuration already match the target.
+    Consistent,
+    /// The ordered actions that reconcile the pipeline.
+    Run(Vec<PlannedAction>),
+}
+
+/// Derive one pipeline's plan from the target profile and the on-disk
+/// state. Pure. `target` carries the stamps a clean build under the
+/// profile would record ([`Pipeline::target_stamps`]).
+///
+/// Rules, most destructive first, each later rule applying only when no
+/// earlier one fired:
+///
+/// 1. A stamped embed model or vector dimension that differs from the
+///    profile derives a [`PlannedAction::Reset`]. The reset re-chunks
+///    and re-embeds everything, so it absorbs every other action.
+/// 2. A stamped chunk or normalize version that differs from this
+///    binary derives a [`PlannedAction::Reembed`].
+/// 3. A persisted ANN configuration that differs from the profile — or
+///    a chunk table with no persisted configuration at all — derives a
+///    [`PlannedAction::Rebuild`].
+/// 4. Stamp keys that are missing while every present one matches
+///    derive a [`PlannedAction::ReconcileStamps`], unless a re-embed is
+///    already planned (it rewrites the stamps itself).
+pub fn derive_pipeline_plan(
+    profile: &IndexProfile,
+    target: &IndexStamps,
+    state: &PipelineState,
+) -> PipelinePlan {
+    let Some(built) = &state.built else {
+        return PipelinePlan::Empty;
+    };
+    if built.is_unstamped() && !state.has_chunks {
+        return PipelinePlan::Empty;
+    }
+
+    let model_diverges = built
+        .embed_model
+        .as_deref()
+        .is_some_and(|m| m != target.embed_model);
+    let dim_diverges = built.vector_dim.is_some_and(|d| d != target.vector_dim);
+    if model_diverges || dim_diverges {
+        return PipelinePlan::Run(vec![PlannedAction::Reset]);
+    }
+
+    let mut actions = Vec::new();
+    let chunks_stale = built
+        .chunk_version
+        .is_some_and(|v| v != target.chunk_version)
+        || built
+            .normalize_version
+            .is_some_and(|v| v != target.normalize_version);
+    if chunks_stale {
+        actions.push(PlannedAction::Reembed);
+    }
+    if state.has_chunks
+        && !state
+            .ann
+            .as_ref()
+            .is_some_and(|current| ann_matches_profile(current, &profile.ann))
+    {
+        actions.push(PlannedAction::Rebuild);
+    }
+    if !built.is_fully_stamped() && !actions.contains(&PlannedAction::Reembed) {
+        actions.push(PlannedAction::ReconcileStamps);
+    }
+
+    if actions.is_empty() {
+        PipelinePlan::Consistent
+    } else {
+        PipelinePlan::Run(actions)
+    }
+}
+
+/// Whether a persisted ANN configuration already realizes a profile's
+/// ANN knob: same kind and the same six parameters, query-time ones
+/// included (they persist in `vectors_meta.json` as defaults).
+pub fn ann_matches_profile(current: &AnnConfig, spec: &AnnSpec) -> bool {
+    current.kind.as_str() == spec.kind.as_str()
+        && current.num_partitions == spec.num_partitions
+        && current.num_sub_vectors == spec.num_sub_vectors
+        && current.num_bits == spec.num_bits
+        && current.nprobes == spec.nprobes
+        && current.refine_factor == spec.refine_factor
+}
+
+/// Configuration layers that would mask the target profile's embed
+/// model at execution time: the env override and the explicit
+/// `config.toml` field both outrank the profile in the resolution
+/// chain, so an apply running under either would embed with the masked
+/// value while declaring the profile — the worst of both. One message
+/// per conflicting layer, each with its removal instruction; empty
+/// means the profile's model would take effect. Pure: the caller
+/// supplies the current env value.
+pub fn masking_conflicts(
+    profile: &IndexProfile,
+    root: &RootConfig,
+    env_model: Option<&str>,
+) -> Vec<String> {
+    let env_var =
+        root_config_env_override("embed_model").expect("embed_model key has an env override");
+    let mut conflicts = Vec::new();
+    if let Some(env) = env_model.map(str::trim).filter(|v| !v.is_empty())
+        && env != profile.embed.model
+    {
+        conflicts.push(format!(
+            "{env_var} is set to '{env}' and overrides every configuration layer, \
+             masking profile '{}' (embed model '{}'); unset {env_var} and re-run",
+            profile.name, profile.embed.model
+        ));
+    }
+    if let Some(explicit) = root.embed_model.as_deref()
+        && explicit != profile.embed.model
+    {
+        conflicts.push(
+            ConfigError::profile_model_conflict(&profile.name, &profile.embed.model, explicit)
+                .to_string(),
+        );
+    }
+    conflicts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_config::LibraryKind;
     use bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
 
     #[test]
@@ -242,18 +624,272 @@ mod tests {
         assert!(matches!(err, ConfigError::ProfileConfigConflict { .. }));
     }
 
-    #[test]
-    fn stamp_findings_report_each_divergent_field() {
-        let profile = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in");
-        let matching = (profile.embed.model.clone(), profile.embed.dim);
-        assert!(profile_stamp_findings(&profile, &matching).is_empty());
+    fn entry(name: &str, data_dir: &Path, profile: Option<&str>) -> LibraryEntry {
+        LibraryEntry {
+            name: name.to_string(),
+            data_dir: data_dir.to_path_buf(),
+            is_default: false,
+            kind: LibraryKind::Prod,
+            description: None,
+            index_profile: profile.map(str::to_string),
+            created_at: None,
+            uuid: None,
+        }
+    }
 
-        let wrong_model = ("other-model".to_string(), profile.embed.dim);
-        let findings = profile_stamp_findings(&profile, &wrong_model);
+    #[test]
+    fn registry_profile_ref_matches_by_name_then_falls_back_to_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root_a = dir.path().join("a");
+        let root_b = dir.path().join("b");
+        std::fs::create_dir_all(&root_a).expect("a");
+        std::fs::create_dir_all(&root_b).expect("b");
+        let entries = vec![
+            entry("a", &root_a, Some("profile-a")),
+            entry("b", &root_b, None),
+        ];
+
+        // Name match wins regardless of the data dir passed alongside.
+        assert_eq!(
+            registry_profile_ref_in(&entries, Some("a"), &root_b),
+            Some("profile-a".to_string())
+        );
+        // An unknown name matches nothing — no fallback to the path.
+        assert_eq!(registry_profile_ref_in(&entries, Some("c"), &root_a), None);
+
+        // No name: the entry is found by data root, including through a
+        // non-canonical spelling of the same directory.
+        assert_eq!(
+            registry_profile_ref_in(&entries, None, &root_a),
+            Some("profile-a".to_string())
+        );
+        let dotted = root_a.join("..").join("a");
+        assert_eq!(
+            registry_profile_ref_in(&entries, None, &dotted),
+            Some("profile-a".to_string())
+        );
+        // A matching entry without a profile reference yields None.
+        assert_eq!(registry_profile_ref_in(&entries, None, &root_b), None);
+        // An unregistered root matches nothing.
+        assert_eq!(
+            registry_profile_ref_in(&entries, None, &dir.path().join("c")),
+            None
+        );
+    }
+
+    fn profile() -> IndexProfile {
+        IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in")
+    }
+
+    fn target(profile: &IndexProfile) -> IndexStamps {
+        Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim)
+    }
+
+    fn stamped(target: &IndexStamps) -> BuiltStamps {
+        BuiltStamps {
+            embed_model: Some(target.embed_model.clone()),
+            vector_dim: Some(target.vector_dim),
+            chunk_version: Some(target.chunk_version),
+            normalize_version: Some(target.normalize_version),
+        }
+    }
+
+    fn matching_ann(profile: &IndexProfile) -> AnnConfig {
+        AnnConfig {
+            kind: profile.ann.kind.as_str().parse().expect("kind round-trips"),
+            num_partitions: profile.ann.num_partitions,
+            num_sub_vectors: profile.ann.num_sub_vectors,
+            num_bits: profile.ann.num_bits,
+            nprobes: profile.ann.nprobes,
+            refine_factor: profile.ann.refine_factor,
+        }
+    }
+
+    fn consistent_state(profile: &IndexProfile, target: &IndexStamps) -> PipelineState {
+        PipelineState {
+            built: Some(stamped(target)),
+            ann: Some(matching_ann(profile)),
+            has_chunks: true,
+        }
+    }
+
+    #[test]
+    fn stamp_findings_report_each_divergent_or_missing_field() {
+        let profile = profile();
+        let target = target(&profile);
+
+        assert!(profile_stamp_findings(&target, &stamped(&target)).is_empty());
+
+        let mut wrong_model = stamped(&target);
+        wrong_model.embed_model = Some("other-model".to_string());
+        let findings = profile_stamp_findings(&target, &wrong_model);
         assert_eq!(findings.len(), 1);
         assert!(findings[0].contains("embed.model"));
 
-        let wrong_both = ("other-model".to_string(), profile.embed.dim + 1);
-        assert_eq!(profile_stamp_findings(&profile, &wrong_both).len(), 2);
+        let mut wrong_both = wrong_model.clone();
+        wrong_both.vector_dim = Some(target.vector_dim + 1);
+        assert_eq!(profile_stamp_findings(&target, &wrong_both).len(), 2);
+
+        let mut missing = stamped(&target);
+        missing.chunk_version = None;
+        let findings = profile_stamp_findings(&target, &missing);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("no chunk_version stamp"));
+
+        let mut stale = stamped(&target);
+        stale.normalize_version = Some(target.normalize_version + 1);
+        let findings = profile_stamp_findings(&target, &stale);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].contains("normalize_version"));
+    }
+
+    #[test]
+    fn derivation_covers_every_action_class() {
+        let profile = profile();
+        let target = target(&profile);
+        let consistent = consistent_state(&profile, &target);
+
+        // Missing corpus database: the pipeline is not in use.
+        let missing_corpus = PipelineState {
+            built: None,
+            ..consistent.clone()
+        };
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &missing_corpus),
+            PipelinePlan::Empty
+        );
+
+        // Unstamped and chunkless: also not in use.
+        let bare = PipelineState {
+            built: Some(BuiltStamps::default()),
+            ann: None,
+            has_chunks: false,
+        };
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &bare),
+            PipelinePlan::Empty
+        );
+
+        // Everything matching: nothing to do.
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &consistent),
+            PipelinePlan::Consistent
+        );
+
+        // A different stamped model: destructive reset.
+        let mut other_model = consistent.clone();
+        other_model.built.as_mut().expect("stamps").embed_model = Some("other".to_string());
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &other_model),
+            PipelinePlan::Run(vec![PlannedAction::Reset])
+        );
+
+        // A different stamped dimension: also a reset.
+        let mut other_dim = consistent.clone();
+        other_dim.built.as_mut().expect("stamps").vector_dim = Some(target.vector_dim + 1);
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &other_dim),
+            PipelinePlan::Run(vec![PlannedAction::Reset])
+        );
+
+        // Model change combined with an ANN change: the reset absorbs
+        // the rebuild — resetting re-derives the store anyway.
+        let mut mixed = other_model.clone();
+        mixed.ann.as_mut().expect("ann").num_partitions += 1;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &mixed),
+            PipelinePlan::Run(vec![PlannedAction::Reset])
+        );
+
+        // A stale chunk version under the same model: re-embed.
+        let mut stale_chunks = consistent.clone();
+        stale_chunks.built.as_mut().expect("stamps").chunk_version = Some(target.chunk_version + 1);
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &stale_chunks),
+            PipelinePlan::Run(vec![PlannedAction::Reembed])
+        );
+
+        // A stale normalize version: same class.
+        let mut stale_norm = consistent.clone();
+        stale_norm.built.as_mut().expect("stamps").normalize_version =
+            Some(target.normalize_version + 1);
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &stale_norm),
+            PipelinePlan::Run(vec![PlannedAction::Reembed])
+        );
+
+        // Only the ANN parameters diverge: a rebuild with the profile's
+        // parameters, nothing destructive.
+        let mut ann_diverges = consistent.clone();
+        ann_diverges.ann.as_mut().expect("ann").nprobes += 1;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &ann_diverges),
+            PipelinePlan::Run(vec![PlannedAction::Rebuild])
+        );
+
+        // Chunks exist but no vectors_meta.json was ever written: the
+        // declared ANN state is unrealized, so a rebuild establishes it.
+        let mut no_meta = consistent.clone();
+        no_meta.ann = None;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &no_meta),
+            PipelinePlan::Run(vec![PlannedAction::Rebuild])
+        );
+
+        // Stale chunks and a divergent ANN combine, re-embed first.
+        let mut both = stale_chunks.clone();
+        both.ann.as_mut().expect("ann").nprobes += 1;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &both),
+            PipelinePlan::Run(vec![PlannedAction::Reembed, PlannedAction::Rebuild])
+        );
+
+        // A missing stamp key while everything present matches:
+        // metadata drift, repaired by a reconcile.
+        let mut drift = consistent.clone();
+        drift.built.as_mut().expect("stamps").vector_dim = None;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &drift),
+            PipelinePlan::Run(vec![PlannedAction::ReconcileStamps])
+        );
+
+        // Drift alongside a planned re-embed: the re-embed rewrites the
+        // stamps itself, so no separate reconcile derives.
+        let mut drift_and_stale = stale_chunks.clone();
+        drift_and_stale.built.as_mut().expect("stamps").vector_dim = None;
+        assert_eq!(
+            derive_pipeline_plan(&profile, &target, &drift_and_stale),
+            PipelinePlan::Run(vec![PlannedAction::Reembed])
+        );
+    }
+
+    #[test]
+    fn masking_conflicts_flag_env_and_explicit_field() {
+        let profile = profile();
+        let clean = RootConfig::default();
+
+        assert!(masking_conflicts(&profile, &clean, None).is_empty());
+        // A matching env value or explicit field masks nothing.
+        assert!(masking_conflicts(&profile, &clean, Some(&profile.embed.model)).is_empty());
+        // Whitespace-only env values are treated as unset, matching the
+        // resolution chain's own trimming.
+        assert!(masking_conflicts(&profile, &clean, Some("  ")).is_empty());
+
+        let conflicts = masking_conflicts(&profile, &clean, Some("other-model"));
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("BOOKRACK_EMBED_MODEL"));
+        assert!(conflicts[0].contains("unset"));
+
+        let explicit = RootConfig {
+            embed_model: Some("other-model".to_string()),
+            ..RootConfig::default()
+        };
+        let conflicts = masking_conflicts(&profile, &explicit, None);
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].contains("embed_model"));
+
+        // Both layers conflicting report both, env first.
+        let conflicts = masking_conflicts(&profile, &explicit, Some("third-model"));
+        assert_eq!(conflicts.len(), 2);
     }
 }

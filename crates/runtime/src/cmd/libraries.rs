@@ -319,6 +319,46 @@ mod tests {
     }
 
     #[test]
+    fn fork_mints_a_distinct_uuid_for_the_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        // Initialize the two databases fork snapshots, and give the
+        // source its own identity manifest.
+        bookrack_catalog::Catalog::open(&source.join("catalog.db")).expect("catalog");
+        bookrack_corpus::Corpus::open(&source.join("corpus.db")).expect("corpus");
+        let source_manifest = new_manifest("source-lib", LibraryKind::Prod, None);
+        write_manifest(&source, &source_manifest).expect("write source manifest");
+        // Point the registry into the tempdir and register the source,
+        // so fork's registry lookups and its own upsert stay contained.
+        // Sound: nextest runs each test in its own process, so no other
+        // thread reads the environment concurrently.
+        let registry_path = dir.path().join("registry.toml");
+        unsafe { std::env::set_var("BOOKRACK_REGISTRY", &registry_path) };
+        let entry = LibraryEntryFields {
+            data_dir: source.clone(),
+            kind: LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: source_manifest.created_at.clone(),
+            uuid: Some(source_manifest.uuid.clone()),
+        };
+        upsert_library_entry(&registry_path, "source-lib", &entry).expect("register source");
+
+        let target = dir.path().join("copy");
+        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+        fork(&cfg, "copy", &target, CopyMode::Copy, true, |_| Ok(true)).expect("fork");
+
+        let copied = load_manifest(&target)
+            .expect("read copy manifest")
+            .expect("fork writes a manifest");
+        assert_ne!(
+            source_manifest.uuid, copied.uuid,
+            "fork must mint a fresh uuid, never carry the source's over"
+        );
+    }
+
+    #[test]
     fn validate_inputs_rejects_symlink_to_source() {
         // Symlinking the target to the source bypasses a raw `==`
         // comparison; canonicalize_target follows the link, so the
