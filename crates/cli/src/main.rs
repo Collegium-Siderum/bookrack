@@ -552,10 +552,14 @@ pub(crate) enum LibrariesAction {
         /// Registry name whose config is read or edited.
         name: String,
         /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
-        /// `embed_model`, `mcp_addr`, `log_directive`.
+        /// `embed_model`, `mcp_addr`, `log_directive`, `index_profile`,
+        /// `search.top_k`, `search.weak_threshold`, `reranker.url`,
+        /// `reranker.ctx`, `reranker.threads`.
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
         sets: Vec<(String, String)>,
-        /// Key to remove from the file. Repeatable.
+        /// Key to remove from the file; accepts the same keys.
+        /// Repeatable. Unsetting `index_profile` also clears the
+        /// registry entry's reference.
         #[arg(long, value_name = "KEY")]
         unset: Vec<String>,
     },
@@ -1892,5 +1896,33 @@ mod tests {
         let out = tmp.path().join("custom.tar.gz");
         bookrack_runtime::cmd::diagnose::run(&cfg, Some(out.clone()), 7, false).expect("collect");
         assert!(out.exists());
+    }
+
+    /// The hand-written "Accepted keys" enumeration in the `libraries
+    /// config` help must stay in lockstep with [`ROOT_CONFIG_KEYS`]:
+    /// every key the runtime accepts appears in the help text.
+    #[test]
+    fn libraries_config_help_lists_every_root_config_key() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let libraries = cmd
+            .find_subcommand("libraries")
+            .expect("libraries subcommand exists");
+        let config = libraries
+            .find_subcommand("config")
+            .expect("libraries config subcommand exists");
+        let help = config
+            .get_arguments()
+            .find(|arg| arg.get_id() == "sets")
+            .expect("libraries config has the sets argument")
+            .get_help()
+            .expect("the sets argument documents its keys")
+            .to_string();
+        for key in bookrack_config::ROOT_CONFIG_KEYS {
+            assert!(
+                help.contains(key),
+                "libraries config help does not list accepted key {key:?}: {help}",
+            );
+        }
     }
 }

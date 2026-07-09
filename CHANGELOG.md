@@ -142,6 +142,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: the `libraries config` help lists every accepted key.** The
+  hand-written "Accepted keys" enumeration predated the config
+  surface's growth and omitted six keys the command accepts —
+  `index_profile`, `search.top_k`, `search.weak_threshold`,
+  `reranker.url`, `reranker.ctx`, and `reranker.threads` — so the
+  reference-conflict error's suggested repair named a key the help
+  claimed unsupported. The help now lists all of `ROOT_CONFIG_KEYS`,
+  the `--unset` help states the registry-side clearing, and a guard
+  test holds the enumeration in lockstep with the constant.
+
 - **cli: `libraries config --unset index_profile` clears both
   reference sites.** `index-profile apply` declares the profile
   reference twice — `config.toml` and the registry entry — but the
