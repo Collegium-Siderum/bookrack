@@ -72,8 +72,9 @@ struct Cli {
         help_heading = "Common Options"
     )]
     data_dir: Option<PathBuf>,
-    /// Select the named library from the registry (see
-    /// BOOKRACK_REGISTRY). Behaves like `--data-dir`: a switch on
+    /// Select the named library from the registry — the
+    /// BOOKRACK_REGISTRY file when set, else the platform-default
+    /// registry. Behaves like `--data-dir`: a switch on
     /// local commands, an assertion against the running daemon on
     /// routed commands. Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
@@ -152,8 +153,9 @@ enum Command {
     Verify,
     /// Inspect the library registry.
     ///
-    /// The registry is the file named by `BOOKRACK_REGISTRY` that maps
-    /// short names to data roots.
+    /// The registry maps short names to data roots: the file named by
+    /// `BOOKRACK_REGISTRY` when set, else the platform-default
+    /// registry.
     Libraries {
         #[command(subcommand)]
         action: LibrariesAction,

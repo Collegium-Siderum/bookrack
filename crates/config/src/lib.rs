@@ -112,7 +112,9 @@ pub struct ShadowedDefault {
 pub enum ResolutionSource {
     /// Won by the `--data-dir` CLI flag.
     DataDirFlag,
-    /// Won by `--library <name>`, with the path looked up in the registry.
+    /// Won by `--library <name>`, with the path looked up in the
+    /// registry — the [`REGISTRY_ENV`] one when set, else the
+    /// platform-default one.
     LibraryFlag,
     /// Won by the [`DATA_DIR_ENV`] environment variable.
     EnvVar,
@@ -194,8 +196,12 @@ pub enum ConfigError {
         /// Library names the registry currently carries, sorted.
         available: Vec<String>,
     },
-    /// `--library` was given but no registry is configured.
-    #[error("--library needs a registry; set {REGISTRY_ENV} to a TOML file")]
+    /// `--library` was given but no registry exists — neither the
+    /// [`REGISTRY_ENV`] file nor the platform-default registry.
+    #[error(
+        "--library needs a registry; set {REGISTRY_ENV} to a TOML file, or create the \
+         platform-default registry with `bookrack libraries add`"
+    )]
     RegistryNotConfigured,
     /// The registry file could not be read.
     #[error("cannot read the registry at {}", .path.display())]
@@ -1331,7 +1337,8 @@ struct Resolved {
 ///
 /// Order, highest first:
 /// 1. the `--data-dir` flag,
-/// 2. the `--library` flag (looked up in the registry),
+/// 2. the `--library` flag (looked up in the registry, then the
+///    platform-default registry),
 /// 3. the data-root environment variable,
 /// 4. a `bookrack-data` directory probed beside the running binary,
 /// 5. the registry's default library,
@@ -1351,8 +1358,7 @@ fn select_root(
         });
     }
     if let Some(name) = &selection.library {
-        let registry = registry.ok_or(ConfigError::RegistryNotConfigured)?;
-        let data_dir = lookup_library(registry, name)?;
+        let data_dir = lookup_library_either(registry, default_registry, name)?;
         return Ok(Resolved {
             data_dir,
             source: ResolutionSource::LibraryFlag,
@@ -1410,6 +1416,42 @@ fn lookup_library(registry: &Registry, name: &str) -> Result<PathBuf, ConfigErro
                 available,
             }
         })
+}
+
+/// Look up a named library across both registries, the [`REGISTRY_ENV`]
+/// one before the platform-default one — the same precedence the bypass
+/// enrichments apply — so a name carried by both resolves to the env
+/// registry's entry. With neither registry present the error is
+/// [`ConfigError::RegistryNotConfigured`]; with a name neither carries,
+/// [`ConfigError::UnknownLibrary`] lists the sorted union of both
+/// registries' names.
+fn lookup_library_either(
+    registry: Option<&Registry>,
+    default_registry: Option<&Registry>,
+    name: &str,
+) -> Result<PathBuf, ConfigError> {
+    if registry.is_none() && default_registry.is_none() {
+        return Err(ConfigError::RegistryNotConfigured);
+    }
+    let registries = [registry, default_registry];
+    if let Some(entry) = registries
+        .iter()
+        .flatten()
+        .find_map(|reg| reg.libraries.get(name))
+    {
+        return Ok(entry.data_dir().to_path_buf());
+    }
+    let mut available: Vec<String> = registries
+        .iter()
+        .flatten()
+        .flat_map(|reg| reg.libraries.keys().cloned())
+        .collect();
+    available.sort();
+    available.dedup();
+    Err(ConfigError::UnknownLibrary {
+        name: name.to_string(),
+        available,
+    })
 }
 
 /// Detect a registry `default` library eclipsed by a path-class
@@ -2508,6 +2550,96 @@ mod tests {
             select_root(&selection, Some("/env/root".to_string()), None, None, None),
             Err(ConfigError::RegistryNotConfigured)
         ));
+    }
+
+    #[test]
+    fn library_flag_falls_back_to_the_default_registry() {
+        // No BOOKRACK_REGISTRY file: the platform-default registry
+        // serves the `--library` lookup.
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("prod".to_string()),
+        };
+        let resolved = select_root(&selection, None, None, None, Some(&sample_registry()))
+            .expect("the default registry serves --library");
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
+        assert_eq!(resolved.source, ResolutionSource::LibraryFlag);
+        assert_eq!(resolved.library.as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn library_flag_prefers_the_env_registry_for_a_name_both_registries_carry() {
+        let env_registry = parse_registry(
+            "[libraries]\n\
+             prod = \"/env-roots/prod\"\n",
+        )
+        .expect("env registry parses");
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("prod".to_string()),
+        };
+        let resolved = select_root(
+            &selection,
+            None,
+            Some(&env_registry),
+            None,
+            Some(&sample_registry()),
+        )
+        .expect("the env registry wins");
+        assert_eq!(resolved.data_dir, PathBuf::from("/env-roots/prod"));
+    }
+
+    #[test]
+    fn library_flag_reaches_the_default_registry_past_an_env_registry_without_the_name() {
+        let env_registry = parse_registry(
+            "[libraries]\n\
+             other = \"/env-roots/other\"\n",
+        )
+        .expect("env registry parses");
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("prod".to_string()),
+        };
+        let resolved = select_root(
+            &selection,
+            None,
+            Some(&env_registry),
+            None,
+            Some(&sample_registry()),
+        )
+        .expect("the default registry serves the name the env registry lacks");
+        assert_eq!(resolved.data_dir, PathBuf::from("/roots/prod"));
+    }
+
+    #[test]
+    fn unknown_library_lists_the_union_of_both_registries() {
+        let env_registry = parse_registry(
+            "[libraries]\n\
+             alpha = \"/env-roots/alpha\"\n\
+             prod = \"/env-roots/prod\"\n",
+        )
+        .expect("env registry parses");
+        let selection = LibrarySelection {
+            data_dir: None,
+            library: Some("ghost".to_string()),
+        };
+        match select_root(
+            &selection,
+            None,
+            Some(&env_registry),
+            None,
+            Some(&sample_registry()),
+        ) {
+            Err(ConfigError::UnknownLibrary { name, available }) => {
+                assert_eq!(name, "ghost");
+                // Sorted union: `prod` appears in both registries once.
+                assert_eq!(
+                    available,
+                    vec!["alpha".to_string(), "prod".to_string(), "test".to_string()]
+                );
+            }
+            other => panic!("expected UnknownLibrary, got {other:?}"),
+        }
     }
 
     #[test]

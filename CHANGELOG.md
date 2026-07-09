@@ -142,6 +142,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **config: `--library` falls back to the platform-default registry.**
+  The flag resolved names only through the `BOOKRACK_REGISTRY` file and
+  errored without one — yet on a standard install the wizard and the
+  `libraries` verbs write the platform-default registry and no env var
+  is ever set, so the documented selection flag was unusable while
+  `libraries list` and `doctor` showed the very entries it refused to
+  see. The lookup now consults the `BOOKRACK_REGISTRY` registry first
+  and the platform-default registry second, the precedence every other
+  registry consumer already applies: a name both registries carry
+  resolves to the env registry's entry, an unknown name reports the
+  sorted union of both registries' names, and only the absence of both
+  registries errors — with the repair message now naming the
+  platform-default path alongside the env var.
+
 - **runtime: the supervised llama-server is spawned with a
   workload-sized argument set.** The previous argument set left batch
   size, GPU offload, and context to the server's defaults, which on a
