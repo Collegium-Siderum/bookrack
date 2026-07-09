@@ -189,6 +189,39 @@ impl TtyLock {
     }
 }
 
+/// Report whether some process currently holds the flock on the
+/// session lock at `path`, without disturbing its contents.
+///
+/// Probes with a non-blocking exclusive lock on a fresh handle:
+/// acquiring it proves nobody holds the lock (the probe lock is
+/// released when the handle drops on return); a contended attempt
+/// proves a live holder. A missing file is trivially unheld. Any
+/// other I/O failure is an `Err`, so callers can treat "cannot tell"
+/// separately from either verdict.
+///
+/// The probe holds the exclusive lock for the duration of the check,
+/// so a concurrent [`TtyLock::acquire`] racing into that window can
+/// fail spuriously; use this only for advisory checks where that
+/// trade-off is acceptable.
+pub fn lock_is_held(path: &Path) -> Result<bool> {
+    let file = match OpenOptions::new().read(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(eyre::Report::new(e).wrap_err(format!(
+                "open session lock at {} to probe its flock",
+                path.display()
+            )));
+        }
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(false),
+        Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(true),
+        Err(e) => Err(eyre::Report::new(e)
+            .wrap_err(format!("probe flock on session lock at {}", path.display()))),
+    }
+}
+
 /// Snapshot of a session lock file's contents. Returned by
 /// [`peek_lock`] for callers that want to discover a live session
 /// (its pid, MCP listener label, control-plane socket path, and
@@ -396,6 +429,36 @@ mod tests {
     fn resolve_runtime_dir_prefers_explicit_override() {
         let path = PathBuf::from("/tmp/bookrack-test-override");
         assert_eq!(resolve_runtime_dir(Some(&path)).unwrap(), path);
+    }
+
+    #[test]
+    fn lock_is_held_false_when_file_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        assert!(!lock_is_held(&path).unwrap());
+    }
+
+    #[test]
+    fn lock_is_held_true_while_acquired_and_false_after_drop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let lock = TtyLock::acquire(&path, 77, "disabled", None).unwrap();
+        assert!(lock_is_held(&path).unwrap());
+        drop(lock);
+        assert!(!lock_is_held(&path).unwrap());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("pid=77"),
+            "leftover content must survive the probe: {content:?}"
+        );
+    }
+
+    #[test]
+    fn lock_is_held_false_on_leftover_file_never_locked() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        std::fs::write(&path, "pid=1\nmcp=disabled\n").unwrap();
+        assert!(!lock_is_held(&path).unwrap());
     }
 
     #[test]

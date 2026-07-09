@@ -142,6 +142,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli, session: the library-mismatch pre-flight no longer trusts a
+  dead session's lock file.** The session lock's liveness lives in the
+  flock — the file is deliberately never deleted, so its recorded
+  `data_dir`/`library_name` outlive the daemon that wrote them. The
+  pre-flight read that content without checking the flock and reported
+  a `LibraryMismatch` ("running daemon serves ...") for any routed
+  command whose explicit `--library`/`--data-dir` named a different
+  library, even with no daemon running — and the error's `bookrack
+  quit` advice was a dead end against a dead daemon. The check now
+  probes the flock first (new `bookrack_session::lock_is_held`) and
+  stays silent when nobody holds it; a held lock still refuses a
+  mismatched selection.
+
 - **cli: the `libraries config` help lists every accepted key.** The
   hand-written "Accepted keys" enumeration predated the config
   surface's growth and omitted six keys the command accepts —

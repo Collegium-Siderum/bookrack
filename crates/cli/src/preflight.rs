@@ -19,6 +19,10 @@
 //! The check is silent in every "cannot reliably compare" case:
 //!   * no explicit selection was given (env / flag both unset)
 //!   * no session lock is present (no daemon, or a torn-down one)
+//!   * the lock file exists but no process holds its flock — the
+//!     content is a dead session's leftover (liveness lives in the
+//!     flock, never in the file, which is deliberately not deleted
+//!     on shutdown), so there is no running daemon to disagree with
 //!   * the lock predates the identity fields and carries neither
 //!     `data_dir=` nor `library_name=`
 //!   * the side of the comparison the intent expresses (path vs name)
@@ -37,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{DATA_DIR_ENV, LibrarySelection};
-use bookrack_session::{LockInfo, peek_lock, resolve_runtime_dir, tty_lock_name};
+use bookrack_session::{LockInfo, lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
 
 /// Compare the CLI's explicit selection against the running session
 /// (if any) and return [`BookrackCliError::LibraryMismatch`] when
@@ -90,7 +94,10 @@ fn resolve_intent(selection: &LibrarySelection, env_data_dir: Option<&str>) -> O
 fn read_lock_info() -> Option<LockInfo> {
     let runtime_dir = resolve_runtime_dir(None).ok()?;
     let lock_path = runtime_dir.join(tty_lock_name());
-    peek_lock(&lock_path).ok().flatten()
+    match lock_is_held(&lock_path) {
+        Ok(true) => peek_lock(&lock_path).ok().flatten(),
+        Ok(false) | Err(_) => None,
+    }
 }
 
 fn is_mismatch(intent: &Intent, lock: &LockInfo) -> bool {
