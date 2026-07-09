@@ -140,6 +140,24 @@ release workflow extracts the matching section verbatim from this file.
   registry entry naming different profiles. An undefined or unloadable
   profile reference no longer passes silently.
 
+### Fixed
+
+- **runtime: the supervised llama-server is spawned with a
+  workload-sized argument set.** The previous argument set left batch
+  size, GPU offload, and context to the server's defaults, which on a
+  real library made the supervised reranker unusable three ways: the
+  512-token default physical batch hard-failed any query whose
+  candidate window held one full-length chunk (rerank requires each
+  query+document pair to fit one batch; a 1000-character chunk can
+  exceed 512 tokens), CPU-only inference pushed a 50-candidate rerank
+  past the control plane's 60 s deadline, and the context defaulted to
+  the model's full training window, sizing the KV cache to gigabytes
+  for a working set of four pairs. The spawn now pins `-ub`/`-b` 2048
+  (covers the chunk cap with headroom), `-ngl 99` (GPU offload with a
+  clean CPU fallback), `--slot-prompt-similarity 0` (slot-cache
+  scanning degrades rerank throughput), and defaults `-c` to 8192 —
+  four slots at the batch cap — while `reranker.ctx` still overrides.
+
 ## [0.8.0] - 2026-07-08
 
 ### Added

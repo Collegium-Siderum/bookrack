@@ -1119,7 +1119,8 @@ impl Default for SearchConfig {
 /// and the `[reranker]` table. `url` decides the backend mode: `Some`
 /// means an operator-run server is probed, `None` means the daemon
 /// supervises its own. `ctx` and `threads` only apply to the
-/// supervised mode and default to the server's own choices.
+/// supervised mode; unset, `ctx` falls to the supervisor's
+/// workload-sized default and `threads` to the server's own choice.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RerankerConfig {
     /// Operator-run rerank server URL, when one is configured.
