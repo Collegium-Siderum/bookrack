@@ -5,15 +5,20 @@
 //! Each library is an independent data root — its own intake store,
 //! databases, and vector store. The registry gives those roots short
 //! names so a caller can select one with `--library <name>` instead of
-//! re-exporting the data-root variable. The file is named by the
-//! `BOOKRACK_REGISTRY` environment variable; it is optional, and only
-//! `--library` requires it.
+//! re-exporting the data-root variable. The file lives at the
+//! platform-default path `bookrack init` writes, unless the
+//! `BOOKRACK_REGISTRY` environment variable overrides it; it is
+//! optional, and a caller resolving through an explicit data-root path
+//! never needs one.
 //!
-//! An entry is written in one of two forms. A bare string is the legacy
-//! format and stays permanently readable; a table carries the metadata
-//! a plain path cannot (kind, description, index profile, timestamps,
-//! uuid). A bare string is exactly equivalent to a table that sets only
-//! `data_dir` and leaves `kind` at its default.
+//! An entry is read in one of two forms, and both parse in every
+//! version of bookrack: a bare string is the legacy format and stays
+//! readable permanently; a table carries the metadata a plain path
+//! cannot (kind, description, index profile, timestamps, uuid). A bare
+//! string is exactly equivalent to a table that sets only `data_dir`
+//! and leaves `kind` at its default. The write side emits only the
+//! table form: any write rewrites the whole file, upgrading legacy
+//! string entries in place.
 //!
 //! ```toml
 //! default = "prod"
@@ -55,7 +60,9 @@ pub struct Registry {
 #[serde(untagged)]
 pub enum RawRegistryEntry {
     /// Legacy bare-path entry, equivalent to a table that sets only
-    /// `data_dir` and leaves every other field at its default.
+    /// `data_dir` and leaves every other field at its default. This
+    /// arm is permanent: a registry written by any past version stays
+    /// readable, even though no current code path writes the form.
     Path(PathBuf),
     /// Metadata-bearing entry.
     Table(RegistryEntryTable),
@@ -198,6 +205,8 @@ mod tests {
         assert_eq!(entry.uuid(), Some("01890a5d-0000-7000-8000-000000000000"));
     }
 
+    // Guards the permanence promise in the module doc: the legacy
+    // bare-string form must keep parsing in every future version.
     #[test]
     fn parses_the_legacy_bare_path_form() {
         let registry = parse_registry("[libraries]\nlegacy = \"/roots/legacy\"\n")

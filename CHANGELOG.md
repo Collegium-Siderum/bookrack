@@ -104,6 +104,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **config: the registry's entry-table format is final.** Every write
+  path emits table-form entries and upgrades a legacy bare-string
+  registry in place; the legacy string form remains readable
+  permanently. The long-unused single-purpose writer
+  (`merge_library_into_registry`) is gone — all writers go through the
+  full entry upsert.
+
 - **cli, config: `libraries list` reads the on-disk registry directly.**
   The verb no longer asks the daemon, so it works with nothing running
   and shows every registered library — name, default marker, kind, and
