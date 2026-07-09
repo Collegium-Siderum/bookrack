@@ -142,6 +142,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: `libraries config --unset index_profile` clears both
+  reference sites.** `index-profile apply` declares the profile
+  reference twice — `config.toml` and the registry entry — but the
+  unset side edited only `config.toml`, so the registry-side reference
+  kept resolving and the profile silently survived its own removal;
+  clearing it took a hand edit of `registry.toml`. The unset now
+  clears the registry entry's field in the same run and says so
+  (`unset index_profile (config.toml + registry entry)`; the JSON
+  report gains a `registry_cleared` field), and a note reminds the
+  operator that a running daemon keeps serving the old profile — and
+  any supervised reranker — until it restarts.
+
 - **config: `--library` falls back to the platform-default registry.**
   The flag resolved names only through the `BOOKRACK_REGISTRY` file and
   errored without one — yet on a standard install the wizard and the

@@ -238,6 +238,88 @@ async fn libraries_default_writes_the_registry_offline() -> Result<()> {
     Ok(())
 }
 
+/// `libraries config --unset index_profile` clears the reference in
+/// both sites `index-profile apply` declares it — `config.toml` and
+/// the registry entry — so `index-profile current` afterwards reports
+/// no profile instead of resolving the leftover registry field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_config_unset_index_profile_clears_both_reference_sites() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.alpha]\n\
+             data_dir = \"{}\"\n\
+             kind = \"test\"\n\
+             index_profile = \"qwen3-0.6b-default\"\n",
+            data_dir.path().display()
+        ),
+    )?;
+    std::fs::write(
+        data_dir.path().join("config.toml"),
+        "index_profile = \"qwen3-0.6b-default\"\n",
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "alpha", "--unset", "index_profile"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "unset should succeed offline; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("unset index_profile (config.toml + registry entry)"),
+        "stdout should name both cleared sites: {stdout}",
+    );
+    let registry_written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        !registry_written.contains("index_profile"),
+        "registry entry still records the profile: {registry_written}",
+    );
+    let config_written = std::fs::read_to_string(data_dir.path().join("config.toml"))?;
+    assert!(
+        !config_written.contains("index_profile"),
+        "config.toml still records the profile: {config_written}",
+    );
+    // The reference is gone from both sites, so `current` reports none.
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["index-profile", "current", "--library", "alpha"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "current should resolve offline; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("profile: none"),
+        "current should report no profile after the unset: {stdout}",
+    );
+    Ok(())
+}
+
 /// A `libraries default` naming a library the registry does not define
 /// is operator input, not a system fault: it exits 2 and does not
 /// disturb the file.

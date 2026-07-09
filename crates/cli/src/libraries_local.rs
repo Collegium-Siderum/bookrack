@@ -9,11 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    AddOptions, AddOutcome, AddReport, ConfigError, DetectError, DetectVerdict, LibraryKind,
-    LibraryManifest, LibraryOpError, RootConfigSetError, ScanOutcome, Signal, add_library,
-    detect_library, find_library, load_root_config, mounted_volumes, read_root_config_text,
-    registry_target_path, remove_library, render_manifest_toml, repoint_library,
-    root_config_env_override, scan_for_libraries, set_root_config_values,
+    AddOptions, AddOutcome, AddReport, ConfigError, DetectError, DetectVerdict, LibraryEntryFields,
+    LibraryKind, LibraryManifest, LibraryOpError, RootConfigSetError, ScanOutcome, Signal,
+    add_library, detect_library, find_library, load_root_config, mounted_volumes,
+    read_root_config_text, registry_target_path, remove_library, render_manifest_toml,
+    repoint_library, root_config_env_override, scan_for_libraries, set_root_config_values,
+    upsert_library_entry,
 };
 use eyre::{Report, Result};
 use serde::Serialize;
@@ -389,7 +390,26 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
     }
 
     set_root_config_values(&data_dir, &sets, &unset).map_err(root_config_set_error)?;
-    render_config_write(&name, &data_dir, &sets, &unset);
+
+    // `index-profile apply` declares the profile reference in both
+    // config.toml and the registry entry; unsetting the key clears the
+    // registry side too, so the reference cannot keep resolving from
+    // the entry after the config.toml side is gone.
+    let registry_cleared =
+        unset.iter().any(|key| key == "index_profile") && entry.index_profile.is_some();
+    if registry_cleared {
+        let fields = LibraryEntryFields {
+            data_dir: data_dir.clone(),
+            kind: entry.kind,
+            description: entry.description.clone(),
+            index_profile: None,
+            created_at: entry.created_at.clone(),
+            uuid: entry.uuid.clone(),
+        };
+        upsert_library_entry(&registry_path, &name, &fields).map_err(config_error)?;
+    }
+
+    render_config_write(&name, &data_dir, &sets, &unset, registry_cleared);
     Ok(())
 }
 
@@ -422,8 +442,16 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
 /// Report a successful edit: the keys set and unset, plus the advisory
 /// notes an operator needs — an embed-model change implies re-ingestion,
 /// a set env var shadows the file, and the change only reaches a running
-/// daemon on restart.
-fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], unset: &[String]) {
+/// daemon on restart. `registry_cleared` marks an `index_profile` unset
+/// that also cleared the registry entry's field, so the output names
+/// both reference sites the way `index-profile apply` does.
+fn render_config_write(
+    name: &str,
+    data_dir: &Path,
+    sets: &[(String, String)],
+    unset: &[String],
+    registry_cleared: bool,
+) {
     if ctx().is_json() {
         let value = serde_json::json!({
             "ok": true,
@@ -431,6 +459,7 @@ fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], u
             "data_dir": data_dir.display().to_string(),
             "set": sets.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
             "unset": unset,
+            "registry_cleared": registry_cleared,
         });
         println!("{value}");
     } else if !ctx().is_quiet() {
@@ -438,7 +467,11 @@ fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], u
             println!("set {key} = {value:?}");
         }
         for key in unset {
-            println!("unset {key}");
+            if key == "index_profile" && registry_cleared {
+                println!("unset {key} (config.toml + registry entry)");
+            } else {
+                println!("unset {key}");
+            }
         }
     }
 
@@ -454,6 +487,12 @@ fn render_config_write(name: &str, data_dir: &Path, sets: &[(String, String)], u
         eprintln!(
             "note: run 'bookrack index-profile current' to compare the profile against the \
              built index"
+        );
+    }
+    if unset.iter().any(|key| key == "index_profile") {
+        eprintln!(
+            "note: a running daemon keeps serving the old profile (and any supervised \
+             reranker) until it restarts"
         );
     }
     for (key, _) in sets {
