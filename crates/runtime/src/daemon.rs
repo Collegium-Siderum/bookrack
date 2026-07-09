@@ -188,6 +188,10 @@ pub struct DaemonRuntime {
     /// clones this to route webview and tray calls through
     /// `control::methods::dispatch` without a socket round-trip.
     pub method_context: MethodContext,
+    /// The supervised llama-server behind the reranker stage, when
+    /// the effective profile enables one and no operator URL takes
+    /// over. Stopped (TERM, grace, KILL) during shutdown.
+    pub rerank_supervisor: Option<Arc<crate::rerank_supervisor::RerankSupervisor>>,
     /// Drop-only field: holds the session-scoped flock. The
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
@@ -324,6 +328,15 @@ impl DaemonRuntime {
             embed_cfg.backoff_base,
         )
         .context("build embedding client")?;
+
+        // 5b. Reranker backend, before any listener serves: an
+        //     operator URL is probed once, or a supervised
+        //     llama-server is spawned and held to readiness. Either
+        //     way a profile that promises a reranker gets a verified
+        //     backend or the daemon refuses to start.
+        let rerank_supervisor = crate::rerank_supervisor::bring_up_reranker(&cfg, &runtime_dir)
+            .await
+            .context("bring up the reranker backend")?;
 
         // 6. Catalog preflight: migrate each on-disk catalog forward
         //    to the binary's `TARGET_VERSION` (with the usual one-shot
@@ -635,6 +648,7 @@ impl DaemonRuntime {
             mcp_tools,
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
+            rerank_supervisor: rerank_supervisor.clone(),
             queue_paused: Arc::clone(&queue_paused),
             log_stream: log_stream.clone(),
             plan_registry,
@@ -688,6 +702,7 @@ impl DaemonRuntime {
             tray_focus_signal,
             queue_paused,
             method_context: method_ctx,
+            rerank_supervisor,
             _tty_lock: tty_lock,
             _obs_guard: obs_guard,
             queue_worker,
@@ -716,6 +731,7 @@ impl DaemonRuntime {
             control_accept_handle,
             control_sock,
             event_stream,
+            rerank_supervisor,
             // Bound (not folded into `..`) so the flock lives across
             // the drain timeouts below; `..` would drop it here.
             _tty_lock,
@@ -755,6 +771,11 @@ impl DaemonRuntime {
                 Ok(Err(err)) => tracing::warn!(error = %err, "queue worker join failed"),
                 Err(_) => tracing::warn!("queue worker did not exit within 3s; abandoning"),
             }
+        }
+
+        // Bounded internally: TERM, the configured grace, then KILL.
+        if let Some(supervisor) = rerank_supervisor {
+            supervisor.shutdown().await;
         }
 
         signal_handle.abort();

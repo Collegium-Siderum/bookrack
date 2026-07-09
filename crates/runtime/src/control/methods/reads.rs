@@ -111,7 +111,7 @@ pub fn status(ctx: &MethodContext) -> Value {
 }
 
 pub async fn doctor_gather(ctx: &MethodContext) -> Value {
-    let report = doctor::gather(&ctx.selection).await;
+    let report = doctor::gather_with(&ctx.selection, ctx.rerank_supervisor.as_deref()).await;
     serde_json::to_value(report).unwrap_or(Value::Null)
 }
 

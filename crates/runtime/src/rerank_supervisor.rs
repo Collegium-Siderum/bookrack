@@ -28,7 +28,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use bookrack_config::llama_server_pin::locate_llama_server;
+use bookrack_config::reranker_model_pin::locate_reranker_model;
+use bookrack_config::{Config, RerankerConfig};
+use bookrack_index_profile::RerankerKind;
 use bookrack_rerank::ServerHealth;
+use eyre::{Context, bail, eyre};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock, watch};
@@ -213,6 +218,90 @@ impl RerankSupervisor {
         if let Some(handle) = self.monitor.lock().await.take() {
             let _ = handle.await;
         }
+    }
+}
+
+/// Bring up the reranker backend a library's effective profile
+/// demands, during daemon bring-up and before the daemon serves.
+///
+/// Dispatch on the deployment mode: no backend at all when the
+/// profile enables no reranker stage; a single hard `/health` probe
+/// when `reranker.url` (or its env override) names an operator-run
+/// server — the operator owns that process, so nothing is spawned and
+/// no supervisor exists; otherwise the artifacts are located and a
+/// supervised llama-server is spawned and held to readiness. Either
+/// verified mode upholds the profile's promise at startup; every
+/// failure refuses bring-up with the repair spelled out.
+pub async fn bring_up_reranker(
+    cfg: &Config,
+    runtime_dir: &Path,
+) -> eyre::Result<Option<Arc<RerankSupervisor>>> {
+    let Some(effective) =
+        crate::profile::effective_index_profile(cfg).context("resolve the effective profile")?
+    else {
+        return Ok(None);
+    };
+    let spec = &effective.profile.reranker;
+    if spec.kind == RerankerKind::None {
+        return Ok(None);
+    }
+    let reranker_cfg = RerankerConfig::resolve(cfg.root_config());
+    bring_up_backend(
+        &effective.profile.name,
+        spec.model.as_deref(),
+        reranker_cfg,
+        runtime_dir,
+    )
+    .await
+}
+
+/// The mode dispatch behind [`bring_up_reranker`], after the profile
+/// has resolved and demanded a reranker: operator URL → one hard
+/// probe, otherwise locate the artifacts and supervise. Factored out
+/// so the dispatch is testable without an effective profile.
+async fn bring_up_backend(
+    profile: &str,
+    model_tag: Option<&str>,
+    reranker_cfg: RerankerConfig,
+    runtime_dir: &Path,
+) -> eyre::Result<Option<Arc<RerankSupervisor>>> {
+    if let Some(url) = reranker_cfg.url {
+        match bookrack_rerank::probe_health(&url).await {
+            ServerHealth::Ready => Ok(None),
+            not_ready => bail!(
+                "the rerank server at {url} is not ready ({detail}); profile '{profile}' \
+                 promises a reranker stage. Fix the server behind reranker.url, or switch \
+                 to a profile without a reranker stage.",
+                detail = match &not_ready {
+                    ServerHealth::Starting => "still loading its model".to_string(),
+                    ServerHealth::Unreachable(detail) => detail.clone(),
+                    ServerHealth::Ready => unreachable!("matched above"),
+                },
+            ),
+        }
+    } else {
+        let model_tag = model_tag
+            .ok_or_else(|| eyre!("profile '{profile}' enables a reranker but names no model"))?;
+        let bin = locate_llama_server().path.ok_or_else(|| {
+            eyre!(
+                "profile '{profile}' promises a reranker stage but no llama-server binary \
+                 is installed; run `bookrack doctor --install-reranker`"
+            )
+        })?;
+        let model = locate_reranker_model(model_tag).path.ok_or_else(|| {
+            eyre!(
+                "profile '{profile}' promises reranker model '{model_tag}' but no model \
+                 file is installed; run `bookrack doctor --install-reranker`"
+            )
+        })?;
+        let mut config = RerankSupervisorConfig::new(bin, model);
+        config.ctx = reranker_cfg.ctx;
+        config.threads = reranker_cfg.threads;
+        config.pid_file = Some(runtime_dir.join(LLAMA_SERVER_PID_FILENAME));
+        let supervisor = RerankSupervisor::start(config)
+            .await
+            .context("bring up the supervised llama-server")?;
+        Ok(Some(Arc::new(supervisor)))
     }
 }
 
@@ -760,6 +849,74 @@ mod tests {
         let supervisor = RerankSupervisor::start(config).await.expect("starts");
         assert!(matches!(supervisor.state().await, SupervisorState::Ready));
         supervisor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bring_up_backend_with_a_ready_url_probes_and_spawns_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let port = health_stub().await;
+        let cfg = RerankerConfig {
+            url: Some(format!("http://127.0.0.1:{port}")),
+            ..RerankerConfig::default()
+        };
+        let backend = bring_up_backend("p", Some("Qwen3-Reranker-0.6B"), cfg, dir.path())
+            .await
+            .expect("operator mode brings up");
+        assert!(backend.is_none(), "operator mode owns no supervisor");
+        assert!(
+            !dir.path().join(LLAMA_SERVER_PID_FILENAME).exists(),
+            "operator mode writes no pid file"
+        );
+    }
+
+    #[tokio::test]
+    async fn bring_up_backend_with_a_dead_url_refuses_with_the_repair() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = RerankerConfig {
+            url: Some(format!("http://127.0.0.1:{}", dead_port())),
+            ..RerankerConfig::default()
+        };
+        let err = bring_up_backend("quality", Some("Qwen3-Reranker-0.6B"), cfg, dir.path())
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("quality"), "{text}");
+        assert!(text.contains("reranker.url"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn bring_up_backend_without_a_model_tag_refuses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = bring_up_backend("p", None, RerankerConfig::default(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("names no model"), "{err}");
+    }
+
+    /// The supervised arm of the dispatch against the real pinned
+    /// artifacts; skips cleanly where they are not installed.
+    #[tokio::test]
+    async fn bring_up_backend_supervises_the_real_server_when_installed() {
+        if locate_llama_server().path.is_none()
+            || locate_reranker_model("Qwen3-Reranker-0.6B").path.is_none()
+        {
+            eprintln!("skipping: reranker artifacts not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = bring_up_backend(
+            "p",
+            Some("Qwen3-Reranker-0.6B"),
+            RerankerConfig::default(),
+            dir.path(),
+        )
+        .await
+        .expect("supervised mode brings up");
+        let supervisor = backend.expect("supervised mode holds a supervisor");
+        assert!(matches!(supervisor.state().await, SupervisorState::Ready));
+        assert!(dir.path().join(LLAMA_SERVER_PID_FILENAME).exists());
+        supervisor.shutdown().await;
+        assert!(!dir.path().join(LLAMA_SERVER_PID_FILENAME).exists());
     }
 
     /// End-to-end against the real pinned artifacts. Skips cleanly on

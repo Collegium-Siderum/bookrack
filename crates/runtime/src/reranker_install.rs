@@ -94,10 +94,26 @@ pub async fn install_pinned_llama_server() -> Result<InstallOutcome> {
         std::fs::remove_dir_all(&dir).with_context(|| format!("remove stale {}", dir.display()))?;
     }
     std::fs::rename(staged.keep(), &dir).with_context(|| format!("write {}", dir.display()))?;
+    prune_stale_builds(parent, &dir);
     Ok(InstallOutcome {
         path: target,
         downloaded: true,
     })
+}
+
+/// Sweep sibling build directories after a pin bump lands the new
+/// one, so exactly one managed build exists at a time. Best-effort:
+/// a directory that will not delete is left for the next run.
+fn prune_stale_builds(parent: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path != keep && path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Download and verify one pinned model file into the managed models

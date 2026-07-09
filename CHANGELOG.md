@@ -64,6 +64,26 @@ release workflow extracts the matching section verbatim from this file.
   `BOOKRACK_LLAMA_SERVER_BIN` and `BOOKRACK_RERANKER_MODEL`, name the
   artifacts directly and are authoritative when set.
 
+- **rerank, runtime, config: the reranker backend — a supervised
+  llama-server subprocess with an operator-URL escape hatch.** A new
+  `rerank` crate wraps llama-server's `/v1/rerank` endpoint behind the
+  same typed error contract as the embed client. When a library's
+  effective profile enables a reranker stage, the daemon now brings up
+  a verified backend before serving: by default it spawns the pinned
+  `llama-server` on a loopback port, holds startup until `/health`
+  reports the model loaded, restarts it with backoff if it crashes,
+  stops it TERM-then-KILL at shutdown, and kills a recorded orphan
+  left by a killed daemon. Setting `reranker.url` in `config.toml` (or
+  `BOOKRACK_RERANKER_URL`) switches to an operator-run server, probed
+  once at startup instead of spawned. The `[reranker]` table also
+  carries `ctx` and `threads` for the supervised server, all three
+  keys writable through `bookrack libraries config`. `bookrack doctor`
+  grows a reranker section (binary, model, backend status) that
+  appears only when the effective profile enables the stage. The
+  profile gate is unchanged: a reranker-enabled profile is still
+  refused until the query path lands, so this backend machinery
+  activates when that gate lifts.
+
 ### Changed
 
 - **cli: the `vectors` and `stamps` namespaces (books and papers) are

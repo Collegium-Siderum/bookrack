@@ -88,6 +88,10 @@ pub struct MethodContext {
     /// attached the notification has no consumer and the call is a
     /// no-op.
     pub tray_focus_signal: Arc<Notify>,
+    /// The supervised llama-server, when the effective profile enables
+    /// a reranker and no operator URL overrides the backend. `doctor.
+    /// gather` reads its state for the backend row.
+    pub rerank_supervisor: Option<Arc<crate::rerank_supervisor::RerankSupervisor>>,
     /// Worker-loop pause flag. The `queue.pause` / `queue.resume`
     /// handlers flip this atomic; the worker loop reads it before
     /// pulling the next pending job. Mirrored onto

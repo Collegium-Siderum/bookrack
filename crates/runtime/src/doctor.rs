@@ -123,6 +123,17 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<bool> {
 /// the sense that every observation is fresh — there is no in-process
 /// cache to invalidate between successive calls.
 pub async fn gather(selection: &LibrarySelection) -> Report {
+    gather_with(selection, None).await
+}
+
+/// [`gather`] with a live daemon's supervised reranker backend, so the
+/// backend row reports the supervisor state instead of `not running`.
+/// The daemon's `doctor.gather` handler passes its handle; the offline
+/// CLI path passes `None`.
+pub async fn gather_with(
+    selection: &LibrarySelection,
+    rerank_supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
+) -> Report {
     let mut rows = Vec::new();
 
     let cfg = push_data_root_row(&mut rows, selection);
@@ -137,6 +148,7 @@ pub async fn gather(selection: &LibrarySelection) -> Report {
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
+    push_reranker_rows(&mut rows, cfg.as_ref(), rerank_supervisor).await;
 
     Report { rows }
 }
@@ -882,6 +894,150 @@ fn embed_model_for_probe(cfg: Option<&Config>) -> String {
         .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string())
 }
 
+/// The reranker section: the two artifact rows and the backend row.
+/// Hidden entirely when the effective profile enables no reranker
+/// stage — the section is a profile option, not a host capability, so
+/// doctor does not warn about machinery the library never uses. With
+/// an operator URL configured the artifact rows are skipped too: the
+/// operator's server is the backend, and a missing managed binary
+/// would be noise.
+async fn push_reranker_rows(
+    rows: &mut Vec<Row>,
+    cfg: Option<&Config>,
+    supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
+) {
+    let Some(cfg) = cfg else {
+        return;
+    };
+    let Ok(Some(effective)) = crate::profile::effective_index_profile(cfg) else {
+        // Unresolvable profile states are the coherence rows' story.
+        return;
+    };
+    let spec = effective.profile.reranker;
+    if spec.kind == bookrack_index_profile::RerankerKind::None {
+        return;
+    }
+    let reranker_cfg = bookrack_config::RerankerConfig::resolve(cfg.root_config());
+    if let Some(url) = &reranker_cfg.url {
+        let health = bookrack_rerank::probe_health(url).await;
+        rows.push(url_backend_row(url, &health));
+        return;
+    }
+
+    rows.push(reranker_binary_row(
+        bookrack_config::llama_server_pin::locate_llama_server().path,
+    ));
+    let model_tag = spec.model.as_deref().unwrap_or_default();
+    rows.push(reranker_model_row(
+        model_tag,
+        bookrack_config::reranker_model_pin::locate_reranker_model(model_tag).path,
+    ));
+    rows.push(match supervisor {
+        Some(supervisor) => {
+            supervised_backend_row(&supervisor.state().await, supervisor.restarts())
+        }
+        None => not_running_backend_row(),
+    });
+}
+
+fn reranker_binary_row(path: Option<std::path::PathBuf>) -> Row {
+    match path {
+        Some(path) => Row {
+            label: "llama-server binary".to_string(),
+            value: path.display().to_string(),
+            status: Status::Ok { note: None },
+        },
+        None => Row {
+            label: "llama-server binary".to_string(),
+            value: "missing".to_string(),
+            status: Status::Fail {
+                note: "install with `bookrack doctor --install-reranker`".to_string(),
+            },
+        },
+    }
+}
+
+fn reranker_model_row(model_tag: &str, path: Option<std::path::PathBuf>) -> Row {
+    match path {
+        Some(path) => Row {
+            label: "reranker model".to_string(),
+            value: format!("{model_tag} ({})", path.display()),
+            status: Status::Ok { note: None },
+        },
+        None => Row {
+            label: "reranker model".to_string(),
+            value: format!("{model_tag} missing"),
+            status: Status::Fail {
+                note: "install with `bookrack doctor --install-reranker`".to_string(),
+            },
+        },
+    }
+}
+
+/// The backend row when this process holds the supervisor — a running
+/// daemon reporting on its own child.
+fn supervised_backend_row(state: &crate::rerank_supervisor::SupervisorState, restarts: u32) -> Row {
+    use crate::rerank_supervisor::SupervisorState;
+    let (value, status) = match state {
+        SupervisorState::Ready => (
+            "supervised".to_string(),
+            Status::Ok {
+                note: (restarts > 0).then(|| format!("{restarts} restart(s)")),
+            },
+        ),
+        SupervisorState::Starting => (
+            "supervised".to_string(),
+            Status::Warn {
+                note: "starting".to_string(),
+            },
+        ),
+        SupervisorState::Restarting { attempt, .. } => (
+            "supervised".to_string(),
+            Status::Warn {
+                note: format!("restarting (attempt {attempt}); queries fail until ready"),
+            },
+        ),
+    };
+    Row {
+        label: "reranker backend".to_string(),
+        value,
+        status,
+    }
+}
+
+/// The backend row when no daemon supervises a server: nothing is
+/// wrong, there is simply nothing to observe.
+fn not_running_backend_row() -> Row {
+    Row {
+        label: "reranker backend".to_string(),
+        value: "not running".to_string(),
+        status: Status::Ok {
+            note: Some("the daemon supervises llama-server when it runs".to_string()),
+        },
+    }
+}
+
+/// The backend row for the operator-URL mode: the named server is
+/// probed directly, whether or not a daemon runs.
+fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
+    let status = match health {
+        bookrack_rerank::ServerHealth::Ready => Status::Ok {
+            note: Some("operator-run (reranker.url)".to_string()),
+        },
+        bookrack_rerank::ServerHealth::Starting => Status::Warn {
+            note: "still loading its model".to_string(),
+        },
+        bookrack_rerank::ServerHealth::Unreachable(detail) => Status::Fail {
+            note: format!("{detail} -- fix the server behind reranker.url or unset it"),
+        },
+    };
+    Row {
+        label: "reranker backend".to_string(),
+        value: url.to_string(),
+        status,
+    }
+}
+
 async fn push_ollama_rows(rows: &mut Vec<Row>, base_url: &str, embed_model: &str) {
     let probe = probe_ollama(base_url).await;
     match probe {
@@ -1063,6 +1219,75 @@ mod tests {
             created_at: None,
             uuid: uuid.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn reranker_rows_cover_the_four_states() {
+        // ok: both artifacts found, supervisor ready.
+        let found = reranker_binary_row(Some(std::path::PathBuf::from("/managed/llama-server")));
+        assert!(matches!(found.status, Status::Ok { .. }), "{found:?}");
+        let model = reranker_model_row(
+            "Qwen3-Reranker-0.6B",
+            Some(std::path::PathBuf::from("/managed/m.gguf")),
+        );
+        assert!(model.value.starts_with("Qwen3-Reranker-0.6B"), "{model:?}");
+        let ready = supervised_backend_row(&crate::rerank_supervisor::SupervisorState::Ready, 2);
+        assert!(
+            matches!(&ready.status, Status::Ok { note: Some(n) } if n.contains("2 restart")),
+            "{ready:?}"
+        );
+
+        // missing: both artifact rows fail with the install hint.
+        for missing in [
+            reranker_binary_row(None),
+            reranker_model_row("Qwen3-Reranker-0.6B", None),
+        ] {
+            assert!(
+                matches!(&missing.status, Status::Fail { note } if note.contains("--install-reranker")),
+                "{missing:?}"
+            );
+        }
+
+        // not running: an offline doctor is not a failure.
+        let offline = not_running_backend_row();
+        assert_eq!(offline.value, "not running");
+        assert!(matches!(offline.status, Status::Ok { .. }), "{offline:?}");
+
+        // restarting: a crash window warns without failing the report.
+        let restarting = supervised_backend_row(
+            &crate::rerank_supervisor::SupervisorState::Restarting {
+                attempt: 3,
+                next_delay: std::time::Duration::from_secs(4),
+            },
+            3,
+        );
+        assert!(
+            matches!(&restarting.status, Status::Warn { note } if note.contains("attempt 3")),
+            "{restarting:?}"
+        );
+    }
+
+    #[test]
+    fn url_backend_row_maps_probe_outcomes() {
+        use bookrack_rerank::ServerHealth;
+        let ready = url_backend_row("http://h:1", &ServerHealth::Ready);
+        assert!(
+            matches!(&ready.status, Status::Ok { note: Some(n) } if n.contains("operator-run")),
+            "{ready:?}"
+        );
+        let starting = url_backend_row("http://h:1", &ServerHealth::Starting);
+        assert!(
+            matches!(starting.status, Status::Warn { .. }),
+            "{starting:?}"
+        );
+        let dead = url_backend_row(
+            "http://h:1",
+            &ServerHealth::Unreachable("connection refused".to_string()),
+        );
+        assert!(
+            matches!(&dead.status, Status::Fail { note } if note.contains("reranker.url")),
+            "{dead:?}"
+        );
     }
 
     #[test]

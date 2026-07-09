@@ -61,6 +61,11 @@ pub const LLAMA_SERVER_BIN_ENV: &str = "BOOKRACK_LLAMA_SERVER_BIN";
 /// [`reranker_model_pin::locate_reranker_model`].
 pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
 
+/// Environment variable naming an operator-run rerank server. Setting
+/// it (or `reranker.url` in `config.toml`) switches the daemon from
+/// spawning a supervised llama-server to probing the named endpoint.
+pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
+
 /// Environment variable naming the directory database backups are written
 /// to. When unset, a `backup/` directory under the data root is used.
 pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
@@ -567,6 +572,9 @@ pub struct RootConfig {
     /// Retrieval knobs, under a `[search]` table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search: Option<RootSearchConfig>,
+    /// Reranker backend knobs, under a `[reranker]` table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reranker: Option<RootRerankerConfig>,
 }
 
 /// The `[search]` table of `<data_root>/config.toml`: the persistent
@@ -581,6 +589,28 @@ pub struct RootSearchConfig {
     /// Cosine-distance threshold at or above which a hit counts as weak.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weak_threshold: Option<f32>,
+}
+
+/// The `[reranker]` table of `<data_root>/config.toml`: how the
+/// reranker backend is deployed, as opposed to *which* reranker runs —
+/// that is the index profile's fact. None of this enters a profile or
+/// a stamp, mirroring how `ollama_url` stays outside them.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RootRerankerConfig {
+    /// Operator-run rerank server URL. Setting it switches the daemon
+    /// from spawning a supervised llama-server to probing this
+    /// endpoint. Overridden by [`RERANKER_URL_ENV`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `-c` context size for the supervised server; its own default
+    /// when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<u32>,
+    /// `--threads` for the supervised server; its own choice when
+    /// unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
 }
 
 /// Read `<data_root>/config.toml`. A missing file resolves to the
@@ -635,6 +665,9 @@ pub const ROOT_CONFIG_KEYS: &[&str] = &[
     "index_profile",
     "search.top_k",
     "search.weak_threshold",
+    "reranker.url",
+    "reranker.ctx",
+    "reranker.threads",
 ];
 
 /// Name the environment variable that overrides `key` in the resolution
@@ -649,6 +682,7 @@ pub fn root_config_env_override(key: &str) -> Option<&'static str> {
         "log_directive" => Some(LOG_ENV),
         "search.top_k" => Some(SEARCH_TOP_K_ENV),
         "search.weak_threshold" => Some(SEARCH_WEAK_THRESHOLD_ENV),
+        "reranker.url" => Some(RERANKER_URL_ENV),
         _ => None,
     }
 }
@@ -745,7 +779,9 @@ pub fn set_root_config_values(
     /// numeric knob round-trips as a number rather than a quoted string.
     fn root_config_value_item(key: &str, value: &str) -> toml_edit::Item {
         match key {
-            "search.top_k" => toml_edit::value(value.parse::<i64>().expect("validated integer")),
+            "search.top_k" | "reranker.ctx" | "reranker.threads" => {
+                toml_edit::value(value.parse::<i64>().expect("validated integer"))
+            }
             "search.weak_threshold" => {
                 toml_edit::value(value.parse::<f64>().expect("validated number"))
             }
@@ -838,6 +874,19 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
         "search.weak_threshold" => match value.parse::<f32>() {
             Ok(v) if v.is_finite() => Ok(()),
             _ => invalid("expected a finite number"),
+        },
+        "reranker.url" => {
+            let Some((scheme, rest)) = value.split_once("://") else {
+                return invalid("expected a URL like 'http://host:port'");
+            };
+            if scheme.is_empty() || rest.is_empty() {
+                return invalid("expected a URL like 'http://host:port'");
+            }
+            Ok(())
+        }
+        "reranker.ctx" | "reranker.threads" => match value.parse::<u32>() {
+            Ok(n) if n > 0 => Ok(()),
+            _ => invalid("expected a positive integer"),
         },
         _ => Ok(()),
     }
@@ -1054,6 +1103,41 @@ impl Default for SearchConfig {
         SearchConfig {
             top_k: DEFAULT_SEARCH_TOP_K,
             weak_distance_threshold: DEFAULT_SEARCH_WEAK_THRESHOLD,
+        }
+    }
+}
+
+/// Reranker backend deployment knobs, resolved from the environment
+/// and the `[reranker]` table. `url` decides the backend mode: `Some`
+/// means an operator-run server is probed, `None` means the daemon
+/// supervises its own. `ctx` and `threads` only apply to the
+/// supervised mode and default to the server's own choices.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RerankerConfig {
+    /// Operator-run rerank server URL, when one is configured.
+    pub url: Option<String>,
+    /// `-c` context size for the supervised server.
+    pub ctx: Option<u32>,
+    /// `--threads` for the supervised server.
+    pub threads: Option<u32>,
+}
+
+impl RerankerConfig {
+    /// Resolve by precedence `env var > config.toml [reranker]`; the
+    /// numeric knobs have no env counterpart. A blank env value falls
+    /// through to the file layer rather than clearing the knob.
+    pub fn resolve(root: &RootConfig) -> RerankerConfig {
+        RerankerConfig::resolve_from(|key| std::env::var(key).ok(), root)
+    }
+
+    /// Pure resolution, factored out so it can be tested without mutating
+    /// process-global environment variables.
+    fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> RerankerConfig {
+        let file = root.reranker.clone().unwrap_or_default();
+        RerankerConfig {
+            url: env_trimmed(get(RERANKER_URL_ENV)).or_else(|| env_trimmed(file.url)),
+            ctx: file.ctx,
+            threads: file.threads,
         }
     }
 }
@@ -2956,6 +3040,83 @@ mod tests {
     }
 
     #[test]
+    fn reranker_config_resolves_env_over_file_and_keeps_knobs_file_only() {
+        let file = RootConfig {
+            reranker: Some(RootRerankerConfig {
+                url: Some("http://file:1".to_string()),
+                ctx: Some(8192),
+                threads: Some(4),
+            }),
+            ..RootConfig::default()
+        };
+
+        // No env: the [reranker] table supplies everything.
+        let from_file = RerankerConfig::resolve_from(|_| None, &file);
+        assert_eq!(from_file.url.as_deref(), Some("http://file:1"));
+        assert_eq!(from_file.ctx, Some(8192));
+        assert_eq!(from_file.threads, Some(4));
+
+        // Env set: it wins over the file for the URL; the numeric
+        // knobs have no env counterpart.
+        let from_env = RerankerConfig::resolve_from(
+            |key| match key {
+                RERANKER_URL_ENV => Some("http://env:2".to_string()),
+                _ => None,
+            },
+            &file,
+        );
+        assert_eq!(from_env.url.as_deref(), Some("http://env:2"));
+        assert_eq!(from_env.ctx, Some(8192));
+
+        // A blank env value falls through to the file layer.
+        let blank_env = RerankerConfig::resolve_from(
+            |key| match key {
+                RERANKER_URL_ENV => Some("  ".to_string()),
+                _ => None,
+            },
+            &file,
+        );
+        assert_eq!(blank_env.url.as_deref(), Some("http://file:1"));
+
+        // Nothing set anywhere: no URL means the supervised mode.
+        let bare = RerankerConfig::resolve_from(|_| None, &RootConfig::default());
+        assert_eq!(bare, RerankerConfig::default());
+    }
+
+    #[test]
+    fn set_root_config_writes_typed_reranker_keys_and_rejects_bad_values() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        set_root_config_values(
+            tmp.path(),
+            &[
+                ("reranker.url".to_string(), "http://h:1".to_string()),
+                ("reranker.ctx".to_string(), "8192".to_string()),
+            ],
+            &[],
+        )
+        .expect("set succeeds");
+        let cfg = load_root_config(tmp.path()).expect("round-trips");
+        let reranker = cfg.reranker.expect("[reranker] written");
+        assert_eq!(reranker.url.as_deref(), Some("http://h:1"));
+        assert_eq!(reranker.ctx, Some(8192));
+
+        let err = set_root_config_values(
+            tmp.path(),
+            &[("reranker.threads".to_string(), "zero".to_string())],
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(err, RootConfigSetError::InvalidValue { .. }));
+        let err = set_root_config_values(
+            tmp.path(),
+            &[("reranker.url".to_string(), "no-scheme".to_string())],
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(err, RootConfigSetError::InvalidValue { .. }));
+    }
+
+    #[test]
     fn profile_conflict_messages_carry_both_values_and_a_repair_path() {
         let model = ConfigError::profile_model_conflict("prof", "profile-model", "file-model");
         let text = model.to_string();
@@ -3511,6 +3672,11 @@ mod tests {
             search: Some(RootSearchConfig {
                 top_k: Some(5),
                 weak_threshold: Some(0.5),
+            }),
+            reranker: Some(RootRerankerConfig {
+                url: Some("http://x:1".to_string()),
+                ctx: Some(8192),
+                threads: Some(4),
             }),
         };
         let value = toml::Value::try_from(&full).expect("RootConfig serializes to a table");
