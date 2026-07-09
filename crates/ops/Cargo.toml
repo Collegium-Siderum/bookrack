@@ -13,6 +13,7 @@ bookrack-embed = { path = "../embed" }
 bookrack-glean = { path = "../glean" }
 bookrack-ingest = { path = "../ingest" }
 bookrack-query = { path = "../query" }
+bookrack-rerank = { path = "../rerank" }
 bookrack-search = { path = "../search" }
 bookrack-vectors = { path = "../vectors" }
 eyre.workspace = true

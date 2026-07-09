@@ -197,6 +197,7 @@ fn error_kind(err: &OpsError) -> &'static str {
         OpsError::Catalog(_) => "catalog",
         OpsError::Corpus(_) => "corpus",
         OpsError::Vectors(_) => "vectors",
+        OpsError::Rerank(_) => "rerank",
         OpsError::IntakeNotFound { .. } => "intake_not_found",
         OpsError::UnknownMetadataField { .. } => "unknown_metadata_field",
         OpsError::UnknownContributorRole { .. } => "unknown_contributor_role",

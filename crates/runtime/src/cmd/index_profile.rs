@@ -16,7 +16,7 @@ use bookrack_config::{
 };
 use bookrack_index_profile::{
     Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, USER_PROFILE_DIR_NAME,
-    builtin_toml, ensure_reranker_supported, has_errors, list_profiles, resolve, validate,
+    builtin_toml, has_errors, list_profiles, resolve, validate,
 };
 use bookrack_vectors::ChunkStore;
 use eyre::{Result, bail};
@@ -326,9 +326,10 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
             match profile.reranker.kind {
                 RerankerKind::None => println!("  reranker: none"),
                 RerankerKind::CrossEncoder => println!(
-                    "  reranker: cross-encoder ({}) — not implemented; \
-                     the daemon refuses to start under this profile",
-                    profile.reranker.model.as_deref().unwrap_or("<unset>")
+                    "  reranker: cross-encoder ({}, top {} -> {})",
+                    profile.reranker.model.as_deref().unwrap_or("<unset>"),
+                    profile.reranker.top_k_in.unwrap_or(0),
+                    profile.reranker.top_k_out.unwrap_or(0),
                 ),
             }
         }
@@ -563,6 +564,14 @@ pub struct ApplyPlan {
 }
 
 impl ApplyPlan {
+    /// Whether the target profile enables a reranker stage. The stage
+    /// is query-time behaviour with no index action, so the apply
+    /// caller uses this only to hint at the daemon restart that brings
+    /// the backend up or down.
+    pub fn enables_reranker(&self) -> bool {
+        self.profile.reranker.kind != RerankerKind::None
+    }
+
     /// Every `(pipeline, action)` pair in execution order.
     pub fn actions(&self) -> Vec<(Pipeline, PlannedAction)> {
         self.sections
@@ -612,9 +621,6 @@ pub async fn plan_apply(
     let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
     let profile =
         resolve(&dir, name)?.ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
-    if let Err(e) = ensure_reranker_supported(&profile) {
-        return Err(ApplyRefusal(e.to_string()).into());
-    }
 
     // Masking check: a set env override or an explicit `embed_model`
     // field outranks the profile at execution time, so the actions

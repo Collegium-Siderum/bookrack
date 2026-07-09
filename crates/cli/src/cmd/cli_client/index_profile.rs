@@ -65,6 +65,12 @@ pub async fn run(
         render_apply_plan(&plan, None);
         declare_target(&plan, name)?;
         println!("nothing else to do: the built index already matches '{name}'");
+        // The reranker is query-time behaviour: no index action, but a
+        // running daemon supervises its backend per the profile it
+        // started under.
+        if plan.enables_reranker() {
+            println!("restart the daemon so it brings up the reranker backend.");
+        }
         return Ok(());
     }
 
@@ -126,6 +132,8 @@ pub async fn run(
         .any(|(_, a)| matches!(a, PlannedAction::Reset | PlannedAction::Reembed))
     {
         println!("restart the daemon so search picks up the new model.");
+    } else if plan.enables_reranker() {
+        println!("restart the daemon so it brings up the reranker backend.");
     }
     Ok(())
 }

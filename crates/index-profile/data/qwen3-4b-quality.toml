@@ -6,7 +6,7 @@
 # surfaces. Re-verify the warning if LanceDB is upgraded.
 schema_version = 1
 name = "qwen3-4b-quality"
-description = "Quality profile: the larger Qwen3 embedding model with an HNSW index and a cross-encoder reranker stage (planned)."
+description = "Quality profile: Qwen3-Embedding-4B with an IVF-HNSW-SQ index and a Qwen3-Reranker-0.6B cross-encoder stage. Suits libraries up to ~2M chunks on 32 GB+ hardware."
 
 [embed]
 backend = "ollama"
@@ -21,7 +21,7 @@ refine_factor = 20
 
 [reranker]
 kind = "cross-encoder"
-backend = "candle"
+backend = "llama-server"
 model = "Qwen3-Reranker-0.6B"
-top_k_in = 100
-top_k_out = 20
+top_k_in = 50
+top_k_out = 10

@@ -221,6 +221,38 @@ impl RerankSupervisor {
     }
 }
 
+/// The live reranker backend behind a daemon: the stage the search
+/// ops apply, plus the supervised subprocess when this daemon owns
+/// one. In the operator-URL mode the stage points at the operator's
+/// server and `supervisor` is `None` — the two modes converge on the
+/// stage, so the query path never distinguishes them.
+pub struct RerankerRuntime {
+    /// The supervised subprocess; `None` in the operator-URL mode.
+    pub supervisor: Option<Arc<RerankSupervisor>>,
+    /// Client and candidate window for the search ops.
+    pub stage: bookrack_ops::RerankStage,
+}
+
+/// Per-request timeout for query-time rerank calls: generous enough
+/// for a full `top_k_in` window on a cold cache, far below a hung
+/// server.
+const RERANK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Transport retries for one rerank call. Two quick retries ride out
+/// a connection blip without stalling an interactive query through a
+/// whole supervisor restart window — that window surfaces as the
+/// query error the profile's atomicity demands.
+const RERANK_MAX_RETRIES: u32 = 2;
+
+/// First retry backoff for a rerank call.
+const RERANK_BACKOFF_BASE: Duration = Duration::from_millis(250);
+
+/// Candidate-window fallbacks when a profile omits the bounds. The
+/// validator requires both fields on a cross-encoder profile, so
+/// these only guard a spec that bypassed validation.
+const DEFAULT_TOP_K_IN: usize = 50;
+const DEFAULT_TOP_K_OUT: usize = 10;
+
 /// Bring up the reranker backend a library's effective profile
 /// demands, during daemon bring-up and before the daemon serves.
 ///
@@ -235,7 +267,7 @@ impl RerankSupervisor {
 pub async fn bring_up_reranker(
     cfg: &Config,
     runtime_dir: &Path,
-) -> eyre::Result<Option<Arc<RerankSupervisor>>> {
+) -> eyre::Result<Option<RerankerRuntime>> {
     let Some(effective) =
         crate::profile::effective_index_profile(cfg).context("resolve the effective profile")?
     else {
@@ -249,10 +281,17 @@ pub async fn bring_up_reranker(
     bring_up_backend(
         &effective.profile.name,
         spec.model.as_deref(),
+        spec.top_k_in
+            .map(|k| k as usize)
+            .unwrap_or(DEFAULT_TOP_K_IN),
+        spec.top_k_out
+            .map(|k| k as usize)
+            .unwrap_or(DEFAULT_TOP_K_OUT),
         reranker_cfg,
         runtime_dir,
     )
     .await
+    .map(Some)
 }
 
 /// The mode dispatch behind [`bring_up_reranker`], after the profile
@@ -262,12 +301,19 @@ pub async fn bring_up_reranker(
 async fn bring_up_backend(
     profile: &str,
     model_tag: Option<&str>,
+    top_k_in: usize,
+    top_k_out: usize,
     reranker_cfg: RerankerConfig,
     runtime_dir: &Path,
-) -> eyre::Result<Option<Arc<RerankSupervisor>>> {
+) -> eyre::Result<RerankerRuntime> {
+    let model_tag = model_tag
+        .ok_or_else(|| eyre!("profile '{profile}' enables a reranker but names no model"))?;
     if let Some(url) = reranker_cfg.url {
         match bookrack_rerank::probe_health(&url).await {
-            ServerHealth::Ready => Ok(None),
+            ServerHealth::Ready => Ok(RerankerRuntime {
+                supervisor: None,
+                stage: rerank_stage(&url, model_tag, top_k_in, top_k_out)?,
+            }),
             not_ready => bail!(
                 "the rerank server at {url} is not ready ({detail}); profile '{profile}' \
                  promises a reranker stage. Fix the server behind reranker.url, or switch \
@@ -280,8 +326,6 @@ async fn bring_up_backend(
             ),
         }
     } else {
-        let model_tag = model_tag
-            .ok_or_else(|| eyre!("profile '{profile}' enables a reranker but names no model"))?;
         let bin = locate_llama_server().path.ok_or_else(|| {
             eyre!(
                 "profile '{profile}' promises a reranker stage but no llama-server binary \
@@ -301,8 +345,36 @@ async fn bring_up_backend(
         let supervisor = RerankSupervisor::start(config)
             .await
             .context("bring up the supervised llama-server")?;
-        Ok(Some(Arc::new(supervisor)))
+        let stage = rerank_stage(supervisor.base_url(), model_tag, top_k_in, top_k_out)?;
+        Ok(RerankerRuntime {
+            supervisor: Some(Arc::new(supervisor)),
+            stage,
+        })
     }
+}
+
+/// Build the search ops' stage: the rerank client pointed at the
+/// backend the mode dispatch selected, with the query-time transport
+/// policy pinned here.
+fn rerank_stage(
+    base_url: &str,
+    model_tag: &str,
+    top_k_in: usize,
+    top_k_out: usize,
+) -> eyre::Result<bookrack_ops::RerankStage> {
+    let client = bookrack_rerank::RerankClient::new(
+        base_url,
+        model_tag,
+        RERANK_REQUEST_TIMEOUT,
+        RERANK_MAX_RETRIES,
+        RERANK_BACKOFF_BASE,
+    )
+    .map_err(|e| eyre!("build the rerank client: {e}"))?;
+    Ok(bookrack_ops::RerankStage {
+        client: Arc::new(client),
+        top_k_in,
+        top_k_out,
+    })
 }
 
 /// Reserve an OS-assigned loopback port by binding and dropping a
@@ -859,10 +931,15 @@ mod tests {
             url: Some(format!("http://127.0.0.1:{port}")),
             ..RerankerConfig::default()
         };
-        let backend = bring_up_backend("p", Some("Qwen3-Reranker-0.6B"), cfg, dir.path())
+        let backend = bring_up_backend("p", Some("Qwen3-Reranker-0.6B"), 50, 10, cfg, dir.path())
             .await
             .expect("operator mode brings up");
-        assert!(backend.is_none(), "operator mode owns no supervisor");
+        assert!(
+            backend.supervisor.is_none(),
+            "operator mode owns no supervisor"
+        );
+        assert_eq!(backend.stage.top_k_in, 50);
+        assert_eq!(backend.stage.top_k_out, 10);
         assert!(
             !dir.path().join(LLAMA_SERVER_PID_FILENAME).exists(),
             "operator mode writes no pid file"
@@ -876,9 +953,17 @@ mod tests {
             url: Some(format!("http://127.0.0.1:{}", dead_port())),
             ..RerankerConfig::default()
         };
-        let err = bring_up_backend("quality", Some("Qwen3-Reranker-0.6B"), cfg, dir.path())
-            .await
-            .unwrap_err();
+        let err = bring_up_backend(
+            "quality",
+            Some("Qwen3-Reranker-0.6B"),
+            50,
+            10,
+            cfg,
+            dir.path(),
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
         let text = err.to_string();
         assert!(text.contains("quality"), "{text}");
         assert!(text.contains("reranker.url"), "{text}");
@@ -887,8 +972,9 @@ mod tests {
     #[tokio::test]
     async fn bring_up_backend_without_a_model_tag_refuses() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let err = bring_up_backend("p", None, RerankerConfig::default(), dir.path())
+        let err = bring_up_backend("p", None, 50, 10, RerankerConfig::default(), dir.path())
             .await
+            .map(|_| ())
             .unwrap_err();
         assert!(err.to_string().contains("names no model"), "{err}");
     }
@@ -907,14 +993,31 @@ mod tests {
         let backend = bring_up_backend(
             "p",
             Some("Qwen3-Reranker-0.6B"),
+            50,
+            10,
             RerankerConfig::default(),
             dir.path(),
         )
         .await
         .expect("supervised mode brings up");
-        let supervisor = backend.expect("supervised mode holds a supervisor");
+        let supervisor = backend
+            .supervisor
+            .expect("supervised mode holds a supervisor");
         assert!(matches!(supervisor.state().await, SupervisorState::Ready));
         assert!(dir.path().join(LLAMA_SERVER_PID_FILENAME).exists());
+        // The stage's client points at the supervised server; a real
+        // call through it proves the two halves are wired together.
+        let ranked = backend
+            .stage
+            .client
+            .rerank(
+                "What animal is a panda?",
+                &["Paris is the capital of France.".to_string()],
+                1,
+            )
+            .await
+            .expect("the stage client reaches the supervised server");
+        assert_eq!(ranked.len(), 1);
         supervisor.shutdown().await;
         assert!(!dir.path().join(LLAMA_SERVER_PID_FILENAME).exists());
     }

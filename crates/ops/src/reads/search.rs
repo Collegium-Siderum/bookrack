@@ -42,7 +42,16 @@ pub async fn search<E: Embedder>(
     );
     let result = async {
         let library = ops.library().ok_or(OpsError::SearchUnavailable)?;
-        Ok(library.search_with(query, overrides, top_k).await?)
+        match ops.rerank_stage() {
+            None => Ok(library.search_with(query, overrides, top_k).await?),
+            Some(stage) => {
+                let candidates = library
+                    .search_with(query, overrides, Some(stage.top_k_in))
+                    .await?;
+                let final_k = top_k.unwrap_or_else(|| library.default_top_k());
+                apply_rerank_stage(stage, query, candidates, final_k).await
+            }
+        }
     }
     .await;
     let retrieval = book_retrieval_payload(ops, query, top_k, &result);
@@ -80,9 +89,18 @@ pub async fn search_in_book<E: Embedder>(
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
-        Ok(library
-            .search_in_book_with(intake_id, query, overrides, top_k)
-            .await?)
+        match ops.rerank_stage() {
+            None => Ok(library
+                .search_in_book_with(intake_id, query, overrides, top_k)
+                .await?),
+            Some(stage) => {
+                let candidates = library
+                    .search_in_book_with(intake_id, query, overrides, Some(stage.top_k_in))
+                    .await?;
+                let final_k = top_k.unwrap_or_else(|| library.default_top_k());
+                apply_rerank_stage(stage, query, candidates, final_k).await
+            }
+        }
     }
     .await;
     let retrieval = book_retrieval_payload(ops, query, top_k, &result);
@@ -114,7 +132,16 @@ pub async fn search_paper<E: Embedder>(
         let papers_library = ops
             .papers_library()
             .ok_or(OpsError::PapersBackendNotConfigured)?;
-        Ok(papers_library.search_with(query, overrides, top_k).await?)
+        match ops.rerank_stage() {
+            None => Ok(papers_library.search_with(query, overrides, top_k).await?),
+            Some(stage) => {
+                let candidates = papers_library
+                    .search_with(query, overrides, Some(stage.top_k_in))
+                    .await?;
+                let final_k = top_k.unwrap_or_else(|| papers_library.default_top_k());
+                apply_rerank_stage(stage, query, candidates, final_k).await
+            }
+        }
     }
     .await;
     let retrieval = paper_retrieval_payload(ops, query, top_k, &result);
@@ -156,9 +183,18 @@ pub async fn search_in_paper<E: Embedder>(
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
-        Ok(papers_library
-            .search_in_paper_with(intake_id, query, overrides, top_k)
-            .await?)
+        match ops.rerank_stage() {
+            None => Ok(papers_library
+                .search_in_paper_with(intake_id, query, overrides, top_k)
+                .await?),
+            Some(stage) => {
+                let candidates = papers_library
+                    .search_in_paper_with(intake_id, query, overrides, Some(stage.top_k_in))
+                    .await?;
+                let final_k = top_k.unwrap_or_else(|| papers_library.default_top_k());
+                apply_rerank_stage(stage, query, candidates, final_k).await
+            }
+        }
     }
     .await;
     let retrieval = paper_retrieval_payload(ops, query, top_k, &result);
@@ -198,22 +234,88 @@ pub async fn search_unified<E: Embedder>(
                 .papers_library()
                 .ok_or(OpsError::PapersBackendNotConfigured)?;
             let effective_k = top_k.unwrap_or_else(|| books.default_top_k());
+            // With a reranker, each side recalls the full candidate
+            // window and the distance merge below narrows the union
+            // back to `top_k_in`, so the stage scores one profile-sized
+            // window regardless of how the candidates split across
+            // stores.
+            let recall_k = match ops.rerank_stage() {
+                Some(stage) => stage.top_k_in,
+                None => effective_k,
+            };
             let mut combined = books
-                .search_with(query, overrides.clone(), Some(effective_k))
+                .search_with(query, overrides.clone(), Some(recall_k))
                 .await?;
-            let paper_hits = papers
-                .search_with(query, overrides, Some(effective_k))
-                .await?;
+            let paper_hits = papers.search_with(query, overrides, Some(recall_k)).await?;
             combined.extend(paper_hits);
             combined.sort_by(|a, b| {
                 a.distance
                     .partial_cmp(&b.distance)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            combined.truncate(effective_k);
-            Ok(combined)
+            match ops.rerank_stage() {
+                None => {
+                    combined.truncate(effective_k);
+                    Ok(combined)
+                }
+                Some(stage) => {
+                    combined.truncate(stage.top_k_in);
+                    apply_rerank_stage(stage, query, combined, effective_k).await
+                }
+            }
         }
     )
+}
+
+/// Run the reranker stage over recalled candidates: score every
+/// candidate's text against the query, reorder by descending
+/// relevance, and keep at most `min(final_k, top_k_out)` — the
+/// caller's ask, capped by the profile's stage width. A stage failure
+/// fails the search; the profile promises the reranked order as part
+/// of an atomic combination, and under the supervised backend an
+/// unreachable server is a transient restart window, so a silent
+/// fallback would deliver a knowingly worse ranking.
+async fn apply_rerank_stage(
+    stage: &crate::RerankStage,
+    query: &str,
+    candidates: Vec<Citation>,
+    final_k: usize,
+) -> Result<Vec<Citation>> {
+    let keep = final_k.min(stage.top_k_out);
+    if candidates.is_empty() || keep == 0 {
+        return Ok(Vec::new());
+    }
+    let documents: Vec<String> = candidates.iter().map(|c| c.text.clone()).collect();
+    let ranked = stage.client.rerank(query, &documents, keep).await?;
+    take_ranked(candidates, &ranked)
+}
+
+/// Reorder candidates by the ranking the server returned, stamping
+/// each survivor with its relevance score. A ranking that names a
+/// candidate twice or out of range is a malformed response — the
+/// client already bounds-checks, so the duplicate check here is the
+/// remaining guard.
+fn take_ranked(
+    candidates: Vec<Citation>,
+    ranked: &[bookrack_rerank::RankedDocument],
+) -> Result<Vec<Citation>> {
+    let mut slots: Vec<Option<Citation>> = candidates.into_iter().map(Some).collect();
+    ranked
+        .iter()
+        .map(|entry| {
+            let mut citation = slots
+                .get_mut(entry.index)
+                .and_then(Option::take)
+                .ok_or_else(|| {
+                    OpsError::Rerank(bookrack_rerank::RerankError::MalformedResponse(format!(
+                        "result index {} repeated or out of range",
+                        entry.index
+                    )))
+                })?;
+            citation.rerank_score = Some(entry.score);
+            Ok(citation)
+        })
+        .collect()
 }
 
 /// Compose the corpus fingerprint of the store rooted at `corpus_db`
@@ -389,5 +491,70 @@ mod tests {
             .compose_corpus_fingerprint("ivf-pq")
             .expect("compose expected");
         assert_eq!(fingerprint, expected);
+    }
+
+    fn candidate(text: &str, distance: f32) -> Citation {
+        use bookrack_core::{ItemKind, NodeId};
+        Citation {
+            text: text.to_string(),
+            breadcrumb: "Book \u{203a} Chapter".to_string(),
+            intake_id: 1,
+            kind: ItemKind::Book,
+            toc_position: None,
+            enclosing_node_id: None,
+            start_node_id: NodeId::new(100_000_001),
+            start_char_offset: 0,
+            end_node_id: NodeId::new(100_000_001),
+            end_char_offset: text.len() as i32,
+            norm_chunk_sha256: "abc".to_string(),
+            distance,
+            rerank_score: None,
+        }
+    }
+
+    #[test]
+    fn take_ranked_reorders_and_stamps_scores() {
+        use bookrack_rerank::RankedDocument;
+        let candidates = vec![
+            candidate("a", 0.1),
+            candidate("b", 0.2),
+            candidate("c", 0.3),
+        ];
+        let ranked = [
+            RankedDocument {
+                index: 2,
+                score: 0.9,
+            },
+            RankedDocument {
+                index: 0,
+                score: 0.4,
+            },
+        ];
+        let reranked = take_ranked(candidates, &ranked).expect("ranking applies");
+        assert_eq!(reranked.len(), 2);
+        assert_eq!(reranked[0].text, "c");
+        assert_eq!(reranked[0].rerank_score, Some(0.9));
+        assert_eq!(reranked[1].text, "a");
+        assert_eq!(reranked[1].rerank_score, Some(0.4));
+        // The ANN distance survives alongside the stage score.
+        assert!((reranked[0].distance - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn take_ranked_rejects_a_repeated_index() {
+        use bookrack_rerank::RankedDocument;
+        let candidates = vec![candidate("a", 0.1), candidate("b", 0.2)];
+        let ranked = [
+            RankedDocument {
+                index: 1,
+                score: 0.9,
+            },
+            RankedDocument {
+                index: 1,
+                score: 0.8,
+            },
+        ];
+        let err = take_ranked(candidates, &ranked).unwrap_err();
+        assert!(matches!(err, OpsError::Rerank(_)), "got {err:?}");
     }
 }

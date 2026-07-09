@@ -27,8 +27,7 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, ensure_reranker_supported, has_errors,
-    resolve, validate,
+    AnnKind, AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, has_errors, resolve, validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -149,8 +148,7 @@ fn fresh_root_config(cfg: &Config) -> RootConfig {
 /// configuration alone. Errors when the two references disagree, when
 /// the referenced profile does not resolve, when the profile's model
 /// contradicts an explicit `embed_model` in `config.toml`
-/// ([`ConfigError::ProfileConfigConflict`]), or when the profile enables
-/// the not-yet-implemented reranker stage.
+/// ([`ConfigError::ProfileConfigConflict`]).
 pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>> {
     effective_index_profile_in(cfg, &fresh_root_config(cfg))
 }
@@ -181,8 +179,6 @@ fn effective_index_profile_in(cfg: &Config, root: &RootConfig) -> Result<Option<
             ConfigError::profile_model_conflict(&name, &profile.embed.model, explicit).into(),
         );
     }
-    ensure_reranker_supported(&profile)?;
-
     Ok(Some(EffectiveProfile { origin, profile }))
 }
 

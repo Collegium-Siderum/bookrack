@@ -102,6 +102,13 @@ pub struct Citation {
     pub norm_chunk_sha256: String,
     /// Cosine distance to the query — smaller is nearer.
     pub distance: f32,
+    /// Relevance score from the reranker stage — larger is more
+    /// relevant, and it defines the result order when present. `None`
+    /// when the effective profile runs no reranker; absent from JSON
+    /// then, so the wire shape is unchanged for reranker-less
+    /// libraries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 /// Retrieve the `top_k` passages nearest `query`, each with a citation
@@ -348,6 +355,7 @@ pub fn cite(
             end_char_offset: hit.end_char_offset,
             norm_chunk_sha256: hit.norm_chunk_sha256,
             distance: hit.distance,
+            rerank_score: None,
         });
     }
     tracing::debug!(
@@ -663,8 +671,16 @@ mod tests {
             end_char_offset: 5,
             norm_chunk_sha256: "abc".to_string(),
             distance: 0.25,
+            rerank_score: None,
         };
         let value = serde_json::to_value(&citation).expect("serialize citation");
+        assert!(
+            !value
+                .as_object()
+                .expect("object")
+                .contains_key("rerank_score"),
+            "an absent rerank score stays off the wire"
+        );
         // The newtype ids flatten to bare integers, not wrapper objects.
         assert_eq!(value["start_node_id"], serde_json::json!(100_000_001));
         assert_eq!(value["enclosing_node_id"], serde_json::json!(100_000_000));

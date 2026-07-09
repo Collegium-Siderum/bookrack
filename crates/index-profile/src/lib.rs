@@ -302,34 +302,6 @@ pub fn list_profiles(dir: &Path) -> Vec<ProfileEntry> {
         .collect()
 }
 
-/// A profile demands the reranker stage before the implementation
-/// exists. Static validation only notes a reranker section; a consumer
-/// about to *run* the profile raises this instead, because silently
-/// skipping the stage would deliver half the combination the profile
-/// promises.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "index profile '{profile}' enables a reranker stage, which is not implemented: \
-     the reranker stage lands in a later release; use a profile without a reranker \
-     section for now"
-)]
-pub struct RerankerNotImplemented {
-    /// The profile that names a reranker.
-    pub profile: String,
-}
-
-/// Refuse a profile whose reranker section demands a stage the current
-/// release cannot run. `kind = "none"` (or an absent section) passes.
-pub fn ensure_reranker_supported(profile: &IndexProfile) -> Result<(), RerankerNotImplemented> {
-    if profile.reranker.kind == RerankerKind::None {
-        Ok(())
-    } else {
-        Err(RerankerNotImplemented {
-            profile: profile.name.clone(),
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,8 +309,8 @@ mod tests {
     #[test]
     fn built_in_names_resolve_and_validate_clean() {
         // The "built-in is exemplary" guard: every shipped profile must
-        // parse and validate with no Error findings. Warnings (HNSW) and
-        // Notes (reranker not implemented) are allowed.
+        // parse and validate with no Error findings. Warnings (HNSW)
+        // are allowed.
         for name in ALL_BUILT_IN_NAMES {
             let profile = IndexProfile::from_named(name).expect("built-in resolves");
             let findings = validate(&profile, false);
@@ -354,17 +326,19 @@ mod tests {
     }
 
     #[test]
-    fn reranker_gate_splits_the_two_built_ins() {
-        // The default profile carries no reranker and runs anywhere.
-        let default = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in");
-        assert!(ensure_reranker_supported(&default).is_ok());
-
-        // The quality profile stays a validatable-but-not-runnable
-        // spec target until the reranker stage lands.
+    fn quality_built_in_declares_the_live_reranker_stage() {
+        // The quality profile's reranker section is an executable
+        // combination: the implemented backend, a registry model tag,
+        // and the candidate window the query path applies.
         let quality = IndexProfile::from_named(PROFILE_QWEN3_4B_QUALITY).expect("built-in");
-        let err = ensure_reranker_supported(&quality).expect_err("reranker refused");
-        assert!(err.to_string().contains(PROFILE_QWEN3_4B_QUALITY));
-        assert!(err.to_string().contains("later release"));
+        assert_eq!(quality.reranker.kind, RerankerKind::CrossEncoder);
+        assert_eq!(quality.reranker.backend.as_deref(), Some("llama-server"));
+        assert_eq!(
+            quality.reranker.model.as_deref(),
+            Some("Qwen3-Reranker-0.6B")
+        );
+        assert_eq!(quality.reranker.top_k_in, Some(50));
+        assert_eq!(quality.reranker.top_k_out, Some(10));
     }
 
     #[test]

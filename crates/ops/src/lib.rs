@@ -29,10 +29,12 @@ pub mod registry;
 pub mod writes;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bookrack_catalog::ActorKind;
 use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
+use bookrack_rerank::RerankClient;
 
 pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_query::{Citation, SearchOptions};
@@ -58,6 +60,13 @@ pub enum OpsError {
     /// The vector store layer reported an error.
     #[error("vectors error")]
     Vectors(#[from] bookrack_vectors::VectorsError),
+
+    /// The reranker stage failed. The effective profile promises the
+    /// stage as part of an atomic retrieval combination, so the search
+    /// fails rather than silently returning the unreranked order; the
+    /// escape is a profile without a reranker.
+    #[error("rerank error")]
+    Rerank(#[from] bookrack_rerank::RerankError),
 
     /// The named intake does not exist.
     #[error("no intake registered for id {intake_id}")]
@@ -163,6 +172,21 @@ pub struct PapersPaths {
     pub papers_dir: PathBuf,
 }
 
+/// The reranker stage the search ops apply when the effective profile
+/// enables one: the client for the serving backend and the profile's
+/// candidate window. One stage serves both the book and paper sides —
+/// the profile is a per-library fact, not a per-pipeline one.
+#[derive(Clone)]
+pub struct RerankStage {
+    /// Client for the rerank endpoint, already pointed at the
+    /// supervised subprocess or the operator-run server.
+    pub client: Arc<RerankClient>,
+    /// How many ANN candidates are recalled for scoring.
+    pub top_k_in: usize,
+    /// How many reranked passages survive the stage.
+    pub top_k_out: usize,
+}
+
 /// Warm, shareable op state.
 ///
 /// Holds the file-system paths every op needs and, optionally, a warm
@@ -181,6 +205,7 @@ pub struct Ops<E: Embedder> {
     backup_dir: PathBuf,
     papers_library: Option<Library<E>>,
     papers_paths: Option<PapersPaths>,
+    rerank: Option<RerankStage>,
     caller: Caller,
 }
 
@@ -205,6 +230,7 @@ impl<E: Embedder> Ops<E> {
             backup_dir,
             papers_library: None,
             papers_paths: None,
+            rerank: None,
             caller,
         }
     }
@@ -217,6 +243,20 @@ impl<E: Embedder> Ops<E> {
         self.papers_library = Some(library);
         self.papers_paths = Some(paths);
         self
+    }
+
+    /// Attach the reranker stage the effective profile demands. Search
+    /// ops then recall `top_k_in` candidates, score them through the
+    /// stage, and return at most `top_k_out`; a stage failure fails the
+    /// search.
+    pub fn with_reranker(mut self, stage: RerankStage) -> Self {
+        self.rerank = Some(stage);
+        self
+    }
+
+    /// The reranker stage, when the effective profile enables one.
+    pub fn rerank_stage(&self) -> Option<&RerankStage> {
+        self.rerank.as_ref()
     }
 
     /// Build an `Ops` over the catalog and corpus only. Search ops on
@@ -241,6 +281,7 @@ impl<E: Embedder> Ops<E> {
             backup_dir,
             papers_library: None,
             papers_paths: None,
+            rerank: None,
             caller,
         }
     }

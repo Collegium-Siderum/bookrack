@@ -79,10 +79,28 @@ release workflow extracts the matching section verbatim from this file.
   carries `ctx` and `threads` for the supervised server, all three
   keys writable through `bookrack libraries config`. `bookrack doctor`
   grows a reranker section (binary, model, backend status) that
-  appears only when the effective profile enables the stage. The
-  profile gate is unchanged: a reranker-enabled profile is still
-  refused until the query path lands, so this backend machinery
-  activates when that gate lifts.
+  appears only when the effective profile enables the stage.
+
+- **index-profile, ops, runtime: the reranker stage is live —
+  `qwen3-4b-quality` becomes a runnable profile.** A profile whose
+  `[reranker]` section names a cross-encoder no longer refuses
+  startup: the daemon brings up the verified backend, and every search
+  op then recalls the profile's `top_k_in` candidates, scores them
+  through the reranker, and returns at most `top_k_out` passages
+  ordered by relevance, each citation carrying a `rerank_score`
+  alongside its ANN distance (the field is absent for reranker-less
+  libraries, so their wire shape is unchanged). The unified
+  book+paper search reranks the merged candidate window, so the stage
+  scores one profile-sized set regardless of how candidates split
+  across stores. A stage failure fails the search — the profile
+  promises an atomic retrieval combination, and under the supervised
+  backend an outage is a self-healing restart window — rather than
+  silently returning the unreranked order. The built-in
+  `qwen3-4b-quality` profile is finalized to the implemented backend
+  (`llama-server`, candidate window 50 -> 10), the validator now
+  rejects any other reranker backend, and `index-profile
+  current`/`apply` drop their not-implemented notes; `apply` hints at
+  the daemon restart that brings the backend up.
 
 ### Changed
 
@@ -105,10 +123,8 @@ release workflow extracts the matching section verbatim from this file.
   declared facts that disagree are a startup error with both values and
   the repair paths spelled out: an explicit `embed_model` that
   contradicts the referenced profile's model, or `config.toml` and the
-  registry entry naming different profiles. A profile that enables a
-  reranker stage is also refused at startup (`qwen3-4b-quality` stays a
-  validatable spec target until the reranker lands), and an undefined
-  or unloadable profile reference no longer passes silently.
+  registry entry naming different profiles. An undefined or unloadable
+  profile reference no longer passes silently.
 
 ## [0.8.0] - 2026-07-08
 

@@ -313,11 +313,10 @@ impl DaemonRuntime {
 
         // 5. EmbedConfig + OllamaEmbedClient. The model resolves by the
         //    full chain (env > config.toml > index profile > default),
-        //    so a profile-reference or embed-model conflict, an
-        //    undefined profile, and a not-yet-implemented reranker
-        //    stage each refuse startup here with the repair spelled
-        //    out, rather than embedding under a combination the
-        //    operator never declared.
+        //    so a profile-reference or embed-model conflict and an
+        //    undefined profile each refuse startup here with the
+        //    repair spelled out, rather than embedding under a
+        //    combination the operator never declared.
         let embed_cfg = crate::profile::effective_embed_config(&cfg)
             .context("resolve effective embed configuration")?;
         let embedder = OllamaEmbedClient::new(
@@ -334,9 +333,10 @@ impl DaemonRuntime {
         //     llama-server is spawned and held to readiness. Either
         //     way a profile that promises a reranker gets a verified
         //     backend or the daemon refuses to start.
-        let rerank_supervisor = crate::rerank_supervisor::bring_up_reranker(&cfg, &runtime_dir)
+        let reranker = crate::rerank_supervisor::bring_up_reranker(&cfg, &runtime_dir)
             .await
             .context("bring up the reranker backend")?;
+        let rerank_supervisor = reranker.as_ref().and_then(|r| r.supervisor.clone());
 
         // 6. Catalog preflight: migrate each on-disk catalog forward
         //    to the binary's `TARGET_VERSION` (with the usual one-shot
@@ -409,6 +409,10 @@ impl DaemonRuntime {
             opts.caller,
         )
         .with_papers(papers_library, papers_paths);
+        let ops = match &reranker {
+            Some(runtime) => ops.with_reranker(runtime.stage.clone()),
+            None => ops,
+        };
         let library_name = cfg.library().unwrap_or("default").to_string();
         let handle = LibraryHandle::new(&library_name, ops);
         let registry = LibraryRegistry::single(handle);

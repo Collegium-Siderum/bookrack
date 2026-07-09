@@ -60,6 +60,7 @@ impl Finding {
         }
     }
 
+    #[allow(dead_code)] // No validator emits a note today; the severity tier stays.
     fn note(field_path: &str, message: impl Into<String>) -> Finding {
         Finding {
             severity: Severity::Note,
@@ -169,25 +170,21 @@ fn validate_reranker(
         return;
     }
 
-    // The reranker stage is schema-first: the fields validate, but the
-    // stage is not wired yet. A live-effect error is raised elsewhere
-    // (library startup, apply); here it is only a note.
-    findings.push(Finding::note(
-        "reranker.kind",
-        "reranker stage not implemented yet (planned)",
-    ));
-
     if reranker.kind == RerankerKind::CrossEncoder {
         match reranker.backend.as_deref() {
             None => findings.push(Finding::error(
                 "reranker.backend",
                 "a cross-encoder reranker requires a backend",
             )),
+            Some("llama-server") => {}
             Some("ollama") => findings.push(Finding::error(
                 "reranker.backend",
                 "ollama does not serve rerankers; choose another backend",
             )),
-            Some(_) => {}
+            Some(other) => findings.push(Finding::error(
+                "reranker.backend",
+                format!("unsupported reranker backend '{other}'; only llama-server is implemented"),
+            )),
         }
 
         match reranker.model.as_deref() {
@@ -342,18 +339,36 @@ mod tests {
     }
 
     #[test]
-    fn cross_encoder_on_ollama_is_an_error_and_carries_a_note() {
-        let mut profile = pq_profile(1024, Some(128));
-        profile.reranker = RerankerSpec {
+    fn cross_encoder_backend_must_be_llama_server() {
+        let reranker = |backend: &str| RerankerSpec {
             kind: RerankerKind::CrossEncoder,
-            backend: Some("ollama".to_string()),
+            backend: Some(backend.to_string()),
             model: Some("Qwen3-Reranker-0.6B".to_string()),
             top_k_in: Some(50),
             top_k_out: Some(10),
         };
+
+        let mut profile = pq_profile(1024, Some(128));
+        profile.reranker = reranker("llama-server");
+        assert!(!has_errors(&validate(&profile, false)));
+
+        // ollama keeps its specific message: it has no rerank endpoint.
+        profile.reranker = reranker("ollama");
         let findings = validate(&profile, false);
-        assert!(has_errors(&findings));
-        assert!(findings.iter().any(|f| f.severity == Severity::Note));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.field_path == "reranker.backend" && f.message.contains("ollama"))
+        );
+
+        // Any other backend names a stage the runtime cannot execute.
+        profile.reranker = reranker("candle");
+        let findings = validate(&profile, false);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.field_path == "reranker.backend" && f.message.contains("llama-server"))
+        );
     }
 
     #[test]
@@ -361,7 +376,7 @@ mod tests {
         let mut profile = pq_profile(1024, Some(128));
         profile.reranker = RerankerSpec {
             kind: RerankerKind::CrossEncoder,
-            backend: Some("candle".to_string()),
+            backend: Some("llama-server".to_string()),
             model: Some("Qwen3-Reranker-0.6B".to_string()),
             top_k_in: Some(5),
             top_k_out: Some(10),

@@ -1977,6 +1977,7 @@ mod tests {
             end_char_offset: 7,
             norm_chunk_sha256: "sha".to_string(),
             distance: 0.1,
+            rerank_score: None,
         }
     }
 

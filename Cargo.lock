@@ -1166,6 +1166,7 @@ dependencies = [
  "bookrack-glean",
  "bookrack-ingest",
  "bookrack-query",
+ "bookrack-rerank",
  "bookrack-search",
  "bookrack-vectors",
  "eyre",
