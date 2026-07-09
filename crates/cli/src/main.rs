@@ -976,6 +976,20 @@ async fn run() -> Result<()> {
                 *json = *json || json_global;
             }
             match action {
+                // `list` renders the on-disk registry directly, so it
+                // works with no daemon and shows every registered
+                // library, not just the one a daemon has warm.
+                LibrariesAction::List { json } => {
+                    if bookrack_cli::render::ctx().is_quiet() {
+                        // Quiet suppresses the listing but still reads
+                        // the registry, so a malformed file is reported
+                        // through the exit code.
+                        bookrack_config::list_libraries()?;
+                        Ok(())
+                    } else {
+                        bookrack_runtime::cmd::libraries::list(json)
+                    }
+                }
                 LibrariesAction::Default { name } => {
                     // `libraries default` writes the registry directly,
                     // so it works with no daemon and the pointer persists

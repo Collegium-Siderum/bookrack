@@ -104,6 +104,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **cli, config: `libraries list` reads the on-disk registry directly.**
+  The verb no longer asks the daemon, so it works with nothing running
+  and shows every registered library — name, default marker, kind, and
+  data root — instead of only the library the daemon had warm. The
+  registry file resolves the same way the write verbs resolve it:
+  `BOOKRACK_REGISTRY` when set, else the platform-default registry.
+
 - **cli: the `vectors` and `stamps` namespaces (books and papers) are
   demoted to low-level escape hatches.** Their help now points at
   `bookrack index-profile apply` first; the verbs themselves are

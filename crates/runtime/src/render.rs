@@ -286,7 +286,7 @@ pub fn verify(report: &VerifyReport) {
 /// a single explanatory line rather than an empty body.
 pub fn libraries_list(entries: Option<&[LibraryEntry]>) {
     let Some(entries) = entries else {
-        println!("No registry configured (set BOOKRACK_REGISTRY).");
+        println!("No registry found (run `bookrack init`, or set BOOKRACK_REGISTRY).");
         return;
     };
     if entries.is_empty() {

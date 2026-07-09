@@ -499,16 +499,24 @@ pub struct LibraryEntry {
 
 /// Read the library registry and return every entry, sorted by name.
 ///
-/// Returns `Ok(None)` when [`REGISTRY_ENV`] is unset or blank — the
-/// registry is optional, and a binary that resolves through
-/// [`DATA_DIR_ENV`] alone has no registry to list. A configured but
-/// malformed or unreadable registry surfaces as the matching error.
+/// Resolves the registry file the same way the write verbs do (see
+/// [`registry_target_path`]): [`REGISTRY_ENV`] wins when set;
+/// otherwise the platform-default registry is read when it exists.
+/// Returns `Ok(None)` when neither names a registry — the registry is
+/// optional, and a binary that resolves through [`DATA_DIR_ENV`] alone
+/// has no registry to list. A registry named by [`REGISTRY_ENV`] that
+/// is missing, malformed, or unreadable surfaces as the matching
+/// error; a missing platform-default file is simply `Ok(None)`.
 pub fn list_libraries() -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
-    list_libraries_from(std::env::var(REGISTRY_ENV).ok())
+    if let Some(entries) = list_libraries_from(std::env::var(REGISTRY_ENV).ok())? {
+        return Ok(Some(entries));
+    }
+    Ok(load_default_registry()?.map(|registry| library_entries(&registry)))
 }
 
-/// Pure form of [`list_libraries`], for tests that should not mutate
-/// the process environment.
+/// The [`REGISTRY_ENV`] layer of [`list_libraries`], pure so tests do
+/// not mutate the process environment. `Ok(None)` means the env var is
+/// unset or blank; the caller falls through to the platform default.
 fn list_libraries_from(env: Option<String>) -> Result<Option<Vec<LibraryEntry>>, ConfigError> {
     let Some(registry) = load_registry(env)? else {
         return Ok(None);

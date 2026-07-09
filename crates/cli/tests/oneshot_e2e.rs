@@ -47,7 +47,6 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
             CaseExpect::NotRunning,
         ),
         (&["verify"], CaseExpect::NotRunning),
-        (&["libraries", "list"], CaseExpect::NotRunning),
         (&["diagnose"], CaseExpect::NotRunning),
         (&["quit"], CaseExpect::Quit),
     ];
@@ -126,6 +125,58 @@ async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
     assert!(
         stdout.contains("\"rows\""),
         "doctor --json should print a report with a `rows` field, got: {stdout}",
+    );
+    Ok(())
+}
+
+/// `libraries list` resolves locally: with no daemon running it still
+/// renders every registry entry and exits 0, rather than the
+/// daemon-not-running code 2. A mixed registry — legacy bare-path and
+/// entry-table forms side by side — lists in full, with the legacy
+/// entry's kind defaulting to `prod`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_list_renders_the_registry_offline() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        "default = \"alpha\"\n\
+         [libraries]\n\
+         alpha = \"/roots/alpha\"\n\
+         [libraries.beta]\n\
+         data_dir = \"/roots/beta\"\n\
+         kind = \"test\"\n",
+    )?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "list"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "libraries list should render offline and exit 0; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for needle in ["alpha", "/roots/alpha", "beta", "/roots/beta", "test"] {
+        assert!(
+            stdout.contains(needle),
+            "list output missing {needle:?}: {stdout}",
+        );
+    }
+    // Listing is read-only: the legacy entry must survive unrewritten.
+    let written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        written.contains("alpha = \"/roots/alpha\""),
+        "list must not rewrite the registry: {written}",
     );
     Ok(())
 }
@@ -431,6 +482,31 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
         assert!(
             written.contains(needle),
             "rebuilt registry missing {needle:?}: {written}",
+        );
+    }
+    // The rebuilt registry serves `libraries list` again: both roots
+    // show up under their manifest names, closing the recovery loop.
+    let list = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "list"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        list.status.code(),
+        Some(0),
+        "list after rebuild should exit 0; stderr={:?}",
+        String::from_utf8_lossy(&list.stderr),
+    );
+    let list_stdout = String::from_utf8_lossy(&list.stdout);
+    for needle in ["alpha", "beta"] {
+        assert!(
+            list_stdout.contains(needle),
+            "list after rebuild missing {needle:?}: {list_stdout}",
         );
     }
     Ok(())
