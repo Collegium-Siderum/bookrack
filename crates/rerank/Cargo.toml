@@ -1,0 +1,18 @@
+[package]
+name = "bookrack-rerank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+# `time` for the inter-retry backoff sleep.
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+# A hand-rolled one-shot mock HTTP server backs the client tests, so no
+# real llama-server is needed; it wants raw sockets and async IO.
+tokio = { workspace = true, features = ["net", "io-util", "rt", "macros"] }

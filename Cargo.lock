@@ -1211,6 +1211,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-rerank"
+version = "0.9.0-dev"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "bookrack-runtime"
 version = "0.9.0-dev"
 dependencies = [
@@ -1233,6 +1243,7 @@ dependencies = [
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-query",
+ "bookrack-rerank",
  "bookrack-session",
  "bookrack-vectors",
  "chrono",
@@ -1246,6 +1257,7 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-rs",

@@ -23,6 +23,7 @@ pub mod pdfium_install;
 pub mod profile;
 pub mod queue;
 pub mod render;
+pub mod rerank_supervisor;
 pub mod reranker_install;
 pub mod rlimit;
 pub mod wizard;
