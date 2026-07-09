@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod detect;
+pub mod llama_server_pin;
 mod manifest;
 mod registry;
+pub mod reranker_model_pin;
 
 pub use detect::{
     DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
@@ -48,6 +50,16 @@ pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 /// is used — the layout of a shipped bookrack build, which places the
 /// library beside the binary.
 pub const PDFIUM_LIB_ENV: &str = "BOOKRACK_PDFIUM_LIB";
+
+/// Environment variable naming the `llama-server` executable the
+/// reranker backend spawns. Authoritative when set; see
+/// [`llama_server_pin::locate_llama_server`].
+pub const LLAMA_SERVER_BIN_ENV: &str = "BOOKRACK_LLAMA_SERVER_BIN";
+
+/// Environment variable naming the reranker GGUF model file.
+/// Authoritative when set; see
+/// [`reranker_model_pin::locate_reranker_model`].
+pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
 
 /// Environment variable naming the directory database backups are written
 /// to. When unset, a `backup/` directory under the data root is used.

@@ -238,6 +238,12 @@ enum Command {
         /// library; the other formats do not.
         #[arg(long)]
         install_pdfium: bool,
+        /// Download the pinned llama-server build and reranker model
+        /// into the per-user managed directories before gathering the
+        /// report. Installs whichever is missing; a no-op when both
+        /// are already in place.
+        #[arg(long)]
+        install_reranker: bool,
         /// Rename legacy-named envelope files under the books and
         /// papers opaque stores to the kind-prefixed shape produced by
         /// `envelope_filename`. Idempotent; already-prefixed files are
@@ -821,6 +827,7 @@ async fn run() -> Result<()> {
     if let Command::Doctor {
         json,
         install_pdfium,
+        install_reranker,
         rename_envelopes,
         backfill_ocr_derivation,
         dry_run,
@@ -830,6 +837,7 @@ async fn run() -> Result<()> {
             &cli.selection(),
             *json || json_global,
             *install_pdfium,
+            *install_reranker,
             *rename_envelopes,
             *backfill_ocr_derivation,
             *dry_run,

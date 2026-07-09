@@ -52,6 +52,18 @@ release workflow extracts the matching section verbatim from this file.
   action, so an interrupted run reports "declaration ahead of stamps"
   in `current` and a re-run re-derives only the remaining actions.
 
+- **config, runtime, cli: `bookrack doctor --install-reranker` installs
+  the pinned reranker artifacts.** The reranker backend's two native
+  artifacts — the `llama-server` binary (llama.cpp release `b9934`,
+  unpacked whole so the executable keeps its dynamic libraries beside
+  it) and the `Qwen3-Reranker-0.6B` GGUF model — are now pinned by
+  SHA-256 in the config crate (`LLAMA_SERVER_VERSION.md` documents the
+  pair) and installed into per-user managed directories by the new
+  doctor verb, which downloads whichever is missing and is a no-op
+  when both are in place. Two new escape hatches,
+  `BOOKRACK_LLAMA_SERVER_BIN` and `BOOKRACK_RERANKER_MODEL`, name the
+  artifacts directly and are authoritative when set.
+
 ### Changed
 
 - **cli: the `vectors` and `stamps` namespaces (books and papers) are

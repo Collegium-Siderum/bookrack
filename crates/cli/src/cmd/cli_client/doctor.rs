@@ -26,23 +26,39 @@ async fn daemon_is_running(runtime_dir: Option<&Path>) -> bool {
 /// caller maps the boolean onto a process exit code so the colored
 /// table the renderer already wrote is the sole human-facing signal of
 /// failure.
+// The parameter list mirrors the doctor subcommand's flag set
+// one-to-one; a grouping struct would only restate the clap variant.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     selection: &LibrarySelection,
     json: bool,
     install_pdfium: bool,
+    install_reranker: bool,
     rename_envelopes: bool,
     backfill_ocr_derivation: bool,
     dry_run: bool,
     runtime_dir: Option<PathBuf>,
 ) -> Result<bool> {
-    // The install is a host-level action: it lands in the per-user
-    // managed directory regardless of whether a daemon is running, so
-    // it happens before the report path forks. A running daemon picks
-    // the library up on its next start.
+    // The installs are host-level actions: they land in the per-user
+    // managed directories regardless of whether a daemon is running,
+    // so they happen before the report path forks. A running daemon
+    // picks the artifacts up on its next start.
     if install_pdfium {
         let path = bookrack_runtime::pdfium_install::install_pinned_pdfium().await?;
         if !json {
             println!("installed {}", path.display());
+        }
+    }
+    if install_reranker {
+        let outcomes = bookrack_runtime::reranker_install::install_reranker().await?;
+        if !json {
+            for outcome in outcomes {
+                if outcome.downloaded {
+                    println!("installed {}", outcome.path.display());
+                } else {
+                    println!("{} already installed", outcome.path.display());
+                }
+            }
         }
     }
     // Envelope rename is also a host-level filesystem walk; it runs
