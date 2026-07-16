@@ -49,7 +49,8 @@ use crate::audit_helpers::{
     load_paper_audit_profile,
 };
 use crate::control::events::{
-    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, Event, EventStreamHandle, Stage,
+    DEFAULT_EVENT_CHANNEL_CAPACITY, DaemonState, DaemonStateFlag, DegradedCause, Event,
+    EventStreamHandle, Stage,
 };
 use crate::control::methods::MethodContext;
 use crate::control::progress::{EventProgressSink, ProgressSink};
@@ -57,6 +58,7 @@ use crate::control::socket::{
     ControlSocketGuard, ControlSocketPath, bind as bind_control_socket, run_accept_loop,
 };
 use crate::queue;
+use crate::rerank_supervisor::SupervisorState;
 
 /// Origin of a daemon bring-up, threaded into the second-launch
 /// handler so a CLI entry surfaces the recorded address while a GUI
@@ -328,14 +330,32 @@ impl DaemonRuntime {
         )
         .context("build embedding client")?;
 
+        // Event stream and daemon-state flag come up before the
+        // reranker so the supervisor's state observer can drive the
+        // degraded source from bring-up onward. The broadcast has no
+        // subscribers yet; `events.subscribe` snapshots are built per
+        // connection, after everything below is loaded.
+        let state_flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let event_stream =
+            EventStreamHandle::new(DEFAULT_EVENT_CHANNEL_CAPACITY, Arc::clone(&state_flag));
+
         // 5b. Reranker backend, before any listener serves: an
         //     operator URL is probed once, or a supervised
         //     llama-server is spawned and held to readiness. Either
         //     way a profile that promises a reranker gets a verified
         //     backend or the daemon refuses to start.
-        let reranker = crate::rerank_supervisor::bring_up_reranker(&cfg, &runtime_dir)
-            .await
-            .context("bring up the reranker backend")?;
+        let events_for_rerank = event_stream.clone();
+        let reranker = crate::rerank_supervisor::bring_up_reranker(
+            &cfg,
+            &runtime_dir,
+            Some(Arc::new(move |state: &SupervisorState| {
+                if let Some(active) = rerank_degraded_transition(state) {
+                    events_for_rerank.set_degraded(DegradedCause::RerankCrashloop, active);
+                }
+            })),
+        )
+        .await
+        .context("bring up the reranker backend")?;
         let rerank_supervisor = reranker.as_ref().and_then(|r| r.supervisor.clone());
 
         // 6. Catalog preflight: migrate each on-disk catalog forward
@@ -456,12 +476,6 @@ impl DaemonRuntime {
         let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
         let glean_params_template = build_glean_params_template(&cfg, &embed_cfg);
 
-        // Event stream, daemon-state flag, and control accept loop
-        // come up after the queue state is loaded so the initial
-        // snapshot includes the on-disk queue.
-        let state_flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
-        let event_stream =
-            EventStreamHandle::new(DEFAULT_EVENT_CHANNEL_CAPACITY, Arc::clone(&state_flag));
         let write_guard = Arc::new(tokio::sync::Mutex::new(()));
         let selection_for_doctor = LibrarySelection {
             data_dir: opts.selection.data_dir.clone(),
@@ -797,6 +811,27 @@ impl DaemonRuntime {
 
 /// Build the [`IngestParams`] template the queue worker reuses for
 /// every job.
+/// Consecutive respawn attempts within one reranker outage after
+/// which the backend counts as crash-looping. Below the threshold a
+/// restart is routine self-healing; at it, the exponential backoff
+/// has already failed twice and the outage deserves operator
+/// attention.
+const RERANK_CRASHLOOP_ATTEMPTS: u32 = 3;
+
+/// Map a supervisor state transition onto the reranker degraded
+/// cause: `Some(true)` enters, `Some(false)` exits, `None` leaves the
+/// cause untouched. Only `Ready` clears — `Starting` oscillates with
+/// `Restarting` inside one outage and must not end the condition.
+fn rerank_degraded_transition(state: &SupervisorState) -> Option<bool> {
+    match state {
+        SupervisorState::Ready => Some(false),
+        SupervisorState::Restarting { attempt, .. } if *attempt >= RERANK_CRASHLOOP_ATTEMPTS => {
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
 fn build_queue_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> IngestParams {
     IngestParams {
         embed: embed_cfg.clone(),
@@ -909,6 +944,29 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBo
 mod tests {
     use super::*;
     use bookrack_config::LibrarySelection;
+
+    #[test]
+    fn rerank_degraded_transition_enters_at_threshold_and_exits_on_ready() {
+        let restarting = |attempt| SupervisorState::Restarting {
+            attempt,
+            next_delay: Duration::from_secs(1),
+        };
+        let table: [(SupervisorState, Option<bool>); 6] = [
+            (SupervisorState::Ready, Some(false)),
+            (SupervisorState::Starting, None),
+            (restarting(1), None),
+            (restarting(RERANK_CRASHLOOP_ATTEMPTS - 1), None),
+            (restarting(RERANK_CRASHLOOP_ATTEMPTS), Some(true)),
+            (restarting(RERANK_CRASHLOOP_ATTEMPTS + 5), Some(true)),
+        ];
+        for (state, expected) in table {
+            assert_eq!(
+                rerank_degraded_transition(&state),
+                expected,
+                "state: {state:?}"
+            );
+        }
+    }
 
     /// Build a [`Config`] rooted at a fresh temp directory so the
     /// per-job-override unit tests can call into the audit profile

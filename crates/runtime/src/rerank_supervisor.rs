@@ -154,6 +154,33 @@ impl RerankSupervisorConfig {
     }
 }
 
+/// Observer invoked after every [`SupervisorState`] transition, on the
+/// supervision task. Kept out of [`RerankSupervisorConfig`] so the
+/// config stays plain data; the daemon passes one to map transitions
+/// onto its own health signals. Callbacks must be cheap and
+/// non-blocking — they run inline between supervision steps.
+pub type StateCallback = Arc<dyn Fn(&SupervisorState) + Send + Sync>;
+
+/// The supervisor's state cell paired with its observer. Every
+/// transition goes through [`StateSlot::set`] — store first, notify
+/// second — so a callback that reads back through the supervisor sees
+/// the state it was called with, and the snapshot and the observer
+/// cannot drift.
+#[derive(Clone)]
+struct StateSlot {
+    slot: Arc<RwLock<SupervisorState>>,
+    on_state: Option<StateCallback>,
+}
+
+impl StateSlot {
+    async fn set(&self, next: SupervisorState) {
+        *self.slot.write().await = next.clone();
+        if let Some(cb) = &self.on_state {
+            cb(&next);
+        }
+    }
+}
+
 /// A running, supervised llama-server.
 ///
 /// Constructed only through [`RerankSupervisor::start`], which returns
@@ -173,8 +200,12 @@ impl RerankSupervisor {
     /// Spawn the server and wait until it is ready. On a readiness
     /// failure the child is killed and the pid file cleared before the
     /// error returns — a failed bring-up leaves nothing running.
+    ///
+    /// `on_state` observes every subsequent state transition; the
+    /// initial `Ready` is reported before this returns.
     pub async fn start(
         config: RerankSupervisorConfig,
+        on_state: Option<StateCallback>,
     ) -> Result<RerankSupervisor, RerankerSpawnError> {
         if let Some(pid_file) = &config.pid_file {
             kill_recorded_orphan(pid_file);
@@ -192,6 +223,11 @@ impl RerankSupervisor {
             return Err(err);
         }
         let state = Arc::new(RwLock::new(SupervisorState::Ready));
+        let state_slot = StateSlot {
+            slot: Arc::clone(&state),
+            on_state,
+        };
+        state_slot.set(SupervisorState::Ready).await;
         let restarts = Arc::new(AtomicU32::new(0));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let monitor = tokio::spawn(monitor_loop(
@@ -199,7 +235,7 @@ impl RerankSupervisor {
             config,
             port,
             base_url.clone(),
-            Arc::clone(&state),
+            state_slot,
             Arc::clone(&restarts),
             shutdown_rx,
         ));
@@ -286,6 +322,7 @@ const DEFAULT_TOP_K_OUT: usize = 10;
 pub async fn bring_up_reranker(
     cfg: &Config,
     runtime_dir: &Path,
+    on_state: Option<StateCallback>,
 ) -> eyre::Result<Option<RerankerRuntime>> {
     let Some(effective) =
         crate::profile::effective_index_profile(cfg).context("resolve the effective profile")?
@@ -308,6 +345,7 @@ pub async fn bring_up_reranker(
             .unwrap_or(DEFAULT_TOP_K_OUT),
         reranker_cfg,
         runtime_dir,
+        on_state,
     )
     .await
     .map(Some)
@@ -324,6 +362,7 @@ async fn bring_up_backend(
     top_k_out: usize,
     reranker_cfg: RerankerConfig,
     runtime_dir: &Path,
+    on_state: Option<StateCallback>,
 ) -> eyre::Result<RerankerRuntime> {
     let model_tag = model_tag
         .ok_or_else(|| eyre!("profile '{profile}' enables a reranker but names no model"))?;
@@ -361,7 +400,7 @@ async fn bring_up_backend(
         config.ctx = reranker_cfg.ctx.or(config.ctx);
         config.threads = reranker_cfg.threads;
         config.pid_file = Some(runtime_dir.join(LLAMA_SERVER_PID_FILENAME));
-        let supervisor = RerankSupervisor::start(config)
+        let supervisor = RerankSupervisor::start(config, on_state)
             .await
             .context("bring up the supervised llama-server")?;
         let stage = rerank_stage(supervisor.base_url(), model_tag, top_k_in, top_k_out)?;
@@ -529,7 +568,7 @@ async fn monitor_loop(
     config: RerankSupervisorConfig,
     port: u16,
     base_url: String,
-    state: Arc<RwLock<SupervisorState>>,
+    state: StateSlot,
     restarts: Arc<AtomicU32>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
@@ -544,7 +583,8 @@ async fn monitor_loop(
                     "llama-server exited unexpectedly ({status}); restarting"
                 );
                 restarts.fetch_add(1, Ordering::Relaxed);
-                match respawn_until_ready(&config, port, &base_url, &state, &mut shutdown_rx).await
+                match respawn_until_ready(&config, port, &base_url, &state, &mut shutdown_rx)
+                    .await
                 {
                     Some(next) => child = next,
                     None => {
@@ -553,7 +593,7 @@ async fn monitor_loop(
                         return;
                     }
                 }
-                *state.write().await = SupervisorState::Ready;
+                state.set(SupervisorState::Ready).await;
             }
             _ = shutdown_rx.changed() => {
                 stop_child(&mut child, &config).await;
@@ -571,7 +611,7 @@ async fn respawn_until_ready(
     config: &RerankSupervisorConfig,
     port: u16,
     base_url: &str,
-    state: &Arc<RwLock<SupervisorState>>,
+    state: &StateSlot,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Option<Child> {
     let mut attempt = 0u32;
@@ -580,15 +620,17 @@ async fn respawn_until_ready(
             .restart_backoff_base
             .saturating_mul(2u32.saturating_pow(attempt))
             .min(RESTART_BACKOFF_CAP);
-        *state.write().await = SupervisorState::Restarting {
-            attempt: attempt + 1,
-            next_delay: delay,
-        };
+        state
+            .set(SupervisorState::Restarting {
+                attempt: attempt + 1,
+                next_delay: delay,
+            })
+            .await;
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = shutdown_rx.changed() => return None,
         }
-        *state.write().await = SupervisorState::Starting;
+        state.set(SupervisorState::Starting).await;
         match spawn_server(config, port) {
             Ok(mut child) => {
                 tokio::select! {
@@ -830,7 +872,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexit 3\n");
         let config = test_config(bin, dead_port(), dir.path());
-        let err = RerankSupervisor::start(config).await.unwrap_err();
+        let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
             matches!(err, RerankerSpawnError::ExitedEarly { .. }),
             "got {err:?}"
@@ -847,7 +889,7 @@ mod tests {
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
         let mut config = test_config(bin, dead_port(), dir.path());
         config.ready_timeout = Duration::from_millis(300);
-        let err = RerankSupervisor::start(config).await.unwrap_err();
+        let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
             matches!(err, RerankerSpawnError::NotReadyWithinDeadline { .. }),
             "got {err:?}"
@@ -858,7 +900,7 @@ mod tests {
     async fn a_missing_executable_is_spawn_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = test_config(dir.path().join("no-such-bin"), dead_port(), dir.path());
-        let err = RerankSupervisor::start(config).await.unwrap_err();
+        let err = RerankSupervisor::start(config, None).await.unwrap_err();
         assert!(
             matches!(err, RerankerSpawnError::SpawnFailed { .. }),
             "got {err:?}"
@@ -872,7 +914,7 @@ mod tests {
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
         let pid_path = config.pid_file.clone().expect("pid file");
-        let supervisor = RerankSupervisor::start(config.clone())
+        let supervisor = RerankSupervisor::start(config.clone(), None)
             .await
             .expect("starts");
         assert!(supervisor.base_url().ends_with(&port.to_string()));
@@ -893,9 +935,17 @@ mod tests {
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nsleep 60\n");
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
-        let supervisor = RerankSupervisor::start(config.clone())
-            .await
-            .expect("starts");
+        let observed: Arc<std::sync::Mutex<Vec<SupervisorState>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed_by_cb = Arc::clone(&observed);
+        let supervisor = RerankSupervisor::start(
+            config.clone(),
+            Some(Arc::new(move |state: &SupervisorState| {
+                observed_by_cb.lock().unwrap().push(state.clone());
+            })),
+        )
+        .await
+        .expect("starts");
         let first_pid = recorded_pid(&config);
         send_sigkill(first_pid);
         let recovered = wait_until(Duration::from_secs(5), || {
@@ -914,6 +964,21 @@ mod tests {
             "respawned server reaches Ready"
         );
         supervisor.shutdown().await;
+
+        let seen = observed.lock().unwrap().clone();
+        assert!(
+            matches!(seen.first(), Some(SupervisorState::Ready)),
+            "callback reports the initial Ready: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|s| matches!(s, SupervisorState::Restarting { .. })),
+            "callback observes the restart transition: {seen:?}"
+        );
+        assert!(
+            matches!(seen.last(), Some(SupervisorState::Ready)),
+            "callback observes the recovery to Ready: {seen:?}"
+        );
     }
 
     /// A non-async peek at the state for use inside `wait_until`'s
@@ -933,7 +998,7 @@ mod tests {
         );
         let port = health_stub().await;
         let config = test_config(bin, port, dir.path());
-        let supervisor = RerankSupervisor::start(config.clone())
+        let supervisor = RerankSupervisor::start(config.clone(), None)
             .await
             .expect("starts");
         let pid = recorded_pid(&config);
@@ -959,7 +1024,7 @@ mod tests {
 
         let bin = script(dir.path(), "fake-server", "#!/bin/sh\nexit 0\n");
         let config = test_config(bin, dead_port(), dir.path());
-        let _ = RerankSupervisor::start(config).await;
+        let _ = RerankSupervisor::start(config, None).await;
         // The test holds the orphan's handle, so the killed process
         // stays a zombie until reaped: `try_wait` is the liveness
         // check, not signal 0.
@@ -981,7 +1046,7 @@ mod tests {
         let pid_path = config.pid_file.clone().expect("pid file");
         // A pid far above any live process on the test host.
         std::fs::write(&pid_path, "99999999\n0\n").expect("write pid file");
-        let supervisor = RerankSupervisor::start(config).await.expect("starts");
+        let supervisor = RerankSupervisor::start(config, None).await.expect("starts");
         assert!(matches!(supervisor.state().await, SupervisorState::Ready));
         supervisor.shutdown().await;
     }
@@ -994,9 +1059,17 @@ mod tests {
             url: Some(format!("http://127.0.0.1:{port}")),
             ..RerankerConfig::default()
         };
-        let backend = bring_up_backend("p", Some("Qwen3-Reranker-0.6B"), 50, 10, cfg, dir.path())
-            .await
-            .expect("operator mode brings up");
+        let backend = bring_up_backend(
+            "p",
+            Some("Qwen3-Reranker-0.6B"),
+            50,
+            10,
+            cfg,
+            dir.path(),
+            None,
+        )
+        .await
+        .expect("operator mode brings up");
         assert!(
             backend.supervisor.is_none(),
             "operator mode owns no supervisor"
@@ -1023,6 +1096,7 @@ mod tests {
             10,
             cfg,
             dir.path(),
+            None,
         )
         .await
         .map(|_| ())
@@ -1035,10 +1109,18 @@ mod tests {
     #[tokio::test]
     async fn bring_up_backend_without_a_model_tag_refuses() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let err = bring_up_backend("p", None, 50, 10, RerankerConfig::default(), dir.path())
-            .await
-            .map(|_| ())
-            .unwrap_err();
+        let err = bring_up_backend(
+            "p",
+            None,
+            50,
+            10,
+            RerankerConfig::default(),
+            dir.path(),
+            None,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_err();
         assert!(err.to_string().contains("names no model"), "{err}");
     }
 
@@ -1060,6 +1142,7 @@ mod tests {
             10,
             RerankerConfig::default(),
             dir.path(),
+            None,
         )
         .await
         .expect("supervised mode brings up");
@@ -1103,7 +1186,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = RerankSupervisorConfig::new(bin, model);
         config.pid_file = Some(dir.path().join(LLAMA_SERVER_PID_FILENAME));
-        let supervisor = RerankSupervisor::start(config)
+        let supervisor = RerankSupervisor::start(config, None)
             .await
             .expect("real server ready");
         let client = bookrack_rerank::RerankClient::new(

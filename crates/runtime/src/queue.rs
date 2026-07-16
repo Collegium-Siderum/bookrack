@@ -28,7 +28,9 @@ pub use bookrack_core::queue::{
     IntakeOcrInfo, JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, QueueState,
 };
 
-use crate::control::events::{Event, EventStreamHandle, JobOutcomeSummary, QueueTick};
+use crate::control::events::{
+    DegradedCause, Event, EventStreamHandle, JobOutcomeSummary, QueueTick,
+};
 
 /// Read the queue state at `path`. A missing file deserialises to the
 /// default state so a freshly initialised data root just works.
@@ -614,6 +616,10 @@ where
             if pause_queue {
                 if save_result.is_ok() {
                     paused.store(true, Ordering::Release);
+                    // The self-pause is a persistent condition an
+                    // operator must acknowledge; `queue resume`
+                    // clears the cause.
+                    events.set_degraded(DegradedCause::QueueFailurePause, true);
                 } else {
                     // Persist failed: keep the in-memory pause flag in
                     // sync with what is on disk so a restart and the
@@ -1257,6 +1263,10 @@ mod tests {
         );
         let state = Arc::new(Mutex::new(initial));
         let paused = Arc::new(AtomicBool::new(false));
+        let flag = Arc::new(crate::control::events::DaemonStateFlag::new(
+            crate::control::events::DaemonState::Idle,
+        ));
+        let events = EventStreamHandle::new(8, Arc::clone(&flag));
         let (tx, rx) = broadcast::channel::<()>(2);
         let handle = {
             let state = Arc::clone(&state);
@@ -1270,7 +1280,7 @@ mod tests {
                         "vector store error: Too many open files".to_string(),
                     ))
                 },
-                EventStreamHandle::default(),
+                events,
                 paused,
             ))
         };
@@ -1307,6 +1317,11 @@ mod tests {
             .count();
         assert_eq!(failed, 1, "exactly one job burns: {snapshot:?}");
         assert_eq!(pending, 1, "the second job survives: {snapshot:?}");
+        assert_eq!(
+            flag.load(),
+            crate::control::events::DaemonState::Degraded,
+            "a self-pause must surface as degraded once the worker quiesces"
+        );
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
@@ -1335,6 +1350,10 @@ mod tests {
         );
         let state = Arc::new(Mutex::new(initial));
         let paused = Arc::new(AtomicBool::new(false));
+        let flag = Arc::new(crate::control::events::DaemonStateFlag::new(
+            crate::control::events::DaemonState::Idle,
+        ));
+        let events = EventStreamHandle::new(8, Arc::clone(&flag));
         let (tx, rx) = broadcast::channel::<()>(2);
         let handle = {
             let state = Arc::clone(&state);
@@ -1348,7 +1367,7 @@ mod tests {
                         "vector store error: Too many open files".to_string(),
                     ))
                 },
-                EventStreamHandle::default(),
+                events,
                 paused,
             ))
         };
@@ -1364,6 +1383,11 @@ mod tests {
         assert!(
             !snapshot.paused,
             "in-memory QueueState::paused must be restored when save fails"
+        );
+        assert_ne!(
+            flag.load(),
+            crate::control::events::DaemonState::Degraded,
+            "an unpersisted pause must not raise the degraded cause"
         );
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;

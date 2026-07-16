@@ -186,6 +186,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: the `degraded` daemon state is now assigned.** The variant
+  existed in the type, the wire format, and the docs but no runtime
+  condition ever produced it. Two causes now drive it, each with its
+  own exit: the queue worker pausing itself after a process-level job
+  failure (cleared by `queue resume`; an operator-initiated pause does
+  not set it), and the supervised reranker backend crash-looping
+  (three consecutive respawn attempts within one outage; cleared on
+  reaching ready). Ongoing `writing`/`working` activity outranks
+  `degraded`, so the condition surfaces once the daemon quiesces.
+
 - **runtime: `daemon.state` no longer reads `idle` during queue-driven
   ingest.** Only the RPC write path ever flipped the state flag, so a
   batch ingest running for hours reported an idle daemon on `status`

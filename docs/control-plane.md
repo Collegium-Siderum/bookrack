@@ -339,6 +339,15 @@ catalog and corpus handles the daemon already holds.
     available; queue-driven work can span hours.
   - `degraded` — a persistent condition needs operator attention.
     Activity outranks it, so it surfaces once the daemon quiesces.
+    Two causes exist, each cleared independently: the queue worker
+    paused itself after a process-level job failure (`queue resume`
+    is the acknowledgement that clears it; an operator-initiated
+    pause never sets it), and the supervised reranker backend is
+    crash-looping (three consecutive respawn attempts within one
+    outage; reaching ready clears it). A daemon restart does not
+    restore the queue cause — the persisted pause flag records no
+    reason — so after a restart a failure-paused queue is visible
+    through `queue.list`, not `daemon.state`.
   - `stopping` — shutdown has been signalled; terminal.
 - `queue.tick` — `{ current, pending, running, last_finished? }`
   published immediately after every persisted change to

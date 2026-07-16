@@ -22,7 +22,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use super::MethodContext;
-use crate::control::events::{Event, QueueTick};
+use crate::control::events::{DegradedCause, Event, EventStreamHandle, QueueTick};
 use crate::control::jsonrpc::{INTERNAL_ERROR, RpcError};
 use crate::queue::{cancel_all_pending, derive_tick, save_atomic};
 
@@ -84,6 +84,7 @@ fn set_paused(ctx: &MethodContext, paused: bool) -> Result<Value, RpcError> {
         &ctx.queue_paused,
         &ctx.queue_state,
         &ctx.queue_state_path,
+        &ctx.event_stream,
     )?;
     ctx.event_stream.publish(Event::QueueTick(tick));
     serde_json::to_value(PauseResponse { paused }).map_err(|e| {
@@ -99,11 +100,17 @@ fn set_paused(ctx: &MethodContext, paused: bool) -> Result<Value, RpcError> {
 /// in-memory `QueueState::paused` is restored to its previous value
 /// and the atomic is left untouched, so the running worker and the
 /// on-disk document never disagree across a restart.
+///
+/// A successful resume also clears the worker's failure-pause
+/// degraded cause: the operator's `queue resume` is the
+/// acknowledgement that ends the condition. Clearing an inactive
+/// cause is a no-op, and an operator-initiated pause never sets one.
 fn apply_pause(
     paused: bool,
     queue_paused: &AtomicBool,
     queue_state: &Mutex<QueueState>,
     queue_state_path: &Path,
+    events: &EventStreamHandle,
 ) -> Result<QueueTick, RpcError> {
     let tick = {
         let mut guard = queue_state.lock().expect("queue state mutex poisoned");
@@ -119,6 +126,9 @@ fn apply_pause(
         derive_tick(&guard, None)
     };
     queue_paused.store(paused, Ordering::Release);
+    if !paused {
+        events.set_degraded(DegradedCause::QueueFailurePause, false);
+    }
     Ok(tick)
 }
 
@@ -165,12 +175,61 @@ mod tests {
         let path = dir.path().join("queue.json");
         let queue_paused = AtomicBool::new(false);
         let queue_state = Mutex::new(QueueState::default());
+        let events = EventStreamHandle::default();
 
-        apply_pause(true, &queue_paused, &queue_state, &path).expect("save succeeds");
+        apply_pause(true, &queue_paused, &queue_state, &path, &events).expect("save succeeds");
 
         assert!(queue_paused.load(Ordering::Acquire));
         assert!(queue_state.lock().unwrap().paused);
         assert!(path.exists(), "save_atomic must have written the document");
+    }
+
+    #[test]
+    fn resume_clears_the_failure_pause_degraded_cause() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let queue_paused = AtomicBool::new(true);
+        let queue_state = Mutex::new(QueueState {
+            paused: true,
+            ..QueueState::default()
+        });
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, Arc::clone(&flag));
+        events.set_degraded(DegradedCause::QueueFailurePause, true);
+        assert_eq!(flag.load(), DaemonState::Degraded);
+
+        apply_pause(false, &queue_paused, &queue_state, &path, &events).expect("save succeeds");
+
+        assert!(!queue_paused.load(Ordering::Acquire));
+        assert_eq!(
+            flag.load(),
+            DaemonState::Idle,
+            "resume must clear the failure-pause cause"
+        );
+    }
+
+    #[test]
+    fn operator_pause_does_not_touch_degraded() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let queue_paused = AtomicBool::new(false);
+        let queue_state = Mutex::new(QueueState::default());
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, Arc::clone(&flag));
+
+        apply_pause(true, &queue_paused, &queue_state, &path, &events).expect("save succeeds");
+
+        assert_eq!(
+            flag.load(),
+            DaemonState::Idle,
+            "an operator-initiated pause is not a degraded condition"
+        );
     }
 
     #[test]
@@ -186,8 +245,14 @@ mod tests {
         let queue_paused = AtomicBool::new(false);
         let queue_state = Mutex::new(QueueState::default());
 
-        let err = apply_pause(true, &queue_paused, &queue_state, &path)
-            .expect_err("save_atomic must fail under a file-shaped parent");
+        let err = apply_pause(
+            true,
+            &queue_paused,
+            &queue_state,
+            &path,
+            &EventStreamHandle::default(),
+        )
+        .expect_err("save_atomic must fail under a file-shaped parent");
         assert_eq!(err.code, INTERNAL_ERROR);
         assert!(
             !queue_paused.load(Ordering::Acquire),
