@@ -28,7 +28,7 @@ pub use db::{Corpus, SCHEMA_VERSION};
 pub use index_meta::{
     CHUNK_VERSION_KEY, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
-pub use node::{NewNode, Node};
+pub use node::{NewNode, Node, TocQuery};
 pub use partition::Partition;
 pub use resolve::ResolveError;
 

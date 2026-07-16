@@ -176,12 +176,37 @@ pub struct TocNode {
 pub struct Toc {
     /// The book this TOC belongs to.
     pub intake_id: i64,
-    /// Organizing nodes in depth-first TOC order. May be truncated to
-    /// [`MAX_TOC_NODES`]; see [`Toc::truncated`].
+    /// One page of organizing nodes in depth-first TOC order, at most
+    /// [`MAX_TOC_NODES`] of them.
     pub nodes: Vec<TocNode>,
-    /// True when the underlying corpus had more organizing nodes than
-    /// the cap.
+    /// Total number of TOC entries the request matches, regardless of
+    /// pagination.
+    pub total: u64,
+    /// Cursor for the next page: pass it back as `offset` to resume.
+    /// `None` when this page completes the TOC.
+    pub next_offset: Option<u32>,
+    /// True when more entries remain past this page — equivalent to
+    /// `next_offset.is_some()`.
     pub truncated: bool,
+}
+
+/// Arguments accepted by the book and paper TOC reads.
+#[derive(Debug, Clone, Default)]
+pub struct ShowTocArgs {
+    /// Leading TOC entries to skip.
+    pub offset: u32,
+    /// Maximum entries in this page. `None` means [`MAX_TOC_NODES`];
+    /// larger values are clamped to it.
+    pub limit: Option<u32>,
+}
+
+impl ShowTocArgs {
+    /// The page size after applying the default and the ceiling.
+    pub fn effective_limit(&self) -> u32 {
+        self.limit
+            .unwrap_or(MAX_TOC_NODES as u32)
+            .min(MAX_TOC_NODES as u32)
+    }
 }
 
 /// One leaf of body text within a context-window or span read, in

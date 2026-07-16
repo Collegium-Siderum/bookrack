@@ -12,15 +12,15 @@ use std::collections::BTreeMap;
 
 use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::Corpus;
+use bookrack_corpus::{Corpus, TocQuery};
 use bookrack_embed::Embedder;
 
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES,
-    OcrPendingItem, OcrPendingResult, Toc, TocNode, clamp_limit,
+    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
+    OcrPendingResult, ShowTocArgs, Toc, TocNode, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -163,37 +163,54 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
 }
 
 /// Project the table of contents of one book — the organizing nodes
-/// under the book root, in depth-first TOC order.
+/// under the book root, in depth-first TOC order, paginated.
+///
+/// `args.offset` skips leading entries and `args.limit` bounds the
+/// page (defaulting to and clamped by
+/// [`MAX_TOC_NODES`](crate::dto::MAX_TOC_NODES)). The response carries
+/// the total entry count and a `next_offset` cursor; pass the cursor
+/// back as `offset` until it comes back `None`.
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is
 /// registered. An intake that exists but has no organizing nodes
-/// produces an empty [`Toc`] with `truncated = false`.
-pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Toc> {
-    record_call_sync!(
-        ops,
-        "library.show_toc",
-        serde_json::json!({ "intake_id": intake_id }),
-        {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
-            if catalog.intake_by_id(intake_id)?.is_none() {
-                return Err(OpsError::IntakeNotFound { intake_id });
-            }
-            let corpus = Corpus::open(ops.corpus_db())?;
-            let book_root_id = PartitionIdx::new(intake_id).root();
-            let nodes = corpus.toc_for_book(book_root_id, MAX_TOC_NODES + 1)?;
-            let truncated = nodes.len() > MAX_TOC_NODES;
-            let projected: Vec<TocNode> = nodes
-                .iter()
-                .take(MAX_TOC_NODES)
-                .map(TocNode::from_node)
-                .collect();
-            Ok(Toc {
-                intake_id,
-                nodes: projected,
-                truncated,
-            })
+/// produces an empty [`Toc`] with `total = 0`.
+pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -> Result<Toc> {
+    let mut call_args = serde_json::json!({ "intake_id": intake_id });
+    if args.offset != 0 {
+        call_args["offset"] = serde_json::json!(args.offset);
+    }
+    if let Some(limit) = args.limit {
+        call_args["limit"] = serde_json::json!(limit);
+    }
+    record_call_sync!(ops, "library.show_toc", call_args, {
+        let catalog = Catalog::open_read_only(ops.catalog_db())?;
+        if catalog.intake_by_id(intake_id)?.is_none() {
+            return Err(OpsError::IntakeNotFound { intake_id });
         }
-    )
+        let corpus = Corpus::open(ops.corpus_db())?;
+        let book_root_id = PartitionIdx::new(intake_id).root();
+        let q = TocQuery {
+            cap: args.effective_limit() as usize,
+            offset: args.offset as usize,
+            ..TocQuery::default()
+        };
+        let total = corpus.count_toc_nodes(book_root_id, &q)?;
+        let nodes = corpus.toc_for_book(book_root_id, &q)?;
+        let projected: Vec<TocNode> = nodes.iter().map(TocNode::from_node).collect();
+        let end = u64::from(args.offset) + projected.len() as u64;
+        let next_offset = if end < total {
+            u32::try_from(end).ok()
+        } else {
+            None
+        };
+        Ok(Toc {
+            intake_id,
+            nodes: projected,
+            total,
+            truncated: next_offset.is_some(),
+            next_offset,
+        })
+    })
 }
 
 /// Aggregate counts across the catalog.

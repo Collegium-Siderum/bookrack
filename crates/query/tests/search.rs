@@ -302,7 +302,11 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
 
     assert!(library.show_book(404).expect("missing").is_none());
 
-    let toc = library.show_toc(1).expect("show toc").expect("present");
+    let toc_args = bookrack_query::dto::ShowTocArgs::default();
+    let toc = library
+        .show_toc(1, &toc_args)
+        .expect("show toc")
+        .expect("present");
     let titles: Vec<&str> = toc
         .nodes
         .iter()
@@ -312,9 +316,11 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
         titles.iter().any(|t| t.contains("Chapter")),
         "expected the chapter in the TOC: {titles:?}"
     );
+    assert_eq!(toc.total, toc.nodes.len() as u64);
+    assert_eq!(toc.next_offset, None);
     assert!(!toc.truncated);
 
-    assert!(library.show_toc(404).expect("missing").is_none());
+    assert!(library.show_toc(404, &toc_args).expect("missing").is_none());
 }
 
 #[tokio::test]

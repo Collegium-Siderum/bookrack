@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, PaperFilter};
+use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs};
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{OpsError, SearchOptions, reads};
 use serde::Deserialize;
@@ -36,6 +36,27 @@ pub struct BookIdParams {
     pub intake_id: i64,
     #[serde(default)]
     pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ShowTocParams {
+    pub intake_id: i64,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+impl ShowTocParams {
+    /// Project the pagination fields onto the ops-side args struct.
+    fn toc_args(&self) -> ShowTocArgs {
+        ShowTocArgs {
+            offset: self.offset.unwrap_or(0),
+            limit: self.limit,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -289,9 +310,9 @@ pub fn show_book(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 }
 
 pub fn show_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: BookIdParams = parse(params, "library.show_toc")?;
+    let p: ShowTocParams = parse(params, "library.show_toc")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    match reads::books::show_toc(handle.ops(), p.intake_id) {
+    match reads::books::show_toc(handle.ops(), p.intake_id, &p.toc_args()) {
         Ok(toc) => to_value(&Some(toc)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
         Err(e) => Err(ops_internal(e)),
@@ -492,9 +513,9 @@ pub fn show_paper(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
 }
 
 pub fn show_paper_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: BookIdParams = parse(params, "library.show_paper_toc")?;
+    let p: ShowTocParams = parse(params, "library.show_paper_toc")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    match reads::papers::show_paper_toc(handle.ops(), p.intake_id) {
+    match reads::papers::show_paper_toc(handle.ops(), p.intake_id, &p.toc_args()) {
         Ok(toc) => to_value(&Some(toc)),
         Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
         Err(e) => Err(ops_internal(e)),

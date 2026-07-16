@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **mcp, runtime: `library.show_toc` / `library.show_paper_toc` are
+  paginated.** Both TOC reads accept optional `offset` / `limit`
+  parameters (the limit defaults to and is clamped by the 2000-entry
+  cap) and return `total` and a `next_offset` cursor alongside the
+  existing `truncated` flag. A TOC larger than one page is now
+  reachable page by page — previously everything past the cap was
+  silently unreachable. Requests without the new parameters return the
+  same entries as before.
+
 - **config, cli: `config.toml` gains `index_profile` and a `[search]`
   table.** A library's per-root config can now name the index profile it
   runs under and pin the two retrieval knobs (`search.top_k`,

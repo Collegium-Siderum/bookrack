@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::{Corpus, IndexStamps};
+use bookrack_corpus::{Corpus, IndexStamps, TocQuery};
 use bookrack_embed::Embedder;
 use bookrack_normalize::NORMALIZE_VERSION;
 use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
@@ -24,8 +24,8 @@ pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
 
 use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, MAX_TOC_NODES,
-    OcrPendingItem, OcrPendingResult, Toc, TocNode, clamp_limit,
+    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
+    OcrPendingResult, ShowTocArgs, Toc, TocNode, clamp_limit,
 };
 
 // Re-exported so consumers name query results through this crate, not the
@@ -512,29 +512,39 @@ impl<E: Embedder> Library<E> {
     }
 
     /// Project the table of contents of one book — the organizing
-    /// nodes under the book root, in depth-first TOC order. Returns
-    /// `None` when no book root exists for `intake_id`.
-    pub fn show_toc(&self, intake_id: i64) -> Result<Option<Toc>> {
+    /// nodes under the book root, in depth-first TOC order, paginated
+    /// by `args`. Returns `None` when no book root exists for
+    /// `intake_id` or when the request matches no TOC entries.
+    pub fn show_toc(&self, intake_id: i64, args: &ShowTocArgs) -> Result<Option<Toc>> {
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Ok(None);
         }
         let corpus = Corpus::open(&self.corpus_db)?;
         let book_root_id = PartitionIdx::new(intake_id).root();
-        let nodes = corpus.toc_for_book(book_root_id, MAX_TOC_NODES + 1)?;
-        if nodes.is_empty() {
+        let q = TocQuery {
+            cap: args.effective_limit() as usize,
+            offset: args.offset as usize,
+            ..TocQuery::default()
+        };
+        let total = corpus.count_toc_nodes(book_root_id, &q)?;
+        if total == 0 {
             return Ok(None);
         }
-        let truncated = nodes.len() > MAX_TOC_NODES;
-        let projected: Vec<TocNode> = nodes
-            .iter()
-            .take(MAX_TOC_NODES)
-            .map(TocNode::from_node)
-            .collect();
+        let nodes = corpus.toc_for_book(book_root_id, &q)?;
+        let projected: Vec<TocNode> = nodes.iter().map(TocNode::from_node).collect();
+        let end = u64::from(args.offset) + projected.len() as u64;
+        let next_offset = if end < total {
+            u32::try_from(end).ok()
+        } else {
+            None
+        };
         Ok(Some(Toc {
             intake_id,
             nodes: projected,
-            truncated,
+            total,
+            truncated: next_offset.is_some(),
+            next_offset,
         }))
     }
 }

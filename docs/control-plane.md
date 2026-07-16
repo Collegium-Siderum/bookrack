@@ -297,7 +297,7 @@ catalog and corpus handles the daemon already holds.
   list that matches books tagged with at least one of the listed
   category strings in `node_categories`.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
-  record and TOC; `null` when the intake id is unknown.
+  record and paginated TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by
   anchor leaf or organizing node.
 - `library.show_metadata_audit` / `library.show_metadata_report` —
@@ -310,8 +310,8 @@ catalog and corpus handles the daemon already holds.
 - `library.list_papers` / `library.find_papers` — paginated
   paper-registry browse and filter, peers of the `*_books` pair.
 - `library.show_paper` / `library.show_paper_toc` — per-paper
-  bibliographic record and section outline; `null` when the intake id
-  is unknown.
+  bibliographic record and paginated section outline; `null` when the
+  intake id is unknown.
 - `papers.export_csl` / `papers.fetch_source` — a paper's metadata as a
   CSL-JSON item, and a reference to its archived source PDF bytes.
   These two are `papers.*`-namespaced but read-class and take no write

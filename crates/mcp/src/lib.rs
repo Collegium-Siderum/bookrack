@@ -166,7 +166,7 @@ pub struct FindBooksArgs {
     pub library: Option<String>,
 }
 
-/// Arguments for the `library.show_book` and `library.show_toc` tools.
+/// Arguments for the tools that address one book by intake id.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BookIdArgs {
     /// Catalog intake id of the book.
@@ -175,6 +175,37 @@ pub struct BookIdArgs {
     /// session's default library.
     #[serde(default)]
     pub library: Option<String>,
+}
+
+/// Arguments for the `library.show_toc` and `library.show_paper_toc`
+/// tools.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ShowTocArgs {
+    /// Catalog intake id of the book or paper.
+    pub intake_id: i64,
+    /// Number of leading TOC entries to skip. Pass a previous
+    /// response's `next_offset` here to read the following page.
+    #[serde(default)]
+    pub offset: Option<u32>,
+    /// Maximum TOC entries in this page. Defaults to and is clamped
+    /// by the server-side cap (2000); around 200 keeps responses
+    /// small.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Library short name from the registry. Omit to target the
+    /// session's default library.
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+impl ShowTocArgs {
+    /// Project the pagination fields onto the ops-side args struct.
+    fn toc_args(&self) -> bookrack_ops::dto::ShowTocArgs {
+        bookrack_ops::dto::ShowTocArgs {
+            offset: self.offset.unwrap_or(0),
+            limit: self.limit,
+        }
+    }
 }
 
 /// Arguments for the `library.list_papers` tool.
@@ -223,8 +254,7 @@ pub struct FindPapersArgs {
     pub library: Option<String>,
 }
 
-/// Arguments for the `library.show_paper` and `library.show_paper_toc`
-/// tools.
+/// Arguments for the tools that address one paper by intake id.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PaperIdArgs {
     /// Catalog intake id of the paper.
@@ -865,15 +895,18 @@ impl BookrackServer {
         name = "library.show_toc",
         description = "Return the table of contents of one book: a depth-first list \
                        of organizing nodes (chapters, sections, ...) with their \
-                       titles, depths, and document-order spans. Returns null when \
+                       titles, depths, and document-order spans, paginated. To \
+                       continue, pass the returned next_offset back as offset until \
+                       next_offset is null; total counts every matching entry. A \
+                       limit of about 200 keeps responses small. Returns null when \
                        no such book is ingested."
     )]
     async fn library_show_toc(
         &self,
-        Parameters(args): Parameters<BookIdArgs>,
+        Parameters(args): Parameters<ShowTocArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::books::show_toc(handle.ops(), args.intake_id) {
+        match reads::books::show_toc(handle.ops(), args.intake_id, &args.toc_args()) {
             Ok(toc) => respond_with(&Some(toc)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
@@ -990,15 +1023,16 @@ impl BookrackServer {
         name = "library.show_paper_toc",
         description = "Return the table of contents of one paper. Papers carry one \
                        Work root plus one prose leaf, so the TOC is effectively \
-                       empty for a well-formed paper. The shape mirrors \
+                       empty for a well-formed paper. The shape and the offset / \
+                       limit / next_offset pagination contract mirror \
                        library.show_toc for the book pipeline."
     )]
     async fn library_show_paper_toc(
         &self,
-        Parameters(args): Parameters<PaperIdArgs>,
+        Parameters(args): Parameters<ShowTocArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        match reads::papers::show_paper_toc(handle.ops(), args.intake_id) {
+        match reads::papers::show_paper_toc(handle.ops(), args.intake_id, &args.toc_args()) {
             Ok(toc) => respond_with(&Some(toc)),
             Err(OpsError::IntakeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::Toc>>(&None)
@@ -2067,7 +2101,7 @@ mod tests {
     }
 
     #[test]
-    fn toc_serializes_with_a_truncated_flag() {
+    fn toc_serializes_with_its_pagination_fields() {
         let toc = Toc {
             intake_id: 1,
             nodes: vec![TocNode {
@@ -2079,12 +2113,16 @@ mod tests {
                 toc_lo: Some(1),
                 toc_hi: Some(50),
             }],
-            truncated: false,
+            total: 3,
+            next_offset: Some(1),
+            truncated: true,
         };
         let value = serde_json::to_value(&toc).expect("serialize");
         assert_eq!(value["intake_id"], 1);
         assert_eq!(value["nodes"][0]["node_id"], 100_000_001);
-        assert_eq!(value["truncated"], false);
+        assert_eq!(value["total"], 3);
+        assert_eq!(value["next_offset"], 1);
+        assert_eq!(value["truncated"], true);
     }
 
     #[test]

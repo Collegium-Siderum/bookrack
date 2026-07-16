@@ -10,15 +10,15 @@
 
 use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::Corpus;
+use bookrack_corpus::{Corpus, TocQuery};
 use bookrack_embed::Embedder;
 
 use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::dto::{
-    ListPapersResult, MAX_TOC_NODES, PaperAuditInfo, PaperDetail, PaperFilter, PaperSource,
-    PaperSummary, Toc, TocNode, clamp_limit,
+    ListPapersResult, PaperAuditInfo, PaperDetail, PaperFilter, PaperSource, PaperSummary,
+    ShowTocArgs, Toc, TocNode, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -150,47 +150,63 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
     )
 }
 
-/// Project the table of contents of one paper. Papers carry one Work
-/// root plus one prose leaf, so the TOC is effectively empty for a
-/// well-formed paper. The shape is shared with the book TOC for
-/// uniformity at the wire boundary.
+/// Project the table of contents of one paper, paginated. Papers
+/// carry one Work root plus one prose leaf, so the TOC is effectively
+/// empty for a well-formed paper. The shape and the pagination
+/// contract are shared with the book TOC for uniformity at the wire
+/// boundary; see [`crate::reads::books::show_toc`].
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is
 /// registered on the paper catalog, or
 /// [`OpsError::PapersBackendNotConfigured`] when the calling `Ops`
 /// has no papers backend.
-pub fn show_paper_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Toc> {
-    record_call_sync!(
-        ops,
-        "library.show_paper_toc",
-        serde_json::json!({ "intake_id": intake_id }),
-        {
-            let papers_db = ops
-                .papers_catalog_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let corpus_db = ops
-                .papers_corpus_db()
-                .ok_or(OpsError::PapersBackendNotConfigured)?;
-            let catalog = Catalog::open_read_only(papers_db)?;
-            if catalog.intake_by_id(intake_id)?.is_none() {
-                return Err(OpsError::IntakeNotFound { intake_id });
-            }
-            let corpus = Corpus::open(corpus_db)?;
-            let work_root_id = PartitionIdx::new(intake_id).root();
-            let nodes = corpus.toc_for_book(work_root_id, MAX_TOC_NODES + 1)?;
-            let truncated = nodes.len() > MAX_TOC_NODES;
-            let projected: Vec<TocNode> = nodes
-                .iter()
-                .take(MAX_TOC_NODES)
-                .map(TocNode::from_node)
-                .collect();
-            Ok(Toc {
-                intake_id,
-                nodes: projected,
-                truncated,
-            })
+pub fn show_paper_toc<E: Embedder>(
+    ops: &Ops<E>,
+    intake_id: i64,
+    args: &ShowTocArgs,
+) -> Result<Toc> {
+    let mut call_args = serde_json::json!({ "intake_id": intake_id });
+    if args.offset != 0 {
+        call_args["offset"] = serde_json::json!(args.offset);
+    }
+    if let Some(limit) = args.limit {
+        call_args["limit"] = serde_json::json!(limit);
+    }
+    record_call_sync!(ops, "library.show_paper_toc", call_args, {
+        let papers_db = ops
+            .papers_catalog_db()
+            .ok_or(OpsError::PapersBackendNotConfigured)?;
+        let corpus_db = ops
+            .papers_corpus_db()
+            .ok_or(OpsError::PapersBackendNotConfigured)?;
+        let catalog = Catalog::open_read_only(papers_db)?;
+        if catalog.intake_by_id(intake_id)?.is_none() {
+            return Err(OpsError::IntakeNotFound { intake_id });
         }
-    )
+        let corpus = Corpus::open(corpus_db)?;
+        let work_root_id = PartitionIdx::new(intake_id).root();
+        let q = TocQuery {
+            cap: args.effective_limit() as usize,
+            offset: args.offset as usize,
+            ..TocQuery::default()
+        };
+        let total = corpus.count_toc_nodes(work_root_id, &q)?;
+        let nodes = corpus.toc_for_book(work_root_id, &q)?;
+        let projected: Vec<TocNode> = nodes.iter().map(TocNode::from_node).collect();
+        let end = u64::from(args.offset) + projected.len() as u64;
+        let next_offset = if end < total {
+            u32::try_from(end).ok()
+        } else {
+            None
+        };
+        Ok(Toc {
+            intake_id,
+            nodes: projected,
+            total,
+            truncated: next_offset.is_some(),
+            next_offset,
+        })
+    })
 }
 
 /// Project one paper's base bibliographic row + contributors onto a

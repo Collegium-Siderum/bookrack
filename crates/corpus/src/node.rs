@@ -91,6 +91,63 @@ fn select_sql(tail: &str) -> String {
     format!("SELECT {} FROM nodes {tail}", SPEC.select_list())
 }
 
+/// `LIKE` escape character used by [`Corpus::toc_for_book`]'s title
+/// predicate, so a needle containing `%` or `_` matches literally
+/// rather than acting as a wildcard.
+const LIKE_ESCAPE: &str = "\\";
+
+/// Escape SQL `LIKE` metacharacters (`%`, `_`, and the escape itself)
+/// using [`LIKE_ESCAPE`].
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            out.push_str(LIKE_ESCAPE);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Pagination and filter parameters for one TOC projection, consumed
+/// by [`Corpus::toc_for_book`] and [`Corpus::count_toc_nodes`].
+#[derive(Debug, Clone, Default)]
+pub struct TocQuery<'a> {
+    /// Maximum rows returned; enforced inside the SQL with `LIMIT`.
+    /// Ignored by [`Corpus::count_toc_nodes`].
+    pub cap: usize,
+    /// Rows to skip after the depth-first ordering; enforced inside
+    /// the SQL with `OFFSET`. Ignored by [`Corpus::count_toc_nodes`].
+    pub offset: usize,
+    /// Keep only nodes at `depth <= max_depth` (the book root is
+    /// depth 0). `None` keeps every depth.
+    pub max_depth: Option<i64>,
+    /// Keep only nodes whose title contains this substring,
+    /// case-sensitively. `LIKE` metacharacters in the needle are
+    /// escaped so they match literally. `None` keeps every node.
+    pub title_substring: Option<&'a str>,
+}
+
+/// The shared `WHERE` clause of [`Corpus::toc_for_book`] and
+/// [`Corpus::count_toc_nodes`]: one book's organizing nodes, narrowed
+/// by whichever [`TocQuery`] filters are set.
+fn toc_where_sql(q: &TocQuery) -> String {
+    let placeholders = ORGANIZING_NODE_TYPES
+        .iter()
+        .map(|t| format!("'{}'", t.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut where_sql =
+        format!("WHERE book_root_id = :book_root_id AND node_type IN ({placeholders})");
+    if q.max_depth.is_some() {
+        where_sql.push_str(" AND depth <= :max_depth");
+    }
+    if q.title_substring.is_some() {
+        where_sql.push_str(" AND title LIKE :title_pattern ESCAPE '\\'");
+    }
+    where_sql
+}
+
 /// A node read back from `corpus.db` — one full `nodes` row.
 ///
 /// Whether a given optional field is populated follows from
@@ -497,29 +554,52 @@ impl Corpus {
     /// to place a parent ahead of children that share its start, then
     /// by `ordinal` as a final tiebreaker.
     ///
-    /// At most `cap` rows are returned; the cap is enforced inside the
-    /// SQL with `LIMIT`. An unknown `book_root_id` returns an empty
+    /// `q` narrows and pages the walk; see [`TocQuery`]. Pagination is
+    /// enforced inside the SQL with `LIMIT` / `OFFSET` and applies
+    /// after the filters. An unknown `book_root_id` returns an empty
     /// `Vec` rather than an error. Leaves are filtered out: the
     /// result is the TOC, not the full node tree.
-    pub fn toc_for_book(&self, book_root_id: NodeId, cap: usize) -> Result<Vec<Node>> {
-        let placeholders = ORGANIZING_NODE_TYPES
-            .iter()
-            .map(|t| format!("'{}'", t.as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
+    pub fn toc_for_book(&self, book_root_id: NodeId, q: &TocQuery) -> Result<Vec<Node>> {
         let sql = select_sql(&format!(
-            "WHERE book_root_id = :book_root_id \
-             AND node_type IN ({placeholders}) \
-             ORDER BY toc_lo, depth, ordinal LIMIT :cap"
+            "{} ORDER BY toc_lo, depth, ordinal LIMIT :cap OFFSET :offset",
+            toc_where_sql(q)
         ));
-        let cap_i = i64::try_from(cap).unwrap_or(i64::MAX);
-        self.query_nodes(
-            &sql,
-            named_params! {
-                ":book_root_id": book_root_id.get(),
-                ":cap": cap_i,
-            },
-        )
+        let root = book_root_id.get();
+        let cap_i = i64::try_from(q.cap).unwrap_or(i64::MAX);
+        let offset_i = i64::try_from(q.offset).unwrap_or(i64::MAX);
+        let pattern = q.title_substring.map(|s| format!("%{}%", like_escape(s)));
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![
+            (":book_root_id", &root),
+            (":cap", &cap_i),
+            (":offset", &offset_i),
+        ];
+        if let Some(depth) = q.max_depth.as_ref() {
+            params.push((":max_depth", depth));
+        }
+        if let Some(pattern) = pattern.as_ref() {
+            params.push((":title_pattern", pattern));
+        }
+        self.query_nodes(&sql, params.as_slice())
+    }
+
+    /// Count the rows [`Self::toc_for_book`] would return for the same
+    /// `q` before pagination: the same `WHERE` clause with `cap` and
+    /// `offset` ignored.
+    pub fn count_toc_nodes(&self, book_root_id: NodeId, q: &TocQuery) -> Result<u64> {
+        let sql = format!("SELECT COUNT(*) FROM nodes {}", toc_where_sql(q));
+        let root = book_root_id.get();
+        let pattern = q.title_substring.map(|s| format!("%{}%", like_escape(s)));
+        let mut params: Vec<(&str, &dyn rusqlite::ToSql)> = vec![(":book_root_id", &root)];
+        if let Some(depth) = q.max_depth.as_ref() {
+            params.push((":max_depth", depth));
+        }
+        if let Some(pattern) = pattern.as_ref() {
+            params.push((":title_pattern", pattern));
+        }
+        let n: i64 = self
+            .conn
+            .query_row(&sql, params.as_slice(), |row| row.get(0))?;
+        Ok(u64::try_from(n).unwrap_or(0))
     }
 
     /// Fetch one book's leaves whose document-order position falls in
@@ -875,7 +955,7 @@ mod tests {
             )
             .expect("set root span");
 
-        let toc = corpus.toc_for_book(root, 1000).expect("toc");
+        let toc = corpus.toc_for_book(root, &toc_query(1000)).expect("toc");
         let titles: Vec<&str> = toc
             .iter()
             .map(|n| n.title.as_deref().unwrap_or(""))
@@ -890,11 +970,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn toc_for_book_caps_the_result_size() {
-        let mut corpus = Corpus::open_in_memory().expect("open");
-        let (idx, root) = seed_book(&mut corpus, 1);
-        let ids = corpus.allocate_node_ids(idx, 4).expect("ids");
+    /// A [`TocQuery`] with only the cap set — the shape most TOC tests
+    /// need.
+    fn toc_query(cap: usize) -> TocQuery<'static> {
+        TocQuery {
+            cap,
+            ..TocQuery::default()
+        }
+    }
+
+    /// Seed `n` chapters titled `Chapter 0..n` under the root, each
+    /// with a distinct document-order span so the TOC walk orders them
+    /// by index.
+    fn seed_chapters(corpus: &mut Corpus, idx: PartitionIdx, root: NodeId, n: u32) {
+        let ids = corpus.allocate_node_ids(idx, n).expect("ids");
         for (i, id) in ids.iter().enumerate() {
             corpus
                 .insert_node(
@@ -904,15 +993,142 @@ mod tests {
                 )
                 .expect("chapter");
         }
-        let toc = corpus.toc_for_book(root, 2).expect("toc");
+    }
+
+    #[test]
+    fn toc_for_book_caps_the_result_size() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        seed_chapters(&mut corpus, idx, root, 4);
+        let toc = corpus.toc_for_book(root, &toc_query(2)).expect("toc");
         assert_eq!(toc.len(), 2);
+    }
+
+    #[test]
+    fn toc_for_book_offset_pages_through_the_walk() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        seed_chapters(&mut corpus, idx, root, 4);
+
+        // The walk is root (no toc span, so it sorts first), then the
+        // four chapters. A page of two starting at offset 3 lands on
+        // the last two chapters.
+        let page = corpus
+            .toc_for_book(
+                root,
+                &TocQuery {
+                    cap: 2,
+                    offset: 3,
+                    ..TocQuery::default()
+                },
+            )
+            .expect("toc");
+        let titles: Vec<&str> = page
+            .iter()
+            .map(|n| n.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(titles, vec!["Chapter 2", "Chapter 3"]);
+
+        // An offset past the end reads as an empty page, not an error.
+        let past_end = corpus
+            .toc_for_book(
+                root,
+                &TocQuery {
+                    cap: 2,
+                    offset: 100,
+                    ..TocQuery::default()
+                },
+            )
+            .expect("toc");
+        assert!(past_end.is_empty());
+    }
+
+    #[test]
+    fn count_toc_nodes_counts_the_full_walk_regardless_of_pagination() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        seed_chapters(&mut corpus, idx, root, 4);
+
+        // Root + 4 chapters, whatever the cap and offset say.
+        let q = TocQuery {
+            cap: 1,
+            offset: 3,
+            ..TocQuery::default()
+        };
+        assert_eq!(corpus.count_toc_nodes(root, &q).expect("count"), 5);
+    }
+
+    #[test]
+    fn toc_for_book_max_depth_keeps_shallow_nodes_only() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 2).expect("ids");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(1, 50),
+            )
+            .expect("chapter");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[1], ids[0], root, 0, 2, NodeType::Section)
+                    .title("Section 1.1")
+                    .toc_span(2, 20),
+            )
+            .expect("section");
+
+        let q = TocQuery {
+            cap: 100,
+            max_depth: Some(1),
+            ..TocQuery::default()
+        };
+        let toc = corpus.toc_for_book(root, &q).expect("toc");
+        let titles: Vec<&str> = toc
+            .iter()
+            .map(|n| n.title.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(titles, vec!["A Book", "Chapter One"]);
+        assert_eq!(corpus.count_toc_nodes(root, &q).expect("count"), 2);
+    }
+
+    #[test]
+    fn toc_for_book_title_substring_escapes_like_metachars() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 2).expect("ids");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter)
+                    .title("100% Pure")
+                    .toc_span(1, 20),
+            )
+            .expect("chapter one");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[1], root, root, 1, 1, NodeType::Chapter)
+                    .title("100 Pure")
+                    .toc_span(21, 40),
+            )
+            .expect("chapter two");
+
+        // The `%` in the needle must match the literal `%` row only.
+        let q = TocQuery {
+            cap: 100,
+            title_substring: Some("100%"),
+            ..TocQuery::default()
+        };
+        let toc = corpus.toc_for_book(root, &q).expect("toc");
+        assert_eq!(toc.len(), 1);
+        assert_eq!(toc[0].title.as_deref(), Some("100% Pure"));
+        assert_eq!(corpus.count_toc_nodes(root, &q).expect("count"), 1);
     }
 
     #[test]
     fn toc_for_book_unknown_root_returns_empty() {
         let corpus = Corpus::open_in_memory().expect("open");
         let toc = corpus
-            .toc_for_book(NodeId::new(999_999_999), 100)
+            .toc_for_book(NodeId::new(999_999_999), &toc_query(100))
             .expect("toc");
         assert!(toc.is_empty());
     }
