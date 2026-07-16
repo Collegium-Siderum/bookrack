@@ -20,7 +20,7 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
-    OcrPendingResult, ShowTocArgs, Toc, TocNodes, clamp_limit,
+    OcrPendingResult, ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::recorder::record_call_sync;
 
@@ -156,7 +156,9 @@ pub fn list_ocr_pending<E: Embedder>(
     )
 }
 
-/// Fetch the full bibliographic record of one book by intake id.
+/// Fetch the full bibliographic record of one book by intake id,
+/// including the aggregate shape of its ingested TOC (`None` when the
+/// book has no corpus nodes).
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is registered.
 pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail> {
@@ -174,11 +176,16 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
             let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
             let contributors =
                 catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
+            let corpus = Corpus::open(ops.corpus_db())?;
+            let toc_stats = corpus
+                .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
+                .map(TocStats::from);
             Ok(BookDetail::build(
                 intake,
                 effective,
                 overrides,
                 contributors,
+                toc_stats,
             ))
         }
     )

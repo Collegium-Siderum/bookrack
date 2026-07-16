@@ -28,6 +28,14 @@ release workflow extracts the matching section verbatim from this file.
   divisions). Both compose with pagination, and `total` counts the
   filtered set.
 
+- **mcp, runtime: `library.show_book` / `library.show_paper` carry
+  `toc_stats`.** The detail responses gain an aggregate of the
+  ingested TOC — `entry_count` (the book root included) and
+  `max_depth` — or `null` when the item has no corpus nodes, so a
+  caller can pick a `show_toc` pagination or projection strategy
+  before pulling any entries. The `show_metadata_audit` response
+  embeds the same detail shape and carries the field too.
+
 - **mcp, runtime: TOC reads gain a `title_substring` filter.**
   `library.show_toc` / `library.show_paper_toc` can keep only entries
   whose title contains a substring (case-sensitive; `LIKE`

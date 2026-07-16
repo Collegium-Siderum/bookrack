@@ -891,8 +891,12 @@ impl BookrackServer {
         description = "Fetch the full bibliographic record for one book by intake id. \
                        Returns effective biblio attributes, the active overrides \
                        (which fields are curated rather than extracted, by whom and \
-                       when; `value: null` marks a suppressed extracted value), and \
-                       the contributor list, or null when no such book is registered."
+                       when; `value: null` marks a suppressed extracted value), the \
+                       contributor list, and toc_stats (entry_count / max_depth of \
+                       the ingested TOC; null when nothing is ingested) — check \
+                       toc_stats before library.show_toc to pick a pagination or \
+                       projection strategy. Returns null when no such book is \
+                       registered."
     )]
     async fn library_show_book(
         &self,
@@ -998,9 +1002,10 @@ impl BookrackServer {
     #[tool(
         name = "library.show_paper",
         description = "Fetch the full bibliographic record for one paper by intake \
-                       id. Mirrors library.show_book for the paper pipeline; the \
-                       abstract text is in the detail response, not in list \
-                       summaries. Returns null when no such paper is registered."
+                       id. Mirrors library.show_book for the paper pipeline, \
+                       toc_stats included; the abstract text is in the detail \
+                       response, not in list summaries. Returns null when no such \
+                       paper is registered."
     )]
     async fn library_show_paper(
         &self,
@@ -2087,8 +2092,14 @@ mod tests {
                 nationality: None,
                 origin: "extracted".to_string(),
             }],
+            toc_stats: Some(bookrack_ops::dto::TocStats {
+                entry_count: 885,
+                max_depth: 2,
+            }),
         };
         let value = serde_json::to_value(&detail).expect("serialize");
+        assert_eq!(value["toc_stats"]["entry_count"], 885);
+        assert_eq!(value["toc_stats"]["max_depth"], 2);
         assert_eq!(value["effective_biblio"]["title"], "T");
         assert_eq!(value["contributors"][0]["role"], "author");
         assert_eq!(value["source_filename"], "book.pdf");

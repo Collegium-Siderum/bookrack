@@ -4,6 +4,7 @@
 
 use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_core::{ItemKind, PartitionIdx};
+use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
 use crate::Ops;
@@ -13,7 +14,7 @@ use crate::dto::audit::AuditTrailEntry;
 use crate::dto::metadata_report::{
     MetadataAuditReport, MetadataListPage, MetadataListRow, MetadataReport,
 };
-use crate::dto::{BookDetail, clamp_limit};
+use crate::dto::{BookDetail, TocStats, clamp_limit};
 use crate::recorder::record_call_sync;
 
 /// Read the metadata-status record for one book: bibliographic detail
@@ -39,7 +40,11 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
                 .map(|r| r.status);
             let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
             let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-            let book = BookDetail::build(intake, effective, overrides, contributors);
+            let corpus = Corpus::open(ops.corpus_db())?;
+            let toc_stats = corpus
+                .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
+                .map(TocStats::from);
+            let book = BookDetail::build(intake, effective, overrides, contributors, toc_stats);
             Ok(MetadataReport {
                 intake_id,
                 book,

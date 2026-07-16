@@ -128,6 +128,16 @@ pub struct TocQuery<'a> {
     pub title_substring: Option<&'a str>,
 }
 
+/// Aggregate shape of one book's TOC: how many organizing nodes the
+/// full walk carries and how deep they go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TocStats {
+    /// Number of organizing nodes, the book root included.
+    pub entry_count: u64,
+    /// Deepest organizing depth; the book root is depth 0.
+    pub max_depth: i64,
+}
+
 /// The shared `WHERE` clause of [`Corpus::toc_for_book`] and
 /// [`Corpus::count_toc_nodes`]: one book's organizing nodes, narrowed
 /// by whichever [`TocQuery`] filters are set.
@@ -600,6 +610,27 @@ impl Corpus {
             .conn
             .query_row(&sql, params.as_slice(), |row| row.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
+    }
+
+    /// Aggregate one book's TOC in a single query: the entry count
+    /// and the deepest depth of the organizing nodes an unfiltered
+    /// [`Self::toc_for_book`] walk returns. `None` when the book has
+    /// no organizing nodes.
+    pub fn toc_stats_for_book(&self, book_root_id: NodeId) -> Result<Option<TocStats>> {
+        let sql = format!(
+            "SELECT COUNT(*), MAX(depth) FROM nodes {}",
+            toc_where_sql(&TocQuery::default())
+        );
+        let root = book_root_id.get();
+        let (count, max_depth): (i64, Option<i64>) =
+            self.conn
+                .query_row(&sql, named_params! { ":book_root_id": root }, |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+        Ok(max_depth.map(|max_depth| TocStats {
+            entry_count: u64::try_from(count).unwrap_or(0),
+            max_depth,
+        }))
     }
 
     /// Fetch one book's leaves whose document-order position falls in
@@ -1131,6 +1162,54 @@ mod tests {
             .toc_for_book(NodeId::new(999_999_999), &toc_query(100))
             .expect("toc");
         assert!(toc.is_empty());
+    }
+
+    #[test]
+    fn toc_stats_aggregate_the_full_unfiltered_walk() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 2).expect("ids");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(1, 50),
+            )
+            .expect("chapter");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[1], ids[0], root, 0, 2, NodeType::Section)
+                    .title("Section 1.1")
+                    .toc_span(2, 20),
+            )
+            .expect("section");
+
+        let stats = corpus
+            .toc_stats_for_book(root)
+            .expect("stats")
+            .expect("present");
+        assert_eq!(
+            stats,
+            TocStats {
+                entry_count: 3,
+                max_depth: 2,
+            }
+        );
+        assert_eq!(
+            stats.entry_count,
+            corpus
+                .count_toc_nodes(root, &TocQuery::default())
+                .expect("count")
+        );
+    }
+
+    #[test]
+    fn toc_stats_for_a_bookless_root_are_none() {
+        let corpus = Corpus::open_in_memory().expect("open");
+        let stats = corpus
+            .toc_stats_for_book(NodeId::new(999_999_999))
+            .expect("stats");
+        assert_eq!(stats, None);
     }
 
     /// Seed one book with a chapter spanning positions 0..=4: three

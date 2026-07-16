@@ -318,6 +318,8 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
     assert_eq!(toc.total, nodes.len() as u64);
     assert_eq!(toc.next_offset, None);
     assert!(!toc.truncated);
+    let stats = detail.toc_stats.expect("toc stats present");
+    assert_eq!(stats.entry_count, toc.total);
 
     let slim = library
         .show_toc(

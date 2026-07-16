@@ -111,6 +111,9 @@ pub struct BookDetail {
     /// Every contributor attributed at the book root, in (role,
     /// ordinal) order.
     pub contributors: Vec<ContributorEntry>,
+    /// Aggregate shape of the ingested TOC; `None` when the book has
+    /// no corpus nodes.
+    pub toc_stats: Option<TocStats>,
 }
 
 /// One override entry within a [`BookDetail`].
@@ -149,6 +152,27 @@ pub struct ContributorEntry {
     /// Where this attribution came from (`extracted` /
     /// `extracted-filename` / `user`).
     pub origin: String,
+}
+
+/// Aggregate shape of one book's TOC, attached to [`BookDetail`] and
+/// [`PaperDetail`] so a caller can pick a TOC read strategy without
+/// pulling any entries.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct TocStats {
+    /// Number of entries a full, unfiltered TOC walk returns, the
+    /// book root included.
+    pub entry_count: u64,
+    /// Deepest entry depth; the book root is depth 0.
+    pub max_depth: i64,
+}
+
+impl From<bookrack_corpus::TocStats> for TocStats {
+    fn from(stats: bookrack_corpus::TocStats) -> TocStats {
+        TocStats {
+            entry_count: stats.entry_count,
+            max_depth: stats.max_depth,
+        }
+    }
 }
 
 /// One node entry within a [`Toc`], flattened from the corpus tree's
@@ -513,6 +537,7 @@ impl BookDetail {
         effective: EffectiveAttrs,
         overrides: Vec<NodeOverride>,
         contributors: Vec<NodeContributor>,
+        toc_stats: Option<TocStats>,
     ) -> BookDetail {
         let mut effective_biblio = BTreeMap::new();
         for (name, value) in effective.iter() {
@@ -539,6 +564,7 @@ impl BookDetail {
                 .into_iter()
                 .map(ContributorEntry::from_row)
                 .collect(),
+            toc_stats,
         }
     }
 }
@@ -642,6 +668,9 @@ pub struct PaperDetail {
     pub abstract_text: Option<String>,
     /// Latest audit identity for the paper, when an audit row exists.
     pub audit: Option<PaperAuditInfo>,
+    /// Aggregate shape of the ingested TOC; `None` when the paper has
+    /// no corpus nodes.
+    pub toc_stats: Option<TocStats>,
 }
 
 /// Audit identity block on one `library.show_paper` response: the
@@ -757,6 +786,7 @@ impl PaperDetail {
         overrides: Vec<NodeOverride>,
         contributors: Vec<NodeContributor>,
         audit: Option<PaperAuditInfo>,
+        toc_stats: Option<TocStats>,
     ) -> PaperDetail {
         let mut effective_biblio = BTreeMap::new();
         for (name, value) in effective.iter() {
@@ -777,6 +807,7 @@ impl PaperDetail {
                 .collect(),
             abstract_text,
             audit,
+            toc_stats,
         }
     }
 }

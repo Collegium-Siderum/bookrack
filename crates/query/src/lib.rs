@@ -493,8 +493,9 @@ impl<E: Embedder> Library<E> {
         })
     }
 
-    /// Fetch the full bibliographic record of one book by intake id, or
-    /// `None` if no such book is registered.
+    /// Fetch the full bibliographic record of one book by intake id,
+    /// including the aggregate shape of its ingested TOC, or `None`
+    /// if no such book is registered.
     pub fn show_book(&self, intake_id: i64) -> Result<Option<BookDetail>> {
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let Some(intake) = catalog.intake_by_id(intake_id)? else {
@@ -503,11 +504,16 @@ impl<E: Embedder> Library<E> {
         let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
         let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
         let contributors = catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
+        let corpus = Corpus::open(&self.corpus_db)?;
+        let toc_stats = corpus
+            .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
+            .map(dto::TocStats::from);
         Ok(Some(BookDetail::build(
             intake,
             effective,
             overrides,
             contributors,
+            toc_stats,
         )))
     }
 

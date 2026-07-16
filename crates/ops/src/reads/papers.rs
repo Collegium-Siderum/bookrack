@@ -18,7 +18,7 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::{
     ListPapersResult, PaperAuditInfo, PaperDetail, PaperFilter, PaperSource, PaperSummary,
-    ShowTocArgs, Toc, TocNodes, clamp_limit,
+    ShowTocArgs, Toc, TocNodes, TocStats, clamp_limit,
 };
 use crate::reads::books::toc_call_args;
 use crate::recorder::record_call_sync;
@@ -107,7 +107,9 @@ pub fn find_papers<E: Embedder>(
     })
 }
 
-/// Fetch the full bibliographic record of one paper by intake id.
+/// Fetch the full bibliographic record of one paper by intake id,
+/// including the aggregate shape of its ingested TOC (`None` when the
+/// paper has no corpus nodes).
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is
 /// registered on the paper catalog, or
@@ -121,6 +123,9 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
         {
             let papers_db = ops
                 .papers_catalog_db()
+                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let corpus_db = ops
+                .papers_corpus_db()
                 .ok_or(OpsError::PapersBackendNotConfigured)?;
             let catalog = Catalog::open_read_only(papers_db)?;
             let Some(intake) = catalog.intake_by_id(intake_id)? else {
@@ -140,12 +145,17 @@ pub fn show_paper<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<PaperDeta
                     profile_name: row.profile_name,
                     profile_fingerprint: row.profile_fingerprint,
                 });
+            let corpus = Corpus::open(corpus_db)?;
+            let toc_stats = corpus
+                .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
+                .map(TocStats::from);
             Ok(PaperDetail::build(
                 intake,
                 effective,
                 overrides,
                 contributors,
                 audit,
+                toc_stats,
             ))
         }
     )

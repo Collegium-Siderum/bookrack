@@ -16,8 +16,8 @@ use bookrack_core::ItemKind;
 use bookrack_corpus::{Corpus, NewNode, NodeId, NodeType, PartitionIdx};
 use bookrack_embed::{Embedder, OllamaEmbedClient, Result as EmbedResult};
 use bookrack_ops::dto::{MAX_TOC_NODES, ShowTocArgs, Toc, TocNodes};
-use bookrack_ops::reads::books::show_toc;
-use bookrack_ops::reads::papers::show_paper_toc;
+use bookrack_ops::reads::books::{show_book, show_toc};
+use bookrack_ops::reads::papers::{show_paper, show_paper_toc};
 use bookrack_ops::{Caller, Ops, OpsError, PapersPaths};
 use tempfile::TempDir;
 
@@ -364,6 +364,37 @@ fn title_substring_composes_with_projection_and_pagination() {
 }
 
 #[test]
+fn show_book_toc_stats_match_the_full_walk() {
+    let mut fx = Fixture::build();
+    let intake_id = fx.register_book("sha-stats");
+    let (idx, root, chapters) = seed_chapters(&mut fx.corpus, intake_id, 3);
+    // One section under the first chapter, so the deepest level is 2.
+    let section = fx.corpus.allocate_node_ids(idx, 1).expect("ids")[0];
+    fx.corpus
+        .insert_node(
+            &NewNode::child(section, chapters[0], root, 0, 2, NodeType::Section)
+                .title("Section 0.0")
+                .toc_span(6, 6),
+        )
+        .expect("section");
+
+    let detail = show_book(&fx.ops, intake_id).expect("detail");
+    let stats = detail.toc_stats.expect("stats present");
+    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full toc");
+    assert_eq!(stats.entry_count, full.total);
+    assert_eq!(stats.entry_count, 5);
+    assert_eq!(stats.max_depth, 2);
+}
+
+#[test]
+fn show_book_toc_stats_are_none_without_corpus_nodes() {
+    let fx = Fixture::build();
+    let intake_id = fx.register_book("sha-no-corpus");
+    let detail = show_book(&fx.ops, intake_id).expect("detail");
+    assert!(detail.toc_stats.is_none());
+}
+
+#[test]
 fn an_unknown_intake_is_intake_not_found() {
     let fx = Fixture::build();
     assert!(matches!(
@@ -467,4 +498,10 @@ async fn paper_toc_pages_with_the_same_contract() {
     assert_eq!(titles(&second), vec!["Chapter 1", "Chapter 2"]);
     assert_eq!(second.next_offset, None);
     assert!(!second.truncated);
+
+    // The paper detail carries the same aggregate the walk reports.
+    let detail = show_paper(&ops, intake_id).expect("paper detail");
+    let stats = detail.toc_stats.expect("stats present");
+    assert_eq!(stats.entry_count, 4);
+    assert_eq!(stats.max_depth, 1);
 }
