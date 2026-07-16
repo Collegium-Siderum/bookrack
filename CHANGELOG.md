@@ -10,6 +10,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: `working` daemon state, and the lifecycle state is now
+  derived instead of assigned.** `daemon.state` / `status.state` gain a
+  fifth value, `working`: the queue worker is executing a job, without
+  the write-mutex and MCP-pause semantics that `writing` implies.
+  Internally the single state flag is folded from independent activity
+  sources (RPC write session, executing queue jobs, degraded
+  conditions, shutdown) by precedence `stopping > writing > working >
+  degraded > idle`, so overlapping activities can no longer clobber
+  each other's transitions — an RPC write finishing while a queue job
+  still runs falls back to `working`, not `idle`.
+
 - **mcp, runtime: `library.show_toc` / `library.show_paper_toc` are
   paginated.** Both TOC reads accept optional `offset` / `limit`
   parameters (the limit defaults to and is clamped by the 2000-entry
@@ -174,6 +185,12 @@ release workflow extracts the matching section verbatim from this file.
   profile reference no longer passes silently.
 
 ### Fixed
+
+- **runtime: `daemon.state` no longer reads `idle` during queue-driven
+  ingest.** Only the RPC write path ever flipped the state flag, so a
+  batch ingest running for hours reported an idle daemon on `status`
+  and the `daemon.state` channel. The queue worker now raises the
+  `working` source for exactly each job's execution span.
 
 - **runtime: queue job outcomes reach the structured log channels.**
   The per-job completion line (`queue: <id> <name> done/skipped/

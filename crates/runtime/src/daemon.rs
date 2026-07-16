@@ -749,7 +749,7 @@ impl DaemonRuntime {
         // Flip the daemon-state flag before draining clients so the
         // `daemon.state=stopping` notification reaches every attached
         // subscriber before its connection task exits.
-        event_stream.set_state(DaemonState::Stopping);
+        event_stream.set_stopping();
 
         match tokio::time::timeout(Duration::from_secs(3), control_accept_handle).await {
             Ok(Ok(Ok(()))) => {}

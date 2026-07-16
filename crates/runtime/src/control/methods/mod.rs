@@ -27,7 +27,7 @@ use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
 use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard, broadcast};
 
-use super::events::{DaemonState, Event, EventStreamHandle};
+use super::events::{Event, EventStreamHandle};
 use super::jsonrpc::{BUSY, CONFIRMATION_REQUIRED, METHOD_NOT_FOUND, Request, RpcError};
 use super::plan_registry::PlanRegistry;
 
@@ -377,11 +377,12 @@ fn is_queue_bound_method(method: &str) -> bool {
 }
 
 /// RAII bundle owning the write mutex guard and the broadcast handle
-/// that signalled `DaemonState::Writing` / `McpAvailability { paused:
+/// that raised the RPC write source / `McpAvailability { paused:
 /// true }`. Its [`Drop`] publishes `mcp.availability { paused: false }`
-/// and flips the daemon back to [`DaemonState::Idle`] before releasing
-/// the mutex, so the state transitions cannot leak when the surrounding
-/// future is cancelled or the blocking work panics mid-handler.
+/// and releases the write source — the state resolver falls back to
+/// whatever other activity is live — before releasing the mutex, so
+/// the state transitions cannot leak when the surrounding future is
+/// cancelled or the blocking work panics mid-handler.
 struct WriteSession {
     event_stream: EventStreamHandle,
     _guard: OwnedMutexGuard<()>,
@@ -391,19 +392,20 @@ impl Drop for WriteSession {
     fn drop(&mut self) {
         self.event_stream
             .publish(Event::McpAvailability { paused: false });
-        self.event_stream.set_state(DaemonState::Idle);
+        self.event_stream.set_rpc_write(false);
         // _guard releases the write mutex after this body returns, so a
-        // subsequent writer observes `Idle` before being able to take
-        // the lock.
+        // subsequent writer observes the released write source before
+        // being able to take the lock.
     }
 }
 
-/// Acquire the runtime-wide write mutex, flip the daemon into
-/// [`DaemonState::Writing`], broadcast `mcp.availability { paused:
-/// true }`, run `op` on a blocking executor, then unwind the
-/// broadcast and state transitions in reverse. Concurrent writers see
-/// `-32001 busy` instead of blocking on the mutex so the caller can
-/// retry.
+/// Acquire the runtime-wide write mutex, raise the RPC write source
+/// (the daemon reads [`super::events::DaemonState::Writing`] for the
+/// session's duration), broadcast `mcp.availability { paused: true }`,
+/// run `op`
+/// on a blocking executor, then unwind the broadcast and state
+/// transitions in reverse. Concurrent writers see `-32001 busy`
+/// instead of blocking on the mutex so the caller can retry.
 ///
 /// `op` is driven on [`tokio::task::spawn_blocking`] with the current
 /// runtime's [`tokio::runtime::Handle::block_on`] so handler bodies
@@ -414,9 +416,9 @@ impl Drop for WriteSession {
 /// The state transitions and mutex release are tied to a
 /// [`WriteSession`] RAII guard that is moved into the blocking task,
 /// so cancellation of the dispatcher future or a panic inside `op`
-/// cannot leave the daemon stranded in `Writing { paused: true }` or
-/// allow a second writer to enter while the blocking work is still
-/// running.
+/// cannot leave the daemon stranded with the write source raised and
+/// MCP paused, or allow a second writer to enter while the blocking
+/// work is still running.
 pub(crate) async fn run_write<F, Fut>(ctx: &MethodContext, op: F) -> Result<Value, RpcError>
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -427,7 +429,7 @@ where
         .clone()
         .try_lock_owned()
         .map_err(|_| RpcError::new(BUSY, "another write command is already in progress"))?;
-    ctx.event_stream.set_state(DaemonState::Writing);
+    ctx.event_stream.set_rpc_write(true);
     ctx.event_stream
         .publish(Event::McpAvailability { paused: true });
     let session = WriteSession {
@@ -488,7 +490,7 @@ pub(crate) fn require_yes(method: &str, yes: bool, exempt: bool) -> Result<(), R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::events::DaemonStateFlag;
+    use crate::control::events::{DaemonState, DaemonStateFlag};
 
     #[tokio::test]
     async fn write_session_drop_resets_state_and_releases_mutex() {
@@ -498,7 +500,7 @@ mod tests {
 
         let mutex = Arc::new(TokioMutex::new(()));
         let guard = mutex.clone().try_lock_owned().expect("lock free");
-        stream.set_state(DaemonState::Writing);
+        stream.set_rpc_write(true);
         stream.publish(Event::McpAvailability { paused: true });
         assert_eq!(state.load(), DaemonState::Writing);
 

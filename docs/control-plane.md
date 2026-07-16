@@ -114,7 +114,8 @@ the exit-code bucket does not distinguish the two.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `status` — `{ state, queue_pending, queue_running }`. `state` is
-  one of `idle`, `writing`, `degraded`, `stopping`.
+  one of `idle`, `writing`, `working`, `degraded`, `stopping`; see
+  the `daemon.state` event for the semantics of each value.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints.
 - `queue.list` — `{ schema_version, paused, jobs }`. `params.limit`
@@ -326,8 +327,19 @@ catalog and corpus handles the daemon already holds.
 
 ## Events (Phase 2)
 
-- `daemon.state` — `idle` / `writing` / `degraded` / `stopping`. The
-  flag flips to `writing` around every write command.
+- `daemon.state` — `idle` / `writing` / `working` / `degraded` /
+  `stopping`. The value is derived from independent activity sources
+  rather than assigned directly, folded by precedence
+  `stopping > writing > working > degraded > idle`:
+  - `writing` — an RPC write command holds the runtime-wide write
+    mutex; concurrent writers see `-32001 busy` and
+    `mcp.availability` is paused for the duration.
+  - `working` — the queue worker is executing a job (ingest or
+    glean). The write mutex is not held and MCP reads stay
+    available; queue-driven work can span hours.
+  - `degraded` — a persistent condition needs operator attention.
+    Activity outranks it, so it surfaces once the daemon quiesces.
+  - `stopping` — shutdown has been signalled; terminal.
 - `queue.tick` — `{ current, pending, running, last_finished? }`
   published immediately after every persisted change to
   `.bookrack-queue.json`, so a subscriber's view always coincides

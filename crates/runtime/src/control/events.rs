@@ -9,11 +9,14 @@
 //! and control-plane events have different shapes, lifetimes, and
 //! consumers — but the operational model is identical.
 //!
-//! Phase 1 emits one channel: `daemon.state` flips between `idle` and
-//! `stopping` over the life of the process. Phase 2 will add
-//! `queue.tick`, `worker.progress`, `library.changed`, and
-//! `mcp.availability`; the [`Event`] enum is the single extension
-//! point.
+//! The `daemon.state` channel carries a single lifecycle value derived
+//! from independent activity sources (RPC write session, queue jobs,
+//! degraded conditions, shutdown) — see [`EventStreamHandle`] for the
+//! source setters and the precedence that folds them into one
+//! [`DaemonState`]. The remaining channels (`queue.tick`,
+//! `worker.progress`, `library.changed`, `mcp.availability`, `log`)
+//! each carry their own payload; the [`Event`] enum is the single
+//! extension point.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -41,6 +44,7 @@ pub enum DaemonState {
     Writing,
     Degraded,
     Stopping,
+    Working,
 }
 
 impl DaemonState {
@@ -52,6 +56,7 @@ impl DaemonState {
             DaemonState::Writing => 1,
             DaemonState::Degraded => 2,
             DaemonState::Stopping => 3,
+            DaemonState::Working => 4,
         }
     }
 
@@ -63,6 +68,7 @@ impl DaemonState {
             1 => DaemonState::Writing,
             2 => DaemonState::Degraded,
             3 => DaemonState::Stopping,
+            4 => DaemonState::Working,
             _ => DaemonState::Idle,
         }
     }
@@ -223,19 +229,93 @@ impl Event {
     }
 }
 
+/// A persistent condition that holds the daemon in
+/// [`DaemonState::Degraded`] while no activity outranks it. Each cause
+/// is set and cleared independently; the daemon leaves `degraded` only
+/// when every cause is clear.
+#[derive(Debug, Clone, Copy)]
+pub enum DegradedCause {
+    /// The queue worker paused itself after a process-level job
+    /// failure (resource exhaustion rather than a bad input).
+    QueueFailurePause,
+    /// The supervised reranker backend is crash-looping: repeated
+    /// respawn attempts within one outage without reaching ready.
+    RerankCrashloop,
+}
+
+impl DegradedCause {
+    fn bit(self) -> u8 {
+        match self {
+            DegradedCause::QueueFailurePause => 1,
+            DegradedCause::RerankCrashloop => 2,
+        }
+    }
+}
+
+/// Independent inputs the daemon lifecycle state derives from. Each
+/// source is owned by exactly one producer; the resolver folds them
+/// into a single [`DaemonState`] by precedence.
+#[derive(Debug, Default)]
+struct StateSources {
+    /// Shutdown has been signalled; terminal and never cleared.
+    stopping: bool,
+    /// An RPC write session holds the runtime-wide write mutex.
+    rpc_write: bool,
+    /// Number of queue jobs currently executing.
+    working_jobs: u32,
+    /// Bitset of active [`DegradedCause`]s.
+    degraded: u8,
+}
+
+impl StateSources {
+    /// Fold the sources into one state:
+    /// `stopping > writing > working > degraded > idle`. Activity
+    /// outranks the degraded condition so a long ingest reads
+    /// `working`, and the condition resurfaces once the daemon
+    /// quiesces.
+    fn resolve(&self) -> DaemonState {
+        if self.stopping {
+            DaemonState::Stopping
+        } else if self.rpc_write {
+            DaemonState::Writing
+        } else if self.working_jobs > 0 {
+            DaemonState::Working
+        } else if self.degraded != 0 {
+            DaemonState::Degraded
+        } else {
+            DaemonState::Idle
+        }
+    }
+}
+
 /// Cloneable broadcast handle. Each control-plane connection
 /// subscribes once at `events.subscribe` time and consumes the
 /// receiver for the lifetime of the connection.
+///
+/// The daemon lifecycle state is derived, not assigned: producers flip
+/// their own source ([`set_rpc_write`](Self::set_rpc_write),
+/// [`job_guard`](Self::job_guard), [`set_degraded`](Self::set_degraded),
+/// [`set_stopping`](Self::set_stopping)) and the handle folds all
+/// sources into one [`DaemonState`] by precedence, publishing a
+/// `daemon.state` event only when the folded value changes. Concurrent
+/// activities therefore cannot clobber each other's transitions — an
+/// RPC write ending while a queue job still runs falls back to
+/// `working`, not `idle`.
 #[derive(Debug, Clone)]
 pub struct EventStreamHandle {
     tx: broadcast::Sender<Event>,
     state: Arc<DaemonStateFlag>,
+    sources: Arc<std::sync::Mutex<StateSources>>,
 }
 
 impl EventStreamHandle {
     pub fn new(capacity: usize, state: Arc<DaemonStateFlag>) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        Self { tx, state }
+        Self {
+            tx,
+            state,
+            sources: Arc::new(std::sync::Mutex::new(StateSources::default())),
+        }
     }
 
     /// Publish a single event. A `send` with no receivers is not an
@@ -255,15 +335,52 @@ impl EventStreamHandle {
         self.state.load()
     }
 
-    /// Move the daemon-state flag and broadcast the transition. No-op
-    /// when the target matches the current state, so callers can fire
-    /// idempotently.
-    pub fn set_state(&self, state: DaemonState) {
-        if self.state.load() == state {
-            return;
+    /// Mutate the sources under the lock, re-resolve, and broadcast
+    /// the transition when the folded state changed. Store and publish
+    /// happen under the same lock so the event order on the broadcast
+    /// matches the state order every subscriber observes.
+    fn update_sources(&self, mutate: impl FnOnce(&mut StateSources)) {
+        let mut sources = self.sources.lock().expect("state sources mutex poisoned");
+        mutate(&mut sources);
+        let resolved = sources.resolve();
+        if self.state.load() != resolved {
+            self.state.store(resolved);
+            self.publish(Event::DaemonState(resolved));
         }
-        self.state.store(state);
-        self.publish(Event::DaemonState(state));
+    }
+
+    /// Mark shutdown. Terminal: outranks every other source and is
+    /// never cleared.
+    pub fn set_stopping(&self) {
+        self.update_sources(|s| s.stopping = true);
+    }
+
+    /// Flip the RPC write-session source. `true` while `run_write`
+    /// holds the runtime-wide write mutex.
+    pub fn set_rpc_write(&self, active: bool) {
+        self.update_sources(|s| s.rpc_write = active);
+    }
+
+    /// Count a queue job as executing for the guard's lifetime. The
+    /// guard's `Drop` decrements the count, so a panicking or aborted
+    /// job cannot leave the daemon stranded in `working`.
+    pub fn job_guard(&self) -> WorkingGuard {
+        self.update_sources(|s| s.working_jobs += 1);
+        WorkingGuard {
+            handle: self.clone(),
+        }
+    }
+
+    /// Set or clear one degraded cause. The daemon reads `degraded`
+    /// while any cause is set and nothing outranks it.
+    pub fn set_degraded(&self, cause: DegradedCause, active: bool) {
+        self.update_sources(|s| {
+            if active {
+                s.degraded |= cause.bit();
+            } else {
+                s.degraded &= !cause.bit();
+            }
+        });
     }
 }
 
@@ -273,6 +390,21 @@ impl Default for EventStreamHandle {
             DEFAULT_EVENT_CHANNEL_CAPACITY,
             Arc::new(DaemonStateFlag::default()),
         )
+    }
+}
+
+/// RAII token for one executing queue job, handed out by
+/// [`EventStreamHandle::job_guard`]. Dropping it releases the job's
+/// contribution to the `working` state.
+#[derive(Debug)]
+pub struct WorkingGuard {
+    handle: EventStreamHandle,
+}
+
+impl Drop for WorkingGuard {
+    fn drop(&mut self) {
+        self.handle
+            .update_sources(|s| s.working_jobs = s.working_jobs.saturating_sub(1));
     }
 }
 
@@ -310,6 +442,7 @@ mod tests {
             DaemonState::Writing,
             DaemonState::Degraded,
             DaemonState::Stopping,
+            DaemonState::Working,
         ] {
             assert_eq!(DaemonState::from_u8(s.as_u8()), s);
         }
@@ -321,13 +454,100 @@ mod tests {
     }
 
     #[test]
-    fn set_state_is_idempotent_and_publishes_only_on_change() {
+    fn resolver_folds_sources_by_precedence() {
+        // (stopping, rpc_write, working_jobs, degraded bits) -> state
+        let table = [
+            ((false, false, 0, 0), DaemonState::Idle),
+            ((false, false, 0, 1), DaemonState::Degraded),
+            ((false, false, 1, 0), DaemonState::Working),
+            ((false, false, 1, 1), DaemonState::Working),
+            ((false, true, 0, 0), DaemonState::Writing),
+            ((false, true, 1, 3), DaemonState::Writing),
+            ((true, true, 1, 3), DaemonState::Stopping),
+            ((true, false, 0, 0), DaemonState::Stopping),
+        ];
+        for ((stopping, rpc_write, working_jobs, degraded), expected) in table {
+            let sources = StateSources {
+                stopping,
+                rpc_write,
+                working_jobs,
+                degraded,
+            };
+            assert_eq!(sources.resolve(), expected, "sources: {sources:?}");
+        }
+    }
+
+    #[test]
+    fn source_flips_publish_only_on_folded_change() {
         let handle = EventStreamHandle::default();
         let mut rx = handle.subscribe();
-        handle.set_state(DaemonState::Idle);
-        assert!(rx.try_recv().is_err());
-        handle.set_state(DaemonState::Stopping);
+        handle.set_rpc_write(false);
+        assert!(rx.try_recv().is_err(), "no-op flip must not publish");
+        handle.set_stopping();
         let event = rx.try_recv().unwrap();
         assert!(matches!(event, Event::DaemonState(DaemonState::Stopping)));
+        handle.set_stopping();
+        assert!(rx.try_recv().is_err(), "repeated stop must not re-publish");
+    }
+
+    #[test]
+    fn job_guard_brackets_working_and_survives_overlap_with_write() {
+        let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let handle = EventStreamHandle::new(8, state.clone());
+        let mut rx = handle.subscribe();
+
+        let guard = handle.job_guard();
+        assert_eq!(state.load(), DaemonState::Working);
+
+        // An RPC write session outranks the running job...
+        handle.set_rpc_write(true);
+        assert_eq!(state.load(), DaemonState::Writing);
+        // ...and its end falls back to the still-running job, not idle.
+        handle.set_rpc_write(false);
+        assert_eq!(state.load(), DaemonState::Working);
+
+        drop(guard);
+        assert_eq!(state.load(), DaemonState::Idle);
+
+        let seen: Vec<DaemonState> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|e| match e {
+                Event::DaemonState(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                DaemonState::Working,
+                DaemonState::Writing,
+                DaemonState::Working,
+                DaemonState::Idle,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlapping_job_guards_stay_working_until_the_last_drops() {
+        let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let handle = EventStreamHandle::new(8, state.clone());
+        let first = handle.job_guard();
+        let second = handle.job_guard();
+        drop(first);
+        assert_eq!(state.load(), DaemonState::Working);
+        drop(second);
+        assert_eq!(state.load(), DaemonState::Idle);
+    }
+
+    #[test]
+    fn degraded_causes_set_and_clear_independently() {
+        let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let handle = EventStreamHandle::new(8, state.clone());
+        handle.set_degraded(DegradedCause::QueueFailurePause, true);
+        handle.set_degraded(DegradedCause::RerankCrashloop, true);
+        assert_eq!(state.load(), DaemonState::Degraded);
+        handle.set_degraded(DegradedCause::QueueFailurePause, false);
+        assert_eq!(state.load(), DaemonState::Degraded);
+        handle.set_degraded(DegradedCause::RerankCrashloop, false);
+        assert_eq!(state.load(), DaemonState::Idle);
     }
 }

@@ -546,7 +546,13 @@ where
             continue;
         };
 
-        let (outcome, pause_queue) = match runner(job.clone()).await {
+        // Hold the working guard across the runner so the daemon
+        // state reads `working` for exactly the execution span; the
+        // outcome-persist block below runs after the guard drops.
+        let working = events.job_guard();
+        let run_result = runner(job.clone()).await;
+        drop(working);
+        let (outcome, pause_queue) = match run_result {
             Ok(JobSuccess {
                 needs_ocr: true,
                 intake_id: Some(intake_id),
@@ -1095,6 +1101,81 @@ mod tests {
         assert_eq!(snapshot.jobs.len(), 1);
         assert_eq!(snapshot.jobs[0].state, JobState::Done);
         assert!(snapshot.jobs[0].finished_at.is_some());
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn worker_loop_reads_working_for_the_execution_span() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/only.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, Arc::clone(&flag));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let release_for_runner = Arc::clone(&release);
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                move |_job| {
+                    let release = Arc::clone(&release_for_runner);
+                    async move {
+                        release.notified().await;
+                        Ok::<JobSuccess, JobError>(JobSuccess::done())
+                    }
+                },
+                events,
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+
+        // While the runner is blocked, the daemon must read `working`.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if flag.load() == DaemonState::Working {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon never read `working` while the job ran"
+            );
+        }
+
+        // Releasing the runner finishes the job and falls back to idle.
+        release.notify_one();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let done = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Done)
+            };
+            if done && flag.load() == DaemonState::Idle {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job did not finish and fall back to idle within 3 s"
+            );
+        }
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
