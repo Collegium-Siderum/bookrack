@@ -26,7 +26,7 @@ use serde::Serialize;
 use bookrack_catalog::{
     EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride, OcrPending,
 };
-use bookrack_corpus::Node;
+use bookrack_corpus::{Node, TocQuery};
 
 /// Server-side ceiling on a single list page. Larger requests are
 /// silently clamped; the response then carries `truncated = true` if
@@ -171,14 +171,75 @@ pub struct TocNode {
     pub toc_hi: Option<i64>,
 }
 
+/// One node entry within a [`Toc`] when `titles_only` is set: just
+/// enough to scan a book's structure and address a follow-up read.
+#[derive(Debug, Clone, Serialize)]
+pub struct TocSlimEntry {
+    /// Stable corpus node id of this TOC entry — the id a span read
+    /// takes.
+    pub node_id: i64,
+    /// Heading text.
+    pub title: Option<String>,
+    /// Tree depth; 0 is the book root.
+    pub depth: i64,
+}
+
+impl TocSlimEntry {
+    /// Project a corpus [`Node`] into a slim TOC entry.
+    pub fn from_node(node: &Node) -> TocSlimEntry {
+        TocSlimEntry {
+            node_id: node.node_id.get(),
+            title: node.title.clone(),
+            depth: node.depth,
+        }
+    }
+}
+
+/// The entries of one [`Toc`] page, in either projection. Serializes
+/// untagged, so both variants come out as a bare JSON array and the
+/// full form is wire-identical to a plain `Vec<TocNode>`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum TocNodes {
+    /// Every [`TocNode`] field.
+    Full(Vec<TocNode>),
+    /// The [`TocSlimEntry`] projection, when `titles_only` is set.
+    Slim(Vec<TocSlimEntry>),
+}
+
+impl TocNodes {
+    /// Project one page of corpus nodes into the requested shape.
+    pub fn project(nodes: &[Node], titles_only: bool) -> TocNodes {
+        if titles_only {
+            TocNodes::Slim(nodes.iter().map(TocSlimEntry::from_node).collect())
+        } else {
+            TocNodes::Full(nodes.iter().map(TocNode::from_node).collect())
+        }
+    }
+
+    /// Number of entries in this page.
+    pub fn len(&self) -> usize {
+        match self {
+            TocNodes::Full(nodes) => nodes.len(),
+            TocNodes::Slim(entries) => entries.len(),
+        }
+    }
+
+    /// True when the page carries no entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A book's table of contents as the facade serves it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Toc {
     /// The book this TOC belongs to.
     pub intake_id: i64,
     /// One page of organizing nodes in depth-first TOC order, at most
-    /// [`MAX_TOC_NODES`] of them.
-    pub nodes: Vec<TocNode>,
+    /// [`MAX_TOC_NODES`] of them — full nodes, or slim entries when
+    /// the request set `titles_only`.
+    pub nodes: TocNodes,
     /// Total number of TOC entries the request matches, regardless of
     /// pagination.
     pub total: u64,
@@ -198,6 +259,11 @@ pub struct ShowTocArgs {
     /// Maximum entries in this page. `None` means [`MAX_TOC_NODES`];
     /// larger values are clamped to it.
     pub limit: Option<u32>,
+    /// Return [`TocSlimEntry`] rows instead of full [`TocNode`]s.
+    pub titles_only: bool,
+    /// Keep only entries at `depth <= max_depth`; the book root is
+    /// depth 0. `None` keeps every depth.
+    pub max_depth: Option<i64>,
 }
 
 impl ShowTocArgs {
@@ -206,6 +272,16 @@ impl ShowTocArgs {
         self.limit
             .unwrap_or(MAX_TOC_NODES as u32)
             .min(MAX_TOC_NODES as u32)
+    }
+
+    /// Project these args onto the corpus-level [`TocQuery`].
+    pub fn to_query(&self) -> TocQuery<'_> {
+        TocQuery {
+            cap: self.effective_limit() as usize,
+            offset: self.offset as usize,
+            max_depth: self.max_depth,
+            ..TocQuery::default()
+        }
     }
 }
 

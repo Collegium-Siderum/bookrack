@@ -192,6 +192,15 @@ pub struct ShowTocArgs {
     /// small.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Return slim entries carrying only node_id, title, and depth —
+    /// the cheap way to scan a book's structure. The node_id feeds
+    /// library.read_span.
+    #[serde(default)]
+    pub titles_only: bool,
+    /// Keep only entries at depth <= max_depth. The book root is
+    /// depth 0, so 1 keeps the root plus its top-level divisions.
+    #[serde(default)]
+    pub max_depth: Option<i64>,
     /// Library short name from the registry. Omit to target the
     /// session's default library.
     #[serde(default)]
@@ -199,11 +208,14 @@ pub struct ShowTocArgs {
 }
 
 impl ShowTocArgs {
-    /// Project the pagination fields onto the ops-side args struct.
+    /// Project the pagination and projection fields onto the ops-side
+    /// args struct.
     fn toc_args(&self) -> bookrack_ops::dto::ShowTocArgs {
         bookrack_ops::dto::ShowTocArgs {
             offset: self.offset.unwrap_or(0),
             limit: self.limit,
+            titles_only: self.titles_only,
+            max_depth: self.max_depth,
         }
     }
 }
@@ -898,8 +910,11 @@ impl BookrackServer {
                        titles, depths, and document-order spans, paginated. To \
                        continue, pass the returned next_offset back as offset until \
                        next_offset is null; total counts every matching entry. A \
-                       limit of about 200 keeps responses small. Returns null when \
-                       no such book is ingested."
+                       limit of about 200 keeps responses small. To scan structure, \
+                       prefer titles_only (each entry keeps node_id / title / depth; \
+                       node_id is what library.read_span takes) and max_depth (1 = \
+                       root plus top-level divisions). Returns null when no such \
+                       book is ingested."
     )]
     async fn library_show_toc(
         &self,
@@ -1023,9 +1038,10 @@ impl BookrackServer {
         name = "library.show_paper_toc",
         description = "Return the table of contents of one paper. Papers carry one \
                        Work root plus one prose leaf, so the TOC is effectively \
-                       empty for a well-formed paper. The shape and the offset / \
-                       limit / next_offset pagination contract mirror \
-                       library.show_toc for the book pipeline."
+                       empty for a well-formed paper. The shape, the offset / limit \
+                       / next_offset pagination contract, and the titles_only / \
+                       max_depth projections mirror library.show_toc for the book \
+                       pipeline."
     )]
     async fn library_show_paper_toc(
         &self,
@@ -1993,7 +2009,7 @@ mod tests {
     use bookrack_ops::Citation;
     use bookrack_ops::dto::{
         BookDetail, BookSummary, ContextWindow, ContributorEntry, LibraryStats, ListBooksResult,
-        Passage, SpanText, Toc, TocNode,
+        Passage, SpanText, Toc, TocNode, TocNodes, TocSlimEntry,
     };
     use bookrack_query::NodeId;
 
@@ -2104,7 +2120,7 @@ mod tests {
     fn toc_serializes_with_its_pagination_fields() {
         let toc = Toc {
             intake_id: 1,
-            nodes: vec![TocNode {
+            nodes: TocNodes::Full(vec![TocNode {
                 node_id: 100_000_001,
                 parent_id: None,
                 title: Some("Root".to_string()),
@@ -2112,7 +2128,7 @@ mod tests {
                 ordinal: 0,
                 toc_lo: Some(1),
                 toc_hi: Some(50),
-            }],
+            }]),
             total: 3,
             next_offset: Some(1),
             truncated: true,
@@ -2120,9 +2136,33 @@ mod tests {
         let value = serde_json::to_value(&toc).expect("serialize");
         assert_eq!(value["intake_id"], 1);
         assert_eq!(value["nodes"][0]["node_id"], 100_000_001);
+        assert_eq!(value["nodes"][0].as_object().unwrap().len(), 7);
         assert_eq!(value["total"], 3);
         assert_eq!(value["next_offset"], 1);
         assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn slim_toc_entries_serialize_as_a_bare_three_field_array() {
+        let toc = Toc {
+            intake_id: 1,
+            nodes: TocNodes::Slim(vec![TocSlimEntry {
+                node_id: 100_000_001,
+                title: Some("Chapter One".to_string()),
+                depth: 1,
+            }]),
+            total: 1,
+            next_offset: None,
+            truncated: false,
+        };
+        let value = serde_json::to_value(&toc).expect("serialize");
+        // The untagged enum must not wrap the array in a variant tag.
+        assert!(value["nodes"].is_array());
+        let entry = value["nodes"][0].as_object().expect("entry object");
+        assert_eq!(entry.len(), 3);
+        assert_eq!(entry["node_id"], 100_000_001);
+        assert_eq!(entry["title"], "Chapter One");
+        assert_eq!(entry["depth"], 1);
     }
 
     #[test]

@@ -46,15 +46,22 @@ pub struct ShowTocParams {
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
+    pub titles_only: bool,
+    #[serde(default)]
+    pub max_depth: Option<i64>,
+    #[serde(default)]
     pub library: Option<String>,
 }
 
 impl ShowTocParams {
-    /// Project the pagination fields onto the ops-side args struct.
+    /// Project the pagination and projection fields onto the ops-side
+    /// args struct.
     fn toc_args(&self) -> ShowTocArgs {
         ShowTocArgs {
             offset: self.offset.unwrap_or(0),
             limit: self.limit,
+            titles_only: self.titles_only,
+            max_depth: self.max_depth,
         }
     }
 }

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::{Corpus, TocQuery};
+use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
 use crate::Ops;
@@ -20,9 +20,28 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::{
     BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
-    OcrPendingResult, ShowTocArgs, Toc, TocNode, clamp_limit,
+    OcrPendingResult, ShowTocArgs, Toc, TocNodes, clamp_limit,
 };
 use crate::recorder::record_call_sync;
+
+/// The audit-row args JSON of one TOC read: the intake id plus every
+/// requested parameter that differs from its default.
+pub(crate) fn toc_call_args(intake_id: i64, args: &ShowTocArgs) -> serde_json::Value {
+    let mut call_args = serde_json::json!({ "intake_id": intake_id });
+    if args.offset != 0 {
+        call_args["offset"] = serde_json::json!(args.offset);
+    }
+    if let Some(limit) = args.limit {
+        call_args["limit"] = serde_json::json!(limit);
+    }
+    if args.titles_only {
+        call_args["titles_only"] = serde_json::json!(true);
+    }
+    if let Some(max_depth) = args.max_depth {
+        call_args["max_depth"] = serde_json::json!(max_depth);
+    }
+    call_args
+}
 
 /// List books in catalog order, paginated.
 pub fn list_books<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result<ListBooksResult> {
@@ -167,36 +186,27 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
 ///
 /// `args.offset` skips leading entries and `args.limit` bounds the
 /// page (defaulting to and clamped by
-/// [`MAX_TOC_NODES`](crate::dto::MAX_TOC_NODES)). The response carries
-/// the total entry count and a `next_offset` cursor; pass the cursor
+/// [`MAX_TOC_NODES`](crate::dto::MAX_TOC_NODES)); `args.max_depth`
+/// narrows the walk to the shallow levels and `args.titles_only`
+/// swaps the entries for their slim projection. The response carries
+/// the filtered total and a `next_offset` cursor; pass the cursor
 /// back as `offset` until it comes back `None`.
 ///
 /// Returns [`OpsError::IntakeNotFound`] when no such intake is
 /// registered. An intake that exists but has no organizing nodes
 /// produces an empty [`Toc`] with `total = 0`.
 pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -> Result<Toc> {
-    let mut call_args = serde_json::json!({ "intake_id": intake_id });
-    if args.offset != 0 {
-        call_args["offset"] = serde_json::json!(args.offset);
-    }
-    if let Some(limit) = args.limit {
-        call_args["limit"] = serde_json::json!(limit);
-    }
-    record_call_sync!(ops, "library.show_toc", call_args, {
+    record_call_sync!(ops, "library.show_toc", toc_call_args(intake_id, args), {
         let catalog = Catalog::open_read_only(ops.catalog_db())?;
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
         let corpus = Corpus::open(ops.corpus_db())?;
         let book_root_id = PartitionIdx::new(intake_id).root();
-        let q = TocQuery {
-            cap: args.effective_limit() as usize,
-            offset: args.offset as usize,
-            ..TocQuery::default()
-        };
+        let q = args.to_query();
         let total = corpus.count_toc_nodes(book_root_id, &q)?;
         let nodes = corpus.toc_for_book(book_root_id, &q)?;
-        let projected: Vec<TocNode> = nodes.iter().map(TocNode::from_node).collect();
+        let projected = TocNodes::project(&nodes, args.titles_only);
         let end = u64::from(args.offset) + projected.len() as u64;
         let next_offset = if end < total {
             u32::try_from(end).ok()

@@ -13,9 +13,9 @@ use std::path::PathBuf;
 
 use bookrack_catalog::{Catalog, NewIntake};
 use bookrack_core::ItemKind;
-use bookrack_corpus::{Corpus, NewNode, NodeType};
+use bookrack_corpus::{Corpus, NewNode, NodeId, NodeType, PartitionIdx};
 use bookrack_embed::{Embedder, OllamaEmbedClient, Result as EmbedResult};
-use bookrack_ops::dto::{MAX_TOC_NODES, ShowTocArgs, Toc};
+use bookrack_ops::dto::{MAX_TOC_NODES, ShowTocArgs, Toc, TocNodes};
 use bookrack_ops::reads::books::show_toc;
 use bookrack_ops::reads::papers::show_paper_toc;
 use bookrack_ops::{Caller, Ops, OpsError, PapersPaths};
@@ -67,7 +67,12 @@ impl Fixture {
 /// Seed a book root plus `n` chapters titled `Chapter 0..n` into
 /// `corpus` under `intake_id`, each with a distinct document-order
 /// span so the TOC walk is root first, then the chapters by index.
-fn seed_chapters(corpus: &mut Corpus, intake_id: i64, n: u32) {
+/// Returns the partition index, the book root id, and the chapter ids.
+fn seed_chapters(
+    corpus: &mut Corpus,
+    intake_id: i64,
+    n: u32,
+) -> (PartitionIdx, NodeId, Vec<NodeId>) {
     let partition = corpus.allocate_partition(intake_id).expect("partition");
     let root = partition.book_root_id;
     corpus
@@ -88,14 +93,22 @@ fn seed_chapters(corpus: &mut Corpus, intake_id: i64, n: u32) {
         })
         .collect();
     corpus.insert_nodes(&chapters).expect("chapters");
+    (partition.idx, root, ids)
 }
 
-/// The titles of one TOC page, in walk order.
+/// The titles of one TOC page, in walk order, whichever projection
+/// the page carries.
 fn titles(toc: &Toc) -> Vec<String> {
-    toc.nodes
-        .iter()
-        .map(|n| n.title.clone().unwrap_or_default())
-        .collect()
+    match &toc.nodes {
+        TocNodes::Full(nodes) => nodes
+            .iter()
+            .map(|n| n.title.clone().unwrap_or_default())
+            .collect(),
+        TocNodes::Slim(entries) => entries
+            .iter()
+            .map(|n| n.title.clone().unwrap_or_default())
+            .collect(),
+    }
 }
 
 #[test]
@@ -108,6 +121,7 @@ fn pages_chain_through_the_cursor_until_it_terminates() {
     let mut args = ShowTocArgs {
         offset: 0,
         limit: Some(2),
+        ..ShowTocArgs::default()
     };
     let mut walked = Vec::new();
     let mut pages = 0;
@@ -150,6 +164,7 @@ fn entries_past_the_page_cap_are_reachable_by_offset() {
         &ShowTocArgs {
             offset: 0,
             limit: Some(MAX_TOC_NODES as u32 + 500),
+            ..ShowTocArgs::default()
         },
     )
     .expect("clamped page");
@@ -162,6 +177,7 @@ fn entries_past_the_page_cap_are_reachable_by_offset() {
         &ShowTocArgs {
             offset: MAX_TOC_NODES as u32,
             limit: None,
+            ..ShowTocArgs::default()
         },
     )
     .expect("second page");
@@ -183,6 +199,95 @@ fn an_intake_without_corpus_nodes_reads_as_an_empty_toc() {
     assert_eq!(toc.total, 0);
     assert_eq!(toc.next_offset, None);
     assert!(!toc.truncated);
+}
+
+#[test]
+fn titles_only_projects_slim_entries_over_the_same_walk() {
+    let mut fx = Fixture::build();
+    let intake_id = fx.register_book("sha-slim");
+    seed_chapters(&mut fx.corpus, intake_id, 3);
+
+    let slim = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            titles_only: true,
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("slim toc");
+    let TocNodes::Slim(entries) = &slim.nodes else {
+        panic!("titles_only must project slim entries");
+    };
+    assert_eq!(slim.total, 4);
+    assert_eq!(entries[0].title.as_deref(), Some("A Book"));
+    assert_eq!(entries[0].depth, 0);
+
+    // The slim walk addresses the same nodes as the full walk, so a
+    // node_id picked from it feeds a span read unchanged.
+    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full toc");
+    let TocNodes::Full(full_nodes) = &full.nodes else {
+        panic!("the default projection must carry full nodes");
+    };
+    let full_ids: Vec<i64> = full_nodes.iter().map(|n| n.node_id).collect();
+    let slim_ids: Vec<i64> = entries.iter().map(|n| n.node_id).collect();
+    assert_eq!(slim_ids, full_ids);
+}
+
+#[test]
+fn max_depth_narrows_the_walk_and_scopes_the_total() {
+    let mut fx = Fixture::build();
+    let intake_id = fx.register_book("sha-depth");
+    let (idx, root, chapters) = seed_chapters(&mut fx.corpus, intake_id, 3);
+    // Hang two sections under the first chapter, inside its span.
+    let section_ids = fx.corpus.allocate_node_ids(idx, 2).expect("ids");
+    for (i, id) in section_ids.iter().enumerate() {
+        fx.corpus
+            .insert_node(
+                &NewNode::child(*id, chapters[0], root, i as i64, 2, NodeType::Section)
+                    .title(format!("Section 0.{i}"))
+                    .toc_span(6 + i as i64, 6 + i as i64),
+            )
+            .expect("section");
+    }
+
+    // Unfiltered: root + 3 chapters + 2 sections.
+    let full = show_toc(&fx.ops, intake_id, &ShowTocArgs::default()).expect("full");
+    assert_eq!(full.total, 6);
+
+    // max_depth 1 keeps the root and the chapters only, and `total`
+    // counts the filtered walk, not the whole tree.
+    let shallow = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            max_depth: Some(1),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("shallow");
+    assert_eq!(shallow.total, 4);
+    assert_eq!(
+        titles(&shallow),
+        vec!["A Book", "Chapter 0", "Chapter 1", "Chapter 2"]
+    );
+
+    // Filter and pagination compose: the cursor walks the filtered
+    // set and the total stays scoped to it.
+    let page = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            offset: 2,
+            limit: Some(2),
+            max_depth: Some(1),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("page");
+    assert_eq!(page.total, 4);
+    assert_eq!(titles(&page), vec!["Chapter 1", "Chapter 2"]);
+    assert_eq!(page.next_offset, None);
 }
 
 #[test]
@@ -268,6 +373,7 @@ async fn paper_toc_pages_with_the_same_contract() {
         &ShowTocArgs {
             offset: 0,
             limit: Some(2),
+            ..ShowTocArgs::default()
         },
     )
     .expect("first page");
@@ -281,6 +387,7 @@ async fn paper_toc_pages_with_the_same_contract() {
         &ShowTocArgs {
             offset: 2,
             limit: Some(2),
+            ..ShowTocArgs::default()
         },
     )
     .expect("second page");

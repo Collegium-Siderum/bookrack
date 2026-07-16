@@ -10,7 +10,7 @@
 
 use bookrack_catalog::{Catalog, IntakeFilter};
 use bookrack_core::{ItemKind, PartitionIdx};
-use bookrack_corpus::{Corpus, TocQuery};
+use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 
 use crate::Ops;
@@ -18,8 +18,9 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::{
     ListPapersResult, PaperAuditInfo, PaperDetail, PaperFilter, PaperSource, PaperSummary,
-    ShowTocArgs, Toc, TocNode, clamp_limit,
+    ShowTocArgs, Toc, TocNodes, clamp_limit,
 };
+use crate::reads::books::toc_call_args;
 use crate::recorder::record_call_sync;
 
 /// List papers in catalog order, paginated.
@@ -165,48 +166,42 @@ pub fn show_paper_toc<E: Embedder>(
     intake_id: i64,
     args: &ShowTocArgs,
 ) -> Result<Toc> {
-    let mut call_args = serde_json::json!({ "intake_id": intake_id });
-    if args.offset != 0 {
-        call_args["offset"] = serde_json::json!(args.offset);
-    }
-    if let Some(limit) = args.limit {
-        call_args["limit"] = serde_json::json!(limit);
-    }
-    record_call_sync!(ops, "library.show_paper_toc", call_args, {
-        let papers_db = ops
-            .papers_catalog_db()
-            .ok_or(OpsError::PapersBackendNotConfigured)?;
-        let corpus_db = ops
-            .papers_corpus_db()
-            .ok_or(OpsError::PapersBackendNotConfigured)?;
-        let catalog = Catalog::open_read_only(papers_db)?;
-        if catalog.intake_by_id(intake_id)?.is_none() {
-            return Err(OpsError::IntakeNotFound { intake_id });
+    record_call_sync!(
+        ops,
+        "library.show_paper_toc",
+        toc_call_args(intake_id, args),
+        {
+            let papers_db = ops
+                .papers_catalog_db()
+                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let corpus_db = ops
+                .papers_corpus_db()
+                .ok_or(OpsError::PapersBackendNotConfigured)?;
+            let catalog = Catalog::open_read_only(papers_db)?;
+            if catalog.intake_by_id(intake_id)?.is_none() {
+                return Err(OpsError::IntakeNotFound { intake_id });
+            }
+            let corpus = Corpus::open(corpus_db)?;
+            let work_root_id = PartitionIdx::new(intake_id).root();
+            let q = args.to_query();
+            let total = corpus.count_toc_nodes(work_root_id, &q)?;
+            let nodes = corpus.toc_for_book(work_root_id, &q)?;
+            let projected = TocNodes::project(&nodes, args.titles_only);
+            let end = u64::from(args.offset) + projected.len() as u64;
+            let next_offset = if end < total {
+                u32::try_from(end).ok()
+            } else {
+                None
+            };
+            Ok(Toc {
+                intake_id,
+                nodes: projected,
+                total,
+                truncated: next_offset.is_some(),
+                next_offset,
+            })
         }
-        let corpus = Corpus::open(corpus_db)?;
-        let work_root_id = PartitionIdx::new(intake_id).root();
-        let q = TocQuery {
-            cap: args.effective_limit() as usize,
-            offset: args.offset as usize,
-            ..TocQuery::default()
-        };
-        let total = corpus.count_toc_nodes(work_root_id, &q)?;
-        let nodes = corpus.toc_for_book(work_root_id, &q)?;
-        let projected: Vec<TocNode> = nodes.iter().map(TocNode::from_node).collect();
-        let end = u64::from(args.offset) + projected.len() as u64;
-        let next_offset = if end < total {
-            u32::try_from(end).ok()
-        } else {
-            None
-        };
-        Ok(Toc {
-            intake_id,
-            nodes: projected,
-            total,
-            truncated: next_offset.is_some(),
-            next_offset,
-        })
-    })
+    )
 }
 
 /// Project one paper's base bibliographic row + contributors onto a

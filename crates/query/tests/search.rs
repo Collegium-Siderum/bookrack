@@ -307,18 +307,30 @@ async fn show_book_and_show_toc_round_trip_through_the_facade() {
         .show_toc(1, &toc_args)
         .expect("show toc")
         .expect("present");
-    let titles: Vec<&str> = toc
-        .nodes
-        .iter()
-        .filter_map(|n| n.title.as_deref())
-        .collect();
+    let bookrack_query::dto::TocNodes::Full(nodes) = &toc.nodes else {
+        panic!("default projection must carry full nodes");
+    };
+    let titles: Vec<&str> = nodes.iter().filter_map(|n| n.title.as_deref()).collect();
     assert!(
         titles.iter().any(|t| t.contains("Chapter")),
         "expected the chapter in the TOC: {titles:?}"
     );
-    assert_eq!(toc.total, toc.nodes.len() as u64);
+    assert_eq!(toc.total, nodes.len() as u64);
     assert_eq!(toc.next_offset, None);
     assert!(!toc.truncated);
+
+    let slim = library
+        .show_toc(
+            1,
+            &bookrack_query::dto::ShowTocArgs {
+                titles_only: true,
+                ..bookrack_query::dto::ShowTocArgs::default()
+            },
+        )
+        .expect("show slim toc")
+        .expect("present");
+    assert!(matches!(slim.nodes, bookrack_query::dto::TocNodes::Slim(_)));
+    assert_eq!(slim.total, toc.total);
 
     assert!(library.show_toc(404, &toc_args).expect("missing").is_none());
 }

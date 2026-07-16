@@ -19,6 +19,15 @@ release workflow extracts the matching section verbatim from this file.
   silently unreachable. Requests without the new parameters return the
   same entries as before.
 
+- **mcp, runtime: TOC reads gain `titles_only` and `max_depth`
+  projections.** With `titles_only`, each TOC entry shrinks to
+  `node_id` / `title` / `depth` — enough to scan a book's structure
+  and address a follow-up span read at a fraction of the response
+  size. `max_depth` keeps only the shallow levels (the book root is
+  depth 0, so `max_depth: 1` is the root plus its top-level
+  divisions). Both compose with pagination, and `total` counts the
+  filtered set.
+
 - **config, cli: `config.toml` gains `index_profile` and a `[search]`
   table.** A library's per-root config can now name the index profile it
   runs under and pin the two retrieval knobs (`search.top_k`,
