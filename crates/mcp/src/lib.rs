@@ -201,6 +201,11 @@ pub struct ShowTocArgs {
     /// depth 0, so 1 keeps the root plus its top-level divisions.
     #[serde(default)]
     pub max_depth: Option<i64>,
+    /// Keep only entries whose title contains this substring
+    /// (case-sensitive). The cheap way to locate one chapter or
+    /// section by name.
+    #[serde(default)]
+    pub title_substring: Option<String>,
     /// Library short name from the registry. Omit to target the
     /// session's default library.
     #[serde(default)]
@@ -208,14 +213,15 @@ pub struct ShowTocArgs {
 }
 
 impl ShowTocArgs {
-    /// Project the pagination and projection fields onto the ops-side
-    /// args struct.
+    /// Project the pagination, projection, and filter fields onto the
+    /// ops-side args struct.
     fn toc_args(&self) -> bookrack_ops::dto::ShowTocArgs {
         bookrack_ops::dto::ShowTocArgs {
             offset: self.offset.unwrap_or(0),
             limit: self.limit,
             titles_only: self.titles_only,
             max_depth: self.max_depth,
+            title_substring: self.title_substring.clone(),
         }
     }
 }
@@ -913,8 +919,10 @@ impl BookrackServer {
                        limit of about 200 keeps responses small. To scan structure, \
                        prefer titles_only (each entry keeps node_id / title / depth; \
                        node_id is what library.read_span takes) and max_depth (1 = \
-                       root plus top-level divisions). Returns null when no such \
-                       book is ingested."
+                       root plus top-level divisions). To locate one chapter or \
+                       section by name, filter with title_substring instead of \
+                       paging the whole TOC. Returns null when no such book is \
+                       ingested."
     )]
     async fn library_show_toc(
         &self,
@@ -1040,8 +1048,8 @@ impl BookrackServer {
                        Work root plus one prose leaf, so the TOC is effectively \
                        empty for a well-formed paper. The shape, the offset / limit \
                        / next_offset pagination contract, and the titles_only / \
-                       max_depth projections mirror library.show_toc for the book \
-                       pipeline."
+                       max_depth / title_substring parameters mirror \
+                       library.show_toc for the book pipeline."
     )]
     async fn library_show_paper_toc(
         &self,

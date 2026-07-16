@@ -264,6 +264,10 @@ pub struct ShowTocArgs {
     /// Keep only entries at `depth <= max_depth`; the book root is
     /// depth 0. `None` keeps every depth.
     pub max_depth: Option<i64>,
+    /// Keep only entries whose title contains this substring,
+    /// case-sensitively; `LIKE` metacharacters match literally.
+    /// `None` keeps every entry.
+    pub title_substring: Option<String>,
 }
 
 impl ShowTocArgs {
@@ -280,7 +284,7 @@ impl ShowTocArgs {
             cap: self.effective_limit() as usize,
             offset: self.offset as usize,
             max_depth: self.max_depth,
-            ..TocQuery::default()
+            title_substring: self.title_substring.as_deref(),
         }
     }
 }

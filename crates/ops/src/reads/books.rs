@@ -40,6 +40,9 @@ pub(crate) fn toc_call_args(intake_id: i64, args: &ShowTocArgs) -> serde_json::V
     if let Some(max_depth) = args.max_depth {
         call_args["max_depth"] = serde_json::json!(max_depth);
     }
+    if let Some(needle) = args.title_substring.as_deref() {
+        call_args["title_substring"] = serde_json::json!(needle);
+    }
     call_args
 }
 

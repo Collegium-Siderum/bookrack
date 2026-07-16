@@ -291,6 +291,79 @@ fn max_depth_narrows_the_walk_and_scopes_the_total() {
 }
 
 #[test]
+fn title_substring_narrows_the_walk_to_matching_titles() {
+    let mut fx = Fixture::build();
+    let intake_id = fx.register_book("sha-find");
+    seed_chapters(&mut fx.corpus, intake_id, 12);
+
+    // "Chapter 1" matches Chapter 1, 10, and 11 — a substring, not an
+    // exact-title match.
+    let hits = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            title_substring: Some("Chapter 1".to_string()),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("hits");
+    assert_eq!(hits.total, 3);
+    assert_eq!(titles(&hits), vec!["Chapter 1", "Chapter 10", "Chapter 11"]);
+
+    // A needle matching nothing reads as an empty page, not an error.
+    let none = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            title_substring: Some("Epilogue".to_string()),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("no hits");
+    assert_eq!(none.total, 0);
+    assert!(none.nodes.is_empty());
+    assert_eq!(none.next_offset, None);
+}
+
+#[test]
+fn title_substring_composes_with_projection_and_pagination() {
+    let mut fx = Fixture::build();
+    let intake_id = fx.register_book("sha-find-slim");
+    seed_chapters(&mut fx.corpus, intake_id, 12);
+
+    // Slim projection over the filtered walk.
+    let slim = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            titles_only: true,
+            title_substring: Some("Chapter 1".to_string()),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("slim hits");
+    assert!(matches!(slim.nodes, TocNodes::Slim(_)));
+    assert_eq!(slim.total, 3);
+    assert_eq!(titles(&slim), vec!["Chapter 1", "Chapter 10", "Chapter 11"]);
+
+    // Pagination walks the filtered set and `total` stays scoped to it.
+    let page = show_toc(
+        &fx.ops,
+        intake_id,
+        &ShowTocArgs {
+            offset: 2,
+            limit: Some(2),
+            title_substring: Some("Chapter 1".to_string()),
+            ..ShowTocArgs::default()
+        },
+    )
+    .expect("page");
+    assert_eq!(page.total, 3);
+    assert_eq!(titles(&page), vec!["Chapter 11"]);
+    assert_eq!(page.next_offset, None);
+}
+
+#[test]
 fn an_unknown_intake_is_intake_not_found() {
     let fx = Fixture::build();
     assert!(matches!(

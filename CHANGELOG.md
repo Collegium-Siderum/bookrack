@@ -28,6 +28,13 @@ release workflow extracts the matching section verbatim from this file.
   divisions). Both compose with pagination, and `total` counts the
   filtered set.
 
+- **mcp, runtime: TOC reads gain a `title_substring` filter.**
+  `library.show_toc` / `library.show_paper_toc` can keep only entries
+  whose title contains a substring (case-sensitive; `LIKE`
+  metacharacters match literally), so locating one chapter by name is
+  a single filtered call instead of a full TOC pull. Composes with
+  pagination and the projections; `total` counts the filtered set.
+
 - **config, cli: `config.toml` gains `index_profile` and a `[search]`
   table.** A library's per-root config can now name the index profile it
   runs under and pin the two retrieval knobs (`search.top_k`,
