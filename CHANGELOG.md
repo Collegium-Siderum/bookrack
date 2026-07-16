@@ -142,6 +142,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: queue job outcomes reach the structured log channels.**
+  The per-job completion line (`queue: <id> <name> done/skipped/
+  failed ...`) was written straight to the daemon's stderr, bypassing
+  the tracing pipeline — `bookrack logs --follow`, `logs.tail`, the
+  `log` event channel, and the rolling log file never saw it, so a
+  remote observer could only infer job outcomes from `queue.tick`
+  summaries. The line is now emitted as a `tracing` INFO event (with
+  the full job id as a structured field) and reaches all three log
+  rails; the operator-facing stderr marker is unchanged in substance.
+
 - **cli, session: the library-mismatch pre-flight no longer trusts a
   dead session's lock file.** The session lock's liveness lives in the
   flock — the file is deliberately never deleted, so its recorded

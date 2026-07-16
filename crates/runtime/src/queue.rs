@@ -666,12 +666,14 @@ fn summarize_outcome(job: &QueueJob) -> JobOutcomeSummary {
     }
 }
 
-/// Emit one terminating line per job onto stderr — a job-completion
-/// marker that lands on its own line after the long tail of tracing /
-/// progress output an ingest produces. The line gives the operator a
-/// clean visual cue that the worker has finished; without it, the last
-/// terminal row is the trailing progress line and the REPL prompt sits
-/// invisibly N rows above, indistinguishable from a hung daemon.
+/// Emit one terminating INFO event per job — a job-completion marker
+/// that lands on its own line after the long tail of progress output
+/// an ingest produces. On the daemon's stderr it gives the operator a
+/// clean visual cue that the worker has finished; because it goes
+/// through `tracing`, the same line also reaches the rolling log file
+/// and the log broadcast channel, so remote observers (`logs --follow`,
+/// the `log` event channel) see job outcomes directly instead of
+/// inferring them from `queue.tick` summaries.
 fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
     let short: String = job.id.chars().take(8).collect();
     let name = job
@@ -680,14 +682,22 @@ fn announce_outcome(job: &QueueJob, outcome: &JobOutcome) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| job.path.display().to_string());
     match outcome {
-        JobOutcome::Done => eprintln!("queue: {short} {name} done"),
+        JobOutcome::Done => tracing::info!(job = %job.id, "queue: {short} {name} done"),
         JobOutcome::SkippedDuplicate { intake_id } => {
-            eprintln!("queue: {short} {name} skipped (already in catalog as intake {intake_id})")
+            tracing::info!(
+                job = %job.id,
+                "queue: {short} {name} skipped (already in catalog as intake {intake_id})"
+            )
         }
         JobOutcome::NeedsOcr { intake_id } => {
-            eprintln!("queue: {short} {name} needs OCR (anchor intake {intake_id})")
+            tracing::info!(
+                job = %job.id,
+                "queue: {short} {name} needs OCR (anchor intake {intake_id})"
+            )
         }
-        JobOutcome::Failed(msg) => eprintln!("queue: {short} {name} failed: {msg}"),
+        JobOutcome::Failed(msg) => {
+            tracing::info!(job = %job.id, "queue: {short} {name} failed: {msg}")
+        }
     }
 }
 
