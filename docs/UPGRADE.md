@@ -170,21 +170,38 @@ per-root override that silently outranks it. The precedence was backwards
 enough to need a dedicated check warning you that the profile you
 declared was being shadowed.
 
-Migrating, per library:
+A library that never set either one has nothing to do here, and says so
+by staying quiet: no warning fires. Silence is not a reason to skip the
+check, though — run `bookrack doctor` once after upgrading and look for
+an `embed-model` row. That row, or the warning on stderr, is the only
+thing that means this section applies to you.
 
-1. See what resolves today: `bookrack index-profile current --library
-   <name>` prints the effective embed model.
-2. Make sure a profile declaring that same model is in effect —
-   `bookrack index-profile apply <profile> --library <name>`, or pick a
-   built-in whose model already matches.
-3. Confirm `index-profile current` still reports the same effective
-   model. **This is the step that matters**: if the model changes, the
-   library's existing vectors no longer match, and the next query or
-   embed fails on a stamp mismatch. Reconcile with `index-profile apply`
-   before removing anything.
-4. Remove the override: unset `BOOKRACK_EMBED_MODEL` (check shell
+Migrating, per library. Nothing here rebuilds an index or needs a
+running daemon:
+
+1. **See what resolves today.** `bookrack index-profile current --library
+   <name>` prints the effective embed model. Note it down.
+2. **Pick a profile that declares that same model** and declare it:
+   `bookrack libraries config <name> index_profile=<profile>`.
+   `bookrack index-profile list` shows the built-ins and what each
+   declares. The declaration is written to the library's manifest; a root
+   old enough to have no manifest gets one minted here, which is why a
+   new `bookrack-library.toml` may appear.
+3. **Confirm the effective model did not change.** Re-run
+   `index-profile current`. **This is the step that matters**: if the
+   model changed, the library's existing vectors were written by the old
+   one, and the next query or embed fails on a stamp mismatch. Go back to
+   step 2 and pick a profile that matches, or reconcile deliberately with
+   `index-profile apply` (below) before continuing.
+4. **Remove the override.** Unset `BOOKRACK_EMBED_MODEL` (check shell
    profiles and CI environments), and `bookrack libraries config <name>
-   --unset embed_model`.
+   --unset embed_model`. `index-profile current` should now be silent.
+
+`index-profile apply` is a different job and is not part of this
+migration. It reconciles a library *to* a profile — rebuilding the ANN
+index, re-embedding — so it derives an action plan and needs a daemon
+already serving that library. Reach for it when you want the library
+changed, not when you are only moving where its model is declared.
 
 After the removal minor, a `config.toml` still carrying `embed_model`
 makes every command fail with a message naming the retired key, until
