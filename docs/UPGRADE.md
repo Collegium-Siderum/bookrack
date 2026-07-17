@@ -187,12 +187,30 @@ running daemon:
    declares. The declaration is written to the library's manifest; a root
    old enough to have no manifest gets one minted here, which is why a
    new `bookrack-library.toml` may appear.
-3. **Confirm the effective model did not change.** Re-run
-   `index-profile current`. **This is the step that matters**: if the
-   model changed, the library's existing vectors were written by the old
-   one, and the next query or embed fails on a stamp mismatch. Go back to
-   step 2 and pick a profile that matches, or reconcile deliberately with
-   `index-profile apply` (below) before continuing.
+3. **Confirm the profile matches the vectors you already have.** Re-run
+   `index-profile current` and read its `stamps:` line. **This is the
+   step that matters**, and this is the line to read:
+
+   - `stamps: consistent with the built index (…)` — the profile
+     declares the model your vectors were written with. Safe to continue.
+   - `stamp mismatch: embed.model: profile declares 'X' but the built
+     index is stamped 'Y'` — **stop**. Removing the override in step 4
+     would switch the library to `X`, and every query and embed would
+     then fail against vectors written by `Y`. Go back to step 2 and pick
+     a profile declaring `Y`, or change the library deliberately with
+     `index-profile apply` (below).
+
+   Do **not** judge this by the `effective embed model:` line. Your
+   override is still in place at this point, so that line reports the
+   override's value whatever profile you declared — it reads "unchanged"
+   even when step 4 is about to break the library. The `stamps:` line
+   compares the *profile* against the built index, which is the question
+   you actually need answered.
+
+   Setting `embed_model` in `config.toml` (rather than the env var) is
+   the easier case: a field that contradicts the declared profile is a
+   hard error naming both values and both ways out, so you cannot get
+   past this step unaware.
 4. **Remove the override.** Unset `BOOKRACK_EMBED_MODEL` (check shell
    profiles and CI environments), and `bookrack libraries config <name>
    --unset embed_model`. `index-profile current` should now be silent.

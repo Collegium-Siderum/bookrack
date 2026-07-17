@@ -186,10 +186,11 @@ release workflow extracts the matching section verbatim from this file.
   still work and still win; each now warns once per process when it is in
   effect, `bookrack doctor` reports the same as a warning row, and
   `libraries config <name> embed_model=<v>` warns as it writes. Migrate
-  by declaring the model through an index profile and confirming
-  `index-profile current` reports the same effective model before you
-  drop the override — [`docs/UPGRADE.md`](docs/UPGRADE.md) has the
-  per-library steps. After removal, a `config.toml` still carrying the
+  by declaring the model through an index profile and checking that
+  `index-profile current` reports no stamp mismatch — that line compares
+  the profile against the vectors you already have, which is the question
+  that matters — before you drop the override.
+  [`docs/UPGRADE.md`](docs/UPGRADE.md) has the per-library steps. After removal, a `config.toml` still carrying the
   key will fail loudly rather than resolve a model you did not ask for.
   The `BOOKRACK_SEARCH_*` and embed-batching variables are unaffected:
   they configure a process, not a library.
