@@ -147,6 +147,7 @@ pub async fn gather_with(
     }
     push_registry_consistency_rows(&mut rows);
     push_index_profile_coherence_rows(&mut rows);
+    push_deprecated_embed_model_row(&mut rows, cfg.as_ref());
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
@@ -840,6 +841,27 @@ fn entry_profile_reference(
         entry.index_profile.as_deref(),
     );
     (effective, drift)
+}
+
+/// Emit the deprecation row for an embed-model layer above the index
+/// profile, reusing the resolution chain's own definition of which layer
+/// wins. Absent entirely when neither layer is set — the healthy case,
+/// which needs no row.
+fn push_deprecated_embed_model_row(rows: &mut Vec<Row>, cfg: Option<&Config>) {
+    let default_root = bookrack_config::RootConfig::default();
+    let root = cfg.map_or(&default_root, |c| c.root_config());
+    let Some(source) =
+        bookrack_config::deprecated_embed_model_layer(|key| std::env::var(key).ok(), root)
+    else {
+        return;
+    };
+    rows.push(Row {
+        label: "embed-model".to_string(),
+        value: source.to_string(),
+        status: Status::Warn {
+            note: bookrack_config::deprecated_embed_model_note(source),
+        },
+    });
 }
 
 /// The drift note for a library whose lower-priority sources still name

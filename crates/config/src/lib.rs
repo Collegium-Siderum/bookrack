@@ -774,6 +774,16 @@ pub fn set_root_config_values(
     for key in unsets {
         validate_root_config_key(key)?;
     }
+    // Warn where the operator is looking: writing the key is the moment
+    // to say it is going away, rather than leaving them to meet the
+    // resolution-time warning later. Unsetting it is the cure, not the
+    // disease, so it is not warned about.
+    if sets.iter().any(|(key, _)| key == "embed_model") {
+        eprintln!(
+            "warning: {}",
+            deprecated_embed_model_note("the config.toml `embed_model` field")
+        );
+    }
 
     let path = data_dir.join(ROOT_CONFIG_NAME);
     let text = read_root_config_text(data_dir)?;
@@ -1059,7 +1069,15 @@ impl EmbedConfig {
     /// The index profile resolves outside this crate; `profile_model` is
     /// the embed model it declares, when a profile is in effect. The
     /// batching budgets remain env-only knobs.
+    ///
+    /// The two layers above the profile are deprecated: warns once per
+    /// process when either is in effect. The warning lives here rather
+    /// than in [`EmbedConfig::resolve_from`] so the chain itself stays
+    /// pure and testable, and so the wide call surface behind it (every
+    /// embed resolution in the daemon) cannot turn one misconfiguration
+    /// into a screenful.
     pub fn resolve(root: &RootConfig, profile_model: Option<&str>) -> EmbedConfig {
+        warn_deprecated_embed_model_layers(|key| std::env::var(key).ok(), root);
         EmbedConfig::resolve_from(|key| std::env::var(key).ok(), root, profile_model)
     }
 
@@ -2204,6 +2222,63 @@ fn emit_registry_upgrade_notice() {
     eprintln!("info: registry upgraded to entry-table format");
 }
 
+/// Text of the deprecation warning for an embed-model layer above the
+/// index profile. Shared with the `doctor` row so an operator reads the
+/// same sentence wherever they meet it.
+pub fn deprecated_embed_model_note(source: &str) -> String {
+    format!(
+        "{source} overrides the index profile and will be removed in the next minor; \
+         declare the model through an index profile instead \
+         (`bookrack index-profile current` shows what resolves today)"
+    )
+}
+
+/// Human name of the `config.toml` embed-model layer, for the warning
+/// and the `doctor` row.
+pub const DEPRECATED_EMBED_MODEL_FIELD: &str = "the config.toml `embed_model` field";
+
+/// Which deprecated embed-model layer is in effect, if any.
+///
+/// A library's embed model is the semantic identity of its vectors — a
+/// library-level fact — so a process-level env var and a per-root
+/// override sitting *above* the index profile that declares it is the
+/// wrong precedence. Both layers are on their way out; this reports
+/// whether one is currently winning.
+///
+/// Names only the layer that actually resolves: with both set the env
+/// var wins, and naming the shadowed field too would misreport what is
+/// in effect. Pure, so the precedence has one testable definition that
+/// the resolution-time warning and `doctor` share.
+pub fn deprecated_embed_model_layer(
+    get: impl Fn(&str) -> Option<String>,
+    root: &RootConfig,
+) -> Option<&'static str> {
+    if env_trimmed(get(EMBED_MODEL_ENV)).is_some() {
+        Some(EMBED_MODEL_ENV)
+    } else if env_trimmed(root.embed_model.clone()).is_some() {
+        Some(DEPRECATED_EMBED_MODEL_FIELD)
+    } else {
+        None
+    }
+}
+
+/// Warn once per process when a deprecated embed-model layer is in
+/// effect.
+///
+/// One warning per process, not per resolution: the daemon resolves the
+/// embed model on nearly every write path, and a per-call warning would
+/// bury the message it is trying to deliver. `doctor` carries the same
+/// note as a row an operator can go looking for.
+fn warn_deprecated_embed_model_layers(get: impl Fn(&str) -> Option<String>, root: &RootConfig) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    if let Some(source) = deprecated_embed_model_layer(get, root) {
+        ONCE.call_once(|| {
+            eprintln!("deprecated: {}", deprecated_embed_model_note(source));
+        });
+    }
+}
+
 /// Serialize `doc` and write it to `path` atomically, creating the
 /// parent directory as needed.
 fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigError> {
@@ -3051,6 +3126,59 @@ mod tests {
         assert_eq!(cfg.request_timeout, d.request_timeout);
         assert_eq!(cfg.max_retries, d.max_retries);
         assert_eq!(cfg.channel_capacity, d.channel_capacity);
+    }
+
+    #[test]
+    fn deprecated_embed_model_layer_names_only_the_one_in_effect() {
+        let with_field = RootConfig {
+            embed_model: Some("file-model".to_string()),
+            ..RootConfig::default()
+        };
+        let env = |key: &str| match key {
+            EMBED_MODEL_ENV => Some("env-model".to_string()),
+            _ => None,
+        };
+
+        // Both layers set: the env var wins the chain, so it is the one
+        // named — reporting the shadowed field would misdescribe what is
+        // actually resolving.
+        assert_eq!(
+            deprecated_embed_model_layer(env, &with_field),
+            Some(EMBED_MODEL_ENV)
+        );
+        assert_eq!(
+            deprecated_embed_model_layer(|_| None, &with_field),
+            Some(DEPRECATED_EMBED_MODEL_FIELD)
+        );
+        assert_eq!(
+            deprecated_embed_model_layer(env, &RootConfig::default()),
+            Some(EMBED_MODEL_ENV)
+        );
+
+        // Neither layer: nothing deprecated is in effect.
+        assert_eq!(
+            deprecated_embed_model_layer(|_| None, &RootConfig::default()),
+            None
+        );
+        // An empty or whitespace value is not a declaration, matching
+        // how the resolution chain skips it.
+        let blank_field = RootConfig {
+            embed_model: Some("   ".to_string()),
+            ..RootConfig::default()
+        };
+        assert_eq!(deprecated_embed_model_layer(|_| None, &blank_field), None);
+        assert_eq!(
+            deprecated_embed_model_layer(|_| Some("  ".to_string()), &RootConfig::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn deprecated_embed_model_note_names_the_source_and_the_way_out() {
+        let note = deprecated_embed_model_note(EMBED_MODEL_ENV);
+        assert!(note.contains("BOOKRACK_EMBED_MODEL"), "{note}");
+        assert!(note.contains("removed in the next minor"), "{note}");
+        assert!(note.contains("index profile"), "{note}");
     }
 
     #[test]

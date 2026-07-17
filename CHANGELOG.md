@@ -175,6 +175,25 @@ release workflow extracts the matching section verbatim from this file.
   current`/`apply` drop their not-implemented notes; `apply` hints at
   the daemon restart that brings the backend up.
 
+### Deprecated
+
+- **config: `BOOKRACK_EMBED_MODEL` and the `config.toml` `embed_model`
+  field, both removed in the next minor.** A library's embed model is the
+  semantic identity of its vectors — which model wrote them, and so which
+  model can read them. That is a library-level fact, and it belongs to
+  the index profile the library declares, not to a process-level variable
+  or a per-root field that silently outranks the profile. Both layers
+  still work and still win; each now warns once per process when it is in
+  effect, `bookrack doctor` reports the same as a warning row, and
+  `libraries config <name> embed_model=<v>` warns as it writes. Migrate
+  by declaring the model through an index profile and confirming
+  `index-profile current` reports the same effective model before you
+  drop the override — [`docs/UPGRADE.md`](docs/UPGRADE.md) has the
+  per-library steps. After removal, a `config.toml` still carrying the
+  key will fail loudly rather than resolve a model you did not ask for.
+  The `BOOKRACK_SEARCH_*` and embed-batching variables are unaffected:
+  they configure a process, not a library.
+
 ### Changed
 
 - **config, runtime: conflicting profile declarations no longer refuse

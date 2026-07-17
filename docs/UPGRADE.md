@@ -154,6 +154,43 @@ changes `CHUNK_VERSION` or
 `NORMALIZE_VERSION` re-uses the existing chunk text but still costs
 one embedding pass per book.
 
+## Declaring the embed model through an index profile
+
+`BOOKRACK_EMBED_MODEL` and the `embed_model` field in a root's
+`config.toml` are **deprecated and will be removed in the next minor**.
+Both still work and still win over the index profile; each warns once per
+process while it does, and `bookrack doctor` carries the same warning as
+a row.
+
+Why they are going: a library's embed model is the semantic identity of
+its vectors — which model wrote them, and therefore which model can read
+them. That is a fact about the library, so it belongs to the index
+profile the library declares, not to a process-level variable or a
+per-root override that silently outranks it. The precedence was backwards
+enough to need a dedicated check warning you that the profile you
+declared was being shadowed.
+
+Migrating, per library:
+
+1. See what resolves today: `bookrack index-profile current --library
+   <name>` prints the effective embed model.
+2. Make sure a profile declaring that same model is in effect —
+   `bookrack index-profile apply <profile> --library <name>`, or pick a
+   built-in whose model already matches.
+3. Confirm `index-profile current` still reports the same effective
+   model. **This is the step that matters**: if the model changes, the
+   library's existing vectors no longer match, and the next query or
+   embed fails on a stamp mismatch. Reconcile with `index-profile apply`
+   before removing anything.
+4. Remove the override: unset `BOOKRACK_EMBED_MODEL` (check shell
+   profiles and CI environments), and `bookrack libraries config <name>
+   --unset embed_model`.
+
+After the removal minor, a `config.toml` still carrying `embed_model`
+makes every command fail with a message naming the retired key, until
+the line is deleted. That is deliberate: silently ignoring the field
+would change which model a library resolves without telling anyone.
+
 ## Moving the index-profile reference into the manifest
 
 A library's `index_profile` reference now lives in its manifest
