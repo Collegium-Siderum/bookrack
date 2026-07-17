@@ -19,6 +19,7 @@
 
 use std::process::Stdio;
 
+use bookrack_session::RootLock;
 use eyre::Result;
 
 fn bookrack_bin() -> &'static str {
@@ -718,6 +719,55 @@ async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
         !written.contains("gone"),
         "the entry should be forgotten: {written}",
     );
+    Ok(())
+}
+
+/// `libraries remove --purge` refuses a data root another writer holds:
+/// the data survives and the registry entry stays, so the operator can
+/// retry once the holder is stopped (exit 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_refuses_a_root_in_use() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let holder_dir = tempfile::tempdir()?;
+    let root = holder_dir.path().join("data");
+    std::fs::create_dir(&root)?;
+    write_manifest_uuid(&root, "busy", "01890a5d-0000-7000-8000-00000000000d");
+    std::fs::write(
+        &registry_path,
+        format!("[libraries]\nbusy = \"{}\"\n", root.display()),
+    )?;
+    let held = RootLock::acquire(&root, std::process::id(), "daemon")?;
+
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "remove", "busy", "--purge", "--yes"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "purge of a root in use is a user error (exit 2); stderr={stderr:?}",
+    );
+    assert!(
+        stderr.contains("already in use"),
+        "the refusal should name the conflict: {stderr:?}",
+    );
+    assert!(root.exists(), "the data root must survive a refused purge");
+    let written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        written.contains("busy"),
+        "the entry must survive a refused purge: {written}",
+    );
+
+    drop(held);
     Ok(())
 }
 

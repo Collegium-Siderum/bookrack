@@ -4,12 +4,13 @@
 //! headless `bookrack-mcp` binary.
 //!
 //! [`DaemonRuntime::start`] performs the fixed eleven-step bring-up:
-//! resolve the runtime directory, acquire the session [`TtyLock`],
-//! initialise observability, build the embedding client, preflight the
-//! catalog schema, open the query [`Library`], wrap it in an [`Ops`],
-//! warm a one-handle [`LibraryRegistry`], install the platform signal
-//! aggregator, load the persistent ingest queue state, and — in the
-//! `bookrack run` profile — spawn the queue worker.
+//! resolve the runtime directory, acquire the session [`TtyLock`] and
+//! the served root's [`RootLock`], initialise observability, build the
+//! embedding client, preflight the catalog schema, open the query
+//! [`Library`], wrap it in an [`Ops`], warm a one-handle
+//! [`LibraryRegistry`], install the platform signal aggregator, load
+//! the persistent ingest queue state, and — in the `bookrack run`
+//! profile — spawn the queue worker.
 //!
 //! Callers wire the MCP listener and any REPL surface as separate
 //! [`tokio::task::JoinHandle`]s and hand them to
@@ -39,7 +40,9 @@ use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
-use bookrack_session::{TtyLock, resolve_runtime_dir, tty_lock_name};
+use bookrack_session::{
+    RootLock, TtyLock, is_root_lock_conflict, resolve_runtime_dir, root_lock_path, tty_lock_name,
+};
 use eyre::{Context, Result};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -198,6 +201,11 @@ pub struct DaemonRuntime {
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
     pub _tty_lock: TtyLock,
+    /// Drop-only field: holds the exclusive flock on the served data
+    /// root for the daemon's whole life, so no second daemon and no
+    /// offline destructive command touches the root behind its back.
+    /// `None` when the root cannot host a lock file (read-only volume).
+    pub _root_lock: Option<RootLock>,
     /// Drop-only field: holds the tracing non-blocking writer's
     /// background-thread guard. Dropping flushes buffered log lines
     /// and joins the writer thread, so this lives until the runtime
@@ -294,6 +302,30 @@ impl DaemonRuntime {
         tty_lock
             .record_library_root(cfg.data_dir(), cfg.library())
             .context("record library root in session lock")?;
+        // 4b. Take the data-root lock before anything under the root is
+        //     opened (log files, SQLite, LanceDB, the queue snapshot),
+        //     so a contended root fails with no half-open handles.
+        //     A root that cannot host a lock file at all — a read-only
+        //     volume, which `libraries add` already supports — is served
+        //     unlocked: read-only media have no writers to exclude.
+        let root_lock = match RootLock::acquire(cfg.data_dir(), std::process::id(), "daemon") {
+            Ok(lock) => {
+                tracing::info!(
+                    path = %root_lock_path(cfg.data_dir()).display(),
+                    "bookrack data root lock acquired",
+                );
+                Some(lock)
+            }
+            Err(err) if is_root_lock_conflict(&err) => return Err(err),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    root = %cfg.data_dir().display(),
+                    "data root lock could not be created; serving the root unlocked",
+                );
+                None
+            }
+        };
         let (obs_guard, log_stream) = bookrack_obs::init(&cfg, &opts.log_config);
         // The guard owns the non-blocking writer's background thread;
         // drop flushes buffered lines and joins the thread. Bind it
@@ -722,6 +754,7 @@ impl DaemonRuntime {
             method_context: method_ctx,
             rerank_supervisor,
             _tty_lock: tty_lock,
+            _root_lock: root_lock,
             _obs_guard: obs_guard,
             queue_worker,
             signal_handle,
@@ -750,9 +783,10 @@ impl DaemonRuntime {
             control_sock,
             event_stream,
             rerank_supervisor,
-            // Bound (not folded into `..`) so the flock lives across
-            // the drain timeouts below; `..` would drop it here.
+            // Bound (not folded into `..`) so the flocks live across
+            // the drain timeouts below; `..` would drop them here.
             _tty_lock,
+            _root_lock,
             ..
         } = self;
 

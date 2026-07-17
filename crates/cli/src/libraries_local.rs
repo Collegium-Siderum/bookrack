@@ -16,6 +16,7 @@ use bookrack_config::{
     repoint_library, root_config_env_override, scan_for_libraries, set_root_config_values,
     upsert_library_entry,
 };
+use bookrack_session::{RootLock, is_root_lock_conflict};
 use eyre::{Report, Result};
 use serde::Serialize;
 
@@ -324,6 +325,27 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
                     message: format!("no library named '{name}' in the registry"),
                 })
             })?;
+        // Take the data root's exclusive lock before the detect gate
+        // and the confirmation: a root in use is refused before the
+        // operator types the name, and the lock closes the window in
+        // which a daemon could attach while the prompt is open.
+        let lock = RootLock::acquire(
+            &entry.data_dir,
+            std::process::id(),
+            "libraries remove --purge",
+        )
+        .map_err(|err| {
+            if is_root_lock_conflict(&err) {
+                Report::new(BookrackCliError::LocalUserError {
+                    message: format!(
+                        "refusing to purge {}: {err}; stop the daemon serving it first",
+                        entry.data_dir.display()
+                    ),
+                })
+            } else {
+                err
+            }
+        })?;
         gate_purge_target(&entry.data_dir)?;
         let prompt = format!(
             "This deletes {} for good. Type the library name '{name}' to confirm:",
@@ -336,6 +358,11 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
             return Ok(());
         }
         remove_library(&registry_path, &name).map_err(config_error)?;
+        // Release before the delete: the lock file sits inside the tree
+        // about to go, and Windows refuses to remove a file with an open
+        // handle. The registry entry is already gone by now, so nothing
+        // routes a new writer here through a library name.
+        drop(lock);
         std::fs::remove_dir_all(&entry.data_dir)
             .map_err(|e| eyre::eyre!("purge {}: {e}", entry.data_dir.display()))?;
         if !ctx().is_quiet() {

@@ -14,6 +14,43 @@ stays read-only and tool-scoped.
   up the `control_sock=<path>` line. The lock file's `pid=` and
   `mcp=` lines are unchanged.
 
+## Locks
+
+Two advisory `flock`s divide the daemon's exclusivity between the
+session and the data it serves.
+
+| Lock | File | Guarantee | Held for |
+| --- | --- | --- | --- |
+| Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above | the daemon's lifetime |
+| Data root | `<data_root>/.bookrack.lock` | one writer per data root, whether a daemon or an offline destructive command | the daemon's lifetime; briefly for an offline writer |
+
+The daemon takes the data-root lock during bring-up, after resolving
+its configuration and before opening anything under the root, and holds
+it until shutdown: mounting a root means owning it. A second daemon
+pointed at the same root — even from a different runtime directory —
+fails to start and names the holder's recorded `pid=` and `role=`.
+`bookrack libraries remove --purge` takes the same lock before its
+detect gate, so purging a root a daemon is serving is refused (exit 2)
+rather than silently destroying live data.
+
+Both locks are held on a file of their own that no atomic rewrite ever
+replaces: `flock` follows the inode, and a `rename` would strand the
+lock on an unlinked file. The OS drops the lock with the file handle,
+so a crash leaves no stale lock — only stale content, which the next
+acquirer truncates. That content is display-only: the flock is the
+truth, and no reader may decide anything from a snapshot of the file.
+
+Read-only surfaces stay lock-free. Offline read-only commands
+(`distill`, `runs`, `retrieval`, `doctor` diagnostics) never take the
+data-root lock, so they keep working alongside a serving daemon;
+concurrent reads rest on SQLite's WAL and LanceDB's read semantics. A
+data root on read-only media cannot host a lock file at all; the daemon
+warns and serves it unlocked, since such a root has no writers to
+exclude.
+
+Both locks carry the usual advisory-lock caveat on network file
+systems. bookrack is a local-first system and does not probe for it.
+
 ## Protocol
 
 - JSON-RPC 2.0 over newline-delimited JSON. Each TCP-style frame is

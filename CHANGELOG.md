@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **session, runtime: data roots are guarded by an exclusive
+  `.bookrack.lock`.** The daemon takes the new root lock during
+  bring-up — after resolving its configuration, before opening anything
+  under the root — and holds it until shutdown, so a second daemon
+  pointed at the same data root fails to start instead of racing the
+  first one through SQLite, LanceDB, and the queue snapshot. This
+  closes the gap that two different `BOOKRACK_RUNTIME_DIR` values left
+  open: the session lock only ever bound one daemon per runtime
+  directory, never one writer per data root. Offline read-only commands
+  (`distill`, `runs`, `retrieval`, `doctor` diagnostics) do not take the
+  lock and keep working alongside a serving daemon; a read-only data
+  root, which cannot host a lock file at all, is served unlocked with a
+  warning.
+
 - **runtime: `working` daemon state, and the lifecycle state is now
   derived instead of assigned.** `daemon.state` / `status.state` gain a
   fifth value, `working`: the queue worker is executing a job, without
@@ -147,6 +161,15 @@ release workflow extracts the matching section verbatim from this file.
   the daemon restart that brings the backend up.
 
 ### Changed
+
+- **cli: `libraries remove --purge` refuses a data root that is
+  currently in use.** The purge takes the root lock before its detect
+  gate, so a root a daemon is serving is now refused (exit 2, naming the
+  holder's pid and role) instead of being deleted out from under it. The
+  lock is taken ahead of the typed confirmation, so the conflict surfaces
+  before the operator types the library name and no writer can attach
+  while the prompt waits. `libraries remove` without `--purge` touches no
+  data and takes no lock.
 
 - **config: the registry's entry-table format is final.** Every write
   path emits table-form entries and upgrades a legacy bare-string

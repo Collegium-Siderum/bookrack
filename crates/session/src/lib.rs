@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session-scoped tty lock shared by every bookrack process that holds
-//! a database write handle.
+//! Cross-process locks guarding a bookrack session and the data root
+//! it serves.
 //!
-//! `bookrack run` and the headless `bookrack-mcp` both compete for the
-//! same lock file under the runtime directory, so the operator cannot
-//! accidentally point two writers at the same on-disk catalog or
-//! corpus. Readers that go through the MCP HTTP surface (`bookrack
-//! exec`) never take the lock; they read its contents to discover the
-//! running session and reach it over the network.
+//! Two locks with distinct jobs live here:
 //!
-//! The lock is advisory `flock`-style: the OS releases it when the
+//! - [`TtyLock`] at `<runtime_dir>/bookrack.tty.lock` — one daemon per
+//!   runtime directory, plus the discovery lines (`pid=`, `mcp=`,
+//!   `control_sock=`) other tools read to reach the live session.
+//!   `bookrack run` and the headless `bookrack-mcp` compete for it, so
+//!   the operator cannot accidentally point two writers at the same
+//!   on-disk catalog or corpus. Readers that go through the MCP HTTP
+//!   surface (`bookrack exec`) never take it.
+//! - [`RootLock`] at `<data_root>/.bookrack.lock` — one writer per data
+//!   root, whether that writer is a daemon serving the root or an
+//!   offline command about to destroy it. Its contents are display-only
+//!   and no reader may decide anything from them.
+//!
+//! Both are advisory `flock`-style: the OS releases them when the
 //! [`File`] handle drops, so a crashed process leaves no stale lock.
 //! Stale *content* — a pid or MCP address from a previous run — is
 //! tolerated and overwritten by the next successful acquire.
@@ -28,11 +35,23 @@ pub const RUNTIME_DIR_ENV: &str = "BOOKRACK_RUNTIME_DIR";
 
 const TTY_LOCK_NAME_STR: &str = "bookrack.tty.lock";
 
+const ROOT_LOCK_NAME_STR: &str = ".bookrack.lock";
+
 /// File name of the session-scoped lock under the runtime directory.
 /// Exposed so siblings (the `cli` REPL, the headless `mcp` binary,
 /// `bookrack exec`) discover the active session through the same path.
 pub fn tty_lock_name() -> &'static str {
     TTY_LOCK_NAME_STR
+}
+
+/// Path of the data-root lock inside `root`.
+///
+/// A dot-prefixed file of its own: the lock never participates in an
+/// atomic rewrite (`flock` follows the inode, and every atomically
+/// rewritten file is replaced by `rename`), and the dot keeps it out of
+/// data-root detection heuristics and content scans.
+pub fn root_lock_path(root: &Path) -> PathBuf {
+    root.join(ROOT_LOCK_NAME_STR)
 }
 
 /// Resolve the runtime directory. Precedence: explicit override, then
@@ -186,6 +205,91 @@ impl TtyLock {
                 .context("append session lock library_name line")?;
         }
         Ok(())
+    }
+}
+
+/// Marker prefix of the error produced when the data-root lock is
+/// already held by another process. [`is_root_lock_conflict`] matches
+/// against it; both sides live in this crate so the text has a single
+/// source.
+const ROOT_LOCK_CONFLICT_MARKER: &str = "bookrack data root already in use";
+
+/// Report whether `err` (or any of its causes) is the conflict error
+/// produced by [`RootLock::acquire`] when another process holds the
+/// data-root lock.
+///
+/// This is the only way to tell a contended root apart from a root
+/// whose lock file could not be opened at all (a read-only volume, a
+/// permission failure): the latter carries no marker, so a caller that
+/// tolerates unwritable roots branches on this predicate.
+pub fn is_root_lock_conflict(err: &eyre::Report) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains(ROOT_LOCK_CONFLICT_MARKER))
+}
+
+/// Exclusive lock over a data root, held by whichever process writes
+/// it: the daemon for as long as it serves the root, an offline
+/// destructive command for the length of its operation.
+///
+/// The OS releases the advisory flock when [`File`] drops, so a crashed
+/// process leaves no stale lock — only stale content that the next
+/// acquirer truncates. Intentionally not `Drop`-implemented because the
+/// underlying file handle's drop is the release.
+///
+/// The recorded `pid=` / `role=` lines exist to name the conflicting
+/// holder in an error message and nothing else. No reader may treat
+/// them as a source of truth: the flock is the truth, its content is a
+/// snapshot that can be stale the instant it is read.
+pub struct RootLock {
+    #[allow(dead_code)]
+    file: File,
+    #[allow(dead_code)]
+    path: PathBuf,
+}
+
+impl RootLock {
+    /// Acquire the exclusive lock at [`root_lock_path`], recording
+    /// `pid` and `role` for display in a competing acquirer's error.
+    ///
+    /// `role` names the holder in operator terms: `daemon`, or the
+    /// command line of an offline writer such as `libraries remove
+    /// --purge`.
+    ///
+    /// Two failures are distinguishable through
+    /// [`is_root_lock_conflict`]: another process holds the lock (the
+    /// error names its pid and role), or the lock file itself could not
+    /// be opened or written.
+    pub fn acquire(root: &Path, pid: u32, role: &str) -> Result<RootLock> {
+        let path = root_lock_path(root);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open data root lock {}", path.display()))?;
+        file.try_lock_exclusive().map_err(|err| {
+            let existing = std::fs::read_to_string(&path).unwrap_or_default();
+            let detail = existing.trim();
+            if detail.is_empty() {
+                eyre!(
+                    "{ROOT_LOCK_CONFLICT_MARKER}, lock held at {}: {err}",
+                    path.display()
+                )
+            } else {
+                eyre!(
+                    "{ROOT_LOCK_CONFLICT_MARKER} ({}), lock held at {}: {err}",
+                    detail.replace('\n', ", "),
+                    path.display()
+                )
+            }
+        })?;
+        let mut owned = file;
+        owned
+            .set_len(0)
+            .context("truncate data root lock contents")?;
+        write!(owned, "pid={pid}\nrole={role}\n").context("write data root lock contents")?;
+        Ok(RootLock { file: owned, path })
     }
 }
 
@@ -556,5 +660,101 @@ mod tests {
         let path = dir.path().join("bookrack.tty.lock");
         std::fs::write(&path, "pid=not-a-number\nmcp=disabled\n").unwrap();
         assert!(peek_lock(&path).is_err());
+    }
+
+    #[test]
+    fn root_lock_path_joins_the_fixed_name() {
+        let root = Path::new("/data/main");
+        assert_eq!(root_lock_path(root), root.join(".bookrack.lock"));
+    }
+
+    #[test]
+    fn root_lock_blocks_a_second_acquirer_until_dropped() {
+        let dir = tempdir().unwrap();
+        let lock1 = RootLock::acquire(dir.path(), 1234, "daemon").unwrap();
+
+        let second = RootLock::acquire(dir.path(), 5678, "daemon");
+        assert!(second.is_err(), "expected second acquire to fail");
+
+        drop(lock1);
+        let _lock2 = RootLock::acquire(dir.path(), 9999, "daemon")
+            .expect("re-acquire after drop must succeed");
+    }
+
+    #[test]
+    fn root_lock_conflict_message_surfaces_pid_and_role() {
+        let dir = tempdir().unwrap();
+        let _held = RootLock::acquire(dir.path(), 7777, "daemon").unwrap();
+        let err = match RootLock::acquire(dir.path(), 8888, "libraries remove --purge") {
+            Ok(_) => panic!("expected lock conflict"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("7777"), "holder pid not in error: {msg}");
+        assert!(
+            msg.contains("role=daemon"),
+            "holder role not in error: {msg}"
+        );
+        assert!(msg.contains("already in use"), "marker missing: {msg}");
+    }
+
+    #[test]
+    fn root_lock_truncates_stale_content_on_acquire() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            root_lock_path(dir.path()),
+            "pid=stale\nrole=stale\nextra-line\n",
+        )
+        .unwrap();
+        let _lock = RootLock::acquire(dir.path(), 4242, "daemon").unwrap();
+        let content = std::fs::read_to_string(root_lock_path(dir.path())).unwrap();
+        assert!(
+            content.contains("pid=4242"),
+            "fresh pid missing: {content:?}"
+        );
+        assert!(
+            content.contains("role=daemon"),
+            "fresh role missing: {content:?}"
+        );
+        assert!(
+            !content.contains("stale"),
+            "stale content not truncated: {content:?}"
+        );
+    }
+
+    #[test]
+    fn is_root_lock_conflict_matches_acquire_error() {
+        let dir = tempdir().unwrap();
+        let _held = RootLock::acquire(dir.path(), 1234, "daemon").unwrap();
+
+        let Err(err) = RootLock::acquire(dir.path(), 5678, "daemon") else {
+            panic!("second acquire must fail");
+        };
+        assert!(is_root_lock_conflict(&err));
+
+        let unrelated = eyre!("disk full");
+        assert!(!is_root_lock_conflict(&unrelated));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_lock_open_failure_is_not_a_conflict() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("read-only-root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let err = match RootLock::acquire(&root, 1, "daemon") {
+            Ok(_) => panic!("expected acquire to fail on an unwritable root"),
+            Err(e) => e,
+        };
+        assert!(
+            !is_root_lock_conflict(&err),
+            "an unopenable lock file must not read as a conflict: {err}"
+        );
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
