@@ -24,8 +24,10 @@ use std::path::Path;
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, LibraryEntry,
-    LibraryIdentification, LibrarySelection, ManifestError, ResolutionSource, ShadowedDefault,
-    default_registry_path, list_libraries, load_manifest, locate_pdfium, pdfium_library_filename,
+    LibraryIdentification, LibrarySelection, ManifestError, ProfileRefDrift, ProfileRefOrigin,
+    ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
+    list_libraries, load_manifest, load_root_config, locate_pdfium, pdfium_library_filename,
+    profile_reference_drift,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use bookrack_index_profile::{has_errors, resolve, validate};
@@ -811,26 +813,81 @@ fn coherence_issue(
     }
 }
 
-/// Emit the index-profile coherence check: for every registry entry that
-/// records an `index_profile`, resolve and validate it, and compare it
-/// against the library's built index stamps. One WARN row per problem, or
-/// a single OK summary when every referenced profile is coherent. Skipped
-/// entirely when no entry references a profile.
+/// The profile reference in effect for `entry`, and the sources that
+/// disagree with it. Resolved by the same chain the daemon applies —
+/// manifest, then `config.toml`, then the entry's own cached copy — so
+/// doctor reports on the profile the library actually runs under rather
+/// than on a stale cache. Unreadable sources count as absent, matching
+/// resolution elsewhere.
+fn entry_profile_reference(
+    entry: &LibraryEntry,
+) -> (Option<(String, ProfileRefOrigin)>, Vec<ProfileRefDrift>) {
+    let manifest_ref = load_manifest(&entry.data_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.index_profile);
+    let config_ref = load_root_config(&entry.data_dir)
+        .ok()
+        .and_then(|r| r.index_profile);
+    let effective = effective_profile_reference(
+        manifest_ref.as_deref(),
+        config_ref.as_deref(),
+        entry.index_profile.as_deref(),
+    );
+    let drift = profile_reference_drift(
+        manifest_ref.as_deref(),
+        config_ref.as_deref(),
+        entry.index_profile.as_deref(),
+    );
+    (effective, drift)
+}
+
+/// The drift note for a library whose lower-priority sources still name
+/// a profile other than the effective one: a stale copy left by an older
+/// write path or a hand edit. Harmless to run under — the effective
+/// reference is unambiguous — but worth repairing before the stale name
+/// confuses the next reader. `None` when nothing drifted.
+fn drift_issue(entry_name: &str, effective: &str, drift: &[ProfileRefDrift]) -> Option<String> {
+    if drift.is_empty() {
+        return None;
+    }
+    let stale = drift
+        .iter()
+        .map(|d| format!("{} names '{}'", d.source.as_str(), d.stale_value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "'{entry_name}' runs under index profile '{effective}' but {stale}; \
+         re-run `bookrack index-profile apply {effective}` to rewrite the stale copies, \
+         or `bookrack libraries config {entry_name} --unset index_profile` to clear a \
+         stale config.toml declaration"
+    ))
+}
+
+/// Emit the index-profile coherence check: for every library that
+/// references a profile, resolve and validate the reference in effect,
+/// compare it against the library's built index stamps, and report any
+/// lower-priority source still naming a different profile. One WARN row
+/// per problem, or a single OK summary when every referenced profile is
+/// coherent. Skipped entirely when no library references a profile.
 fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
     let Ok(Some(entries)) = list_libraries() else {
         return;
     };
-    let referencing: Vec<&LibraryEntry> = entries
+    let referencing: Vec<(&LibraryEntry, String, Vec<ProfileRefDrift>)> = entries
         .iter()
-        .filter(|e| e.index_profile.is_some())
+        .filter_map(|e| {
+            let (effective, drift) = entry_profile_reference(e);
+            effective.map(|(name, _)| (e, name, drift))
+        })
         .collect();
     if referencing.is_empty() {
         return;
     }
     let dir = index_profile_dir();
     let mut clean = true;
-    for entry in referencing {
-        let profile_name = entry.index_profile.as_deref().expect("filtered to Some");
+    for (entry, profile_name, drift) in referencing {
+        let profile_name = profile_name.as_str();
         let resolved = match &dir {
             Some(dir) => match resolve(dir, profile_name) {
                 Ok(Some(profile)) => Ok(Some((
@@ -845,6 +902,14 @@ fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
         };
         let built = built_stamps(&entry.data_dir);
         if let Some(note) = coherence_issue(&entry.name, profile_name, resolved, built) {
+            clean = false;
+            rows.push(Row {
+                label: "index-profile".to_string(),
+                value: entry.name.clone(),
+                status: Status::Warn { note },
+            });
+        }
+        if let Some(note) = drift_issue(&entry.name, profile_name, &drift) {
             clean = false;
             rows.push(Row {
                 label: "index-profile".to_string(),

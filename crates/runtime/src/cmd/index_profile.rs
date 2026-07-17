@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    ConfigError, EmbedConfig, LibraryEntry, list_libraries, load_root_config,
-    root_config_env_override,
+    ConfigError, EmbedConfig, LibraryEntry, effective_profile_reference, list_libraries,
+    load_manifest, load_root_config, profile_reference_drift, root_config_env_override,
 };
 use bookrack_index_profile::{
     Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, USER_PROFILE_DIR_NAME,
@@ -237,18 +237,30 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
 }
 
 /// Report the profile a library effectively runs under and compare it
-/// against the built index stamps. Offline: registry, `config.toml`,
-/// profile files, and a read-only corpus open — no daemon involved. The
-/// conflicts the daemon refuses to start with surface here as the same
-/// errors; a stamp mismatch is a finding in the report, not an error,
-/// because reconciling it is `index-profile apply`'s job.
+/// against the built index stamps. Offline: manifest, registry,
+/// `config.toml`, profile files, and a read-only corpus open — no daemon
+/// involved. The conflicts the daemon refuses to start with surface here
+/// as the same errors; a stamp mismatch and a drifted reference are both
+/// findings in the report, not errors, because reconciling them is
+/// `index-profile apply`'s job (a stale registry copy is also what
+/// `libraries scan` refreshes).
 fn current(library: Option<String>, json: bool) -> Result<()> {
     let entry = registry_entry(library.as_deref())?;
     let root = load_root_config(&entry.data_dir)?;
-    let reference = crate::profile::effective_reference(
-        root.index_profile.clone(),
-        entry.index_profile.clone(),
-    )?;
+    let manifest_ref = load_manifest(&entry.data_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.index_profile);
+    let reference = effective_profile_reference(
+        manifest_ref.as_deref(),
+        root.index_profile.as_deref(),
+        entry.index_profile.as_deref(),
+    );
+    let drift = profile_reference_drift(
+        manifest_ref.as_deref(),
+        root.index_profile.as_deref(),
+        entry.index_profile.as_deref(),
+    );
 
     let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
     let resolved = match &reference {
@@ -294,8 +306,9 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
             "data_dir": entry.data_dir.display().to_string(),
             "profile": resolved.as_ref().map(|(p, origin)| serde_json::json!({
                 "name": p.name,
-                "origin": origin.as_str(),
+                "origin": origin,
             })),
+            "drift": drift,
             "effective_embed_model": effective_model,
             "built_stamps": built.as_ref().map(|b| serde_json::json!({
                 "embed_model": b.embed_model,
@@ -334,6 +347,19 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
             }
         }
         None => println!("profile: none (field-level configuration)"),
+    }
+    for d in &drift {
+        println!(
+            "drift: {} still references '{}'",
+            d.source.as_str(),
+            d.stale_value
+        );
+    }
+    if !drift.is_empty() {
+        println!(
+            "note: `bookrack index-profile apply` rewrites the stale copies, \
+             or `bookrack libraries scan` refreshes the registry cache alone"
+        );
     }
     println!("effective embed model: {effective_model}");
     match (&built, &findings) {

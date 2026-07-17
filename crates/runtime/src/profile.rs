@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Effective index-profile resolution and the apply-plan derivation.
+//! Effective index-profile assembly and the apply-plan derivation.
 //!
-//! A library can reference a profile from two places — the per-root
-//! `config.toml` and its registry entry — and the profile's embed model
-//! competes with the explicit `embed_model` field and the env override.
-//! This module derives the single effective combination (or refuses with
-//! the conflict spelled out), and every embed-model consumer in this
-//! crate goes through it so the `env > config.toml > profile > default`
-//! chain applies uniformly.
+//! A library's profile reference can sit in three places — its manifest,
+//! its per-root `config.toml`, and its registry entry — and picking
+//! between them lives in `bookrack_config`
+//! ([`effective_profile_reference`]). This module reads those three
+//! sources fresh per call, hands them to that chain, resolves the named
+//! profile, and reconciles the result with the explicit `embed_model`
+//! field and the env override; every embed-model consumer in this crate
+//! goes through it so the `env > config.toml > profile > default` chain
+//! applies uniformly.
 //!
 //! The second half of the module is the offline planning layer behind
 //! `index-profile apply`: read the built stamps and the persisted ANN
@@ -20,9 +22,14 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    Config, ConfigError, EmbedConfig, LibraryEntry, RootConfig, list_libraries, load_root_config,
+    Config, ConfigError, EmbedConfig, RootConfig, effective_profile_reference, list_libraries,
+    load_manifest, load_root_config, profile_reference_drift, registry_profile_ref_in,
     registry_target_path, root_config_env_override,
 };
+// The origin and drift types live in `bookrack_config` beside the
+// resolution chain; re-exported so `crate::profile::ProfileRefOrigin`
+// keeps naming them for this crate's callers.
+pub use bookrack_config::{ProfileRefDrift, ProfileRefOrigin};
 use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
@@ -32,36 +39,17 @@ use bookrack_index_profile::{
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
 
-/// Where a library's effective profile reference was declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProfileRefOrigin {
-    /// Only `<data_root>/config.toml` names the profile.
-    ConfigToml,
-    /// Only the library's registry entry names the profile.
-    Registry,
-    /// Both name it, consistently.
-    Both,
-}
-
-impl ProfileRefOrigin {
-    /// Stable label for human and JSON rendering.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProfileRefOrigin::ConfigToml => "config.toml",
-            ProfileRefOrigin::Registry => "registry",
-            ProfileRefOrigin::Both => "config.toml + registry",
-        }
-    }
-}
-
 /// The profile a library effectively runs under, with the reference that
 /// selected it.
 #[derive(Debug, Clone)]
 pub struct EffectiveProfile {
-    /// Which side(s) declared the reference.
+    /// Which source the reference was read from.
     pub origin: ProfileRefOrigin,
     /// The resolved profile.
     pub profile: IndexProfile,
+    /// Sources naming a different profile than the effective one. Empty
+    /// in the healthy case; a report, never a reason to refuse.
+    pub drift: Vec<ProfileRefDrift>,
 }
 
 /// The per-user index-profile directory, beside `registry.toml`. `None`
@@ -89,78 +77,60 @@ fn registry_profile_ref(cfg: &Config) -> Option<String> {
     registry_profile_ref_in(&entries, cfg.library(), cfg.data_dir())
 }
 
-/// [`registry_profile_ref`] against an explicit entry list. Pure, so a
-/// test drives the name-match and path-fallback branches without a
-/// registry on disk.
-fn registry_profile_ref_in(
-    entries: &[LibraryEntry],
-    library: Option<&str>,
-    data_dir: &Path,
-) -> Option<String> {
-    let entry = match library {
-        Some(name) => entries.iter().find(|e| e.name == name),
-        None => entries.iter().find(|e| same_dir(&e.data_dir, data_dir)),
-    }?;
-    entry.index_profile.clone()
-}
-
-/// Whether two paths name the same directory, comparing canonicalized
-/// forms and falling back to a raw comparison when canonicalization
-/// fails.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(ca), Ok(cb)) => ca == cb,
-        _ => a == b,
-    }
-}
-
-/// Pick the effective profile reference from the two independent
-/// declaration sites, refusing when they disagree. Pure, so a test
-/// drives every branch without a registry on disk.
-pub(crate) fn effective_reference(
-    config_ref: Option<String>,
-    registry_ref: Option<String>,
-) -> Result<Option<(String, ProfileRefOrigin)>, ConfigError> {
-    match (config_ref, registry_ref) {
-        (Some(c), Some(r)) if c != r => Err(ConfigError::profile_reference_conflict(&c, &r)),
-        (Some(c), Some(_)) => Ok(Some((c, ProfileRefOrigin::Both))),
-        (Some(c), None) => Ok(Some((c, ProfileRefOrigin::ConfigToml))),
-        (None, Some(r)) => Ok(Some((r, ProfileRefOrigin::Registry))),
-        (None, None) => Ok(None),
-    }
-}
-
-/// The root config re-read from disk at call time, falling back to the
-/// snapshot `cfg` carries when the file cannot be read. Daemon RPC
-/// handlers hold a `Config` captured at bring-up; re-reading keeps a
-/// profile declaration written after bring-up (e.g. by `index-profile
-/// apply`) visible to every handler without a restart. Offline callers
-/// parse a fresh `Config` per process, so for them the two sources
-/// agree.
-fn fresh_root_config(cfg: &Config) -> RootConfig {
-    load_root_config(cfg.data_dir()).unwrap_or_else(|_| cfg.root_config().clone())
+/// The three profile-reference sources, re-read from disk at call time.
+///
+/// Daemon RPC handlers hold a `Config` captured at bring-up; re-reading
+/// keeps a declaration written after bring-up (e.g. by `index-profile
+/// apply`, which declares before it acts) visible to every handler
+/// without a restart. That is why the manifest is read here too and not
+/// taken from a snapshot: the manifest is where a declaration now lands,
+/// so a stale read would make declare-first silently ineffective.
+/// Offline callers parse a fresh `Config` per process, so for them the
+/// snapshot and the file agree anyway.
+///
+/// The root config falls back to `cfg`'s snapshot when the file cannot
+/// be read. A manifest that cannot be read counts as absent: resolution
+/// must not fail because a root carries a corrupt or future-versioned
+/// identity file, matching how `identify_library` treats one.
+fn fresh_profile_sources(cfg: &Config) -> (RootConfig, Option<String>) {
+    let root = load_root_config(cfg.data_dir()).unwrap_or_else(|_| cfg.root_config().clone());
+    let manifest_ref = load_manifest(cfg.data_dir())
+        .ok()
+        .flatten()
+        .and_then(|m| m.index_profile);
+    (root, manifest_ref)
 }
 
 /// Resolve the effective index profile for the library `cfg` serves.
 ///
-/// `Ok(None)` when neither `config.toml` nor the registry entry
-/// references a profile — the library then runs on field-level
-/// configuration alone. Errors when the two references disagree, when
-/// the referenced profile does not resolve, when the profile's model
-/// contradicts an explicit `embed_model` in `config.toml`
+/// `Ok(None)` when no source references a profile — the library then
+/// runs on field-level configuration alone. Sources that disagree do not
+/// fail: the highest-priority one wins and the rest are reported as
+/// [`EffectiveProfile::drift`]. Errors when the referenced profile does
+/// not resolve, or when the profile's model contradicts an explicit
+/// `embed_model` in `config.toml`
 /// ([`ConfigError::ProfileConfigConflict`]).
 pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>> {
-    effective_index_profile_in(cfg, &fresh_root_config(cfg))
+    let (root, manifest_ref) = fresh_profile_sources(cfg);
+    effective_index_profile_in(cfg, &root, manifest_ref.as_deref())
 }
 
-/// [`effective_index_profile`] against an already-loaded root config,
-/// so [`effective_embed_config`] reads the file once per call.
-fn effective_index_profile_in(cfg: &Config, root: &RootConfig) -> Result<Option<EffectiveProfile>> {
+/// [`effective_index_profile`] against already-read sources, so
+/// [`effective_embed_config`] reads each file once per call.
+fn effective_index_profile_in(
+    cfg: &Config,
+    root: &RootConfig,
+    manifest_ref: Option<&str>,
+) -> Result<Option<EffectiveProfile>> {
     let config_ref = root.index_profile.clone();
     let registry_ref = registry_profile_ref(cfg);
-    let Some((name, origin)) = effective_reference(config_ref, registry_ref)? else {
+    let Some((name, origin)) =
+        effective_profile_reference(manifest_ref, config_ref.as_deref(), registry_ref.as_deref())
+    else {
         return Ok(None);
     };
+    let drift =
+        profile_reference_drift(manifest_ref, config_ref.as_deref(), registry_ref.as_deref());
 
     let dir = user_profile_dir_or_default();
     let profile = resolve(&dir, &name)
@@ -179,7 +149,11 @@ fn effective_index_profile_in(cfg: &Config, root: &RootConfig) -> Result<Option<
             ConfigError::profile_model_conflict(&name, &profile.embed.model, explicit).into(),
         );
     }
-    Ok(Some(EffectiveProfile { origin, profile }))
+    Ok(Some(EffectiveProfile {
+        origin,
+        profile,
+        drift,
+    }))
 }
 
 /// The [`EmbedConfig`] for `cfg`'s library with every layer of the model
@@ -188,8 +162,8 @@ fn effective_index_profile_in(cfg: &Config, root: &RootConfig) -> Result<Option<
 /// itself in conflict, so a handler cannot embed under a configuration
 /// the daemon would refuse to start with.
 pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
-    let root = fresh_root_config(cfg);
-    let effective = effective_index_profile_in(cfg, &root)?;
+    let (root, manifest_ref) = fresh_profile_sources(cfg);
+    let effective = effective_index_profile_in(cfg, &root, manifest_ref.as_deref())?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
     Ok(EmbedConfig::resolve(&root, model))
 }
@@ -616,90 +590,7 @@ pub fn masking_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookrack_config::LibraryKind;
     use bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
-
-    #[test]
-    fn effective_reference_covers_all_declaration_shapes() {
-        // Nothing declared: no profile in effect.
-        assert!(effective_reference(None, None).expect("ok").is_none());
-
-        // One side declared: that side is the origin.
-        let (name, origin) = effective_reference(Some("p".to_string()), None)
-            .expect("ok")
-            .expect("some");
-        assert_eq!(name, "p");
-        assert_eq!(origin, ProfileRefOrigin::ConfigToml);
-        let (name, origin) = effective_reference(None, Some("p".to_string()))
-            .expect("ok")
-            .expect("some");
-        assert_eq!(name, "p");
-        assert_eq!(origin, ProfileRefOrigin::Registry);
-
-        // Both agreeing: allowed, and marked as such.
-        let (_, origin) = effective_reference(Some("p".to_string()), Some("p".to_string()))
-            .expect("ok")
-            .expect("some");
-        assert_eq!(origin, ProfileRefOrigin::Both);
-
-        // Both disagreeing: the conflict error, neither side preferred.
-        let err = effective_reference(Some("a".to_string()), Some("b".to_string()))
-            .expect_err("conflict");
-        assert!(matches!(err, ConfigError::ProfileConfigConflict { .. }));
-    }
-
-    fn entry(name: &str, data_dir: &Path, profile: Option<&str>) -> LibraryEntry {
-        LibraryEntry {
-            name: name.to_string(),
-            data_dir: data_dir.to_path_buf(),
-            is_default: false,
-            kind: LibraryKind::Prod,
-            description: None,
-            index_profile: profile.map(str::to_string),
-            created_at: None,
-            uuid: None,
-        }
-    }
-
-    #[test]
-    fn registry_profile_ref_matches_by_name_then_falls_back_to_path() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root_a = dir.path().join("a");
-        let root_b = dir.path().join("b");
-        std::fs::create_dir_all(&root_a).expect("a");
-        std::fs::create_dir_all(&root_b).expect("b");
-        let entries = vec![
-            entry("a", &root_a, Some("profile-a")),
-            entry("b", &root_b, None),
-        ];
-
-        // Name match wins regardless of the data dir passed alongside.
-        assert_eq!(
-            registry_profile_ref_in(&entries, Some("a"), &root_b),
-            Some("profile-a".to_string())
-        );
-        // An unknown name matches nothing — no fallback to the path.
-        assert_eq!(registry_profile_ref_in(&entries, Some("c"), &root_a), None);
-
-        // No name: the entry is found by data root, including through a
-        // non-canonical spelling of the same directory.
-        assert_eq!(
-            registry_profile_ref_in(&entries, None, &root_a),
-            Some("profile-a".to_string())
-        );
-        let dotted = root_a.join("..").join("a");
-        assert_eq!(
-            registry_profile_ref_in(&entries, None, &dotted),
-            Some("profile-a".to_string())
-        );
-        // A matching entry without a profile reference yields None.
-        assert_eq!(registry_profile_ref_in(&entries, None, &root_b), None);
-        // An unregistered root matches nothing.
-        assert_eq!(
-            registry_profile_ref_in(&entries, None, &dir.path().join("c")),
-            None
-        );
-    }
 
     fn profile() -> IndexProfile {
         IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in")

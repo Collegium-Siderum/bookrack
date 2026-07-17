@@ -3,11 +3,18 @@
 //! Self-describing identity manifest for a data root.
 //!
 //! Every data root carries a `bookrack-library.toml` naming the
-//! library, its kind, and a stable uuid. The registry is a regenerable
-//! cache over these manifests: a lost registry can be rebuilt by
-//! scanning roots for their manifests, so a library's identity lives
-//! with its data, not only in the registry. A root without a manifest
-//! stays valid — the file is confirming evidence, never a gate on use.
+//! library, its kind, a stable uuid, and the index profile its vectors
+//! are built under. The registry is a regenerable cache over these
+//! manifests: a lost registry can be rebuilt by scanning roots for their
+//! manifests, so a library's identity and data contract live with its
+//! data, not only in the registry. A root without a manifest stays valid
+//! — the file is confirming evidence, never a gate on use.
+//!
+//! The manifest carries identity and the data contract — what this
+//! library *is* and what its vectors *are* — and nothing else. Runtime
+//! preferences and facility knobs (a `top_k`, an Ollama URL) belong to
+//! `config.toml`: they describe how one machine runs the library, not
+//! the library itself, and so must not travel with the data.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +52,11 @@ pub struct LibraryManifest {
     pub description: Option<String>,
     /// RFC 3339 creation timestamp; absent on manifests that omit it.
     pub created_at: Option<String>,
+    /// Name of the index profile the library's vectors are built under.
+    /// The authoritative copy of the reference: a registry entry's
+    /// `index_profile` is a regenerable cache of this value. Absent when
+    /// the library runs on field-level configuration alone.
+    pub index_profile: Option<String>,
 }
 
 /// Reasons loading a manifest can fail.
@@ -106,6 +118,8 @@ struct ManifestFile {
     description: Option<String>,
     #[serde(default)]
     created_at: Option<String>,
+    #[serde(default)]
+    index_profile: Option<String>,
 }
 
 /// Load the identity manifest from `data_dir`.
@@ -151,12 +165,14 @@ pub fn load_manifest(data_dir: &Path) -> Result<Option<LibraryManifest>, Manifes
         kind: file.kind,
         description: file.description,
         created_at: file.created_at,
+        index_profile: file.index_profile,
     }))
 }
 
 /// Build a fresh manifest for a newly created library: a UUIDv7 (time
 /// ordered, carrying a coarse creation instant) and an RFC 3339
-/// `created_at`, at the current schema version.
+/// `created_at`, at the current schema version. The profile reference
+/// starts absent; [`set_manifest_index_profile`] is the way it is set.
 pub fn new_manifest(
     name: impl Into<String>,
     kind: LibraryKind,
@@ -169,6 +185,7 @@ pub fn new_manifest(
         kind,
         description,
         created_at: Some(chrono::Utc::now().to_rfc3339()),
+        index_profile: None,
     }
 }
 
@@ -203,6 +220,7 @@ pub fn render_manifest_toml(m: &LibraryManifest) -> String {
     for (key, value) in [
         ("description", m.description.as_ref()),
         ("created_at", m.created_at.as_ref()),
+        ("index_profile", m.index_profile.as_ref()),
     ] {
         if let Some(v) = value {
             table.insert(key.to_string(), toml::Value::String(v.clone()));
@@ -210,6 +228,51 @@ pub fn render_manifest_toml(m: &LibraryManifest) -> String {
     }
     let body = toml::to_string(&table).expect("toml::Table is always serialisable");
     format!("# bookrack library identity. Written by `bookrack init`; do not edit.\n{body}")
+}
+
+/// Identity to stamp onto a manifest that has to be created on the
+/// spot. Callers editing a library they resolved through the registry
+/// pass its entry's identity, so a manifest minted for a pre-manifest
+/// root agrees with the name the operator already knows it by.
+#[derive(Debug, Clone, Copy)]
+pub struct ManifestIdentitySeed<'a> {
+    /// Registry name to record as the library's birth name.
+    pub name: &'a str,
+    /// Library kind.
+    pub kind: LibraryKind,
+    /// Free-form description; `None` leaves the field absent.
+    pub description: Option<&'a str>,
+}
+
+/// Set or clear the manifest's `index_profile`, atomically, and return
+/// the manifest as written.
+///
+/// This is the one write path for the authoritative profile reference;
+/// a registry entry's copy is a cache refreshed after this returns.
+///
+/// A root with no manifest is handled by direction: setting a profile
+/// mints one from `seed` (a fresh uuid, as `add`/`register` would),
+/// because the reference has to live somewhere; clearing one is
+/// `Ok(None)` and writes nothing, since there is no stored reference to
+/// clear and minting an identity is not what `--unset` was asked to do.
+///
+/// A manifest that exists but does not load — corrupt, or from a future
+/// schema — is an error rather than a root to mint over: overwriting it
+/// would destroy the identity it was still carrying.
+pub fn set_manifest_index_profile(
+    data_dir: &Path,
+    profile: Option<&str>,
+    seed: ManifestIdentitySeed<'_>,
+) -> Result<Option<LibraryManifest>, ManifestError> {
+    let existing = load_manifest(data_dir)?;
+    let mut manifest = match (existing, profile) {
+        (Some(m), _) => m,
+        (None, None) => return Ok(None),
+        (None, Some(_)) => new_manifest(seed.name, seed.kind, seed.description.map(str::to_string)),
+    };
+    manifest.index_profile = profile.map(str::to_string);
+    write_manifest(data_dir, &manifest)?;
+    Ok(Some(manifest))
 }
 
 #[cfg(test)]
@@ -224,6 +287,15 @@ mod tests {
             kind: LibraryKind::Prod,
             description: Some("primary production library".to_string()),
             created_at: Some("2026-06-30T12:00:00Z".to_string()),
+            index_profile: None,
+        }
+    }
+
+    fn seed() -> ManifestIdentitySeed<'static> {
+        ManifestIdentitySeed {
+            name: "seeded",
+            kind: LibraryKind::Test,
+            description: Some("from the registry entry"),
         }
     }
 
@@ -329,6 +401,153 @@ mod tests {
         .expect("seed");
         let m = load_manifest(dir.path()).expect("load").expect("present");
         assert_eq!(m.name, "n");
+    }
+
+    #[test]
+    fn index_profile_round_trips_when_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let m = LibraryManifest {
+            index_profile: Some("fast-local".to_string()),
+            ..sample()
+        };
+        write_manifest(dir.path(), &m).expect("write");
+        let text = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).expect("read");
+        assert!(text.contains("index_profile = \"fast-local\""), "{text}");
+        assert_eq!(
+            load_manifest(dir.path()).expect("load").expect("present"),
+            m
+        );
+    }
+
+    #[test]
+    fn manifest_without_index_profile_omits_the_key_and_reads_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_manifest(dir.path(), &sample()).expect("write");
+        let text = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).expect("read");
+        assert!(!text.contains("index_profile"), "{text}");
+        let loaded = load_manifest(dir.path()).expect("load").expect("present");
+        assert!(loaded.index_profile.is_none());
+    }
+
+    #[test]
+    fn a_pre_field_manifest_reads_with_index_profile_none() {
+        // A file written before the field existed must keep loading.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\n\
+             format_version = 1\n\
+             uuid = \"u\"\n\
+             name = \"n\"\n",
+        )
+        .expect("seed");
+        let m = load_manifest(dir.path()).expect("load").expect("present");
+        assert_eq!(m.format_version, 1);
+        assert!(m.index_profile.is_none());
+    }
+
+    #[test]
+    fn set_index_profile_writes_the_reference_into_an_existing_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_manifest(dir.path(), &sample()).expect("write");
+        let written = set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect("set")
+            .expect("manifest written");
+        assert_eq!(written.index_profile.as_deref(), Some("fast-local"));
+        // Identity is untouched: the seed is only for minting.
+        assert_eq!(written.uuid, sample().uuid);
+        assert_eq!(written.name, sample().name);
+        let loaded = load_manifest(dir.path()).expect("load").expect("present");
+        assert_eq!(loaded, written);
+    }
+
+    #[test]
+    fn set_index_profile_to_none_clears_an_existing_reference() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let m = LibraryManifest {
+            index_profile: Some("fast-local".to_string()),
+            ..sample()
+        };
+        write_manifest(dir.path(), &m).expect("write");
+        let written = set_manifest_index_profile(dir.path(), None, seed())
+            .expect("clear")
+            .expect("manifest written");
+        assert!(written.index_profile.is_none());
+        let text = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).expect("read");
+        assert!(!text.contains("index_profile"), "{text}");
+    }
+
+    #[test]
+    fn set_index_profile_mints_a_manifest_on_a_root_without_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let written = set_manifest_index_profile(dir.path(), Some("fast-local"), seed())
+            .expect("set")
+            .expect("manifest minted");
+        assert_eq!(written.name, "seeded");
+        assert_eq!(written.kind, LibraryKind::Test);
+        assert_eq!(
+            written.description.as_deref(),
+            Some("from the registry entry")
+        );
+        assert_eq!(written.index_profile.as_deref(), Some("fast-local"));
+        let parsed = uuid::Uuid::parse_str(&written.uuid).expect("valid uuid");
+        assert_eq!(parsed.get_version_num(), 7);
+        assert_eq!(
+            load_manifest(dir.path()).expect("load").expect("present"),
+            written
+        );
+    }
+
+    #[test]
+    fn clearing_index_profile_on_a_root_without_a_manifest_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(
+            set_manifest_index_profile(dir.path(), None, seed())
+                .expect("clear")
+                .is_none()
+        );
+        assert!(
+            !dir.path().join(MANIFEST_FILENAME).exists(),
+            "clearing must not mint an identity"
+        );
+    }
+
+    #[test]
+    fn set_index_profile_refuses_to_mint_over_an_unreadable_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\n\
+             format_version = 99\n\
+             uuid = \"u\"\n\
+             name = \"n\"\n",
+        )
+        .expect("seed");
+        assert!(matches!(
+            set_manifest_index_profile(dir.path(), Some("fast-local"), seed()),
+            Err(ManifestError::SchemaVersion { found: 99, .. })
+        ));
+        // The file it refused to understand is still intact.
+        let text = std::fs::read_to_string(dir.path().join(MANIFEST_FILENAME)).expect("read");
+        assert!(text.contains("format_version = 99"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_index_profile_fails_on_a_read_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("ro");
+        std::fs::create_dir(&root).expect("create");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+
+        assert!(matches!(
+            set_manifest_index_profile(&root, Some("fast-local"), seed()),
+            Err(ManifestError::Io { .. })
+        ));
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).expect("restore");
     }
 
     #[test]

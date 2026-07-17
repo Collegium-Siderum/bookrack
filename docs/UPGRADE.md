@@ -154,6 +154,46 @@ changes `CHUNK_VERSION` or
 `NORMALIZE_VERSION` re-uses the existing chunk text but still costs
 one embedding pass per book.
 
+## Moving the index-profile reference into the manifest
+
+A library's `index_profile` reference now lives in its manifest
+(`bookrack-library.toml`), and the registry entry's copy is a cache of
+it. Nothing breaks on upgrade and there is no deadline: a reference
+declared the old way — in the root's `config.toml`, or in the registry
+entry alone — keeps resolving, because resolution reads all three
+sources and takes the first that names one, in the order manifest →
+`config.toml` → registry entry.
+
+To move a library's reference to its new home, declare it once:
+
+```
+bookrack index-profile apply <profile> --library <name>
+```
+
+or, without the reconciliation plan,
+
+```
+bookrack libraries config <name> index_profile=<profile>
+```
+
+Either writes the manifest, refreshes the registry cache, and clears a
+superseded `config.toml` declaration. `bookrack index-profile current`
+names the source in effect (`origin`) and lists any source still holding
+a different name (`drift`); `bookrack doctor` warns about the same drift.
+
+Two consequences worth knowing:
+
+- **Sources that disagree no longer refuse to start.** Previously a
+  `config.toml` and a registry entry naming different profiles was a
+  hard error. Now the higher-priority source wins and the disagreement
+  is reported as drift. If you relied on that error to catch a
+  misconfiguration, watch `doctor` instead.
+- **The reference travels with the data.** Copy a data root to another
+  machine and `bookrack libraries register` it: the profile comes along,
+  because it is in the manifest. `bookrack libraries scan` refills the
+  registry cache for every root it finds, which is also the repair for a
+  registry that drifted or was lost.
+
 ## What never refreshes automatically
 
 bookrack never decides, on its own, that derived content is stale and

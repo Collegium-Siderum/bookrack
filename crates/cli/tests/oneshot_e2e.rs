@@ -239,12 +239,13 @@ async fn libraries_default_writes_the_registry_offline() -> Result<()> {
     Ok(())
 }
 
-/// `libraries config --unset index_profile` clears the reference in
-/// both sites `index-profile apply` declares it — `config.toml` and
-/// the registry entry — so `index-profile current` afterwards reports
-/// no profile instead of resolving the leftover registry field.
+/// `libraries config --unset index_profile` clears the reference from
+/// every site that can hold one — the manifest that owns it, plus a
+/// legacy `config.toml` declaration and the registry's cached copy — so
+/// `index-profile current` afterwards reports no profile instead of
+/// resolving a leftover.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn libraries_config_unset_index_profile_clears_both_reference_sites() -> Result<()> {
+async fn libraries_config_unset_index_profile_clears_every_reference_site() -> Result<()> {
     let runtime_dir = tempfile::tempdir()?;
     let registry_dir = tempfile::tempdir()?;
     let data_dir = tempfile::tempdir()?;
@@ -262,6 +263,15 @@ async fn libraries_config_unset_index_profile_clears_both_reference_sites() -> R
     std::fs::write(
         data_dir.path().join("config.toml"),
         "index_profile = \"qwen3-0.6b-default\"\n",
+    )?;
+    std::fs::write(
+        data_dir.path().join("bookrack-library.toml"),
+        "format = \"bookrack-library\"\n\
+         format_version = 1\n\
+         uuid = \"01890a5d-0000-7000-8000-00000000000e\"\n\
+         name = \"alpha\"\n\
+         kind = \"test\"\n\
+         index_profile = \"qwen3-0.6b-default\"\n",
     )?;
     let output = tokio::process::Command::new(bookrack_bin())
         .args(["libraries", "config", "alpha", "--unset", "index_profile"])
@@ -282,8 +292,17 @@ async fn libraries_config_unset_index_profile_clears_both_reference_sites() -> R
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("unset index_profile (config.toml + registry entry)"),
-        "stdout should name both cleared sites: {stdout}",
+        stdout.contains("unset index_profile (library manifest)"),
+        "stdout should name the site that owns the reference: {stdout}",
+    );
+    let manifest_written = std::fs::read_to_string(data_dir.path().join("bookrack-library.toml"))?;
+    assert!(
+        !manifest_written.contains("index_profile"),
+        "the manifest still records the profile: {manifest_written}",
+    );
+    assert!(
+        manifest_written.contains("uuid = \"01890a5d-0000-7000-8000-00000000000e\""),
+        "clearing the profile must leave the identity intact: {manifest_written}",
     );
     let registry_written = std::fs::read_to_string(&registry_path)?;
     assert!(
@@ -317,6 +336,197 @@ async fn libraries_config_unset_index_profile_clears_both_reference_sites() -> R
     assert!(
         stdout.contains("profile: none"),
         "current should report no profile after the unset: {stdout}",
+    );
+    Ok(())
+}
+
+/// `libraries config <name> index_profile=<p>` declares into the
+/// manifest, refreshes the registry cache, and sweeps a superseded
+/// `config.toml` declaration — the one truth write plus cache
+/// maintenance, from the local verb as much as from `index-profile
+/// apply`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.alpha]\n\
+             data_dir = \"{}\"\n\
+             kind = \"test\"\n",
+            data_dir.path().display()
+        ),
+    )?;
+    // A root declared the old way: config.toml only, no manifest. The
+    // second key is an unrelated preference the sweep must not touch.
+    std::fs::write(
+        data_dir.path().join("config.toml"),
+        "index_profile = \"qwen3-0.6b-default\"\nollama_url = \"http://127.0.0.1:11434\"\n",
+    )?;
+
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args([
+            "libraries",
+            "config",
+            "alpha",
+            "index_profile=qwen3-0.6b-default",
+        ])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "set should succeed offline; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // The truth: a manifest minted for the root, carrying the reference.
+    let manifest = std::fs::read_to_string(data_dir.path().join("bookrack-library.toml"))?;
+    assert!(
+        manifest.contains("index_profile = \"qwen3-0.6b-default\""),
+        "the manifest should own the reference: {manifest}",
+    );
+    assert!(manifest.contains("name = \"alpha\""), "{manifest}");
+    // The cache: refreshed to match.
+    let registry_written = std::fs::read_to_string(&registry_path)?;
+    assert!(
+        registry_written.contains("index_profile = \"qwen3-0.6b-default\""),
+        "the registry cache should be refreshed: {registry_written}",
+    );
+    // The superseded declaration: swept, leaving unrelated keys alone.
+    let config_written = std::fs::read_to_string(data_dir.path().join("config.toml"))?;
+    assert!(
+        !config_written.contains("index_profile"),
+        "the superseded config.toml declaration should be swept: {config_written}",
+    );
+    assert!(
+        config_written.contains("ollama_url"),
+        "sweeping must not disturb other keys: {config_written}",
+    );
+
+    // `current` reads it back from its new home, with nothing drifted.
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["index-profile", "current", "--library", "alpha", "--json"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "current should resolve offline; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["profile"]["origin"], "manifest", "{stdout}");
+    assert_eq!(value["drift"], serde_json::json!([]), "{stdout}");
+    Ok(())
+}
+
+/// A registry entry naming a different profile than the manifest is
+/// drift, not a conflict: the manifest wins, `current` exits zero and
+/// reports the stale copy, and `libraries scan` refreshes it away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let holder = tempfile::tempdir()?;
+    let data_dir = holder.path().join("alpha");
+    std::fs::create_dir(&data_dir)?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    // The cache disagrees with the manifest — an entry left behind by a
+    // profile change that never refreshed it.
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.alpha]\n\
+             data_dir = \"{}\"\n\
+             kind = \"test\"\n\
+             index_profile = \"qwen3-4b-quality\"\n",
+            data_dir.display()
+        ),
+    )?;
+    std::fs::write(
+        data_dir.join("bookrack-library.toml"),
+        "format = \"bookrack-library\"\n\
+         format_version = 1\n\
+         uuid = \"01890a5d-0000-7000-8000-00000000000f\"\n\
+         name = \"alpha\"\n\
+         kind = \"test\"\n\
+         index_profile = \"qwen3-0.6b-default\"\n",
+    )?;
+
+    let current = || {
+        tokio::process::Command::new(bookrack_bin())
+            .args(["index-profile", "current", "--library", "alpha", "--json"])
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+            .env("BOOKRACK_REGISTRY", &registry_path)
+            .env_remove("BOOKRACK_DATA_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    };
+
+    let output = current().await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "drift is a finding, not a failure; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(value["profile"]["name"], "qwen3-0.6b-default", "{stdout}");
+    assert_eq!(value["profile"]["origin"], "manifest", "{stdout}");
+    assert_eq!(
+        value["drift"],
+        serde_json::json!([{"source": "registry", "stale_value": "qwen3-4b-quality"}]),
+        "{stdout}",
+    );
+
+    // `scan --register` re-reads the manifests and refreshes the cache.
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "scan"])
+        .arg(holder.path())
+        .arg("--register")
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "scan should succeed; stderr={:?}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let output = current().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(
+        value["drift"],
+        serde_json::json!([]),
+        "scan should have refreshed the stale cache: {stdout}",
     );
     Ok(())
 }

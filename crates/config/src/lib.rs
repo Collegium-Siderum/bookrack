@@ -18,6 +18,7 @@ use std::time::Duration;
 mod detect;
 pub mod llama_server_pin;
 mod manifest;
+mod profile_ref;
 mod registry;
 pub mod reranker_model_pin;
 
@@ -27,7 +28,12 @@ pub use detect::{
 };
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
-    load_manifest, new_manifest, render_manifest_toml, write_manifest,
+    ManifestIdentitySeed, load_manifest, new_manifest, render_manifest_toml,
+    set_manifest_index_profile, write_manifest,
+};
+pub use profile_ref::{
+    ProfileRefDrift, ProfileRefOrigin, effective_profile_reference, profile_reference_drift,
+    registry_profile_ref_in,
 };
 pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
@@ -239,9 +245,8 @@ pub enum ConfigError {
     },
     /// Two configured index-profile facts disagree, so no single
     /// effective retrieval combination exists. Constructed through
-    /// [`ConfigError::profile_model_conflict`] or
-    /// [`ConfigError::profile_reference_conflict`], which spell out the
-    /// two values and the repair paths.
+    /// [`ConfigError::profile_model_conflict`], which spells out the two
+    /// values and the repair paths.
     #[error("index profile conflict: {message}")]
     ProfileConfigConflict { message: String },
 }
@@ -262,19 +267,6 @@ impl ConfigError {
                  {profile:?} declares {profile_model:?}; unset embed_model \
                  (`bookrack libraries config <name> --unset embed_model`) or reference \
                  a profile that declares {explicit_model:?}"
-            ),
-        }
-    }
-
-    /// `config.toml` and the registry entry both name an index profile
-    /// and the names differ. Neither side is treated as newer; the
-    /// operator aligns them explicitly.
-    pub fn profile_reference_conflict(config_value: &str, registry_value: &str) -> ConfigError {
-        ConfigError::ProfileConfigConflict {
-            message: format!(
-                "config.toml references index profile {config_value:?} but the registry \
-                 entry records {registry_value:?}; set both to the same name \
-                 (`bookrack libraries config <name> index_profile=...` edits config.toml)"
             ),
         }
     }
@@ -495,7 +487,10 @@ pub struct LibraryEntry {
     pub kind: LibraryKind,
     /// Free-form description, when the entry carries one.
     pub description: Option<String>,
-    /// Index-profile name the entry records, when set.
+    /// Index-profile name the entry records, when set. A cache of the
+    /// manifest's `index_profile`, like the identity fields below it:
+    /// [`effective_profile_reference`] prefers the manifest, and
+    /// `libraries scan` refreshes a stale copy.
     pub index_profile: Option<String>,
     /// Cached RFC 3339 creation timestamp, when set.
     pub created_at: Option<String>,
@@ -1914,11 +1909,18 @@ where
         }
     };
 
+    // The entry's profile reference is a cache of the manifest's, so a
+    // root that carries one restores it here: registering a rsynced
+    // library, or rescanning after a lost registry, recovers the data
+    // contract along with the identity. A manifestless root has no
+    // reference to restore.
+    let index_profile = existing.as_ref().and_then(|m| m.index_profile.clone());
+
     let fields = LibraryEntryFields {
         data_dir: data_dir.to_path_buf(),
         kind,
         description,
-        index_profile: None,
+        index_profile,
         created_at,
         uuid: uuid.clone(),
     };
@@ -3214,12 +3216,6 @@ mod tests {
         assert!(text.contains("\"file-model\""));
         assert!(text.contains("\"profile-model\""));
         assert!(text.contains("--unset embed_model"));
-
-        let reference = ConfigError::profile_reference_conflict("a-prof", "b-prof");
-        let text = reference.to_string();
-        assert!(text.contains("\"a-prof\""));
-        assert!(text.contains("\"b-prof\""));
-        assert!(text.contains("libraries config"));
     }
 
     #[test]

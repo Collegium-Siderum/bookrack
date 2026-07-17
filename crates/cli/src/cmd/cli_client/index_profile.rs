@@ -4,22 +4,25 @@
 //! offline, confirm it, write the target declaration, then drive the
 //! low-level control-plane methods in plan order.
 //!
-//! The declaration (`config.toml` + registry entry) is written before
-//! the first action runs: every action handler resolves its target
-//! model through the effective-profile chain at execution time, so a
-//! declaration written afterwards would have the actions run against
-//! the old profile. A failure mid-plan therefore leaves the declaration
-//! ahead of the stamps; `index-profile current` reports the divergence
-//! and re-running `apply` re-derives only the remaining actions.
+//! The declaration is written before the first action runs: every action
+//! handler resolves its target model through the effective-profile chain
+//! at execution time, so a declaration written afterwards would have the
+//! actions run against the old profile. A failure mid-plan therefore
+//! leaves the declaration ahead of the stamps; `index-profile current`
+//! reports the divergence and re-running `apply` re-derives only the
+//! remaining actions.
+//!
+//! The truth is the manifest write; the rest is cache maintenance.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use bookrack_cli::error::BookrackCliError;
+use bookrack_cli::libraries_local::root_config_exists;
 use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
 use bookrack_config::{
-    LibraryEntryFields, LibrarySelection, registry_target_path, set_root_config_values,
-    upsert_library_entry,
+    LibraryEntryFields, LibrarySelection, ManifestIdentitySeed, load_manifest,
+    registry_target_path, set_manifest_index_profile, set_root_config_values, upsert_library_entry,
 };
 use bookrack_control_client::ControlClient;
 use bookrack_runtime::cmd::index_profile::{
@@ -232,23 +235,34 @@ fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
     confirm_destructive(&prompt, mode, false).context("read index-profile apply confirmation")
 }
 
-/// Write the target declaration into both reference sites —
-/// `<data_root>/config.toml` and the registry entry — before any action
-/// runs, so every handler resolves the new profile at execution time.
-/// The two sites are written to the same name, which keeps the
-/// reference-conflict check green.
+/// Write the target declaration before any action runs, so every handler
+/// resolves the new profile at execution time.
+///
+/// The manifest write is the declaration; the two steps after it are
+/// cache maintenance. Their failure modes are correspondingly mild: a
+/// crash before the registry refresh leaves a stale cache that `doctor`
+/// reports and `libraries scan` repairs, and one before the `config.toml`
+/// sweep leaves a value identical to the one just declared. Neither can
+/// split the truth, because there is only one copy of it.
 fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
-    set_root_config_values(
+    let had_manifest = matches!(load_manifest(&plan.entry.data_dir), Ok(Some(_)));
+    set_manifest_index_profile(
         &plan.entry.data_dir,
-        &[("index_profile".to_string(), name.to_string())],
-        &[],
+        Some(name),
+        ManifestIdentitySeed {
+            name: &plan.entry.name,
+            kind: plan.entry.kind,
+            description: plan.entry.description.as_deref(),
+        },
     )
     .with_context(|| {
         format!(
-            "write index_profile into {}/config.toml",
-            plan.entry.data_dir.display()
+            "declare index_profile in {}/{}",
+            plan.entry.data_dir.display(),
+            bookrack_config::MANIFEST_FILENAME,
         )
     })?;
+
     let registry_path = registry_target_path().ok_or_else(|| {
         eyre::eyre!(
             "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform \
@@ -270,7 +284,33 @@ fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
             registry_path.display()
         )
     })?;
-    println!("declared: index_profile = '{name}' (config.toml + registry entry)");
+
+    // Sweep a `config.toml` declaration left by an older write path: it
+    // sits above the registry cache in the resolution chain, so leaving
+    // it would shadow the cache forever and keep the drift report
+    // permanently non-empty.
+    sweep_stale_config_declaration(&plan.entry.data_dir)?;
+
+    println!("declared: index_profile = '{name}' (library manifest)");
+    if !had_manifest {
+        println!("  wrote a library manifest for this root (it had none)");
+    }
+    Ok(())
+}
+
+/// Clear an `index_profile` from a root's `config.toml`. Skipped on a
+/// root with no such file, which an unset would otherwise materialise;
+/// unsetting a key an existing file does not carry is a no-op.
+fn sweep_stale_config_declaration(data_dir: &Path) -> Result<()> {
+    if !root_config_exists(data_dir) {
+        return Ok(());
+    }
+    set_root_config_values(data_dir, &[], &["index_profile".to_string()]).with_context(|| {
+        format!(
+            "clear the superseded index_profile from {}/config.toml",
+            data_dir.display()
+        )
+    })?;
     Ok(())
 }
 

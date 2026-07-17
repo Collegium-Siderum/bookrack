@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 
 use bookrack_config::{
     AddOptions, AddOutcome, AddReport, ConfigError, DetectError, DetectVerdict, LibraryEntryFields,
-    LibraryKind, LibraryManifest, LibraryOpError, RootConfigSetError, ScanOutcome, Signal,
-    add_library, detect_library, find_library, load_root_config, mounted_volumes,
-    read_root_config_text, registry_target_path, remove_library, render_manifest_toml,
-    repoint_library, root_config_env_override, scan_for_libraries, set_root_config_values,
-    upsert_library_entry,
+    LibraryKind, LibraryManifest, LibraryOpError, ManifestIdentitySeed, ROOT_CONFIG_NAME,
+    RootConfigSetError, ScanOutcome, Signal, add_library, detect_library, find_library,
+    load_root_config, mounted_volumes, read_root_config_text, registry_target_path, remove_library,
+    render_manifest_toml, repoint_library, root_config_env_override, scan_for_libraries,
+    set_manifest_index_profile, set_root_config_values, upsert_library_entry,
 };
 use bookrack_session::{RootLock, is_root_lock_conflict};
 use eyre::{Report, Result};
@@ -388,6 +388,11 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
 /// library's data root from the registry, then read or edit its
 /// `config.toml`. With no sets and no unsets, print the file; otherwise
 /// apply the edits in place, preserving comments.
+///
+/// `index_profile` is the exception: it is a data contract, not a
+/// per-machine preference, so it is written to the library manifest and
+/// only cached in the registry entry. Setting or unsetting it here goes
+/// down the same path `index-profile apply` uses.
 pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> Result<()> {
     let registry_path = registry_path()?;
     let entry = find_library(&registry_path, &name)
@@ -416,28 +421,78 @@ pub fn config(name: String, sets: Vec<(String, String)>, unset: Vec<String>) -> 
         }
     }
 
-    set_root_config_values(&data_dir, &sets, &unset).map_err(root_config_set_error)?;
-
-    // `index-profile apply` declares the profile reference in both
-    // config.toml and the registry entry; unsetting the key clears the
-    // registry side too, so the reference cannot keep resolving from
-    // the entry after the config.toml side is gone.
-    let registry_cleared =
-        unset.iter().any(|key| key == "index_profile") && entry.index_profile.is_some();
-    if registry_cleared {
-        let fields = LibraryEntryFields {
-            data_dir: data_dir.clone(),
-            kind: entry.kind,
-            description: entry.description.clone(),
-            index_profile: None,
-            created_at: entry.created_at.clone(),
-            uuid: entry.uuid.clone(),
-        };
-        upsert_library_entry(&registry_path, &name, &fields).map_err(config_error)?;
+    // `index_profile` is not a config.toml field any more: the manifest
+    // holds it. Route it out of the config.toml write and through the
+    // same truth-write-then-refresh-caches path `index-profile apply`
+    // takes, so both verbs leave one story on disk.
+    let profile_set = sets
+        .iter()
+        .find(|(key, _)| key == "index_profile")
+        .map(|(_, value)| value.clone());
+    let profile_unset = unset.iter().any(|key| key == "index_profile");
+    let file_sets: Vec<(String, String)> = sets
+        .iter()
+        .filter(|(key, _)| key != "index_profile")
+        .cloned()
+        .collect();
+    // Setting the profile also sweeps a superseded config.toml
+    // declaration: it sits above the registry cache in the resolution
+    // chain, so leaving it would shadow the cache forever and keep the
+    // drift report permanently non-empty.
+    let mut file_unset = unset.clone();
+    if profile_set.is_some() && !profile_unset && root_config_exists(&data_dir) {
+        file_unset.push("index_profile".to_string());
     }
 
-    render_config_write(&name, &data_dir, &sets, &unset, registry_cleared);
+    set_root_config_values(&data_dir, &file_sets, &file_unset).map_err(root_config_set_error)?;
+
+    let mut profile_written = None;
+    if profile_set.is_some() || profile_unset {
+        let seed = ManifestIdentitySeed {
+            name: &name,
+            kind: entry.kind,
+            description: entry.description.as_deref(),
+        };
+        set_manifest_index_profile(&data_dir, profile_set.as_deref(), seed).map_err(|e| {
+            Report::new(BookrackCliError::LocalUserError {
+                message: format!("write index_profile into the library manifest: {e}"),
+            })
+        })?;
+        profile_written = Some(profile_set.clone());
+    }
+
+    // Refresh the registry's cached copy after either direction, so the
+    // entry does not keep advertising a reference the manifest no longer
+    // agrees with. A stale copy is only ever drift now — `doctor` reports
+    // it and `libraries scan` repairs it — never a second truth.
+    let registry_refreshed = match &profile_written {
+        Some(value) if value.as_deref() != entry.index_profile.as_deref() => {
+            let fields = LibraryEntryFields {
+                data_dir: data_dir.clone(),
+                kind: entry.kind,
+                description: entry.description.clone(),
+                index_profile: value.clone(),
+                created_at: entry.created_at.clone(),
+                uuid: entry.uuid.clone(),
+            };
+            upsert_library_entry(&registry_path, &name, &fields).map_err(config_error)?;
+            true
+        }
+        _ => false,
+    };
+
+    render_config_write(&name, &data_dir, &sets, &unset, registry_refreshed);
     Ok(())
+}
+
+/// Whether the root has a `config.toml` at all.
+///
+/// Guards the sweep of a superseded `index_profile` declaration: an
+/// unset against a root with no file would materialise one. Deliberately
+/// a file-existence test rather than a parse — a file carrying a key
+/// this binary does not know still needs its stale declaration swept.
+pub fn root_config_exists(data_dir: &Path) -> bool {
+    data_dir.join(ROOT_CONFIG_NAME).exists()
 }
 
 /// Dump a library's `config.toml`: the parsed [`RootConfig`] for `--json`,
@@ -469,15 +524,14 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
 /// Report a successful edit: the keys set and unset, plus the advisory
 /// notes an operator needs — an embed-model change implies re-ingestion,
 /// a set env var shadows the file, and the change only reaches a running
-/// daemon on restart. `registry_cleared` marks an `index_profile` unset
-/// that also cleared the registry entry's field, so the output names
-/// both reference sites the way `index-profile apply` does.
+/// daemon on restart. `registry_refreshed` marks an `index_profile`
+/// write that also refreshed the registry entry's cached copy.
 fn render_config_write(
     name: &str,
     data_dir: &Path,
     sets: &[(String, String)],
     unset: &[String],
-    registry_cleared: bool,
+    registry_refreshed: bool,
 ) {
     if ctx().is_json() {
         let value = serde_json::json!({
@@ -486,16 +540,20 @@ fn render_config_write(
             "data_dir": data_dir.display().to_string(),
             "set": sets.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
             "unset": unset,
-            "registry_cleared": registry_cleared,
+            "registry_refreshed": registry_refreshed,
         });
         println!("{value}");
     } else if !ctx().is_quiet() {
         for (key, value) in sets {
-            println!("set {key} = {value:?}");
+            if key == "index_profile" {
+                println!("set {key} = {value:?} (library manifest)");
+            } else {
+                println!("set {key} = {value:?}");
+            }
         }
         for key in unset {
-            if key == "index_profile" && registry_cleared {
-                println!("unset {key} (config.toml + registry entry)");
+            if key == "index_profile" {
+                println!("unset {key} (library manifest)");
             } else {
                 println!("unset {key}");
             }

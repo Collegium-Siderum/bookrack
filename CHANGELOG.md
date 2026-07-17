@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **config, cli: the library manifest carries the index-profile
+  reference; the registry entry becomes a regenerable cache of it.**
+  `bookrack-library.toml` gains an optional `index_profile` key, and
+  declaring a profile — through `index-profile apply` or `libraries
+  config <name> index_profile=<p>` — writes it there in one atomic
+  write, then refreshes the registry cache and sweeps a superseded
+  `config.toml` declaration. The reference now travels with the data:
+  copy a root to another machine, `libraries register` it, and its
+  profile comes along; `libraries scan` refills the cache for every root
+  it finds. Resolution reads manifest, then `config.toml`, then the
+  registry entry, so references declared the old way keep working
+  untouched — see [`docs/UPGRADE.md`](docs/UPGRADE.md) for the one-command
+  migration. `format_version` stays at 1: the key is optional and
+  additive, and unknown keys were always tolerated.
+
 - **session, runtime: data roots are guarded by an exclusive
   `.bookrack.lock`.** The daemon takes the new root lock during
   bring-up — after resolving its configuration, before opening anything
@@ -162,6 +177,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **config, runtime: conflicting profile declarations no longer refuse
+  startup — the highest-priority source wins and the drift is
+  reported.** A `config.toml` and a registry entry naming different
+  profiles used to be a hard error that stopped the daemon from starting
+  and `index-profile current` from reading. With the manifest as the
+  single truth, a lower-priority source naming something else is a stale
+  cache, not an irreconcilable conflict: resolution takes the winner and
+  carries on. `index-profile current` reports every stale copy in a
+  `drift` list (exit 0 — it is a finding, not a failure), `doctor` warns
+  about the same, and both name the repair. `current`'s `origin` gains
+  `manifest` and its `--json` token is now the serde form
+  (`config_toml`); the `config.toml + registry` origin is gone, since
+  sources no longer have to agree to be usable.
+
 - **cli: `libraries remove --purge` refuses a data root that is
   currently in use.** The purge takes the root lock before its detect
   gate, so a root a daemon is serving is now refused (exit 2, naming the
@@ -200,12 +229,13 @@ release workflow extracts the matching section verbatim from this file.
 
 - **runtime: a referenced index profile now takes effect, and conflicts
   refuse startup.** The daemon (and every offline embedding command)
-  resolves its embed model through the effective index profile. Two
-  declared facts that disagree are a startup error with both values and
-  the repair paths spelled out: an explicit `embed_model` that
-  contradicts the referenced profile's model, or `config.toml` and the
-  registry entry naming different profiles. An undefined or unloadable
-  profile reference no longer passes silently.
+  resolves its embed model through the effective index profile. An
+  explicit `embed_model` that contradicts the referenced profile's model
+  is a startup error with both values and the repair paths spelled out.
+  An undefined or unloadable profile reference no longer passes
+  silently. (Two *reference* sites naming different profiles was also an
+  error here for part of this cycle; it is drift now — see the manifest
+  entry above.)
 
 ### Fixed
 

@@ -548,6 +548,10 @@ pub(crate) enum LibrariesAction {
     /// daemon, then reads or edits its `config.toml` in place. With no
     /// `KEY=VALUE` arguments (and no `--unset`), prints the file. The
     /// change does not reach a running daemon until it restarts.
+    ///
+    /// `index_profile` is the exception: it is a data contract rather
+    /// than a per-machine preference, so it is written to the library
+    /// manifest and only cached in the registry entry.
     Config {
         /// Registry name whose config is read or edited.
         name: String,
@@ -558,8 +562,8 @@ pub(crate) enum LibrariesAction {
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
         sets: Vec<(String, String)>,
         /// Key to remove from the file; accepts the same keys.
-        /// Repeatable. Unsetting `index_profile` also clears the
-        /// registry entry's reference.
+        /// Repeatable. Unsetting `index_profile` clears it from the
+        /// manifest and refreshes the registry entry's cached copy.
         #[arg(long, value_name = "KEY")]
         unset: Vec<String>,
     },
