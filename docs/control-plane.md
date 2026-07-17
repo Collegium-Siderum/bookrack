@@ -155,11 +155,27 @@ the exit-code bucket does not distinguish the two.
   the `daemon.state` event for the semantics of each value.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints.
+- `daemon.methods` — the live method table: every name this daemon
+  dispatches, with its read/write class. Authoritative at runtime where
+  this document is authoritative at review time.
+- `daemon.mcp_tools` — the MCP tool names the daemon's listener exposes.
 - `queue.list` — `{ schema_version, paused, jobs }`. `params.limit`
   optionally caps the jobs slice.
+- `queue.pause` — `{ ok: true, paused: true }`. Stops the worker
+  picking up new jobs; a running job finishes. The pause is persisted in
+  the queue document, so it survives a restart.
+- `queue.resume` — `{ ok: true, paused: false }`.
+- `queue.clear` — `{ ok: true, cleared }`. Drops every not-yet-running
+  job; a running job is untouched.
 - `library.list` — array of `{ name, default, dimension }` entries.
 - `library.info` — full status card for one library;
   `params.name` selects which.
+- `library.fork` — `{ new_name, data_dir }` → the fork report. Clones
+  the served library into a sibling registry entry: the envelope store is
+  hardlinked where the filesystem allows, the catalog and corpus are
+  copied, and the vector store is deliberately not carried over, so the
+  clone starts unstamped and awaits its own `vectors reset`. Writes the
+  registry.
 - `library.set_default` — `{ name }` → `{ ok: true, name }`. Move
   the registry's default-library pointer to `name`. The change
   lives in the daemon's in-memory registry only; the on-disk
@@ -177,6 +193,17 @@ the exit-code bucket does not distinguish the two.
   oldest first. `n` defaults to 100 and is capped server-side at
   1024. Peer of the `session.logs_tail` MCP tool; same backing
   buffer.
+- `verify.run` — no params; the cross-store verify report. Read-only,
+  but funnelled through the write mutex because it opens the same
+  catalog handle the writes mutate, so it cannot overlap one in flight.
+- `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
+  scrubbed }`. Bundles crash reports, recent logs, and a catalog
+  snapshot for a bug attachment. Scrubbed of local paths and titles
+  unless `no_scrub` is set.
+- `tray.focus` — no params; `{ ok: true }`. Signals one waiter on the
+  daemon's focus notification, which a GUI host attached in-process
+  uses to raise its window. A daemon with no GUI attached accepts the
+  call and nothing observes it.
 
 ## Methods (Phase 2)
 

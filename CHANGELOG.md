@@ -351,6 +351,16 @@ release workflow extracts the matching section verbatim from this file.
   scanning degrades rerank throughput), and defaults `-c` to 8192 —
   four slots at the batch cap — while `reranker.ctx` still overrides.
 
+### Security
+
+- **deps: `serde_with` moves to 3.21.0, clearing GHSA-7gcf-g7xr-8hxj.**
+  The advisory (medium, no CVE) is a panic in `KeyValueMap`
+  serialization on empty sequence or map entries. `serde_with` reaches
+  bookrack only transitively, through `lancedb`; no crate here depends on
+  it directly and none uses the affected API, so this clears a known
+  advisory from the tree rather than fixing anything observed in
+  bookrack.
+
 ## [0.8.0] - 2026-07-08
 
 ### Added
