@@ -16,13 +16,15 @@ stays read-only and tool-scoped.
 
 ## Locks
 
-Two advisory `flock`s divide the daemon's exclusivity between the
-session and the data it serves.
+Three advisory `flock`s divide the daemon's exclusivity: two over the
+session and the data it serves, held long; one over the shared library
+registry, held only for a write.
 
 | Lock | File | Guarantee | Held for |
 | --- | --- | --- | --- |
 | Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above | the daemon's lifetime |
 | Data root | `<data_root>/.bookrack.lock` | one writer per data root, whether a daemon or an offline destructive command | the daemon's lifetime; briefly for an offline writer |
+| Registry | `<registry>.lock` | one writer at a time through a registry file's read-modify-write window | a single write; milliseconds |
 
 The daemon takes the data-root lock during bring-up, after resolving
 its configuration and before opening anything under the root, and holds
@@ -33,12 +35,23 @@ fails to start and names the holder's recorded `pid=` and `role=`.
 detect gate, so purging a root a daemon is serving is refused (exit 2)
 rather than silently destroying live data.
 
-Both locks are held on a file of their own that no atomic rewrite ever
+The registry lock is different in kind: short, not long. The library
+registry has two kinds of writer — the offline CLI verbs and the daemon
+(`library.fork`, `library.set_default`) — so bare atomic replacement is
+not enough, since two writers' read-modify-write cycles would swallow
+each other. Every registry write verb takes the lock around its read,
+modify, and atomic write, then releases it; readers take no lock and the
+atomic rename hands them the old file or the new one. The registry lives
+in the platform config directory, not under a data root, so this lock is
+independent of which roots any daemon serves.
+
+Each lock is held on a file of its own that no atomic rewrite ever
 replaces: `flock` follows the inode, and a `rename` would strand the
 lock on an unlinked file. The OS drops the lock with the file handle,
 so a crash leaves no stale lock — only stale content, which the next
-acquirer truncates. That content is display-only: the flock is the
-truth, and no reader may decide anything from a snapshot of the file.
+acquirer truncates (the registry lock file carries no content at all).
+That content is display-only: the flock is the truth, and no reader may
+decide anything from a snapshot of the file.
 
 Read-only surfaces stay lock-free. Offline read-only commands
 (`distill`, `runs`, `retrieval`, `doctor` diagnostics) never take the
@@ -177,10 +190,15 @@ the exit-code bucket does not distinguish the two.
   clone starts unstamped and awaits its own `vectors reset`. Writes the
   registry.
 - `library.set_default` — `{ name }` → `{ ok: true, name }`. Move
-  the registry's default-library pointer to `name`. The change
-  lives in the daemon's in-memory registry only; the on-disk
-  library registry stays as written. Returns `-32602` with the
-  list of known libraries when `name` is unregistered. Fires a
+  the registry's default-library pointer to `name`. The change is
+  persisted to the on-disk registry, and the running daemon's
+  in-memory pointer — a cache of the on-disk value — follows it
+  immediately, so the default survives a restart. Registry writes
+  are serialized by a sibling lock file, so a concurrent CLI write
+  verb and this RPC cannot clobber each other. Returns `-32010`
+  (invalid library) with the list of known libraries when `name`
+  is not a registered library, whether the name is unknown to the
+  daemon or absent from the on-disk registry. Fires a
   `library.changed` event so subscribers can refresh their view.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,

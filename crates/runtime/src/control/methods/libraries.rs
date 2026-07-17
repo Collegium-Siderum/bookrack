@@ -5,21 +5,22 @@
 //! parity work in Phase 5 reuses this same handler.
 //!
 //! `library.set_default` — re-point the registry's default-library
-//! pointer at one of its known libraries. The change lives in the
-//! daemon's in-memory registry only; the persistent library
-//! registry on disk is untouched, so restarting the daemon picks
-//! up whatever the configured `--library` / TOML default says.
+//! pointer at one of its known libraries. The change is persisted to
+//! the on-disk registry, then the daemon's in-memory pointer — a cache
+//! of that on-disk value — is refreshed, so the default survives a
+//! daemon restart and the running daemon's routing follows immediately.
 
 use std::path::PathBuf;
 
-use bookrack_ops::registry::RegistryError;
+use bookrack_config::{registry_target_path, set_default_library};
 use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
+use super::super::error_map::{config_err, registry_err};
 use super::super::events::Event;
-use super::super::jsonrpc::{INVALID_PARAMS, RpcError};
+use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use super::MethodContext;
 use super::run_write;
 use crate::cmd::libraries::CopyMode;
@@ -93,33 +94,42 @@ pub struct LibrarySetDefaultParams {
     pub name: String,
 }
 
-/// Re-point the daemon's in-memory default-library pointer at `name`.
-/// This affects only the running daemon session and is not persisted;
-/// the on-disk registry default is written by the CLI's offline
-/// `libraries default`, which owns registry persistence. The daemon's
-/// primary `library_name` (used as a fallback when an RPC caller omits
-/// `library`) is unchanged — the call is advisory and fires a
-/// `library.changed` event so subscribers can refresh their view of
-/// which library the daemon now reports as default.
+/// Re-point the default-library pointer at `name`, persisting it to the
+/// registry.
+///
+/// The registry file is the single home of the default. The name is
+/// validated against the daemon's registered libraries first, so an
+/// unknown name is rejected before any write; the change is then written
+/// to the on-disk registry, and only afterwards is the daemon's
+/// in-memory pointer — a cache of the on-disk value — refreshed. Writing
+/// disk before memory keeps the truth ahead of its cache: a memory flip
+/// that outran a failed disk write would silently evaporate on restart.
+/// Fires a `library.changed` event so subscribers refresh their view.
 pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let raw = params
         .clone()
         .ok_or_else(|| RpcError::new(INVALID_PARAMS, "library.set_default: missing params"))?;
     let parsed: LibrarySetDefaultParams = serde_json::from_value(raw)
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("library.set_default params: {e}")))?;
-    match ctx.registry.set_default(&parsed.name) {
-        Ok(()) => {
-            ctx.event_stream.publish(Event::LibraryChanged {
-                library: parsed.name.clone(),
-            });
-            Ok(json!({ "ok": true, "name": parsed.name }))
-        }
-        Err(err @ RegistryError::LibraryUnknown { .. }) => {
-            Err(RpcError::new(INVALID_PARAMS, err.to_string()))
-        }
-        Err(err) => Err(RpcError::new(
-            crate::control::jsonrpc::INTERNAL_ERROR,
-            err.to_string(),
-        )),
-    }
+
+    // Validate against the registered libraries before touching disk, so
+    // an unknown name fails without a write.
+    ctx.registry.get(Some(&parsed.name)).map_err(registry_err)?;
+
+    // Persist to the registry, then refresh the in-memory cache.
+    let registry_path = registry_target_path().ok_or_else(|| {
+        RpcError::new(
+            INTERNAL_ERROR,
+            "library.set_default: no registry file to persist the default",
+        )
+    })?;
+    set_default_library(&registry_path, &parsed.name).map_err(config_err)?;
+    ctx.registry
+        .set_default(&parsed.name)
+        .map_err(registry_err)?;
+
+    ctx.event_stream.publish(Event::LibraryChanged {
+        library: parsed.name.clone(),
+    });
+    Ok(json!({ "ok": true, "name": parsed.name }))
 }

@@ -8,6 +8,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **config: registry writes are serialized by a sibling lock file.**
+  Every registry write verb — set-default, upsert, repoint, remove —
+  now takes a short-held exclusive lock on `<registry>.lock` around its
+  read-modify-write window before replacing the file atomically. The
+  daemon became a registry writer when `library.fork` and now
+  `library.set_default` persist to it, so the single-writer assumption
+  behind bare atomic replacement no longer holds; the lock closes the
+  window where two writers' read-modify-write cycles would silently
+  swallow each other. Readers take no lock — the atomic rename still
+  hands them the old file or the new one. The lock file carries no
+  content and can be deleted at any time.
+
 ### Removed
 
 - **config, runtime, cli: `BOOKRACK_EMBED_MODEL` and the `config.toml`
@@ -30,6 +44,18 @@ release workflow extracts the matching section verbatim from this file.
   model-conflict error no longer exist, because neither is reachable.
 
 ### Changed
+
+- **runtime: `library.set_default` persists the default to the registry;
+  the in-memory pointer becomes a cache.** The RPC previously flipped a
+  daemon-local pointer that evaporated on restart, leaving the registry
+  file as a second, divergent home for the default. It now writes the
+  on-disk registry first, then refreshes the in-memory pointer — a cache
+  of that on-disk value — so the change survives a restart and the
+  daemon's routing follows immediately. An external registry write
+  (another process, the offline CLI) is not pushed into the cache; a
+  restart re-seeds it. An unknown name is reported as `-32010` (invalid
+  library) rather than `-32602`, aligning the in-memory check with the
+  on-disk one and with the code the method already documented.
 
 - **config: a library's profile reference resolves from the manifest,
   then the registry cache.** The `config.toml` layer between them is

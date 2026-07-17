@@ -18,6 +18,7 @@
 //! does not match a known user-input variant falls through to
 //! [`INTERNAL_ERROR`].
 
+use bookrack_config::ConfigError;
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
@@ -62,6 +63,14 @@ pub(crate) fn ops_err(e: OpsError) -> RpcError {
 /// Map a directly-held [`RegistryError`] without an `anyhow` round-trip.
 pub(crate) fn registry_err(e: RegistryError) -> RpcError {
     from_registry(&e)
+}
+
+/// Map a directly-held [`ConfigError`] from a registry write onto the
+/// corresponding wire code. An unknown library named against the
+/// on-disk registry is caller input ([`INVALID_LIBRARY`]); every other
+/// registry fault is a server-side [`INTERNAL_ERROR`].
+pub(crate) fn config_err(e: ConfigError) -> RpcError {
+    from_config(&e)
 }
 
 /// Map a [`PlanLookupError`] onto the corresponding wire code.
@@ -145,6 +154,13 @@ fn from_registry(e: &RegistryError) -> RpcError {
     }
 }
 
+fn from_config(e: &ConfigError) -> RpcError {
+    match e {
+        ConfigError::UnknownLibrary { .. } => RpcError::new(INVALID_LIBRARY, e.to_string()),
+        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,6 +215,15 @@ mod tests {
         }
         .into();
         let rpc = write_err("library.set_default", err);
+        assert_eq!(rpc.code, INVALID_LIBRARY);
+    }
+
+    #[test]
+    fn config_unknown_library_is_invalid_library() {
+        let rpc = config_err(ConfigError::UnknownLibrary {
+            name: "ghost".into(),
+            available: vec!["main".into()],
+        });
         assert_eq!(rpc.code, INVALID_LIBRARY);
     }
 

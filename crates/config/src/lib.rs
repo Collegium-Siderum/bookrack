@@ -15,6 +15,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use fs2::FileExt;
+
 mod detect;
 pub mod llama_server_pin;
 mod manifest;
@@ -1644,20 +1646,16 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
 /// the registry does not define `name`, so the default can never point
 /// at a missing library.
 pub fn set_default_library(path: &Path, name: &str) -> Result<(), ConfigError> {
-    let mut doc = read_registry_table(path)?;
-    let upgraded = normalize_registry_entries(&mut doc, path)?;
-    if !registry_has_library(&doc, name) {
-        return Err(ConfigError::UnknownLibrary {
-            name: name.to_string(),
-            available: registry_library_names(&doc),
-        });
-    }
-    doc.insert("default".to_string(), toml::Value::String(name.to_string()));
-    write_registry_table(path, &doc)?;
-    if upgraded {
-        emit_registry_upgrade_notice();
-    }
-    Ok(())
+    update_registry_table(path, |doc| {
+        if !registry_has_library(doc, name) {
+            return Err(ConfigError::UnknownLibrary {
+                name: name.to_string(),
+                available: registry_library_names(doc),
+            });
+        }
+        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+        Ok(())
+    })
 }
 
 /// Remove the library named `name` from the registry, discarding the
@@ -1678,22 +1676,18 @@ pub fn upsert_library_entry(
     name: &str,
     entry: &LibraryEntryFields,
 ) -> Result<(), ConfigError> {
-    let mut doc = read_registry_table(path)?;
-    let upgraded = normalize_registry_entries(&mut doc, path)?;
-    let libraries = doc
-        .get_mut("libraries")
-        .expect("normalize_registry_entries inserts the libraries table")
-        .as_table_mut()
-        .expect("normalize_registry_entries guarantees a table");
-    libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
-    if !doc.contains_key("default") {
-        doc.insert("default".to_string(), toml::Value::String(name.to_string()));
-    }
-    write_registry_table(path, &doc)?;
-    if upgraded {
-        emit_registry_upgrade_notice();
-    }
-    Ok(())
+    update_registry_table(path, |doc| {
+        let libraries = doc
+            .get_mut("libraries")
+            .expect("normalize_registry_entries inserts the libraries table")
+            .as_table_mut()
+            .expect("normalize_registry_entries guarantees a table");
+        libraries.insert(name.to_string(), toml::Value::Table(entry.to_toml_table()));
+        if !doc.contains_key("default") {
+            doc.insert("default".to_string(), toml::Value::String(name.to_string()));
+        }
+        Ok(())
+    })
 }
 
 /// The metadata a full registry entry can carry, for the write side of
@@ -2018,29 +2012,25 @@ pub fn repoint_library(
     name: &str,
     new_data_dir: &Path,
 ) -> Result<(), ConfigError> {
-    let mut doc = read_registry_table(registry_path)?;
-    let upgraded = normalize_registry_entries(&mut doc, registry_path)?;
-    if !registry_has_library(&doc, name) {
-        return Err(ConfigError::UnknownLibrary {
-            name: name.to_string(),
-            available: registry_library_names(&doc),
-        });
-    }
-    let entry = doc
-        .get_mut("libraries")
-        .and_then(toml::Value::as_table_mut)
-        .and_then(|libraries| libraries.get_mut(name))
-        .and_then(toml::Value::as_table_mut)
-        .expect("registry_has_library confirmed a table entry");
-    entry.insert(
-        "data_dir".to_string(),
-        toml::Value::String(new_data_dir.display().to_string()),
-    );
-    write_registry_table(registry_path, &doc)?;
-    if upgraded {
-        emit_registry_upgrade_notice();
-    }
-    Ok(())
+    update_registry_table(registry_path, |doc| {
+        if !registry_has_library(doc, name) {
+            return Err(ConfigError::UnknownLibrary {
+                name: name.to_string(),
+                available: registry_library_names(doc),
+            });
+        }
+        let entry = doc
+            .get_mut("libraries")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|libraries| libraries.get_mut(name))
+            .and_then(toml::Value::as_table_mut)
+            .expect("registry_has_library confirmed a table entry");
+        entry.insert(
+            "data_dir".to_string(),
+            toml::Value::String(new_data_dir.display().to_string()),
+        );
+        Ok(())
+    })
 }
 
 /// What [`remove_library`] removed, for the CLI to act on.
@@ -2059,35 +2049,31 @@ pub struct RemoveReport {
 /// data root itself is never touched. Errors with
 /// [`ConfigError::UnknownLibrary`] when no such entry exists.
 pub fn remove_library(registry_path: &Path, name: &str) -> Result<RemoveReport, ConfigError> {
-    let mut doc = read_registry_table(registry_path)?;
-    let upgraded = normalize_registry_entries(&mut doc, registry_path)?;
-    let removed = doc
-        .get_mut("libraries")
-        .and_then(toml::Value::as_table_mut)
-        .and_then(|libraries| libraries.remove(name));
-    let Some(removed) = removed else {
-        return Err(ConfigError::UnknownLibrary {
-            name: name.to_string(),
-            available: registry_library_names(&doc),
-        });
-    };
-    let data_dir = removed
-        .as_table()
-        .and_then(|entry| entry.get("data_dir"))
-        .and_then(toml::Value::as_str)
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let default_cleared = doc.get("default").and_then(toml::Value::as_str) == Some(name);
-    if default_cleared {
-        doc.remove("default");
-    }
-    write_registry_table(registry_path, &doc)?;
-    if upgraded {
-        emit_registry_upgrade_notice();
-    }
-    Ok(RemoveReport {
-        data_dir,
-        default_cleared,
+    update_registry_table(registry_path, |doc| {
+        let removed = doc
+            .get_mut("libraries")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|libraries| libraries.remove(name));
+        let Some(removed) = removed else {
+            return Err(ConfigError::UnknownLibrary {
+                name: name.to_string(),
+                available: registry_library_names(doc),
+            });
+        };
+        let data_dir = removed
+            .as_table()
+            .and_then(|entry| entry.get("data_dir"))
+            .and_then(toml::Value::as_str)
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let default_cleared = doc.get("default").and_then(toml::Value::as_str) == Some(name);
+        if default_cleared {
+            doc.remove("default");
+        }
+        Ok(RemoveReport {
+            data_dir,
+            default_cleared,
+        })
     })
 }
 
@@ -2131,6 +2117,86 @@ fn load_registry_at(path: &Path) -> Result<Registry, ConfigError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Path of the sibling lock file guarding a registry's write window:
+/// the registry path with a `.lock` suffix, e.g. `registry.toml.lock`
+/// beside `registry.toml`. The lock lives in a separate file rather
+/// than on the registry inode because [`write_atomically`] replaces the
+/// registry by renaming a fresh file over it — a lock bound to the old
+/// inode would not cover its successor.
+fn registry_lock_path(registry: &Path) -> PathBuf {
+    let mut name = registry.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Exclusive advisory lock over a registry's read-modify-write window.
+///
+/// Held for a single read-modify-write cycle and released when the
+/// guard drops — or when the process exits, so a crashed writer leaves
+/// no stale lock to reap. Readers take no lock: the atomic rename hands
+/// them the old file or the new one, never a torn one.
+struct RegistryWriteLock {
+    _file: std::fs::File,
+}
+
+impl RegistryWriteLock {
+    /// Create the sibling lock file (and any missing parent directory)
+    /// and block until the exclusive lock is held. The wait spans a
+    /// single read plus a single write — milliseconds — so a blocking
+    /// acquire is preferred over surfacing a spurious try-lock failure
+    /// to the operator.
+    fn acquire(registry: &Path) -> Result<Self, ConfigError> {
+        let lock_path = registry_lock_path(registry);
+        if let Some(parent) = lock_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::RegistryUnreadable {
+                path: lock_path.clone(),
+                source,
+            })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|source| ConfigError::RegistryUnreadable {
+                path: lock_path.clone(),
+                source,
+            })?;
+        FileExt::lock_exclusive(&file).map_err(|source| ConfigError::RegistryUnreadable {
+            path: lock_path,
+            source,
+        })?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Run `mutate` over the registry table at `path` under the registry
+/// write lock, then persist the result atomically.
+///
+/// The choke point every registry write verb funnels through: acquire
+/// the sibling lock, read the table, upgrade any legacy bare-string
+/// entries, apply the caller's mutation, and write the whole file back.
+/// The read-modify-write window is the only region that needs mutual
+/// exclusion, so the lock is released before the one-time upgrade notice
+/// is emitted. Readers stay lock-free.
+fn update_registry_table<T>(
+    path: &Path,
+    mutate: impl FnOnce(&mut toml::Table) -> Result<T, ConfigError>,
+) -> Result<T, ConfigError> {
+    let lock = RegistryWriteLock::acquire(path)?;
+    let mut doc = read_registry_table(path)?;
+    let upgraded = normalize_registry_entries(&mut doc, path)?;
+    let value = mutate(&mut doc)?;
+    write_registry_table(path, &doc)?;
+    drop(lock);
+    if upgraded {
+        emit_registry_upgrade_notice();
+    }
+    Ok(value)
 }
 
 /// Read the registry at `path` as a free-form TOML table. A missing
@@ -4030,6 +4096,66 @@ mod tests {
             index_profile: None,
             created_at: None,
             uuid: None,
+        }
+    }
+
+    #[test]
+    fn registry_lock_path_is_a_sibling_dotlock() {
+        assert_eq!(
+            registry_lock_path(Path::new("/cfg/bookrack/registry.toml")),
+            PathBuf::from("/cfg/bookrack/registry.toml.lock")
+        );
+    }
+
+    #[test]
+    fn a_registry_write_leaves_no_lock_held() {
+        // The write lock is short-lived: once a verb returns, the lock
+        // file may exist but no lock is held, so the next writer proceeds
+        // without waiting.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        let data_root = tmp.path().join("a");
+        std::fs::create_dir_all(&data_root).expect("create data root");
+        upsert_library_entry(&path, "alpha", &entry_fields(&data_root)).expect("upsert");
+        // A fresh exclusive lock succeeds immediately: nobody holds it.
+        let lock_path = registry_lock_path(&path);
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .expect("open lock file");
+        FileExt::try_lock_exclusive(&probe).expect("lock is not held after a write");
+    }
+
+    #[test]
+    fn concurrent_upserts_do_not_lose_writes() {
+        // Each of several threads inserts a distinct entry into the same
+        // registry. Under last-writer-wins these writes would clobber one
+        // another; the write lock serializes the read-modify-write window
+        // so every entry survives.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("registry.toml");
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                let root = tmp.path().join(format!("root{i}"));
+                std::fs::create_dir_all(&root).expect("create root");
+                std::thread::spawn(move || {
+                    upsert_library_entry(&path, &format!("lib{i}"), &entry_fields(&root))
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("join").expect("upsert");
+        }
+        let registry =
+            parse_registry(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        for i in 0..8 {
+            assert!(
+                registry.libraries.contains_key(&format!("lib{i}")),
+                "lib{i} was lost"
+            );
         }
     }
 

@@ -357,6 +357,13 @@ pub struct LibrarySummary {
 /// short name, plus a mutable pointer to the default library used when
 /// a caller does not name one.
 ///
+/// The default pointer is a cache of the on-disk registry's `default`
+/// selection, not a second source of truth: it is seeded from the
+/// registry at bring-up and re-synced whenever `library.set_default`
+/// writes the registry, so the two agree after every write the daemon
+/// performs. An external write to the registry does not push into this
+/// cache; a restart re-seeds it.
+///
 /// Held behind an `Arc` and shared across the REPL task, the MCP
 /// server, and the queue worker. Routing in this phase is "look up
 /// handle, hand it back"; future scheduling logic — priority,

@@ -908,6 +908,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "dotenvy",
+ "fs2",
  "serde",
  "serde_json",
  "tempfile",
