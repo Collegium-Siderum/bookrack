@@ -6,6 +6,8 @@ follows [semver](https://semver.org/spec/v2.0.0.html). Each release
 section is the source of truth for the GitHub Release notes — the
 release workflow extracts the matching section verbatim from this file.
 
+## [Unreleased]
+
 ## [0.9.0] - 2026-07-17
 
 ### Added
