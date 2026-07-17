@@ -295,8 +295,11 @@ workflows below drive the same switch through the low-level verbs.
 Two supported workflows. Both execute inside the running daemon —
 `vectors reset` is dispatched over its control plane — and the
 embedding model resolves through the effective chain
-(`BOOKRACK_EMBED_MODEL`, then `config.toml` and its profile reference,
-then the default) at the moment the reset runs. The environment layer
+(`BOOKRACK_EMBED_MODEL`, then `config.toml`'s `embed_model`, then the
+model the library's index profile declares, then the default) at the
+moment the reset runs. The first two rungs are deprecated; see
+[Declaring the embed model through an index
+profile](#declaring-the-embed-model-through-an-index-profile). The environment layer
 is process state: setting the variable on the client invocation has no
 effect, and a daemon started under it must be restarted to change it.
 After any model switch, restart the daemon once so the serve path

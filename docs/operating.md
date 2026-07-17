@@ -12,17 +12,25 @@ control plane see [control-plane.md](control-plane.md).
 
 `bookrack run` starts a foreground daemon that owns one library. It
 serves MCP over streamable-HTTP at `127.0.0.1:8765/mcp` and a local
-control socket where the one-shot write subcommands arrive. It holds a
-machine-wide session lock for its lifetime, so only one daemon serves a
-given library at a time.
+control socket where the one-shot write subcommands arrive.
+
+It takes two locks for its lifetime, and they answer different
+questions. The session lock under the runtime directory admits one daemon
+per runtime directory, and carries the lines other tools read to find the
+session. The data-root lock, `<data_root>/.bookrack.lock`, admits one
+writer per library: a second daemon pointed at the same root — even from
+a different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
+Offline commands that would destroy data take it too, so `bookrack
+libraries remove --purge` refuses a root a daemon is serving rather than
+deleting it underneath. Read-only commands take neither.
 
 For a headless deployment — a systemd unit, a Windows service — run
 `bookrack-mcp` instead. It serves the same MCP endpoint, and takes
 `--with-queue-worker` when it should also process ingest jobs; without
 that flag the queue-bound write methods short-circuit rather than
 enqueue work no one will run. `bookrack run` and `bookrack-mcp` are
-mutually exclusive against one library — each takes the session lock —
-so stop one before starting the other.
+mutually exclusive against one library — each takes both locks — so stop
+one before starting the other.
 
 `bookrack quit` stops a running daemon. `bookrack logs` streams or
 snapshots its log ring (see [Observability](#observability)).
@@ -133,21 +141,27 @@ page.
 bookrack doctor
 ```
 
-A one-screen health check covering every install expectation: the data
-root resolves, the catalog and corpus schemas open, PDFium is on disk,
-the Ollama daemon is reachable, the embed model is pulled, each
-registry entry agrees with its on-disk identity manifest, and each
+A one-screen health check: the data root resolves, the catalog and
+corpus schemas open, PDFium is on disk, the file-descriptor limit is
+sufficient, the Ollama daemon is reachable, the embed model is pulled,
+each registry entry agrees with its on-disk identity manifest, and each
 library's referenced index profile is coherent with its built index
-stamps. Each row is `OK`, `WARN`, or `FAIL`; any `FAIL` exits non-zero
-so a script can branch on it. Pass `--json` for a machine-readable
-report suitable for a bug attachment.
+stamps. When the effective profile enables a reranker, three more rows
+cover its backend: the `llama-server` binary, the reranker model, and
+whichever server is serving. A deprecated embed-model override, if one is
+in effect, gets a row of its own. Each row is `OK`, `WARN`, or `FAIL`;
+any `FAIL` exits non-zero so a script can branch on it. Pass `--json` for
+a machine-readable report suitable for a bug attachment.
 
-Three maintenance sub-commands cover one-off repairs; `--dry-run`
+Four maintenance sub-commands cover one-off repairs; `--dry-run`
 computes the plan for the last two without touching disk:
 
 - `bookrack doctor --install-pdfium` downloads the pinned PDFium
   build, verifies its SHA-256, and unpacks it into the per-user
   managed directory the loader searches.
+- `bookrack doctor --install-reranker` does the same for the pinned
+  reranker artifacts — the `llama-server` binary and the cross-encoder
+  model — which only a profile with a reranker stage needs.
 - `bookrack doctor --rename-envelopes` migrates envelope files from
   older libraries into the kind-prefixed filename layout.
 - `bookrack doctor --backfill-ocr-derivation` recovers the OCR

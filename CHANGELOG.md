@@ -98,7 +98,8 @@ release workflow extracts the matching section verbatim from this file.
 - **index-profile, runtime: `index-profile current` and `index-profile
   diff`.** `current [--library <name>]` reports, offline and read-only,
   the profile a library effectively runs under — the reference's origin
-  (`config.toml`, `registry`, or both), the resolved
+  (`manifest`, `config_toml`, or `registry`), any lower-priority source
+  still naming a different profile (`drift`), the resolved
   embed/ann/reranker combination, the effective embed model, and a
   field-by-field comparison against the built index stamps. `diff <a>
   <b>` compares two profiles field by field. Both take `--json`.
@@ -120,10 +121,10 @@ release workflow extracts the matching section verbatim from this file.
   through the daemon queue in order, one result line per step. A plan
   containing a reset demands the library name retyped (or `--yes`), and
   the recommended rehearsal is `libraries fork` → apply on the copy →
-  verify → apply in place. The target declaration (`config.toml` +
-  registry entry) is written after confirmation and before the first
-  action, so an interrupted run reports "declaration ahead of stamps"
-  in `current` and a re-run re-derives only the remaining actions.
+  verify → apply in place. The target declaration is written to the
+  library manifest after confirmation and before the first action, so an
+  interrupted run reports "declaration ahead of stamps" in `current` and
+  a re-run re-derives only the remaining actions.
 
 - **config, runtime, cli: `bookrack doctor --install-reranker` installs
   the pinned reranker artifacts.** The reranker backend's two native
@@ -314,9 +315,9 @@ release workflow extracts the matching section verbatim from this file.
   unset side edited only `config.toml`, so the registry-side reference
   kept resolving and the profile silently survived its own removal;
   clearing it took a hand edit of `registry.toml`. The unset now
-  clears the registry entry's field in the same run and says so
-  (`unset index_profile (config.toml + registry entry)`; the JSON
-  report gains a `registry_cleared` field), and a note reminds the
+  clears every other copy in the same run and says so
+  (`unset index_profile (library manifest)`; the JSON report gains a
+  `registry_refreshed` field), and a note reminds the
   operator that a running daemon keeps serving the old profile — and
   any supervised reranker — until it restarts.
 

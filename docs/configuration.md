@@ -39,8 +39,11 @@ The registry maps short names to data roots and records the machine's
 legacy bare-path form (`name = "/path"`) stays permanently readable; a
 write rewrites the file into the table form atomically. Every data root
 also carries a self-describing `bookrack-library.toml` manifest naming
-its stable identity, so the registry is a regenerable cache over the
-manifests rather than the sole record of identity.
+its stable identity and the index profile it runs under, so the registry
+is a regenerable cache over the manifests rather than the sole record of
+either. Editing an entry's `index_profile` by hand therefore accomplishes
+nothing durable: the manifest outranks it, and `doctor` reports the
+difference as drift.
 
 Every registry verb resolves locally with no running daemon, so it
 works during a fresh install or a recovery:
@@ -70,21 +73,41 @@ reinstall.
 ## Per-library settings: `config.toml`
 
 Operational knobs resolve `environment variable > <data_root>/config.toml
-> hardcoded default`. The file accepts four keys:
+> hardcoded default`. The file accepts these keys:
 
 ```toml
 ollama_url    = "http://localhost:11434"
-embed_model   = "qwen3-embedding:0.6b"
 mcp_addr      = "127.0.0.1:8765"
 log_directive = "info,lance=warn"
+
+[search]
+top_k          = 5      # passages a query returns
+weak_threshold = 0.5    # cosine distance at or above which a hit is weak
+
+[reranker]
+url     = "http://localhost:8080"  # probe an operator-run server instead
+                                   # of supervising one
+ctx     = 8192          # -c for the supervised server
+threads = 4             # --threads; unset leaves the server's own choice
 ```
 
 Every field is optional. Edit the file by hand, or through the offline
 `bookrack libraries config <name> KEY=VALUE ...` verb (with `--unset
-KEY` to clear one); an edit does not reach a running daemon until it
-restarts. Changing `embed_model` on an ingested library invalidates its
-vectors — see [Switching the embedding
-model](UPGRADE.md#switching-the-embedding-model).
+KEY` to clear one); nested keys are spelled `search.top_k`,
+`reranker.ctx`, and so on. An edit does not reach a running daemon until
+it restarts.
+
+Two more keys exist and neither belongs here for long:
+
+- `index_profile` — accepted, but written to the library's manifest
+  rather than to this file, because it is a property of the library
+  rather than of this machine. See [Index
+  profiles](#index-profiles).
+- `embed_model` — **deprecated, removed in the next minor.** The embed
+  model is declared by the library's index profile now; this field
+  outranks the profile, which is the wrong way round. It still works and
+  warns while it does. See [Declaring the embed model through an index
+  profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile).
 
 ## Environment knobs
 
@@ -105,12 +128,23 @@ statically-checkable atom. Two presets ship compiled into the binary:
 A user profile at `<config_dir>/bookrack/index-profiles/<name>.toml`
 shadows a built-in of the same name.
 
-Three read-only verbs resolve locally with no daemon:
+A library declares the profile it runs under in its manifest
+(`bookrack-library.toml`), so the declaration travels with the data; its
+registry entry caches the same name, and `libraries scan` refreshes the
+cache from the manifests. Declare one offline with:
+
+```
+bookrack libraries config <name> index_profile=<profile>
+```
+
+Five read-only verbs resolve locally with no daemon:
 
 ```
 bookrack index-profile list                 # built-ins + user profiles
 bookrack index-profile show <name>          # source and validation result
 bookrack index-profile validate <name>      # static checks; non-zero on error
+bookrack index-profile current              # what a library runs under, vs its stamps
+bookrack index-profile diff <a> <b>         # two profiles, field by field
 ```
 
 `validate` enforces the product-quantization constraints, checks the
@@ -118,6 +152,20 @@ cross-encoder reranker contract, and consults an offline model registry
 that `--allow-unknown-model` bypasses. `bookrack doctor` additionally
 compares each library's referenced profile against its built index
 stamps and warns on a mismatch that would keep the daemon from starting.
+
+The sixth verb changes things rather than reporting them:
+
+```
+bookrack index-profile apply <profile> [--library <name>] [--dry-run]
+```
+
+`apply` reconciles a library *to* a profile — re-embedding, rebuilding
+the ANN index, reconciling stamps — so it derives an action plan and needs
+a daemon already serving that library. It prints the plan and asks before
+running it; `--dry-run` prints and exits, offline. It is the preferred
+front door for switching the embedding model or the ANN shape; use
+`libraries config` above when you only mean to declare a profile the
+library already matches.
 
 ## The metadata audit profile
 
