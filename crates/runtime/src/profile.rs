@@ -2,15 +2,12 @@
 
 //! Effective index-profile assembly and the apply-plan derivation.
 //!
-//! A library's profile reference can sit in three places — its manifest,
-//! its per-root `config.toml`, and its registry entry — and picking
-//! between them lives in `bookrack_config`
-//! ([`effective_profile_reference`]). This module reads those three
-//! sources fresh per call, hands them to that chain, resolves the named
-//! profile, and reconciles the result with the explicit `embed_model`
-//! field and the env override; every embed-model consumer in this crate
-//! goes through it so the `env > config.toml > profile > default` chain
-//! applies uniformly.
+//! A library's profile reference can sit in two places — its manifest
+//! and its registry entry — and picking between them lives in
+//! `bookrack_config` ([`effective_profile_reference`]). This module
+//! reads both sources fresh per call, hands them to that chain, and
+//! resolves the named profile; every embed-model consumer in this crate
+//! goes through it so the `profile > default` chain applies uniformly.
 //!
 //! The second half of the module is the offline planning layer behind
 //! `index-profile apply`: read the built stamps and the persisted ANN

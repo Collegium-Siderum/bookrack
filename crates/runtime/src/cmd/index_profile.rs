@@ -327,7 +327,7 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
                 ),
             }
         }
-        None => println!("profile: none (field-level configuration)"),
+        None => println!("profile: none (built-in default embed model)"),
     }
     for d in &drift {
         println!(

@@ -55,7 +55,7 @@ pub struct LibraryManifest {
     /// Name of the index profile the library's vectors are built under.
     /// The authoritative copy of the reference: a registry entry's
     /// `index_profile` is a regenerable cache of this value. Absent when
-    /// the library runs on field-level configuration alone.
+    /// the library runs on the built-in default embed model.
     pub index_profile: Option<String>,
 }
 
