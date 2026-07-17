@@ -204,10 +204,10 @@ pub struct IntakeFilter<'a> {
     /// pipeline (the default), `Paper` for the glean pipeline. Every
     /// `node_*` JOIN this filter builds picks up the matching scope.
     pub kind: ItemKind,
-    /// Case-sensitive substring match against the root publication-attrs
-    /// title, i.e. `node_publication_attrs.title LIKE '%' || ? || '%'`
-    /// joined on the item scope. `%` and `_` in the substring match
-    /// literally — the LIKE is escaped.
+    /// Substring match against the root publication-attrs title, i.e.
+    /// `node_publication_attrs.title LIKE '%' || ? || '%'` joined on the
+    /// item scope. ASCII case is ignored (`LIKE` folds it). `%` and `_`
+    /// in the substring match literally — the LIKE is escaped.
     pub title_substring: Option<&'a str>,
     /// Exact-equality match against the root contributor name in
     /// `node_contributors.name`, joined on the book scope. Combined with
@@ -237,8 +237,9 @@ pub struct IntakeFilter<'a> {
     /// column. The column stores the raw year string the file or
     /// metadata enrichment surfaced; the filter is compared as text.
     pub year: Option<&'a str>,
-    /// Case-sensitive substring match against the root publication-attrs
-    /// `container_title` column. `%` and `_` are escaped.
+    /// Substring match against the root publication-attrs
+    /// `container_title` column, ignoring ASCII case. `%` and `_` are
+    /// escaped.
     pub venue_substring: Option<&'a str>,
     /// Exact-equality match against the root publication-attrs `doi`
     /// column.
@@ -1621,7 +1622,7 @@ mod tests {
     }
 
     #[test]
-    fn find_intakes_title_substring_matches_case_sensitive_and_paginates() {
+    fn find_intakes_title_substring_ignores_case_and_paginates() {
         let mut catalog = catalog();
         seed_book(&mut catalog, "sha-a", "Alpha Bravo", "Ann");
         seed_book(&mut catalog, "sha-b", "Bravo Charlie", "Ben");
@@ -1637,6 +1638,22 @@ mod tests {
             catalog.count_find_intakes(&filter).expect("count"),
             hits.len() as u64
         );
+
+        // The needle's case does not matter: `LIKE` folds ASCII, and a
+        // reader searching for a title should not have to reproduce its
+        // capitalisation.
+        for needle in ["bravo", "BRAVO"] {
+            let folded = IntakeFilter {
+                title_substring: Some(needle),
+                ..IntakeFilter::default()
+            };
+            assert_eq!(
+                catalog.find_intakes(&folded, 10, 0).expect("find").len(),
+                2,
+                "needle {needle:?} should match regardless of case"
+            );
+            assert_eq!(catalog.count_find_intakes(&folded).expect("count"), 2);
+        }
 
         // Paged.
         let first = catalog.find_intakes(&filter, 1, 0).expect("page1");

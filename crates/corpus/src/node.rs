@@ -123,8 +123,9 @@ pub struct TocQuery<'a> {
     /// depth 0). `None` keeps every depth.
     pub max_depth: Option<i64>,
     /// Keep only nodes whose title contains this substring,
-    /// case-sensitively. `LIKE` metacharacters in the needle are
-    /// escaped so they match literally. `None` keeps every node.
+    /// ignoring ASCII case (SQLite's `LIKE` folds it). `LIKE`
+    /// metacharacters in the needle are escaped so they match
+    /// literally. `None` keeps every node.
     pub title_substring: Option<&'a str>,
 }
 
@@ -1121,6 +1122,51 @@ mod tests {
             .collect();
         assert_eq!(titles, vec!["A Book", "Chapter One"]);
         assert_eq!(corpus.count_toc_nodes(root, &q).expect("count"), 2);
+    }
+
+    #[test]
+    fn toc_for_book_title_substring_ignores_ascii_case() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 1).expect("ids");
+        corpus
+            .insert_node(
+                &NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter)
+                    .title("Chapter One")
+                    .toc_span(1, 20),
+            )
+            .expect("chapter");
+
+        // A lowercase needle finds a capitalised title: `LIKE` folds
+        // ASCII case. Reading a table of contents means guessing at
+        // someone else's capitalisation, so this is the useful default —
+        // pinned here because it is the kind of thing a stray
+        // `case_sensitive_like` pragma would silently reverse.
+        for needle in ["chapter", "CHAPTER", "ChApTeR one"] {
+            let q = TocQuery {
+                cap: 100,
+                title_substring: Some(needle),
+                ..TocQuery::default()
+            };
+            let toc = corpus.toc_for_book(root, &q).expect("toc");
+            assert_eq!(
+                toc.iter()
+                    .filter_map(|n| n.title.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["Chapter One"],
+                "needle {needle:?} should match regardless of case"
+            );
+            assert_eq!(corpus.count_toc_nodes(root, &q).expect("count"), 1);
+        }
+
+        // Folding case is not matching anything: a needle that differs
+        // by more than case still misses.
+        let q = TocQuery {
+            cap: 100,
+            title_substring: Some("chpater"),
+            ..TocQuery::default()
+        };
+        assert!(corpus.toc_for_book(root, &q).expect("toc").is_empty());
     }
 
     #[test]

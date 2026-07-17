@@ -201,8 +201,8 @@ pub struct ShowTocArgs {
     /// depth 0, so 1 keeps the root plus its top-level divisions.
     #[serde(default)]
     pub max_depth: Option<i64>,
-    /// Keep only entries whose title contains this substring
-    /// (case-sensitive). The cheap way to locate one chapter or
+    /// Keep only entries whose title contains this substring,
+    /// ignoring ASCII case. The cheap way to locate one chapter or
     /// section by name.
     #[serde(default)]
     pub title_substring: Option<String>,

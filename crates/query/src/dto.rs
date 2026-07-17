@@ -289,7 +289,7 @@ pub struct ShowTocArgs {
     /// depth 0. `None` keeps every depth.
     pub max_depth: Option<i64>,
     /// Keep only entries whose title contains this substring,
-    /// case-sensitively; `LIKE` metacharacters match literally.
+    /// ignoring ASCII case; `LIKE` metacharacters match literally.
     /// `None` keeps every entry.
     pub title_substring: Option<String>,
 }
