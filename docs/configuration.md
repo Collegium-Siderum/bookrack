@@ -73,7 +73,10 @@ reinstall.
 ## Per-library settings: `config.toml`
 
 Operational knobs resolve `environment variable > <data_root>/config.toml
-> hardcoded default`. The file accepts these keys:
+> hardcoded default`. That chain covers this machine's operational
+preferences only; a library's embed model is not one of them — it is the
+index profile's fact, and nothing overrides it. The file accepts these
+keys:
 
 ```toml
 ollama_url    = "http://localhost:11434"
@@ -97,17 +100,19 @@ KEY` to clear one); nested keys are spelled `search.top_k`,
 `reranker.ctx`, and so on. An edit does not reach a running daemon until
 it restarts.
 
-Two more keys exist and neither belongs here for long:
+`index_profile` is accepted by the same verb, but written to the
+library's manifest rather than to this file, because it is a property of
+the library rather than of this machine. See [Retrieval
+profiles](#retrieval-profiles-index-profile).
 
-- `index_profile` — accepted, but written to the library's manifest
-  rather than to this file, because it is a property of the library
-  rather than of this machine. See [Index
-  profiles](#index-profiles).
-- `embed_model` — **deprecated, removed in the next minor.** The embed
-  model is declared by the library's index profile now; this field
-  outranks the profile, which is the wrong way round. It still works and
-  warns while it does. See [Declaring the embed model through an index
-  profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile).
+Two keys are **retired**: `embed_model` and `index_profile` as *file*
+fields. The embed model is declared by the library's index profile, and
+the profile reference lives in the manifest. A file still carrying
+either is refused by name — every command fails until the line goes,
+rather than the field being silently ignored — and `libraries config
+<name> --unset <key>` deletes it. See [Declaring the embed model through
+an index
+profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile).
 
 ## Environment knobs
 

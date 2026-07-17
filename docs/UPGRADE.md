@@ -157,30 +157,38 @@ one embedding pass per book.
 ## Declaring the embed model through an index profile
 
 `BOOKRACK_EMBED_MODEL` and the `embed_model` field in a root's
-`config.toml` are **deprecated and will be removed in the next minor**.
-Both still work and still win over the index profile; each warns once per
-process while it does, and `bookrack doctor` carries the same warning as
-a row.
+`config.toml` are **gone**. The embed model is declared by the index
+profile a library references, and by nothing else.
 
-Why they are going: a library's embed model is the semantic identity of
-its vectors — which model wrote them, and therefore which model can read
+Why they went: a library's embed model is the semantic identity of its
+vectors — which model wrote them, and therefore which model can read
 them. That is a fact about the library, so it belongs to the index
 profile the library declares, not to a process-level variable or a
-per-root override that silently outranks it. The precedence was backwards
-enough to need a dedicated check warning you that the profile you
-declared was being shadowed.
+per-root override that silently outranks it. The precedence was
+backwards enough to need a dedicated check warning you that the profile
+you declared was being shadowed.
 
-A library that never set either one has nothing to do here, and says so
-by staying quiet: no warning fires. Silence is not a reason to skip the
-check, though — run `bookrack doctor` once after upgrading and look for
-an `embed-model` row. That row, or the warning on stderr, is the only
-thing that means this section applies to you.
+What you will see:
+
+- **`BOOKRACK_EMBED_MODEL` set in a shell profile or a CI environment**
+  is now inert. Nothing reads it, and nothing warns — an environment
+  that pins it keeps running, silently resolving the model from the
+  library's profile instead. If you relied on it to pin a model, follow
+  the migration below before upgrading, or check afterwards that the
+  model still resolves the way you expect.
+- **`embed_model` or `index_profile` in a `config.toml`** makes every
+  command fail with a message naming the retired key and the way out,
+  until the line is deleted. That is deliberate: silently ignoring the
+  field would change which model a library resolves without telling
+  anyone.
 
 Migrating, per library. Nothing here rebuilds an index or needs a
 running daemon:
 
-1. **See what resolves today.** `bookrack index-profile current --library
-   <name>` prints the effective embed model. Note it down.
+1. **See what the library's vectors were written with.** `bookrack
+   index-profile current --library <name>` prints the `stamps:` line.
+   That is the model the built index carries, and the one your profile
+   must declare.
 2. **Pick a profile that declares that same model** and declare it:
    `bookrack libraries config <name> index_profile=<profile>`.
    `bookrack index-profile list` shows the built-ins and what each
@@ -188,43 +196,28 @@ running daemon:
    old enough to have no manifest gets one minted here, which is why a
    new `bookrack-library.toml` may appear.
 3. **Confirm the profile matches the vectors you already have.** Re-run
-   `index-profile current` and read its `stamps:` line. **This is the
-   step that matters**, and this is the line to read:
+   `index-profile current` and read its `stamps:` line:
 
    - `stamps: consistent with the built index (…)` — the profile
-     declares the model your vectors were written with. Safe to continue.
+     declares the model your vectors were written with. Done.
    - `stamp mismatch: embed.model: profile declares 'X' but the built
-     index is stamped 'Y'` — **stop**. Removing the override in step 4
-     would switch the library to `X`, and every query and embed would
-     then fail against vectors written by `Y`. Go back to step 2 and pick
-     a profile declaring `Y`, or change the library deliberately with
-     `index-profile apply` (below).
-
-   Do **not** judge this by the `effective embed model:` line. Your
-   override is still in place at this point, so that line reports the
-   override's value whatever profile you declared — it reads "unchanged"
-   even when step 4 is about to break the library. The `stamps:` line
-   compares the *profile* against the built index, which is the question
-   you actually need answered.
-
-   Setting `embed_model` in `config.toml` (rather than the env var) is
-   the easier case: a field that contradicts the declared profile is a
-   hard error naming both values and both ways out, so you cannot get
-   past this step unaware.
-4. **Remove the override.** Unset `BOOKRACK_EMBED_MODEL` (check shell
-   profiles and CI environments), and `bookrack libraries config <name>
-   --unset embed_model`. `index-profile current` should now be silent.
+     index is stamped 'Y'` — **stop**. The library now resolves to `X`,
+     and every query and embed will fail against vectors written by `Y`.
+     Go back to step 2 and pick a profile declaring `Y`, or change the
+     library deliberately with `index-profile apply` (below).
+4. **Delete the retired lines.** `bookrack libraries config <name>
+   --unset embed_model` (and `--unset index_profile`, if the root
+   carries one) removes them while leaving the rest of the file, and its
+   comments, alone. Unsetting a retired key still works — it is the cure
+   the refusal prescribes. Unset `BOOKRACK_EMBED_MODEL` in any shell
+   profile or CI environment that exports it; it does nothing now, but a
+   variable that does nothing is a trap for the next reader.
 
 `index-profile apply` is a different job and is not part of this
 migration. It reconciles a library *to* a profile — rebuilding the ANN
 index, re-embedding — so it derives an action plan and needs a daemon
 already serving that library. Reach for it when you want the library
 changed, not when you are only moving where its model is declared.
-
-After the removal minor, a `config.toml` still carrying `embed_model`
-makes every command fail with a message naming the retired key, until
-the line is deleted. That is deliberate: silently ignoring the field
-would change which model a library resolves without telling anyone.
 
 ## Moving the index-profile reference into the manifest
 
@@ -293,17 +286,14 @@ executing it. To rehearse, fork first and apply on the copy. The
 workflows below drive the same switch through the low-level verbs.
 
 Two supported workflows. Both execute inside the running daemon —
-`vectors reset` is dispatched over its control plane — and the
-embedding model resolves through the effective chain
-(`BOOKRACK_EMBED_MODEL`, then `config.toml`'s `embed_model`, then the
-model the library's index profile declares, then the default) at the
-moment the reset runs. The first two rungs are deprecated; see
-[Declaring the embed model through an index
-profile](#declaring-the-embed-model-through-an-index-profile). The environment layer
-is process state: setting the variable on the client invocation has no
-effect, and a daemon started under it must be restarted to change it.
-After any model switch, restart the daemon once so the serve path
-picks up the new stamps.
+`vectors reset` is dispatched over its control plane — and the embedding
+model resolves from the index profile the library declares (or the
+built-in default, when it declares none) at the moment the reset runs.
+Switching models therefore means pointing the library at a different
+profile, with `bookrack libraries config <name> index_profile=<p>`.
+That write is offline and lands in the manifest, but a running daemon
+keeps serving the old profile until it restarts — so restart it before
+the reset, and again after, so the serve path picks up the new stamps.
 
 ### Side by side: `libraries fork` then `vectors reset` on the clone
 
@@ -314,8 +304,10 @@ clone runs against the new model.
 # with the daemon running on the source library:
 bookrack libraries fork trial --data-dir /abs/path/to/trial
 bookrack quit
-# restart against the clone, new model in the daemon's environment:
-BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack --library trial run
+# point the clone at a profile declaring the new model (offline):
+bookrack libraries config trial index_profile=qwen3-4b-quality
+# restart against the clone:
+bookrack --library trial run
 # from a second shell; type RESET at the prompt (--yes skips it):
 bookrack vectors reset
 # evaluate the clone, compare with the original library
@@ -336,17 +328,19 @@ filesystem; `--copy-mode copy` forces the byte copy unconditionally.
 For users on disk-tight hosts or fully confident in the new model.
 
 ```sh
-# restart the daemon with the new model in its environment:
-BOOKRACK_EMBED_MODEL=qwen3-embedding:4b bookrack run
+# point the library at a profile declaring the new model (offline):
+bookrack libraries config <name> index_profile=qwen3-4b-quality
+# restart the daemon so it picks the declaration up:
+bookrack quit && bookrack run
 # from a second shell; type RESET at the prompt (--yes skips it):
 bookrack vectors reset
 # restart the daemon once the reset completes
 ```
 
 The old vectors are dropped before the new ones land — there is no
-rollback. To "go back" to the previous model, repeat `reset` with the
-old `BOOKRACK_EMBED_MODEL`; bookrack treats reverse as another
-reset, not as undo.
+rollback. To "go back" to the previous model, re-declare the old profile
+and repeat `reset`; bookrack treats reverse as another reset, not as
+undo.
 
 If `reset` is interrupted mid-run (a kill or an embed-backend
 outage), rerun with `bookrack vectors reset --resume` to pick up

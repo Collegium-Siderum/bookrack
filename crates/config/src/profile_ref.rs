@@ -3,13 +3,11 @@
 //! Which index profile a library references, and where that reference
 //! came from.
 //!
-//! The reference can be recorded in three places, in descending order of
+//! The reference can be recorded in two places, in descending order of
 //! authority:
 //!
 //! 1. the data root's manifest — the truth, travelling with the data;
-//! 2. the data root's `config.toml` — a per-root declaration written by
-//!    hand or by a binary that predates the manifest field;
-//! 3. the library's registry entry — a regenerable cache of the
+//! 2. the library's registry entry — a regenerable cache of the
 //!    manifest, one machine's view of a library it may not even hold.
 //!
 //! Resolution takes the highest-priority source that names one and never
@@ -30,20 +28,16 @@ use std::path::Path;
 pub enum ProfileRefOrigin {
     /// The data root's manifest — the authoritative copy.
     Manifest,
-    /// The data root's `config.toml`.
-    ConfigToml,
     /// The library's registry entry, a cache of the manifest.
     Registry,
 }
 
 impl ProfileRefOrigin {
-    /// Stable label for human rendering. The JSON form is the serde
-    /// `snake_case` token, which differs for `ConfigToml`: the file's
-    /// real name reads better in a terminal than the token does.
+    /// Stable label for human rendering, matching the serde
+    /// `snake_case` token of the JSON form.
     pub fn as_str(self) -> &'static str {
         match self {
             ProfileRefOrigin::Manifest => "manifest",
-            ProfileRefOrigin::ConfigToml => "config.toml",
             ProfileRefOrigin::Registry => "registry",
         }
     }
@@ -60,21 +54,18 @@ pub struct ProfileRefDrift {
     pub stale_value: String,
 }
 
-/// Pick the effective profile reference from the three sources by fixed
-/// priority: manifest, then `config.toml`, then the registry entry.
-/// `None` when no source names one — the library runs on field-level
-/// configuration alone.
+/// Pick the effective profile reference from the two sources by fixed
+/// priority: the manifest, then the registry entry. `None` when neither
+/// names one — the library runs on the default embed model alone.
 ///
 /// Never fails. Disagreement between sources is drift, not an error;
 /// see [`profile_reference_drift`].
 pub fn effective_profile_reference(
     manifest_ref: Option<&str>,
-    config_ref: Option<&str>,
     registry_ref: Option<&str>,
 ) -> Option<(String, ProfileRefOrigin)> {
     [
         (manifest_ref, ProfileRefOrigin::Manifest),
-        (config_ref, ProfileRefOrigin::ConfigToml),
         (registry_ref, ProfileRefOrigin::Registry),
     ]
     .into_iter()
@@ -89,16 +80,13 @@ pub fn effective_profile_reference(
 /// drift: absence is how a library that never declared a profile looks.
 pub fn profile_reference_drift(
     manifest_ref: Option<&str>,
-    config_ref: Option<&str>,
     registry_ref: Option<&str>,
 ) -> Vec<ProfileRefDrift> {
-    let Some((effective, _)) = effective_profile_reference(manifest_ref, config_ref, registry_ref)
-    else {
+    let Some((effective, _)) = effective_profile_reference(manifest_ref, registry_ref) else {
         return Vec::new();
     };
     [
         (manifest_ref, ProfileRefOrigin::Manifest),
-        (config_ref, ProfileRefOrigin::ConfigToml),
         (registry_ref, ProfileRefOrigin::Registry),
     ]
     .into_iter()
@@ -151,37 +139,19 @@ mod tests {
     type Case = (
         Option<&'static str>,
         Option<&'static str>,
-        Option<&'static str>,
         Option<(&'static str, ProfileRefOrigin)>,
     );
 
-    /// Every combination of the three sources being absent, or naming
+    /// Every combination of the two sources being absent, or naming
     /// `a`, or naming `b`, against the expected effective pick.
     #[test]
-    fn effective_reference_follows_manifest_then_config_then_registry() {
+    fn effective_reference_follows_manifest_then_registry() {
         let cases: &[Case] = &[
-            (None, None, None, None),
+            (None, None, None),
+            (Some("a"), None, Some(("a", ProfileRefOrigin::Manifest))),
+            (None, Some("a"), Some(("a", ProfileRefOrigin::Registry))),
+            // The manifest wins over the cache below it, agreeing or not.
             (
-                Some("a"),
-                None,
-                None,
-                Some(("a", ProfileRefOrigin::Manifest)),
-            ),
-            (
-                None,
-                Some("a"),
-                None,
-                Some(("a", ProfileRefOrigin::ConfigToml)),
-            ),
-            (
-                None,
-                None,
-                Some("a"),
-                Some(("a", ProfileRefOrigin::Registry)),
-            ),
-            // The manifest wins over anything below it, agreeing or not.
-            (
-                Some("a"),
                 Some("a"),
                 Some("a"),
                 Some(("a", ProfileRefOrigin::Manifest)),
@@ -189,70 +159,29 @@ mod tests {
             (
                 Some("a"),
                 Some("b"),
-                Some("b"),
                 Some(("a", ProfileRefOrigin::Manifest)),
-            ),
-            (
-                Some("a"),
-                None,
-                Some("b"),
-                Some(("a", ProfileRefOrigin::Manifest)),
-            ),
-            // config.toml wins over the registry cache below it.
-            (
-                None,
-                Some("a"),
-                Some("b"),
-                Some(("a", ProfileRefOrigin::ConfigToml)),
-            ),
-            (
-                None,
-                Some("a"),
-                Some("a"),
-                Some(("a", ProfileRefOrigin::ConfigToml)),
             ),
         ];
-        for (manifest, config, registry, expected) in cases {
-            let got = effective_profile_reference(*manifest, *config, *registry);
+        for (manifest, registry, expected) in cases {
+            let got = effective_profile_reference(*manifest, *registry);
             let expected = expected.map(|(name, origin)| (name.to_string(), origin));
-            assert_eq!(
-                got, expected,
-                "manifest={manifest:?} config={config:?} registry={registry:?}"
-            );
+            assert_eq!(got, expected, "manifest={manifest:?} registry={registry:?}");
         }
     }
 
     #[test]
     fn agreeing_sources_and_absent_sources_are_not_drift() {
-        assert!(profile_reference_drift(None, None, None).is_empty());
-        assert!(profile_reference_drift(Some("a"), Some("a"), Some("a")).is_empty());
-        assert!(profile_reference_drift(Some("a"), None, None).is_empty());
-        // Absence below the effective source is how an undeclared
-        // library looks, not a stale copy.
-        assert!(profile_reference_drift(Some("a"), None, Some("a")).is_empty());
+        assert!(profile_reference_drift(None, None).is_empty());
+        assert!(profile_reference_drift(Some("a"), Some("a")).is_empty());
+        assert!(profile_reference_drift(Some("a"), None).is_empty());
+        // A cache naming nothing is a cache that has not caught up to
+        // the manifest, not a stale copy naming the wrong thing.
+        assert!(profile_reference_drift(None, Some("a")).is_empty());
     }
 
     #[test]
-    fn every_disagreeing_source_is_reported_in_priority_order() {
-        let drift = profile_reference_drift(Some("a"), Some("b"), Some("c"));
-        assert_eq!(
-            drift,
-            vec![
-                ProfileRefDrift {
-                    source: ProfileRefOrigin::ConfigToml,
-                    stale_value: "b".to_string(),
-                },
-                ProfileRefDrift {
-                    source: ProfileRefOrigin::Registry,
-                    stale_value: "c".to_string(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_stale_registry_cache_under_a_config_declaration_is_drift() {
-        let drift = profile_reference_drift(None, Some("a"), Some("b"));
+    fn a_registry_cache_disagreeing_with_the_manifest_is_drift() {
+        let drift = profile_reference_drift(Some("a"), Some("b"));
         assert_eq!(
             drift,
             vec![ProfileRefDrift {

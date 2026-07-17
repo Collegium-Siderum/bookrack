@@ -541,10 +541,10 @@ pub enum WriteVectorsAction {
     /// Drop and rebuild every vector under the active embedding model.
     ///
     /// Drops the chunks table, clears the corpus index stamps, and
-    /// re-derives every book's vectors with the env-configured embedding
-    /// model. Use after switching `BOOKRACK_EMBED_MODEL`. The old
-    /// vectors are unrecoverable; consider `libraries fork` for a
-    /// non-destructive trial first.
+    /// re-derives every book's vectors with the index profile's
+    /// embedding model. Use after pointing the library at a profile that
+    /// declares a different model. The old vectors are unrecoverable;
+    /// consider `libraries fork` for a non-destructive trial first.
     Reset {
         /// Skip the destructive-action confirmation prompt. The
         /// command still rejects the run if the typed sentinel is not

@@ -1018,7 +1018,7 @@ mod tests {
     #[test]
     fn prepare_book_params_threads_force_and_hold_for_metadata() {
         let (cfg, _dir) = synthetic_cfg();
-        let template = build_queue_params_template(&cfg, &EmbedConfig::from_env());
+        let template = build_queue_params_template(&cfg, &EmbedConfig::default());
         let params = prepare_book_params(&template, &cfg, true, true, None);
         assert!(params.force);
         assert!(params.hold_for_metadata);
@@ -1029,7 +1029,7 @@ mod tests {
     #[test]
     fn prepare_book_params_overrides_audit_profile_when_set() {
         let (cfg, _dir) = synthetic_cfg();
-        let template = build_queue_params_template(&cfg, &EmbedConfig::from_env());
+        let template = build_queue_params_template(&cfg, &EmbedConfig::default());
         let params = prepare_book_params(&template, &cfg, false, false, Some("strict"));
         // The override resolves through `load_audit_profile`, so the
         // result must be the named built-in -- not the template's

@@ -114,7 +114,11 @@ async fn finalize_writes_config_and_skeleton() {
     assert!(cfg.exists(), "config.toml should be created");
     let text = std::fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("ollama_url = "));
-    assert!(text.contains("embed_model = "));
+    // The embed model is the index profile's fact, and `embed_model` is
+    // a retired key: a wizard that wrote one would produce a root the
+    // very next command refuses to load.
+    assert!(!text.contains("embed_model"), "{text}");
+    bookrack_config::load_root_config(dir.path()).expect("a freshly initialized root must load");
 
     for sub in ["sources", "books", "logs", "audit-rules"] {
         assert!(dir.path().join(sub).is_dir(), "{sub} missing");

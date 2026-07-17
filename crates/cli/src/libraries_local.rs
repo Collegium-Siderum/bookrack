@@ -522,10 +522,10 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
 }
 
 /// Report a successful edit: the keys set and unset, plus the advisory
-/// notes an operator needs — an embed-model change implies re-ingestion,
-/// a set env var shadows the file, and the change only reaches a running
-/// daemon on restart. `registry_refreshed` marks an `index_profile`
-/// write that also refreshed the registry entry's cached copy.
+/// notes an operator needs — a set env var shadows the file, and the
+/// change only reaches a running daemon on restart. `registry_refreshed`
+/// marks an `index_profile` write that also refreshed the registry
+/// entry's cached copy.
 fn render_config_write(
     name: &str,
     data_dir: &Path,
@@ -562,11 +562,6 @@ fn render_config_write(
 
     if ctx().is_quiet() {
         return;
-    }
-    if sets.iter().any(|(key, _)| key == "embed_model") {
-        eprintln!(
-            "warning: changing embed_model requires re-ingestion; see 'bookrack vectors reset'"
-        );
     }
     if sets.iter().any(|(key, _)| key == "index_profile") {
         eprintln!(

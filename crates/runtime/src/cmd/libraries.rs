@@ -167,7 +167,8 @@ where
     println!();
     println!("next steps:");
     println!("  bookrack quit");
-    println!("  BOOKRACK_EMBED_MODEL=<new-model> bookrack --library {new_name} run");
+    println!("  bookrack libraries config {new_name} index_profile=<profile>");
+    println!("  bookrack --library {new_name} run");
     println!("  bookrack vectors reset");
     Ok(())
 }

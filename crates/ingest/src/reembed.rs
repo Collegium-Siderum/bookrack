@@ -368,7 +368,7 @@ mod tests {
     fn embed_cfg(model: &str) -> EmbedConfig {
         EmbedConfig {
             model: model.to_string(),
-            ..EmbedConfig::from_env()
+            ..EmbedConfig::default()
         }
     }
 

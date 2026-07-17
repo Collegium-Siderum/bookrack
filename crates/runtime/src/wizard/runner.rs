@@ -11,11 +11,10 @@ use std::path::{Path, PathBuf};
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, EmbedConfig,
-    LibraryEntryFields, LibraryKind, LibraryManifest, MANIFEST_FILENAME, OLLAMA_URL_ENV,
-    ROOT_CONFIG_NAME, default_registry_path, load_manifest, locate_pdfium, new_manifest,
-    pdfium_library_filename, portable_data_dir, render_root_config_toml, upsert_library_entry,
-    write_manifest,
+    Config, DEFAULT_OLLAMA_URL, EmbedConfig, LibraryEntryFields, LibraryKind, LibraryManifest,
+    MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, default_registry_path, load_manifest,
+    locate_pdfium, new_manifest, pdfium_library_filename, portable_data_dir,
+    render_root_config_toml, upsert_library_entry, write_manifest,
 };
 
 use bookrack_corpus::Corpus;
@@ -104,7 +103,7 @@ impl Wizard {
         };
         driver.step_smoke(&outcome).await?;
 
-        let summary = finalize(&data_root, &url, &embed_model, opts.force)?;
+        let summary = finalize(&data_root, &url, opts.force)?;
         driver.step_finalize(&summary).await?;
         Ok(())
     }
@@ -124,20 +123,24 @@ fn probe_pdfium() -> PdfiumReport {
 }
 
 /// Resolve the Ollama URL and embed model that downstream steps will
-/// use, through the existing env-var conventions ([`OLLAMA_URL_ENV`]
-/// and [`EMBED_MODEL_ENV`]). The wizard never writes either to
-/// `config.toml` from the env value, only from whichever value the
-/// finalize step was told to record.
+/// use.
+///
+/// The URL follows the [`OLLAMA_URL_ENV`] convention; the wizard never
+/// writes it to `config.toml` from the env value, only from whichever
+/// value the finalize step was told to record.
+///
+/// The model goes through [`EmbedConfig::resolve`], the same chain every
+/// other embed path uses, so what the probe and the smoke test exercise
+/// is what the library will actually embed with. A root being
+/// initialized references no index profile yet, so the chain lands on
+/// the default; routing through it anyway keeps the wizard from growing
+/// a second, drifting definition of the model.
 fn resolve_ollama_target() -> (String, String) {
     let url = std::env::var(OLLAMA_URL_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
-    let model = std::env::var(EMBED_MODEL_ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string());
-    (url, model)
+    (url, EmbedConfig::resolve(None).model)
 }
 
 /// Refuse to write into an existing populated data root unless the
@@ -263,14 +266,9 @@ fn build_embedder(cfg: &Config, embed_cfg: &EmbedConfig) -> Result<OllamaEmbedCl
 /// files are kept untouched unless `force` is set, so a rerun of the
 /// wizard against the same root does not stomp on edits the operator
 /// made by hand.
-fn finalize(
-    data_root: &Path,
-    ollama_url: &str,
-    embed_model: &str,
-    force: bool,
-) -> Result<FinalizeSummary> {
+fn finalize(data_root: &Path, ollama_url: &str, force: bool) -> Result<FinalizeSummary> {
     create_data_root_skeleton(data_root)?;
-    let (config_path, config_kept) = write_root_config(data_root, ollama_url, embed_model, force)?;
+    let (config_path, config_kept) = write_root_config(data_root, ollama_url, force)?;
     let (manifest, manifest_kept) = ensure_library_manifest(data_root, "default")?;
     let registry = write_default_registry(data_root, &manifest)?;
     Ok(FinalizeSummary {
@@ -294,17 +292,12 @@ fn create_data_root_skeleton(data_root: &Path) -> Result<()> {
 /// Write `<data_root>/config.toml` unless one already exists and
 /// `force` is off. Returns the config path and whether the existing
 /// file was kept.
-fn write_root_config(
-    data_root: &Path,
-    ollama_url: &str,
-    embed_model: &str,
-    force: bool,
-) -> Result<(PathBuf, bool)> {
+fn write_root_config(data_root: &Path, ollama_url: &str, force: bool) -> Result<(PathBuf, bool)> {
     let path = data_root.join(ROOT_CONFIG_NAME);
     if path.exists() && !force {
         return Ok((path, true));
     }
-    let contents = render_root_config_toml(ollama_url, embed_model);
+    let contents = render_root_config_toml(ollama_url);
     std::fs::write(&path, contents).with_context(|| format!("write {}", path.display()))?;
     Ok((path, false))
 }
@@ -434,13 +427,16 @@ mod tests {
     #[test]
     fn write_root_config_creates_the_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (path, kept) =
-            write_root_config(tmp.path(), "http://x:1", "model:xyz", false).expect("write");
+        let (path, kept) = write_root_config(tmp.path(), "http://x:1", false).expect("write");
         assert!(!kept, "fresh write should not report kept");
         assert_eq!(path, tmp.path().join(ROOT_CONFIG_NAME));
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("ollama_url = \"http://x:1\""));
-        assert!(text.contains("embed_model = \"model:xyz\""));
+        // The embed model is the index profile's fact, and `embed_model`
+        // is a retired key: writing one would produce a root the very
+        // next command refuses to load.
+        assert!(!text.contains("embed_model"), "{text}");
+        bookrack_config::load_root_config(tmp.path()).expect("a freshly written root loads");
     }
 
     #[test]
@@ -448,7 +444,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(ROOT_CONFIG_NAME);
         std::fs::write(&path, "hand-edited content").expect("seed");
-        let (_, kept) = write_root_config(tmp.path(), "ignored", "ignored", false).expect("noop");
+        let (_, kept) = write_root_config(tmp.path(), "ignored", false).expect("noop");
         assert!(kept, "existing config should be kept");
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(text, "hand-edited content");
@@ -464,10 +460,9 @@ mod tests {
     fn write_root_config_round_trips_special_characters_in_ollama_url() {
         let tricky = "http://x:1/has \"quotes\" and a\nnewline and a \\ and a \u{2028}";
         let tmp = tempfile::tempdir().expect("tempdir");
-        write_root_config(tmp.path(), tricky, "model:xyz", false).expect("write");
+        write_root_config(tmp.path(), tricky, false).expect("write");
         let loaded = bookrack_config::load_root_config(tmp.path()).expect("load");
         assert_eq!(loaded.ollama_url.as_deref(), Some(tricky));
-        assert_eq!(loaded.embed_model.as_deref(), Some("model:xyz"));
     }
 
     /// A wider sweep of single tricky characters: each one used to be
@@ -479,7 +474,7 @@ mod tests {
         ] {
             let tmp = tempfile::tempdir().expect("tempdir");
             let url = format!("http://x:1/{ch}");
-            write_root_config(tmp.path(), &url, "model:xyz", true).expect("write");
+            write_root_config(tmp.path(), &url, true).expect("write");
             let parsed = bookrack_config::load_root_config(tmp.path())
                 .unwrap_or_else(|e| panic!("char {ch:?} broke parse: {e}"));
             assert_eq!(parsed.ollama_url.as_deref(), Some(url.as_str()));
@@ -491,11 +486,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join(ROOT_CONFIG_NAME);
         std::fs::write(&path, "hand-edited content").expect("seed");
-        let (_, kept) =
-            write_root_config(tmp.path(), "http://new:9", "new-model", true).expect("force");
+        let (_, kept) = write_root_config(tmp.path(), "http://new:9", true).expect("force");
         assert!(!kept, "force overwrite should not report kept");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("http://new:9"));
-        assert!(text.contains("new-model"));
     }
 }

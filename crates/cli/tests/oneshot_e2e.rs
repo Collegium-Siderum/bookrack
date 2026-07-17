@@ -1029,9 +1029,9 @@ async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
 
 /// `libraries config <name> KEY=VALUE` resolves the root from the
 /// registry offline, edits its `config.toml` in place preserving a
-/// hand-written comment, and warns that an embed-model change needs
-/// re-ingestion and a daemon restart. A subsequent no-pair invocation
-/// dumps the whole file.
+/// hand-written comment, and notes that the change reaches a running
+/// daemon only on restart. A subsequent no-pair invocation dumps the
+/// whole file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_config_edits_root_config_offline() -> Result<()> {
     let runtime_dir = tempfile::tempdir()?;
@@ -1048,15 +1048,14 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     // A hand-written comment the edit must not clobber.
     std::fs::write(
         root.path().join("config.toml"),
-        "# operator note: leave this here\nembed_model = \"old-model\"\n",
+        "# operator note: leave this here\nlog_directive = \"old-directive\"\n",
     )?;
 
     let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "embed_model=new-model"])
+        .args(["libraries", "config", "prod", "log_directive=new-directive"])
         .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
         .env("BOOKRACK_REGISTRY", &registry_path)
         .env_remove("BOOKRACK_DATA_DIR")
-        .env_remove("BOOKRACK_EMBED_MODEL")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1070,10 +1069,6 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("requires re-ingestion"),
-        "embed_model change should warn about re-ingestion: {stderr}",
-    );
-    assert!(
         stderr.contains("restart the daemon"),
         "a write should note the daemon restart: {stderr}",
     );
@@ -1083,7 +1078,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         "the hand-written comment was clobbered: {written}",
     );
     assert!(
-        written.contains("new-model") && !written.contains("old-model"),
+        written.contains("new-directive") && !written.contains("old-directive"),
         "the key was not updated: {written}",
     );
 
@@ -1101,7 +1096,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     assert_eq!(dump.status.code(), Some(0));
     let dump_out = String::from_utf8_lossy(&dump.stdout);
     assert!(
-        dump_out.contains("# operator note: leave this here") && dump_out.contains("new-model"),
+        dump_out.contains("# operator note: leave this here") && dump_out.contains("new-directive"),
         "the dump should print the whole file: {dump_out}",
     );
     Ok(())
@@ -1141,6 +1136,121 @@ async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
     assert!(
         !root.path().join("config.toml").exists(),
         "a rejected batch must not create the file",
+    );
+    Ok(())
+}
+
+/// A `config.toml` left over from a release that still honoured
+/// `embed_model` is refused by name, not ignored: silently dropping it
+/// would change which model a write path resolves without the operator
+/// seeing it. The refusal reaches the operator the same way any other
+/// unusable root config does — `doctor` renders it as a failing row
+/// carrying the way out — and following that way out makes the root
+/// usable again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.prod]\ndata_dir = {}\n",
+            toml_escape(root.path()),
+        ),
+    )?;
+    std::fs::write(
+        root.path().join("config.toml"),
+        "ollama_url = \"http://127.0.0.1:11434\"\nembed_model = \"qwen3-embedding:0.6b\"\n",
+    )?;
+
+    let doctor = || async {
+        tokio::process::Command::new(bookrack_bin())
+            .args(["--library", "prod", "doctor"])
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+            .env("BOOKRACK_REGISTRY", &registry_path)
+            .env_remove("BOOKRACK_DATA_DIR")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+    };
+
+    // The root does not resolve, so `doctor` reports it unhealthy and
+    // names both the key and the way out.
+    let refused = doctor().await?;
+    assert_eq!(
+        refused.status.code(),
+        Some(1),
+        "an unusable root config is a self-reported unhealthy doctor (exit 1)",
+    );
+    let report = String::from_utf8_lossy(&refused.stdout);
+    assert!(
+        report.contains("data root") && report.contains("FAIL"),
+        "the data-root row must fail: {report}",
+    );
+    assert!(
+        report.contains("embed_model"),
+        "the refusal must name the key: {report}",
+    );
+    assert!(
+        report.contains("--unset embed_model"),
+        "the refusal must carry the way out: {report}",
+    );
+
+    // The way out the refusal prescribes works while the stale line is
+    // still there -- `libraries config` resolves the root from the
+    // registry and edits the file as text, so the cure cannot be
+    // blocked by the disease.
+    let unset = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod", "--unset", "embed_model"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        unset.status.code(),
+        Some(0),
+        "unsetting a retired key must succeed; stderr={:?}",
+        String::from_utf8_lossy(&unset.stderr),
+    );
+    let written = std::fs::read_to_string(root.path().join("config.toml"))?;
+    assert!(!written.contains("embed_model"), "{written}");
+    assert!(
+        written.contains("ollama_url"),
+        "the rest of the file survives: {written}"
+    );
+
+    // The root resolves again: the data-root row no longer fails.
+    let cured = doctor().await?;
+    let report = String::from_utf8_lossy(&cured.stdout);
+    assert!(
+        !report.contains("retired key"),
+        "the refusal must be gone once the line is: {report}",
+    );
+
+    // And setting it back is refused: the key no longer exists.
+    let reset = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod", "embed_model=whatever"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        reset.status.code(),
+        Some(2),
+        "a retired key is not a settable key (exit 2); stderr={:?}",
+        String::from_utf8_lossy(&reset.stderr),
     );
     Ok(())
 }

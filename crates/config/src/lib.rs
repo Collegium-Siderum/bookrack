@@ -243,33 +243,20 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
-    /// Two configured index-profile facts disagree, so no single
-    /// effective retrieval combination exists. Constructed through
-    /// [`ConfigError::profile_model_conflict`], which spells out the two
-    /// values and the repair paths.
-    #[error("index profile conflict: {message}")]
-    ProfileConfigConflict { message: String },
-}
-
-impl ConfigError {
-    /// The explicit `embed_model` in `config.toml` and the model the
-    /// referenced index profile declares resolve to different values.
-    /// Neither side is silently preferred; the operator removes the
-    /// explicit field or repoints the profile reference.
-    pub fn profile_model_conflict(
-        profile: &str,
-        profile_model: &str,
-        explicit_model: &str,
-    ) -> ConfigError {
-        ConfigError::ProfileConfigConflict {
-            message: format!(
-                "config.toml sets embed_model = {explicit_model:?} but index profile \
-                 {profile:?} declares {profile_model:?}; unset embed_model \
-                 (`bookrack libraries config <name> --unset embed_model`) or reference \
-                 a profile that declares {explicit_model:?}"
-            ),
-        }
-    }
+    /// `<data_root>/config.toml` sets a key that no longer carries any
+    /// meaning. Retired keys are refused rather than ignored: a silently
+    /// dropped `embed_model` would change which model a write path
+    /// resolves without the operator seeing it.
+    #[error(
+        "the root config at {} sets retired key `{key}`; {help}",
+        .path.display()
+    )]
+    RootConfigRetiredKey {
+        path: PathBuf,
+        key: &'static str,
+        /// What replaces the key and how to get rid of the line.
+        help: &'static str,
+    },
 }
 
 impl Config {
@@ -564,7 +551,10 @@ pub struct RootConfig {
     /// Ollama HTTP endpoint for embeddings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ollama_url: Option<String>,
-    /// Embedding model tag.
+    /// Retired: the embed model is declared by the index profile. The
+    /// field stays so the document still parses under
+    /// `deny_unknown_fields` and [`load_root_config`] can name the key
+    /// in [`ConfigError::RootConfigRetiredKey`]; nothing reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
     /// Address the MCP server binds.
@@ -573,9 +563,8 @@ pub struct RootConfig {
     /// `EnvFilter` directive for tracing verbosity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_directive: Option<String>,
-    /// Name of the index profile this library runs under. The profile
-    /// resolves outside this crate; the resolved embed model slots into
-    /// the resolution chain below the explicit `embed_model` field.
+    /// Retired: a library's profile reference lives in its manifest.
+    /// Kept for the same reason as [`RootConfig::embed_model`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_profile: Option<String>,
     /// Retrieval knobs, under a `[search]` table.
@@ -622,9 +611,43 @@ pub struct RootRerankerConfig {
     pub threads: Option<u32>,
 }
 
+/// Keys a `config.toml` may still carry from an older release but that
+/// no longer resolve to anything, each paired with the way out. Every
+/// entry names a field that [`RootConfig`] still declares so the
+/// document parses far enough for the key to be reported by name.
+const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
+    (
+        "embed_model",
+        "the embed model is declared by the index profile now -- run \
+         `bookrack index-profile current` to see what resolves, then drop the line \
+         (`bookrack libraries config <name> --unset embed_model`)",
+    ),
+    (
+        "index_profile",
+        "a library's profile reference lives in its manifest now -- declare it with \
+         `bookrack libraries config <name> index_profile=<profile>`, then drop the line \
+         (`bookrack libraries config <name> --unset index_profile`)",
+    ),
+];
+
+/// Which retired key `cfg` sets, if any, in the order they are listed.
+fn retired_root_config_key(cfg: &RootConfig) -> Option<(&'static str, &'static str)> {
+    let set = |key: &str| match key {
+        "embed_model" => cfg.embed_model.is_some(),
+        "index_profile" => cfg.index_profile.is_some(),
+        _ => false,
+    };
+    RETIRED_ROOT_CONFIG_KEYS
+        .iter()
+        .find(|(key, _)| set(key))
+        .copied()
+}
+
 /// Read `<data_root>/config.toml`. A missing file resolves to the
 /// default (every field `None`) so a fresh data root is no error; a
-/// malformed file surfaces as [`ConfigError::RootConfigMalformed`].
+/// malformed file surfaces as [`ConfigError::RootConfigMalformed`], and
+/// a document carrying a retired key as
+/// [`ConfigError::RootConfigRetiredKey`].
 pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
     let path = data_dir.join(ROOT_CONFIG_NAME);
     let text = match std::fs::read_to_string(&path) {
@@ -636,24 +659,32 @@ pub fn load_root_config(data_dir: &Path) -> Result<RootConfig, ConfigError> {
             return Err(ConfigError::RootConfigUnreadable { path, source });
         }
     };
-    toml::from_str(&text).map_err(|source| ConfigError::RootConfigMalformed { path, source })
+    let cfg: RootConfig =
+        toml::from_str(&text).map_err(|source| ConfigError::RootConfigMalformed {
+            path: path.clone(),
+            source,
+        })?;
+    if let Some((key, help)) = retired_root_config_key(&cfg) {
+        return Err(ConfigError::RootConfigRetiredKey { path, key, help });
+    }
+    Ok(cfg)
 }
 
 /// Render a `<data_root>/config.toml` body for a freshly initialized
-/// library, using the canonical TOML serializer so the URL and model
-/// strings are escaped correctly regardless of which characters they
-/// carry.
+/// library, using the canonical TOML serializer so the URL is escaped
+/// correctly regardless of which characters it carries.
 ///
-/// The previous wizard hand-rolled the file with `format!`, which let
-/// a `"` or a `\n` inside `ollama_url` break the file: `toml::from_str`
-/// then refused the document on the next daemon start. The serializer
-/// emits a TOML basic string with the right escapes (`\"`, `\n`, `\\`,
-/// `\u{...}` for U+2028 and friends) so the same input round-trips
-/// through `load_root_config`.
-pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
+/// A TOML basic string with the right escapes (`\"`, `\n`, `\\`,
+/// `\u{...}` for U+2028 and friends) round-trips through
+/// [`load_root_config`], which a hand-rolled `format!` does not: a `"`
+/// or a `\n` inside `ollama_url` would break the document.
+///
+/// Only the endpoint is written. The embed model is the index profile's
+/// fact, and `embed_model` is a retired key that
+/// [`load_root_config`] refuses.
+pub fn render_root_config_toml(ollama_url: &str) -> String {
     let cfg = RootConfig {
         ollama_url: Some(ollama_url.to_string()),
-        embed_model: Some(embed_model.to_string()),
         ..RootConfig::default()
     };
     let body = toml::to_string(&cfg).expect("RootConfig serialization is infallible");
@@ -668,10 +699,8 @@ pub fn render_root_config_toml(ollama_url: &str, embed_model: &str) -> String {
 /// nested table (`search.top_k` edits `top_k` under `[search]`).
 pub const ROOT_CONFIG_KEYS: &[&str] = &[
     "ollama_url",
-    "embed_model",
     "mcp_addr",
     "log_directive",
-    "index_profile",
     "search.top_k",
     "search.weak_threshold",
     "reranker.url",
@@ -686,7 +715,6 @@ pub const ROOT_CONFIG_KEYS: &[&str] = &[
 pub fn root_config_env_override(key: &str) -> Option<&'static str> {
     match key {
         "ollama_url" => Some(OLLAMA_URL_ENV),
-        "embed_model" => Some(EMBED_MODEL_ENV),
         "mcp_addr" => Some(MCP_ADDR_ENV),
         "log_directive" => Some(LOG_ENV),
         "search.top_k" => Some(SEARCH_TOP_K_ENV),
@@ -772,17 +800,7 @@ pub fn set_root_config_values(
         validate_root_config_value(key, value)?;
     }
     for key in unsets {
-        validate_root_config_key(key)?;
-    }
-    // Warn where the operator is looking: writing the key is the moment
-    // to say it is going away, rather than leaving them to meet the
-    // resolution-time warning later. Unsetting it is the cure, not the
-    // disease, so it is not warned about.
-    if sets.iter().any(|(key, _)| key == "embed_model") {
-        eprintln!(
-            "warning: {}",
-            deprecated_embed_model_note("the config.toml `embed_model` field")
-        );
+        validate_root_config_unset_key(key)?;
     }
 
     let path = data_dir.join(ROOT_CONFIG_NAME);
@@ -841,7 +859,8 @@ pub fn set_root_config_values(
         .map_err(|source| RootConfigSetError::Write { path, source })
 }
 
-/// Reject a key that is not one bookrack recognizes.
+/// Reject a key that cannot be set: anything outside
+/// [`ROOT_CONFIG_KEYS`], which no longer lists the retired keys.
 fn validate_root_config_key(key: &str) -> Result<(), RootConfigSetError> {
     if ROOT_CONFIG_KEYS.contains(&key) {
         Ok(())
@@ -852,14 +871,23 @@ fn validate_root_config_key(key: &str) -> Result<(), RootConfigSetError> {
     }
 }
 
+/// Reject a key that cannot be unset. Wider than
+/// [`validate_root_config_key`] by the retired keys: deleting the line
+/// is exactly what [`ConfigError::RootConfigRetiredKey`] tells the
+/// operator to do, so the cure cannot be refused along with the disease.
+fn validate_root_config_unset_key(key: &str) -> Result<(), RootConfigSetError> {
+    if RETIRED_ROOT_CONFIG_KEYS.iter().any(|(k, _)| *k == key) {
+        return Ok(());
+    }
+    validate_root_config_key(key)
+}
+
 /// Light per-key value check: `ollama_url` must carry a scheme and an
 /// authority, `mcp_addr` must have a `host:port` shape with a numeric
 /// port, `search.top_k` must be a positive integer, and
-/// `search.weak_threshold` a finite number. `embed_model`,
-/// `log_directive`, and `index_profile` are free-form — a model tag has
-/// no fixed grammar, a tracing directive is validated by the runtime
-/// that consumes it, and a profile reference is checked against the
-/// profile store by the caller that can resolve it.
+/// `search.weak_threshold` a finite number. `log_directive` is
+/// free-form — a tracing directive is validated by the runtime that
+/// consumes it.
 fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
     let invalid = |reason: &str| {
         Err(RootConfigSetError::InvalidValue {
@@ -914,9 +942,6 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
 /// Embedding model served by the local Ollama daemon, used when
 /// [`EmbedConfig`] is left at its default.
 pub const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding:0.6b";
-
-/// Environment variable overriding the embedding model tag.
-pub const EMBED_MODEL_ENV: &str = "BOOKRACK_EMBED_MODEL";
 
 /// Environment variable overriding the target batch size, in characters.
 pub const EMBED_BATCH_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_CHAR_BUDGET";
@@ -1050,49 +1075,36 @@ impl Default for EmbedConfig {
 }
 
 impl EmbedConfig {
-    /// Resolve from the environment alone, ignoring the per-root config
-    /// layer. Callers that hold a loaded [`RootConfig`] (and possibly a
-    /// resolved index profile) use [`EmbedConfig::resolve`] instead so
-    /// the file and profile layers participate.
+    /// Resolve the model from the index profile, falling back to the
+    /// hardcoded default when no profile is in effect. The profile
+    /// resolves outside this crate; `profile_model` is the embed model
+    /// it declares.
     ///
-    /// Only operational knobs are read here: the model tag and the
-    /// batching budgets. Content-identity parameters (chunk length,
-    /// overlap, grouping) are not configurable — they are frozen with
-    /// `CHUNK_VERSION` so a change forces a re-derivation. A malformed or
-    /// empty value falls back to the default rather than failing.
-    pub fn from_env() -> EmbedConfig {
-        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), &RootConfig::default(), None)
-    }
-
-    /// Resolve the model by the full precedence chain: env var > explicit
-    /// `config.toml` field > profile-derived value > hardcoded default.
-    /// The index profile resolves outside this crate; `profile_model` is
-    /// the embed model it declares, when a profile is in effect. The
-    /// batching budgets remain env-only knobs.
+    /// The model is a library-level fact — the semantic identity of the
+    /// library's vectors — so nothing process-level sits above the
+    /// profile that declares it. The batching budgets below are the
+    /// opposite kind of knob and stay env-only: they shape how a run is
+    /// paced, not what it produces.
     ///
-    /// The two layers above the profile are deprecated: warns once per
-    /// process when either is in effect. The warning lives here rather
-    /// than in [`EmbedConfig::resolve_from`] so the chain itself stays
-    /// pure and testable, and so the wide call surface behind it (every
-    /// embed resolution in the daemon) cannot turn one misconfiguration
-    /// into a screenful.
-    pub fn resolve(root: &RootConfig, profile_model: Option<&str>) -> EmbedConfig {
-        warn_deprecated_embed_model_layers(|key| std::env::var(key).ok(), root);
-        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), root, profile_model)
+    /// Content-identity parameters (chunk length, overlap, grouping) are
+    /// not configurable at all — they are frozen with `CHUNK_VERSION` so
+    /// a change forces a re-derivation. A malformed or empty env value
+    /// falls back to the default rather than failing.
+    pub fn resolve(profile_model: Option<&str>) -> EmbedConfig {
+        EmbedConfig::resolve_from(|key| std::env::var(key).ok(), profile_model)
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
     fn resolve_from(
         get: impl Fn(&str) -> Option<String>,
-        root: &RootConfig,
         profile_model: Option<&str>,
     ) -> EmbedConfig {
         let d = EmbedConfig::default();
         EmbedConfig {
-            model: env_trimmed(get(EMBED_MODEL_ENV))
-                .or_else(|| env_trimmed(root.embed_model.clone()))
-                .or_else(|| profile_model.map(str::to_string))
+            model: profile_model
+                .map(str::to_string)
+                .filter(|m| !m.trim().is_empty())
                 .unwrap_or(d.model),
             request_timeout: d.request_timeout,
             max_retries: d.max_retries,
@@ -2222,63 +2234,6 @@ fn emit_registry_upgrade_notice() {
     eprintln!("info: registry upgraded to entry-table format");
 }
 
-/// Text of the deprecation warning for an embed-model layer above the
-/// index profile. Shared with the `doctor` row so an operator reads the
-/// same sentence wherever they meet it.
-pub fn deprecated_embed_model_note(source: &str) -> String {
-    format!(
-        "{source} overrides the index profile and will be removed in the next minor; \
-         declare the model through an index profile instead \
-         (`bookrack index-profile current` shows what resolves today)"
-    )
-}
-
-/// Human name of the `config.toml` embed-model layer, for the warning
-/// and the `doctor` row.
-pub const DEPRECATED_EMBED_MODEL_FIELD: &str = "the config.toml `embed_model` field";
-
-/// Which deprecated embed-model layer is in effect, if any.
-///
-/// A library's embed model is the semantic identity of its vectors — a
-/// library-level fact — so a process-level env var and a per-root
-/// override sitting *above* the index profile that declares it is the
-/// wrong precedence. Both layers are on their way out; this reports
-/// whether one is currently winning.
-///
-/// Names only the layer that actually resolves: with both set the env
-/// var wins, and naming the shadowed field too would misreport what is
-/// in effect. Pure, so the precedence has one testable definition that
-/// the resolution-time warning and `doctor` share.
-pub fn deprecated_embed_model_layer(
-    get: impl Fn(&str) -> Option<String>,
-    root: &RootConfig,
-) -> Option<&'static str> {
-    if env_trimmed(get(EMBED_MODEL_ENV)).is_some() {
-        Some(EMBED_MODEL_ENV)
-    } else if env_trimmed(root.embed_model.clone()).is_some() {
-        Some(DEPRECATED_EMBED_MODEL_FIELD)
-    } else {
-        None
-    }
-}
-
-/// Warn once per process when a deprecated embed-model layer is in
-/// effect.
-///
-/// One warning per process, not per resolution: the daemon resolves the
-/// embed model on nearly every write path, and a per-call warning would
-/// bury the message it is trying to deliver. `doctor` carries the same
-/// note as a row an operator can go looking for.
-fn warn_deprecated_embed_model_layers(get: impl Fn(&str) -> Option<String>, root: &RootConfig) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-
-    if let Some(source) = deprecated_embed_model_layer(get, root) {
-        ONCE.call_once(|| {
-            eprintln!("deprecated: {}", deprecated_embed_model_note(source));
-        });
-    }
-}
-
 /// Serialize `doc` and write it to `path` atomically, creating the
 /// parent directory as needed.
 fn write_registry_table(path: &Path, doc: &toml::Table) -> Result<(), ConfigError> {
@@ -3105,19 +3060,17 @@ mod tests {
     }
 
     #[test]
-    fn embed_config_from_env_overrides_operational_knobs() {
+    fn embed_config_env_overrides_the_batching_knobs_only() {
         let cfg = EmbedConfig::resolve_from(
             |key| match key {
-                EMBED_MODEL_ENV => Some("custom-model".to_string()),
                 EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
                 EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
                 EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
                 _ => None,
             },
-            &RootConfig::default(),
-            None,
+            Some("profile-model"),
         );
-        assert_eq!(cfg.model, "custom-model");
+        assert_eq!(cfg.model, "profile-model");
         assert_eq!(cfg.batch_char_budget, 4_000);
         assert_eq!(cfg.batch_max_chunks, 32);
         assert_eq!(cfg.batch_min_char_budget, 250);
@@ -3129,85 +3082,101 @@ mod tests {
     }
 
     #[test]
-    fn deprecated_embed_model_layer_names_only_the_one_in_effect() {
-        let with_field = RootConfig {
-            embed_model: Some("file-model".to_string()),
-            ..RootConfig::default()
-        };
-        let env = |key: &str| match key {
-            EMBED_MODEL_ENV => Some("env-model".to_string()),
-            _ => None,
-        };
+    fn embed_model_resolves_from_the_profile_or_the_default() {
+        // The profile declares the model; nothing sits above it.
+        let profile = EmbedConfig::resolve_from(|_| None, Some("profile-model"));
+        assert_eq!(profile.model, "profile-model");
 
-        // Both layers set: the env var wins the chain, so it is the one
-        // named — reporting the shadowed field would misdescribe what is
-        // actually resolving.
-        assert_eq!(
-            deprecated_embed_model_layer(env, &with_field),
-            Some(EMBED_MODEL_ENV)
-        );
-        assert_eq!(
-            deprecated_embed_model_layer(|_| None, &with_field),
-            Some(DEPRECATED_EMBED_MODEL_FIELD)
-        );
-        assert_eq!(
-            deprecated_embed_model_layer(env, &RootConfig::default()),
-            Some(EMBED_MODEL_ENV)
-        );
-
-        // Neither layer: nothing deprecated is in effect.
-        assert_eq!(
-            deprecated_embed_model_layer(|_| None, &RootConfig::default()),
-            None
-        );
-        // An empty or whitespace value is not a declaration, matching
-        // how the resolution chain skips it.
-        let blank_field = RootConfig {
-            embed_model: Some("   ".to_string()),
-            ..RootConfig::default()
-        };
-        assert_eq!(deprecated_embed_model_layer(|_| None, &blank_field), None);
-        assert_eq!(
-            deprecated_embed_model_layer(|_| Some("  ".to_string()), &RootConfig::default()),
-            None
-        );
-    }
-
-    #[test]
-    fn deprecated_embed_model_note_names_the_source_and_the_way_out() {
-        let note = deprecated_embed_model_note(EMBED_MODEL_ENV);
-        assert!(note.contains("BOOKRACK_EMBED_MODEL"), "{note}");
-        assert!(note.contains("removed in the next minor"), "{note}");
-        assert!(note.contains("index profile"), "{note}");
-    }
-
-    #[test]
-    fn embed_model_resolution_orders_env_file_profile_default() {
-        let file = RootConfig {
-            embed_model: Some("file-model".to_string()),
-            ..RootConfig::default()
-        };
-        let env = |key: &str| match key {
-            EMBED_MODEL_ENV => Some("env-model".to_string()),
-            _ => None,
-        };
-
-        // Every layer set: the env var wins.
-        let all = EmbedConfig::resolve_from(env, &file, Some("profile-model"));
-        assert_eq!(all.model, "env-model");
-
-        // No env: the explicit config.toml field wins over the profile.
-        let no_env = EmbedConfig::resolve_from(|_| None, &file, Some("profile-model"));
-        assert_eq!(no_env.model, "file-model");
-
-        // No env, no explicit field: the profile-derived value wins.
-        let profile_only =
-            EmbedConfig::resolve_from(|_| None, &RootConfig::default(), Some("profile-model"));
-        assert_eq!(profile_only.model, "profile-model");
-
-        // Nothing set anywhere: the hardcoded default.
-        let bare = EmbedConfig::resolve_from(|_| None, &RootConfig::default(), None);
+        // No profile in effect: the hardcoded default.
+        let bare = EmbedConfig::resolve_from(|_| None, None);
         assert_eq!(bare.model, DEFAULT_EMBED_MODEL);
+
+        // A blank declaration is not a declaration.
+        let blank = EmbedConfig::resolve_from(|_| None, Some("   "));
+        assert_eq!(blank.model, DEFAULT_EMBED_MODEL);
+    }
+
+    #[test]
+    fn retired_root_config_keys_are_refused_by_name_with_a_way_out() {
+        for (key, value) in [
+            ("embed_model", "some-model"),
+            ("index_profile", "some-profile"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                dir.path().join(ROOT_CONFIG_NAME),
+                format!("ollama_url = \"http://127.0.0.1:11434\"\n{key} = \"{value}\"\n"),
+            )
+            .expect("write config");
+
+            let err = load_root_config(dir.path()).expect_err("retired key must be refused");
+            let ConfigError::RootConfigRetiredKey { key: named, .. } = &err else {
+                panic!("expected RootConfigRetiredKey, got {err:?}");
+            };
+            assert_eq!(*named, key);
+
+            // The message names the key and carries the way out, so the
+            // error is actionable without reaching for the docs.
+            let text = err.to_string();
+            assert!(text.contains(key), "{text}");
+            assert!(text.contains("--unset"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_root_config_without_retired_keys_still_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ROOT_CONFIG_NAME),
+            "ollama_url = \"http://127.0.0.1:11434\"\n",
+        )
+        .expect("write config");
+
+        let cfg = load_root_config(dir.path()).expect("clean config loads");
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+    }
+
+    #[test]
+    fn retired_keys_cannot_be_set_but_can_still_be_unset() {
+        for key in ["embed_model", "index_profile"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::write(
+                dir.path().join(ROOT_CONFIG_NAME),
+                format!(
+                    "# operator note: keep me\nollama_url = \"http://127.0.0.1:11434\"\n\
+                     {key} = \"stale\"\n"
+                ),
+            )
+            .expect("write config");
+
+            // Setting is refused: the key resolves to nothing.
+            let err = set_root_config_values(
+                dir.path(),
+                &[(key.to_string(), "whatever".to_string())],
+                &[],
+            )
+            .expect_err("a retired key cannot be set");
+            assert!(
+                matches!(err, RootConfigSetError::UnknownKey { .. }),
+                "{err:?}"
+            );
+
+            // Unsetting is the cure the retired-key error prescribes, so
+            // it must work while the stale line is still there.
+            set_root_config_values(dir.path(), &[], &[key.to_string()])
+                .expect("a retired key can be unset");
+
+            let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
+            assert!(!text.contains(key), "{text}");
+            // Only the retired line goes: the rest of the document, and
+            // the comments decorating it, are untouched.
+            assert!(text.contains("operator note"), "{text}");
+            assert!(text.contains("ollama_url"), "{text}");
+
+            // And the root loads again once the line is gone.
+            let cfg = load_root_config(dir.path()).expect("load after unset");
+            assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+        }
     }
 
     #[test]
@@ -3338,15 +3307,6 @@ mod tests {
     }
 
     #[test]
-    fn profile_conflict_messages_carry_both_values_and_a_repair_path() {
-        let model = ConfigError::profile_model_conflict("prof", "profile-model", "file-model");
-        let text = model.to_string();
-        assert!(text.contains("\"file-model\""));
-        assert!(text.contains("\"profile-model\""));
-        assert!(text.contains("--unset embed_model"));
-    }
-
-    #[test]
     fn embed_config_progress_interval_default_and_override() {
         let d = EmbedConfig::default();
         assert_eq!(
@@ -3359,7 +3319,6 @@ mod tests {
                 EMBED_PROGRESS_INTERVAL_ENV => Some("12".to_string()),
                 _ => None,
             },
-            &RootConfig::default(),
             None,
         );
         assert_eq!(cfg.progress_interval, Duration::from_secs(12));
@@ -3371,7 +3330,6 @@ mod tests {
                 EMBED_PROGRESS_INTERVAL_ENV => Some("0".to_string()),
                 _ => None,
             },
-            &RootConfig::default(),
             None,
         );
         assert_eq!(burst.progress_interval, Duration::ZERO);
@@ -3382,7 +3340,6 @@ mod tests {
                 EMBED_PROGRESS_INTERVAL_ENV => Some("not-a-number".to_string()),
                 _ => None,
             },
-            &RootConfig::default(),
             None,
         );
         assert_eq!(
@@ -3392,21 +3349,20 @@ mod tests {
     }
 
     #[test]
-    fn embed_config_from_env_falls_back_on_blank_or_malformed() {
+    fn embed_config_env_knobs_fall_back_on_blank_or_malformed() {
         let d = EmbedConfig::default();
         let cfg = EmbedConfig::resolve_from(
             |key| match key {
-                // Whitespace-only counts as unset.
-                EMBED_MODEL_ENV => Some("   ".to_string()),
                 // Non-numeric falls back rather than failing.
                 EMBED_BATCH_CHAR_BUDGET_ENV => Some("not-a-number".to_string()),
+                // Blank counts as unset.
+                EMBED_BATCH_MAX_CHUNKS_ENV => Some("   ".to_string()),
                 _ => None,
             },
-            &RootConfig::default(),
             None,
         );
-        assert_eq!(cfg.model, d.model);
         assert_eq!(cfg.batch_char_budget, d.batch_char_budget);
+        assert_eq!(cfg.batch_max_chunks, d.batch_max_chunks);
     }
 
     #[test]
@@ -3766,13 +3722,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nembed_model = \"m\"\n",
+            "# hand-written note\nlog_directive = \"info\"\n",
         )
         .expect("seed config");
         set_root_config_values(
             tmp.path(),
             &[
-                ("index_profile".to_string(), "some-profile".to_string()),
                 ("search.top_k".to_string(), "7".to_string()),
                 ("search.weak_threshold".to_string(), "0.4".to_string()),
             ],
@@ -3790,7 +3745,6 @@ mod tests {
 
         // The written file round-trips through the typed loader.
         let cfg = load_root_config(tmp.path()).expect("load config");
-        assert_eq!(cfg.index_profile.as_deref(), Some("some-profile"));
         let search = cfg.search.expect("search table present");
         assert_eq!(search.top_k, Some(7));
         assert!((search.weak_threshold.expect("threshold") - 0.4).abs() < 1e-6);
@@ -3809,7 +3763,9 @@ mod tests {
         assert!(!text.contains("[search]"));
         let cfg = load_root_config(tmp.path()).expect("load config");
         assert!(cfg.search.is_none());
-        assert_eq!(cfg.index_profile.as_deref(), Some("some-profile"));
+        // A scalar key sitting beside the table is untouched by the
+        // table's removal.
+        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
     }
 
     #[test]
@@ -3847,12 +3803,12 @@ mod tests {
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
             "ollama_url = \"http://elsewhere:1234\"\n\
-             embed_model = \"alt-model\"\n",
+             log_directive = \"debug\"\n",
         )
         .expect("write root config");
         let cfg = load_root_config(tmp.path()).expect("root config parses");
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
-        assert_eq!(cfg.embed_model.as_deref(), Some("alt-model"));
+        assert_eq!(cfg.log_directive.as_deref(), Some("debug"));
         assert!(cfg.mcp_addr.is_none());
     }
 
@@ -3904,6 +3860,10 @@ mod tests {
                 None => fields.push(key.clone()),
             }
         }
+        // Retired fields survive on the struct so a document carrying
+        // one still parses far enough to be refused by name, but they
+        // are not settable, so they are not in the key list.
+        fields.retain(|f| !RETIRED_ROOT_CONFIG_KEYS.iter().any(|(k, _)| k == f));
         fields.sort();
         let mut keys: Vec<String> = ROOT_CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
         keys.sort();
@@ -3915,19 +3875,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nembed_model = \"old-model\"\n",
+            "# hand-written note\nlog_directive = \"old-directive\"\n",
         )
         .expect("seed config");
         set_root_config_values(
             tmp.path(),
-            &[("embed_model".to_string(), "new-model".to_string())],
+            &[("log_directive".to_string(), "new-directive".to_string())],
             &[],
         )
         .expect("set applies");
         let text = read_root_config_text(tmp.path()).expect("read back");
         assert!(text.contains("# hand-written note"));
-        assert!(text.contains("new-model"));
-        assert!(!text.contains("old-model"));
+        assert!(text.contains("new-directive"));
+        assert!(!text.contains("old-directive"));
     }
 
     #[test]
@@ -3980,28 +3940,31 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_root_config_values(
             tmp.path(),
-            &[("embed_model".to_string(), "m".to_string())],
+            &[("log_directive".to_string(), "info".to_string())],
             &[],
         )
         .expect("write from empty");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.embed_model.as_deref(), Some("m"));
+        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
     }
 
     #[test]
     fn set_root_config_unset_is_idempotent() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(ROOT_CONFIG_NAME), "embed_model = \"m\"\n")
-            .expect("seed config");
+        std::fs::write(
+            tmp.path().join(ROOT_CONFIG_NAME),
+            "log_directive = \"info\"\n",
+        )
+        .expect("seed config");
         // Unsetting a key the file never set is a no-op, not an error.
         set_root_config_values(tmp.path(), &[], &["mcp_addr".to_string()]).expect("unset absent");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.embed_model.as_deref(), Some("m"));
+        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
         // Unsetting a key that is present removes it.
-        set_root_config_values(tmp.path(), &[], &["embed_model".to_string()])
+        set_root_config_values(tmp.path(), &[], &["log_directive".to_string()])
             .expect("unset present");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert!(cfg.embed_model.is_none());
+        assert!(cfg.log_directive.is_none());
     }
 
     #[test]
@@ -4012,7 +3975,7 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("embed_model".to_string(), "m".to_string())],
+                &[("log_directive".to_string(), "info".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::Malformed { .. })
@@ -4022,10 +3985,6 @@ mod tests {
     #[test]
     fn root_config_env_override_maps_each_key() {
         assert_eq!(root_config_env_override("ollama_url"), Some(OLLAMA_URL_ENV));
-        assert_eq!(
-            root_config_env_override("embed_model"),
-            Some(EMBED_MODEL_ENV)
-        );
         assert_eq!(root_config_env_override("mcp_addr"), Some(MCP_ADDR_ENV));
         assert_eq!(root_config_env_override("log_directive"), Some(LOG_ENV));
         assert_eq!(

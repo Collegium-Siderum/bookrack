@@ -22,9 +22,8 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    Config, ConfigError, EmbedConfig, RootConfig, effective_profile_reference, list_libraries,
-    load_manifest, load_root_config, profile_reference_drift, registry_profile_ref_in,
-    registry_target_path, root_config_env_override,
+    Config, EmbedConfig, effective_profile_reference, list_libraries, load_manifest,
+    profile_reference_drift, registry_profile_ref_in, registry_target_path,
 };
 // The origin and drift types live in `bookrack_config` beside the
 // resolution chain; re-exported so `crate::profile::ProfileRefOrigin`
@@ -77,60 +76,49 @@ fn registry_profile_ref(cfg: &Config) -> Option<String> {
     registry_profile_ref_in(&entries, cfg.library(), cfg.data_dir())
 }
 
-/// The three profile-reference sources, re-read from disk at call time.
+/// The manifest's profile reference, re-read from disk at call time.
 ///
 /// Daemon RPC handlers hold a `Config` captured at bring-up; re-reading
 /// keeps a declaration written after bring-up (e.g. by `index-profile
 /// apply`, which declares before it acts) visible to every handler
-/// without a restart. That is why the manifest is read here too and not
-/// taken from a snapshot: the manifest is where a declaration now lands,
-/// so a stale read would make declare-first silently ineffective.
-/// Offline callers parse a fresh `Config` per process, so for them the
-/// snapshot and the file agree anyway.
+/// without a restart. Offline callers parse a fresh `Config` per
+/// process, so for them the snapshot and the file agree anyway.
 ///
-/// The root config falls back to `cfg`'s snapshot when the file cannot
-/// be read. A manifest that cannot be read counts as absent: resolution
-/// must not fail because a root carries a corrupt or future-versioned
-/// identity file, matching how `identify_library` treats one.
-fn fresh_profile_sources(cfg: &Config) -> (RootConfig, Option<String>) {
-    let root = load_root_config(cfg.data_dir()).unwrap_or_else(|_| cfg.root_config().clone());
-    let manifest_ref = load_manifest(cfg.data_dir())
+/// A manifest that cannot be read counts as absent: resolution must not
+/// fail because a root carries a corrupt or future-versioned identity
+/// file, matching how `identify_library` treats one.
+fn fresh_manifest_profile_ref(cfg: &Config) -> Option<String> {
+    load_manifest(cfg.data_dir())
         .ok()
         .flatten()
-        .and_then(|m| m.index_profile);
-    (root, manifest_ref)
+        .and_then(|m| m.index_profile)
 }
 
 /// Resolve the effective index profile for the library `cfg` serves.
 ///
-/// `Ok(None)` when no source references a profile — the library then
-/// runs on field-level configuration alone. Sources that disagree do not
-/// fail: the highest-priority one wins and the rest are reported as
+/// `Ok(None)` when neither source references a profile — the library
+/// then runs on the default embed model. Sources that disagree do not
+/// fail: the manifest wins and the registry cache is reported as
 /// [`EffectiveProfile::drift`]. Errors when the referenced profile does
-/// not resolve, or when the profile's model contradicts an explicit
-/// `embed_model` in `config.toml`
-/// ([`ConfigError::ProfileConfigConflict`]).
+/// not resolve.
 pub fn effective_index_profile(cfg: &Config) -> Result<Option<EffectiveProfile>> {
-    let (root, manifest_ref) = fresh_profile_sources(cfg);
-    effective_index_profile_in(cfg, &root, manifest_ref.as_deref())
+    let manifest_ref = fresh_manifest_profile_ref(cfg);
+    effective_index_profile_in(cfg, manifest_ref.as_deref())
 }
 
-/// [`effective_index_profile`] against already-read sources, so
-/// [`effective_embed_config`] reads each file once per call.
+/// [`effective_index_profile`] against an already-read manifest
+/// reference, so [`effective_embed_config`] reads the file once per
+/// call.
 fn effective_index_profile_in(
     cfg: &Config,
-    root: &RootConfig,
     manifest_ref: Option<&str>,
 ) -> Result<Option<EffectiveProfile>> {
-    let config_ref = root.index_profile.clone();
     let registry_ref = registry_profile_ref(cfg);
-    let Some((name, origin)) =
-        effective_profile_reference(manifest_ref, config_ref.as_deref(), registry_ref.as_deref())
+    let Some((name, origin)) = effective_profile_reference(manifest_ref, registry_ref.as_deref())
     else {
         return Ok(None);
     };
-    let drift =
-        profile_reference_drift(manifest_ref, config_ref.as_deref(), registry_ref.as_deref());
+    let drift = profile_reference_drift(manifest_ref, registry_ref.as_deref());
 
     let dir = user_profile_dir_or_default();
     let profile = resolve(&dir, &name)
@@ -142,13 +130,6 @@ fn effective_index_profile_in(
             )
         })?;
 
-    if let Some(explicit) = root.embed_model.as_deref()
-        && explicit != profile.embed.model
-    {
-        return Err(
-            ConfigError::profile_model_conflict(&name, &profile.embed.model, explicit).into(),
-        );
-    }
     Ok(Some(EffectiveProfile {
         origin,
         profile,
@@ -156,16 +137,15 @@ fn effective_index_profile_in(
     }))
 }
 
-/// The [`EmbedConfig`] for `cfg`'s library with every layer of the model
-/// chain applied: env var > explicit `config.toml` field > the effective
-/// profile's model > hardcoded default. Fails when the profile layer is
-/// itself in conflict, so a handler cannot embed under a configuration
-/// the daemon would refuse to start with.
+/// The [`EmbedConfig`] for `cfg`'s library: the effective profile's
+/// model, or the hardcoded default when no profile is in effect. Fails
+/// when the profile does not resolve, so a handler cannot embed under a
+/// configuration the daemon would refuse to start with.
 pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
-    let (root, manifest_ref) = fresh_profile_sources(cfg);
-    let effective = effective_index_profile_in(cfg, &root, manifest_ref.as_deref())?;
+    let manifest_ref = fresh_manifest_profile_ref(cfg);
+    let effective = effective_index_profile_in(cfg, manifest_ref.as_deref())?;
     let model = effective.as_ref().map(|e| e.profile.embed.model.as_str());
-    Ok(EmbedConfig::resolve(&root, model))
+    Ok(EmbedConfig::resolve(model))
 }
 
 /// Write gate for an `index_profile` reference: the name must resolve
@@ -551,42 +531,6 @@ pub fn ann_matches_profile(current: &AnnConfig, spec: &AnnSpec) -> bool {
         && current.refine_factor == spec.refine_factor
 }
 
-/// Configuration layers that would mask the target profile's embed
-/// model at execution time: the env override and the explicit
-/// `config.toml` field both outrank the profile in the resolution
-/// chain, so an apply running under either would embed with the masked
-/// value while declaring the profile — the worst of both. One message
-/// per conflicting layer, each with its removal instruction; empty
-/// means the profile's model would take effect. Pure: the caller
-/// supplies the current env value.
-pub fn masking_conflicts(
-    profile: &IndexProfile,
-    root: &RootConfig,
-    env_model: Option<&str>,
-) -> Vec<String> {
-    let env_var =
-        root_config_env_override("embed_model").expect("embed_model key has an env override");
-    let mut conflicts = Vec::new();
-    if let Some(env) = env_model.map(str::trim).filter(|v| !v.is_empty())
-        && env != profile.embed.model
-    {
-        conflicts.push(format!(
-            "{env_var} is set to '{env}' and overrides every configuration layer, \
-             masking profile '{}' (embed model '{}'); unset {env_var} and re-run",
-            profile.name, profile.embed.model
-        ));
-    }
-    if let Some(explicit) = root.embed_model.as_deref()
-        && explicit != profile.embed.model
-    {
-        conflicts.push(
-            ConfigError::profile_model_conflict(&profile.name, &profile.embed.model, explicit)
-                .to_string(),
-        );
-    }
-    conflicts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -801,35 +745,5 @@ mod tests {
             derive_pipeline_plan(&profile, &target, &drift_and_stale),
             PipelinePlan::Run(vec![PlannedAction::Reembed])
         );
-    }
-
-    #[test]
-    fn masking_conflicts_flag_env_and_explicit_field() {
-        let profile = profile();
-        let clean = RootConfig::default();
-
-        assert!(masking_conflicts(&profile, &clean, None).is_empty());
-        // A matching env value or explicit field masks nothing.
-        assert!(masking_conflicts(&profile, &clean, Some(&profile.embed.model)).is_empty());
-        // Whitespace-only env values are treated as unset, matching the
-        // resolution chain's own trimming.
-        assert!(masking_conflicts(&profile, &clean, Some("  ")).is_empty());
-
-        let conflicts = masking_conflicts(&profile, &clean, Some("other-model"));
-        assert_eq!(conflicts.len(), 1);
-        assert!(conflicts[0].contains("BOOKRACK_EMBED_MODEL"));
-        assert!(conflicts[0].contains("unset"));
-
-        let explicit = RootConfig {
-            embed_model: Some("other-model".to_string()),
-            ..RootConfig::default()
-        };
-        let conflicts = masking_conflicts(&profile, &explicit, None);
-        assert_eq!(conflicts.len(), 1);
-        assert!(conflicts[0].contains("embed_model"));
-
-        // Both layers conflicting report both, env first.
-        let conflicts = masking_conflicts(&profile, &explicit, Some("third-model"));
-        assert_eq!(conflicts.len(), 2);
     }
 }

@@ -145,10 +145,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
 }
 
 /// Render `bookrack vectors reset` — drop the chunks table, clear the
-/// corpus stamps, and re-embed every book with the env-configured
+/// corpus stamps, and re-embed every book with the index profile's
 /// embedding model. The old vectors are unrecoverable. Use after
-/// switching `BOOKRACK_EMBED_MODEL`; for a non-destructive trial of a
-/// new model, use `libraries fork` instead.
+/// pointing the library at a profile that declares a different model;
+/// for a non-destructive trial, use `libraries fork` instead.
 pub async fn reset<F>(cfg: &Config, yes: bool, resume: bool, ask: F) -> Result<()>
 where
     F: FnOnce(&str) -> Result<bool>,

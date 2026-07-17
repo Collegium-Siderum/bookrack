@@ -23,11 +23,10 @@ use std::path::Path;
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, EMBED_MODEL_ENV, LibraryEntry,
+    Config, ConfigError, DEFAULT_EMBED_MODEL, DEFAULT_OLLAMA_URL, LibraryEntry,
     LibraryIdentification, LibrarySelection, ManifestError, ProfileRefDrift, ProfileRefOrigin,
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
-    list_libraries, load_manifest, load_root_config, locate_pdfium, pdfium_library_filename,
-    profile_reference_drift,
+    list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
 use bookrack_index_profile::{has_errors, resolve, validate};
@@ -147,7 +146,6 @@ pub async fn gather_with(
     }
     push_registry_consistency_rows(&mut rows);
     push_index_profile_coherence_rows(&mut rows);
-    push_deprecated_embed_model_row(&mut rows, cfg.as_ref());
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
@@ -827,41 +825,10 @@ fn entry_profile_reference(
         .ok()
         .flatten()
         .and_then(|m| m.index_profile);
-    let config_ref = load_root_config(&entry.data_dir)
-        .ok()
-        .and_then(|r| r.index_profile);
-    let effective = effective_profile_reference(
-        manifest_ref.as_deref(),
-        config_ref.as_deref(),
-        entry.index_profile.as_deref(),
-    );
-    let drift = profile_reference_drift(
-        manifest_ref.as_deref(),
-        config_ref.as_deref(),
-        entry.index_profile.as_deref(),
-    );
+    let effective =
+        effective_profile_reference(manifest_ref.as_deref(), entry.index_profile.as_deref());
+    let drift = profile_reference_drift(manifest_ref.as_deref(), entry.index_profile.as_deref());
     (effective, drift)
-}
-
-/// Emit the deprecation row for an embed-model layer above the index
-/// profile, reusing the resolution chain's own definition of which layer
-/// wins. Absent entirely when neither layer is set — the healthy case,
-/// which needs no row.
-fn push_deprecated_embed_model_row(rows: &mut Vec<Row>, cfg: Option<&Config>) {
-    let default_root = bookrack_config::RootConfig::default();
-    let root = cfg.map_or(&default_root, |c| c.root_config());
-    let Some(source) =
-        bookrack_config::deprecated_embed_model_layer(|key| std::env::var(key).ok(), root)
-    else {
-        return;
-    };
-    rows.push(Row {
-        label: "embed-model".to_string(),
-        value: source.to_string(),
-        status: Status::Warn {
-            note: bookrack_config::deprecated_embed_model_note(source),
-        },
-    });
 }
 
 /// The drift note for a library whose lower-priority sources still name
@@ -965,19 +932,14 @@ fn ollama_url_for_probe(cfg: Option<&Config>) -> String {
 }
 
 /// The embed model the Ollama probe should look for, by the resolution
-/// chain the daemon applies: env var > `config.toml` > (best-effort) the
-/// effective index profile > default. Profile resolution failures fall
-/// through silently — the coherence rows report them; the probe only
-/// needs a model name to ask about.
+/// chain the daemon applies: the effective index profile, best-effort,
+/// then the default. Profile resolution failures fall through silently —
+/// the coherence rows report them; the probe only needs a model name to
+/// ask about.
 fn embed_model_for_probe(cfg: Option<&Config>) -> String {
-    std::env::var(EMBED_MODEL_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| cfg.and_then(|c| c.root_config().embed_model.clone()))
-        .or_else(|| {
-            let profile = cfg.and_then(|c| crate::profile::effective_index_profile(c).ok())??;
-            Some(profile.profile.embed.model)
-        })
+    cfg.and_then(|c| crate::profile::effective_index_profile(c).ok())
+        .flatten()
+        .map(|p| p.profile.embed.model)
         .unwrap_or_else(|| DEFAULT_EMBED_MODEL.to_string())
 }
 

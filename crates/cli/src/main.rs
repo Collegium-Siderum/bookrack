@@ -39,7 +39,6 @@ Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
   BOOKRACK_REGISTRY     TOML file mapping --library names to roots
   BOOKRACK_OLLAMA_URL   Ollama endpoint (default http://localhost:11434)
-  BOOKRACK_EMBED_MODEL  embedding model tag (default qwen3-embedding:0.6b)
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
 Library reads (search, browse, metadata, status) live behind `bookrack exec
@@ -556,7 +555,7 @@ pub(crate) enum LibrariesAction {
         /// Registry name whose config is read or edited.
         name: String,
         /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
-        /// `embed_model`, `mcp_addr`, `log_directive`, `index_profile`,
+        /// `mcp_addr`, `log_directive`, `index_profile`,
         /// `search.top_k`, `search.weak_threshold`, `reranker.url`,
         /// `reranker.ctx`, `reranker.threads`.
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
@@ -1371,7 +1370,7 @@ mod tests {
             "libraries",
             "config",
             "prod",
-            "embed_model=alt-model",
+            "log_directive=debug",
             "ollama_url=http://host:11434",
             "--unset",
             "mcp_addr",
@@ -1387,7 +1386,7 @@ mod tests {
                 assert_eq!(
                     sets,
                     vec![
-                        ("embed_model".to_string(), "alt-model".to_string()),
+                        ("log_directive".to_string(), "debug".to_string()),
                         ("ollama_url".to_string(), "http://host:11434".to_string()),
                     ]
                 );
@@ -1419,9 +1418,9 @@ mod tests {
     #[test]
     fn libraries_config_rejects_a_pair_without_equals() {
         for argv in [
-            vec!["bookrack", "libraries", "config", "prod", "embed_model"],
+            vec!["bookrack", "libraries", "config", "prod", "log_directive"],
             vec!["bookrack", "libraries", "config", "prod", "=value"],
-            vec!["bookrack", "libraries", "config", "prod", "embed_model="],
+            vec!["bookrack", "libraries", "config", "prod", "log_directive="],
         ] {
             let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
                 panic!("a malformed pair must error: {argv:?}");

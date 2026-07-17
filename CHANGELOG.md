@@ -8,6 +8,46 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **config, runtime, cli: `BOOKRACK_EMBED_MODEL` and the `config.toml`
+  `embed_model` and `index_profile` fields are gone; the embed model is
+  the index profile's fact and nothing outranks it.** A library's embed
+  model is the semantic identity of its vectors — which model wrote
+  them, and so which model can read them — so it is declared by the
+  index profile the library references. The resolution chain is now
+  profile, then the built-in default; `BOOKRACK_EMBED_MODEL` is no
+  longer read. A `config.toml` still carrying `embed_model` or
+  `index_profile` is refused by name with the way out rather than
+  silently ignored, since dropping the field would change which model a
+  write path resolves without the operator seeing it; `libraries config
+  <name> --unset <key>` still deletes either line, and is the cure the
+  refusal prescribes. Both keys were deprecated with a per-process
+  warning and a `doctor` row in 0.9.0. See
+  [`docs/UPGRADE.md`](docs/UPGRADE.md) for the per-library migration.
+  The guardrails that existed only to police the old precedence go with
+  it: the `index-profile apply` masking refusal and the profile/field
+  model-conflict error no longer exist, because neither is reachable.
+
+### Changed
+
+- **config: a library's profile reference resolves from the manifest,
+  then the registry cache.** The `config.toml` layer between them is
+  gone with the field, so `config.toml` is no longer a reported origin
+  for a profile reference (`index-profile current --json` and `doctor`
+  emit `manifest` or `registry`).
+
+- **cli: `libraries config` accepts a narrower key set.** `embed_model`
+  is refused as an unknown key. `index_profile` remains accepted and
+  still declares into the library manifest.
+
+- **cli: `bookrack init` writes only `ollama_url` into a new root's
+  `config.toml`.** It previously wrote `embed_model` too, which would
+  have produced a root the very next command refused to load.
+
+- **cli: `libraries fork` and `vectors reset` guidance points at the
+  index profile** rather than at the removed environment variable.
+
 ## [0.9.0] - 2026-07-17
 
 ### Added

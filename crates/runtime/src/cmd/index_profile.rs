@@ -11,8 +11,8 @@
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    ConfigError, EmbedConfig, LibraryEntry, effective_profile_reference, list_libraries,
-    load_manifest, load_root_config, profile_reference_drift, root_config_env_override,
+    EmbedConfig, LibraryEntry, effective_profile_reference, list_libraries, load_manifest,
+    profile_reference_drift,
 };
 use bookrack_index_profile::{
     Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, USER_PROFILE_DIR_NAME,
@@ -246,21 +246,13 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
 /// `libraries scan` refreshes).
 fn current(library: Option<String>, json: bool) -> Result<()> {
     let entry = registry_entry(library.as_deref())?;
-    let root = load_root_config(&entry.data_dir)?;
     let manifest_ref = load_manifest(&entry.data_dir)
         .ok()
         .flatten()
         .and_then(|m| m.index_profile);
-    let reference = effective_profile_reference(
-        manifest_ref.as_deref(),
-        root.index_profile.as_deref(),
-        entry.index_profile.as_deref(),
-    );
-    let drift = profile_reference_drift(
-        manifest_ref.as_deref(),
-        root.index_profile.as_deref(),
-        entry.index_profile.as_deref(),
-    );
+    let reference =
+        effective_profile_reference(manifest_ref.as_deref(), entry.index_profile.as_deref());
+    let drift = profile_reference_drift(manifest_ref.as_deref(), entry.index_profile.as_deref());
 
     let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
     let resolved = match &reference {
@@ -275,19 +267,8 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
         }
         None => None,
     };
-    if let (Some((profile, _)), Some(explicit)) = (&resolved, root.embed_model.as_deref())
-        && explicit != profile.embed.model
-    {
-        return Err(ConfigError::profile_model_conflict(
-            &profile.name,
-            &profile.embed.model,
-            explicit,
-        )
-        .into());
-    }
-
     let profile_model = resolved.as_ref().map(|(p, _)| p.embed.model.as_str());
-    let effective_model = EmbedConfig::resolve(&root, profile_model).model;
+    let effective_model = EmbedConfig::resolve(profile_model).model;
     // An unstamped corpus reports as "no built index", same as a
     // missing one: there is nothing to compare a profile against.
     let built = crate::profile::built_stamps(&Pipeline::Books.corpus_db(&entry.data_dir))
@@ -647,19 +628,6 @@ pub async fn plan_apply(
     let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
     let profile =
         resolve(&dir, name)?.ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
-
-    // Masking check: a set env override or an explicit `embed_model`
-    // field outranks the profile at execution time, so the actions
-    // below would run against the masked value. Refuse instead of
-    // silently editing the operator's other configuration.
-    let root = load_root_config(&entry.data_dir)?;
-    let env_var =
-        root_config_env_override("embed_model").expect("embed_model key has an env override");
-    let env_model = std::env::var(env_var).ok();
-    let conflicts = crate::profile::masking_conflicts(&profile, &root, env_model.as_deref());
-    if !conflicts.is_empty() {
-        return Err(ApplyRefusal(conflicts.join("\n")).into());
-    }
 
     let mut sections = Vec::new();
     for pipeline in Pipeline::ALL {
