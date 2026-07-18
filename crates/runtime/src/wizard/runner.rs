@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, DEFAULT_OLLAMA_URL, EmbedConfig, LibraryEntryFields, LibraryKind, LibraryManifest,
-    MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, default_registry_path, load_manifest,
-    locate_pdfium, new_manifest, pdfium_library_filename, portable_data_dir,
+    MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, load_manifest, locate_pdfium,
+    new_manifest, pdfium_library_filename, portable_data_dir, registry_target_path,
     render_root_config_toml, upsert_library_entry, write_manifest,
 };
 
@@ -320,12 +320,13 @@ fn ensure_library_manifest(data_root: &Path, name: &str) -> Result<(LibraryManif
     Ok((manifest, false))
 }
 
-/// Register `default = <data_root>` in the platform-default registry,
-/// caching the manifest's identity fields in the entry. Returns `None`
-/// when no platform config directory could be located; the driver
-/// renders the `BOOKRACK_DATA_DIR` fallback hint.
+/// Register `default = <data_root>` in the registry the write-side
+/// commands target (`BOOKRACK_REGISTRY` when set, else the
+/// platform-default file), caching the manifest's identity fields in
+/// the entry. Returns `None` when no registry path could be resolved;
+/// the driver renders the `BOOKRACK_DATA_DIR` fallback hint.
 fn write_default_registry(data_root: &Path, manifest: &LibraryManifest) -> Result<Option<PathBuf>> {
-    let Some(path) = default_registry_path() else {
+    let Some(path) = registry_target_path() else {
         return Ok(None);
     };
     let entry = LibraryEntryFields {

@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's
+  finalize step resolved the registry through the platform-default-only
+  path helper, so with `BOOKRACK_REGISTRY` set the new library's
+  `default` entry still landed in the platform-default file — and a
+  follow-up `--library`, which reads the env-named registry, could not
+  find the library init had just created. The wizard now resolves the
+  registry through the same helper as every other write verb: the
+  env-named file when the variable is set, the platform default
+  otherwise.
+
 ### Added
 
 - **config: registry writes are serialized by a sibling lock file.**

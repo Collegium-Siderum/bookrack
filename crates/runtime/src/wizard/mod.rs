@@ -104,7 +104,7 @@ pub struct SmokeReport {
 }
 
 /// Result of step 5. `registry` is `None` when
-/// `default_registry_path()` returned `None` and the wizard left a
+/// `registry_target_path()` returned `None` and the wizard left a
 /// `BOOKRACK_DATA_DIR` hint to the driver instead.
 pub struct FinalizeSummary {
     pub data_root: PathBuf,
