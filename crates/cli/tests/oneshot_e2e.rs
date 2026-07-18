@@ -130,6 +130,125 @@ async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
     Ok(())
 }
 
+/// `bookrack status` answers "not running" as a legal verdict: a
+/// fresh runtime directory with no lock renders the short card and
+/// exits 0, not the daemon-not-running code 2. `--json` keeps the
+/// short card a single valid JSON object.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_without_daemon_prints_a_short_card_and_exits_zero() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["status"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_DATA_DIR", data_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "status with no daemon should exit 0; stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("daemon.running") && stdout.contains("bookrack run"),
+        "short card should report not-running and point at `bookrack run`: {stdout}",
+    );
+
+    let json_out = tokio::process::Command::new(bookrack_bin())
+        .args(["--json", "status"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_DATA_DIR", data_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(json_out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&json_out.stdout);
+    let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+    assert_eq!(
+        value["daemon"]["running"],
+        serde_json::json!(false),
+        "{stdout}",
+    );
+
+    let quiet = tokio::process::Command::new(bookrack_bin())
+        .args(["--quiet", "status"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_DATA_DIR", data_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(quiet.status.code(), Some(0));
+    assert!(
+        quiet.stdout.is_empty(),
+        "quiet mode must print nothing: {:?}",
+        String::from_utf8_lossy(&quiet.stdout),
+    );
+    Ok(())
+}
+
+/// A held flock whose control socket answers nothing within the probe
+/// window is a stale session: `bookrack status` exits 3. The fixture
+/// holds the flock from the test process itself — the stale verdict
+/// exists only while the lock is genuinely held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_with_a_stale_lock_exits_three() -> Result<()> {
+    use std::io::Write;
+
+    use fs2::FileExt;
+
+    let runtime_dir = tempfile::tempdir()?;
+    let data_dir = tempfile::tempdir()?;
+    let lock_path = runtime_dir.path().join("bookrack.tty.lock");
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    holder.try_lock_exclusive()?;
+    let mut writer = &holder;
+    writeln!(writer, "pid=999999")?;
+    writeln!(writer, "mcp=disabled")?;
+    writeln!(
+        writer,
+        "control_sock={}",
+        runtime_dir.path().join("no-such-control.sock").display()
+    )?;
+    writer.flush()?;
+
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["status"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_DATA_DIR", data_dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a held lock with a dead control plane is stale (exit 3); stderr={stderr:?}",
+    );
+    assert!(
+        stderr.contains("stale"),
+        "the error should name the stale lock: {stderr}",
+    );
+    drop(holder);
+    Ok(())
+}
+
 /// `libraries list` resolves locally: with no daemon running it still
 /// renders every registry entry and exits 0, rather than the
 /// daemon-not-running code 2. A mixed registry — legacy bare-path and

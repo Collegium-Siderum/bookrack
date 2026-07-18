@@ -22,6 +22,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack status`, a one-screen status card.** One
+  no-argument command answers "is a daemon running, which library does
+  it serve, is it busy": with a live daemon it renders a single card
+  with `daemon.*` / `library.*` / `queue.*` sections; with no daemon it
+  prints a short card and exits 0 ("not running" is an answer, not an
+  error); a held session lock whose control plane stays silent for 2s
+  exits 3 with the same stale-lock contract as `bookrack run`. `--json`
+  emits the card as one JSON object in every state; `--quiet` answers
+  through the exit code alone. The identity rows come from the daemon
+  over RPC, not from the lock file. Embedder and reranker health stay
+  with `bookrack doctor`; the card links to it instead of paying the
+  network round-trips.
+
+- **runtime: the `status` RPC reports the served library.** The
+  response gains `library` (registry name, `null` for a data root
+  selected directly by path) and `data_dir` (the served root), so any
+  control-plane client can name what the daemon serves without reading
+  the session lock. Both are single-library snapshot fields; a
+  multi-library daemon will report them in plural form.
+
 - **config: registry writes are serialized by a sibling lock file.**
   Every registry write verb — set-default, upsert, repoint, remove —
   now takes a short-held exclusive lock on `<registry>.lock` around its

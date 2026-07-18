@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use bookrack_cli::render::ctx;
-use bookrack_cli::render::table::KvTable;
+use bookrack_cli::render::table::{KvTable, flatten_into_kv};
 use bookrack_runtime::cmd::libraries::CopyMode;
 use eyre::Result;
 use serde_json::{Value, json};
@@ -104,36 +104,4 @@ fn render_library_info(response: &Value) {
     let mut table = KvTable::new();
     flatten_into_kv(&mut table, "", response);
     println!("{}", table.render());
-}
-
-/// Walk a JSON value into a [`KvTable`]. Scalars become rows with
-/// dot-notation keys; arrays render as a compact JSON string so the
-/// table stays narrow.
-fn flatten_into_kv(table: &mut KvTable, prefix: &str, value: &Value) {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                let next = if prefix.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{prefix}.{k}")
-                };
-                flatten_into_kv(table, &next, v);
-            }
-        }
-        Value::Null => {
-            table.push(prefix, "");
-        }
-        scalar @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => {
-            let s = match scalar {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            table.push(prefix, s);
-        }
-        Value::Array(arr) => {
-            let compact = serde_json::to_string(arr).unwrap_or_else(|_| "[…]".to_string());
-            table.push(prefix, compact);
-        }
-    }
 }

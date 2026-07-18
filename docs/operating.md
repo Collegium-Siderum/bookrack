@@ -135,6 +135,58 @@ EMBED path. The expected page count comes from the source PDF's
 and `--allow-partial` to accept a product that does not cover every
 page.
 
+## The status card
+
+```
+bookrack status
+```
+
+One no-argument call answers "is a daemon running, which library does
+it serve, is it busy". With a live daemon it renders a single card in
+three sections — `daemon.*` (version, pid, uptime, state, MCP and
+control endpoints), `library.*` (name, data root, chunk and ready-book
+counts, disk usage), `queue.*` (pending, running, worker) — and a hint
+pointing at `bookrack doctor` for the health probes the card
+deliberately skips (embedder and reranker reachability involve network
+round-trips; status stays fast). The identity rows come from the
+daemon over RPC, so they name what is actually served, not what a lock
+file once recorded. `library.name` is empty when the served data root
+was selected directly by path — a normal state, not a fault.
+
+The card distinguishes four verdicts:
+
+| Verdict | How it is decided | Output | Exit |
+| --- | --- | --- | --- |
+| running | session lock held, control plane answers within 2s | full card | 0 |
+| not running | no lock, or a leftover lock nobody holds | short card pointing at `bookrack run` | 0 |
+| stale | lock held, control plane silent for 2s | error naming the lock to remove | 3 |
+| unprobeable | lock held but records no control socket | short card with the recorded pid | 0 |
+
+"Not running" is an answer, not an error, so it exits 0; a daemon
+killed outright releases its flock and lands here, no cleanup needed.
+"Stale" means a process still holds the flock but its control plane
+has stopped answering — the same exit-3 contract as `bookrack run`
+against a stale lock. "Unprobeable" means the lock names no control
+address (a daemon started without a control listener, or a hand-edited
+lock): the probe made no verdict that the daemon is dead, so status
+does not either — but note that under `--quiet`, where the exit code
+is the whole answer, this state is indistinguishable from a healthy
+daemon; scripts that must tell them apart should parse `--json`
+output, where an unreachable control plane surfaces as
+`daemon.control: null`.
+
+Other exits follow the standard buckets in
+[control-plane.md](control-plane.md): 2 when an explicit `--library` /
+`--data-dir` disagrees with what the running daemon serves (the
+preflight names both sides), or when the daemon exits in the race
+between the probe and the connect; RPC failures map to 1 / 2 / 4 as
+everywhere else.
+
+`--json` prints the same card as one JSON object
+(`{ "daemon": …, "library": …, "queue": … }`); the short cards are
+valid JSON objects too, with `daemon.running` saying which shape you
+got. `--quiet` prints nothing and lets the exit code answer.
+
 ## Health and diagnostics
 
 ```

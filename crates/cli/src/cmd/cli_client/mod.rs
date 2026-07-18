@@ -9,7 +9,10 @@
 //! daemon is not running the helpers return
 //! [`crate::error::BookrackCliError::DaemonNotRunning`], which the
 //! top-level reporter in `main` renders as a uniform one-line
-//! "bookrack: …" message and maps to exit code 2.
+//! "bookrack: …" message and maps to exit code 2. The one exception
+//! is [`status`], which probes the session lock before connecting so
+//! "no daemon" renders as a short card with exit 0; its module doc
+//! carries the reasoning.
 
 pub mod corpus;
 pub mod diagnose;
@@ -27,5 +30,6 @@ pub mod queue;
 pub mod quit;
 pub mod remove;
 pub mod stamps;
+pub mod status;
 pub mod vectors;
 pub mod verify;

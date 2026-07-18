@@ -391,6 +391,13 @@ enum Command {
     /// `HH:MM:SS LEVEL target | message`; `--json` emits the
     /// underlying `LogEvent` payload as newline-delimited JSON.
     Logs(LogsArgs),
+    /// Print a one-screen status card: daemon, served library, queue.
+    ///
+    /// Answers "is a daemon running, which library does it serve, is
+    /// it busy" in one call. Exits 0 when a daemon answers or none is
+    /// running, 3 when the session lock is stale (a held lock whose
+    /// daemon stopped answering).
+    Status,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -658,10 +665,6 @@ fn natural_name_hint(typed: &str) -> Option<String> {
         "find" => &["`bookrack exec library.find_books`"],
         "show" => &["`bookrack exec library.show_book`"],
         "stats" => &["`bookrack exec library.stats`"],
-        "status" => &[
-            "`bookrack exec library.info`",
-            "`bookrack exec library.stats`",
-        ],
         "search" => &["`bookrack exec library.search`"],
         _ => return None,
     };
@@ -1135,6 +1138,7 @@ async fn run() -> Result<()> {
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
         Command::Retrieval { action } => bookrack_cli::retrieval_cmd::run(&selection, action),
         Command::Logs(args) => cmd::cli_client::logs::run(args, None).await,
+        Command::Status => cmd::cli_client::status::run(None).await,
         Command::Quit => cmd::cli_client::quit::run(None).await,
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),
@@ -1183,6 +1187,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. }
         | Command::Logs(_)
+        | Command::Status
         | Command::Quit
         | Command::Doctor { .. }
         | Command::Init { .. }
@@ -1746,13 +1751,6 @@ mod tests {
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
-
-        // `status` is ambiguous between library-level and per-book; the
-        // hint surfaces both so the user picks.
-        let status = natural_name_hint("status").expect("status maps");
-        assert!(status.contains("`bookrack exec library.info`"));
-        assert!(status.contains("`bookrack exec library.stats`"));
-        assert!(status.contains(" or "));
 
         // Tokens not in the table fall through to clap's similarity tip;
         // returning None is how we signal that.

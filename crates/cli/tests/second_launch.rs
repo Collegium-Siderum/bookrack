@@ -75,6 +75,51 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires a reachable Ollama embedding daemon"]
+async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+    ))
+    .await?;
+    let shutdown_tx = runtime.shutdown_tx.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let runtime_dir_for_subprocess = runtime_root.path().to_path_buf();
+    let data_dir_for_subprocess = data_root.path().to_path_buf();
+    let subprocess = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
+            .args(["status"])
+            .env("BOOKRACK_RUNTIME_DIR", runtime_dir_for_subprocess)
+            .env("BOOKRACK_DATA_DIR", data_dir_for_subprocess)
+            .output()
+            .await
+    });
+
+    let out = subprocess.await??;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}");
+    for needle in [
+        "daemon.state",
+        "library.name",
+        "library.data_dir",
+        "queue.pending",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "missing {needle} in card: {stdout}"
+        );
+    }
+
+    let _ = shutdown_tx.send(());
+    runtime.run_until_shutdown(None, repl_handle).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_lock_exits_three() -> Result<()> {
     use std::io::Write;
 
