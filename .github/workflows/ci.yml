@@ -94,7 +94,15 @@ jobs:
           tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
       - name: Export PDFium lib path
         run: echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
-      - run: cargo test --workspace
+      - name: Install cargo-nextest
+        # Prebuilt binary, pinned. nextest runs every test in its own
+        # process, which some tests rely on for sound environment
+        # mutation; plain `cargo test` shares one process per binary
+        # and lets `std::env::set_var` leak across threads.
+        run: |
+          curl -LsSf https://get.nexte.st/0.9.140/linux | \
+            tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+      - run: cargo nextest run --workspace
 
   leak-gate:
     runs-on: ubuntu-latest
