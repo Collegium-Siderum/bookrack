@@ -15,3 +15,25 @@ pub mod crashes;
 pub mod env;
 pub mod logs;
 pub mod vectors;
+
+use std::path::PathBuf;
+
+use bookrack_config::Config;
+
+/// The directories log files and crash reports may live in, in
+/// collection-priority order: the daemon state directory's `logs/`
+/// (where the daemon writes) first, then the per-root `logs/` under
+/// the data root (written by earlier binaries; still collected so a
+/// bundle assembled right after an upgrade keeps its history). A file
+/// name present in both sources is taken from the first.
+pub(crate) fn log_source_dirs(cfg: &Config) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(state) = bookrack_config::daemon_state_dir() {
+        dirs.push(state.join("logs"));
+    }
+    let per_root = cfg.logs_dir();
+    if !dirs.contains(&per_root) {
+        dirs.push(per_root);
+    }
+    dirs
+}

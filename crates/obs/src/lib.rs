@@ -6,9 +6,9 @@
 //! never install a subscriber. The two executables — `cli` and `mcp` —
 //! call [`init`] once at startup to route those events: human-readable
 //! lines to stderr, structured JSON lines to a rolling file under the
-//! data root. Keeping the subscriber here means the heavyweight
-//! `tracing-subscriber` and `tracing-appender` dependencies stay at the
-//! entry points and out of every library crate.
+//! caller-chosen logs directory. Keeping the subscriber here means the
+//! heavyweight `tracing-subscriber` and `tracing-appender` dependencies
+//! stay at the entry points and out of every library crate.
 
 use std::backtrace::Backtrace;
 use std::io;
@@ -16,7 +16,7 @@ use std::panic::PanicHookInfo;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bookrack_config::{Config, DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
+use bookrack_config::{DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub mod stream;
@@ -37,8 +37,8 @@ pub use tracing_appender::non_blocking::WorkerGuard;
 ///   an attached terminal clear of daemon-internal telemetry; set
 ///   `BOOKRACK_LOG_CONSOLE` to override.
 /// * The **file layer** writes JSON lines to a daily-rolling
-///   `bookrack.log` under [`Config::logs_dir`] (created if missing)
-///   and is filtered by [`LogConfig::directive`].
+///   `bookrack.log` under `logs_dir` (created if missing) and is
+///   filtered by [`LogConfig::directive`].
 /// * The **broadcast layer** mirrors events into the returned
 ///   [`LogStreamHandle`] for in-process consumers (ring-buffered tail
 ///   reads, live broadcast subscribers), filtered by the same
@@ -59,12 +59,12 @@ pub use tracing_appender::non_blocking::WorkerGuard;
 ///
 /// The returned [`WorkerGuard`] owns the non-blocking writer's background
 /// thread. The caller must hold it for the program's lifetime — typically
-/// `let (_guard, log_stream) = bookrack_obs::init(&cfg, &log);` in
+/// `let (_guard, log_stream) = bookrack_obs::init(&logs_dir, &log);` in
 /// `main` — so buffered lines flush on exit.
-pub fn init(cfg: &Config, log: &LogConfig) -> (Option<WorkerGuard>, LogStreamHandle) {
-    let logs_dir = cfg.logs_dir();
-    // The data root is validated to exist, but its `logs/` subdirectory
-    // may not; the appender does not create it, so do it here.
+pub fn init(logs_dir: &Path, log: &LogConfig) -> (Option<WorkerGuard>, LogStreamHandle) {
+    let logs_dir = logs_dir.to_path_buf();
+    // The directory may not exist yet; the appender does not create
+    // it, so do it here.
     let logs_dir_writable = std::fs::create_dir_all(&logs_dir).is_ok() && probe_writable(&logs_dir);
 
     let file_filter =

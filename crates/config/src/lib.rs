@@ -440,9 +440,10 @@ impl Config {
         self.data_dir.join("lancedb_papers")
     }
 
-    /// Directory for log files and crash reports. Kept under the data
-    /// root — like every other path — so diagnostics never land inside
-    /// the project workspace.
+    /// Per-root directory of log files and crash reports. The daemon
+    /// writes its log stream under the daemon state directory (see
+    /// [`daemon_state_dir`]); this location holds what earlier
+    /// binaries wrote, and support bundles still collect it.
     pub fn logs_dir(&self) -> PathBuf {
         self.data_dir.join("logs")
     }

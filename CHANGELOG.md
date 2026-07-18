@@ -20,6 +20,14 @@ release workflow extracts the matching section verbatim from this file.
   old location is migrated on daemon start; the job schema is
   unchanged.
 
+- **obs, runtime: daemon logs move into the daemon state
+  directory.** The rolling JSON log and crash reports used to land
+  under the served library's data root (`<data_root>/logs/`); they
+  now land under `logs/` in the daemon state directory, so a daemon
+  process has one log stream regardless of which library it serves.
+  Logs already written under a data root stay where they are;
+  `bookrack diagnose` collects from both locations.
+
 ### Fixed
 
 - **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's

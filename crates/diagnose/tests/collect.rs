@@ -11,6 +11,7 @@
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::{Duration, UNIX_EPOCH};
 
 use bookrack_catalog::{
@@ -23,6 +24,25 @@ use bookrack_diagnose::{Options, collect};
 /// A fixed unix-ms timestamp the test runs against so the bundle name
 /// and the manifest's `generated_at` are reproducible.
 const FROZEN_UNIX_MS: u64 = 1_717_573_200_000;
+
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// the collectors' daemon-side log source is controlled by the tests
+/// instead of scanning the user's real per-user data directory.
+fn isolate_daemon_state_dir() -> &'static Path {
+    DAEMON_STATE_DIR
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().expect("daemon state tempdir");
+            // SAFETY: env is mutated exactly once, inside
+            // `OnceLock::get_or_init`'s single-initialization guarantee,
+            // as the first statement of every test in this binary,
+            // before any concurrent env reads.
+            unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+            dir
+        })
+        .path()
+}
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -83,6 +103,7 @@ impl Fixture {
 
 #[test]
 fn collect_writes_a_bundle_with_every_collector_present() {
+    isolate_daemon_state_dir();
     let fx = Fixture::build();
     let opts = Options {
         now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
@@ -115,6 +136,7 @@ fn collect_writes_a_bundle_with_every_collector_present() {
 
 #[test]
 fn collect_honours_no_scrub_and_writes_to_an_explicit_out_path() {
+    isolate_daemon_state_dir();
     let fx = Fixture::build();
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("custom.tar.gz");
@@ -135,6 +157,7 @@ fn collect_honours_no_scrub_and_writes_to_an_explicit_out_path() {
 
 #[test]
 fn collect_with_an_empty_logs_dir_still_succeeds() {
+    isolate_daemon_state_dir();
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().to_path_buf();
     // Note: no logs/ directory and no catalog.db.
@@ -147,6 +170,44 @@ fn collect_with_an_empty_logs_dir_still_succeeds() {
     assert!(report.out_path.exists());
     let names = list_archive_files(&report.out_path);
     assert!(names.iter().any(|n| n == "manifest.json"));
+}
+
+#[test]
+fn collect_picks_up_the_daemon_state_dir_log_source() {
+    let state_dir = isolate_daemon_state_dir();
+    let state_logs = state_dir.join("logs");
+    std::fs::create_dir_all(&state_logs).unwrap();
+    std::fs::write(
+        state_logs.join("bookrack.log.2024-06-04"),
+        "{\"level\":\"info\",\"msg\":\"from the daemon state dir\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        state_logs.join("crash-1717572000000.txt"),
+        "panic: from the daemon state dir\n",
+    )
+    .unwrap();
+
+    let fx = Fixture::build();
+    let opts = Options {
+        now: Some(UNIX_EPOCH + Duration::from_millis(FROZEN_UNIX_MS)),
+        ..Options::default()
+    };
+    let report = collect(&fx.cfg, &opts).expect("collect");
+    let names = list_archive_files(&report.out_path);
+    for needle in [
+        // Both sources land in the bundle: the daemon state dir...
+        "logs/bookrack.log.2024-06-04",
+        "crashes/crash-1717572000000.txt",
+        // ...and the per-root legacy location the fixture seeds.
+        "logs/bookrack.log.2024-06-05",
+        "crashes/crash-1717573000000.txt",
+    ] {
+        assert!(
+            names.iter().any(|n| n == needle),
+            "expected {needle} in bundle; got: {names:?}"
+        );
+    }
 }
 
 fn list_archive_files(path: &Path) -> Vec<String> {

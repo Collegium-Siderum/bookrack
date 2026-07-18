@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Copy the most recent `bookrack.log.YYYY-MM-DD` files from
-//! `<data_dir>/logs/` into `<bundle>/logs/`, scrubbing strings inside
-//! each JSON line.
+//! Copy the most recent `bookrack.log.YYYY-MM-DD` files from every
+//! log source directory (see [`super::log_source_dirs`]) into
+//! `<bundle>/logs/`, scrubbing strings inside each JSON line.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -26,29 +26,33 @@ pub fn collect(
     bundle_dir: &Path,
     scrubber: &Scrubber,
 ) -> Result<()> {
-    let logs_src = cfg.logs_dir();
     let logs_dst = bundle_dir.join("logs");
     std::fs::create_dir_all(&logs_dst)?;
-
-    let read = match std::fs::read_dir(&logs_src) {
-        Ok(r) => r,
-        Err(_) => return Ok(()),
-    };
-    let mut candidates: Vec<String> = read
-        .flatten()
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|n| n.starts_with(LOG_PREFIX))
-        .collect();
-    candidates.sort(); // YYYY-MM-DD sort is lexicographic.
-
     let cutoff_date = cutoff_date_string(now, opts.days);
-    for name in candidates.into_iter().rev().take_while(|n| {
-        n.strip_prefix(LOG_PREFIX)
-            .is_some_and(|date| date.as_bytes() >= cutoff_date.as_bytes())
-    }) {
-        let src = logs_src.join(&name);
-        let dst = logs_dst.join(&name);
-        scrub_file(&src, &dst, scrubber)?;
+
+    for logs_src in super::log_source_dirs(cfg) {
+        let read = match std::fs::read_dir(&logs_src) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut candidates: Vec<String> = read
+            .flatten()
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| n.starts_with(LOG_PREFIX))
+            .collect();
+        candidates.sort(); // YYYY-MM-DD sort is lexicographic.
+
+        for name in candidates.into_iter().rev().take_while(|n| {
+            n.strip_prefix(LOG_PREFIX)
+                .is_some_and(|date| date.as_bytes() >= cutoff_date.as_bytes())
+        }) {
+            let src = logs_src.join(&name);
+            let dst = logs_dst.join(&name);
+            if dst.exists() {
+                continue;
+            }
+            scrub_file(&src, &dst, scrubber)?;
+        }
     }
     Ok(())
 }

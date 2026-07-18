@@ -326,7 +326,20 @@ impl DaemonRuntime {
                 None
             }
         };
-        let (obs_guard, log_stream) = bookrack_obs::init(&cfg, &opts.log_config);
+        // The daemon state directory holds process-scoped assets that
+        // span libraries: the log stream (below) and the queue
+        // snapshot (step 11). Resolved once, before the subscriber
+        // needs its `logs/` subdirectory.
+        let daemon_state_dir =
+            bookrack_config::daemon_state_dir().context("resolve the daemon state directory")?;
+        std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
+            format!(
+                "create daemon state directory {}",
+                daemon_state_dir.display()
+            )
+        })?;
+        let (obs_guard, log_stream) =
+            bookrack_obs::init(&daemon_state_dir.join("logs"), &opts.log_config);
         // The guard owns the non-blocking writer's background thread;
         // drop flushes buffered lines and joins the thread. Bind it
         // to `DaemonRuntime` so a `?` between here and the final
@@ -505,14 +518,6 @@ impl DaemonRuntime {
         //     target `library`), so its document belongs to the daemon
         //     process. A snapshot written by a binary that kept it
         //     under the data root is moved over once.
-        let daemon_state_dir =
-            bookrack_config::daemon_state_dir().context("resolve the daemon state directory")?;
-        std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
-            format!(
-                "create daemon state directory {}",
-                daemon_state_dir.display()
-            )
-        })?;
         let queue_state_path = daemon_state_dir.join("queue.json");
         migrate_queue_snapshot(
             &cfg.data_dir().join(".bookrack-queue.json"),
