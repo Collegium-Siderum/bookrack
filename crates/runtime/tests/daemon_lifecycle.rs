@@ -19,11 +19,30 @@
 //! failure rather than as a missing prerequisite.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use bookrack_session::{RootLock, TtyLock, is_root_lock_conflict, tty_lock_name};
 use eyre::Result;
+
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// bring-up never touches the user's real per-user data directory.
+fn isolate_daemon_state_dir() -> &'static std::path::Path {
+    DAEMON_STATE_DIR
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().expect("daemon state tempdir");
+            // SAFETY: env is mutated exactly once, inside
+            // `OnceLock::get_or_init`'s single-initialization guarantee,
+            // as the first statement of every test in this binary,
+            // before any concurrent env reads.
+            unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+            dir
+        })
+        .path()
+}
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
@@ -39,6 +58,7 @@ fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
@@ -76,6 +96,7 @@ async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
@@ -110,6 +131,7 @@ async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn bring_up_refuses_a_root_locked_by_another_writer() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();

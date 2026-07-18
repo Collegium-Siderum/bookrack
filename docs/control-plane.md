@@ -443,9 +443,10 @@ catalog and corpus handles the daemon already holds.
     through `queue.list`, not `daemon.state`.
   - `stopping` — shutdown has been signalled; terminal.
 - `queue.tick` — `{ current, pending, running, last_finished? }`
-  published immediately after every persisted change to
-  `.bookrack-queue.json`, so a subscriber's view always coincides
-  with what a crash recovery would replay.
+  published immediately after every persisted change to the queue
+  snapshot (`queue.json` in the daemon state directory), so a
+  subscriber's view always coincides with what a crash recovery
+  would replay.
 - `worker.progress` — `{ job_id, stage, stage_progress?, message? }`
   with `stage` in `extract` / `ingest` / `embed`. Phase 2 emits at
   the runner's two visible boundaries (`extract` on pull,
@@ -461,10 +462,9 @@ catalog and corpus handles the daemon already holds.
 
 - **Phase 1** — minimal read-only methods plus `daemon.shutdown`,
   `daemon.state` events, and the snapshot bundle. The MCP tool set,
-  the CLI command surface, the REPL behaviour, the
-  `.bookrack-queue.json` schema, and the session lock path are
-  unchanged; the session lock gains a non-breaking
-  `control_sock=<path>` line.
+  the CLI command surface, the REPL behaviour, the queue snapshot
+  schema, and the session lock path are unchanged; the session lock
+  gains a non-breaking `control_sock=<path>` line.
 - **Phase 2** — write methods + queue / worker event flow +
   `bookrack exec call` over the control channel. New methods:
   `ingest.submit` / `ingest.cancel`, `metadata.{set,clear,ack,approve,reject}`,

@@ -374,7 +374,7 @@ mod tests {
                 mcp_addr: String::new(),
             },
             queue_state: Arc::new(Mutex::new(QueueState::default())),
-            queue_state_path: dir.join(".bookrack-queue.json"),
+            queue_state_path: dir.join("queue.json"),
             event_stream: EventStreamHandle::new(8, state),
             write_guard: Arc::new(TokioMutex::new(())),
             shutdown_tx,

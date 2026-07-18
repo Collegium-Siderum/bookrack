@@ -12,11 +12,30 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::Result;
+
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// bring-up (in-process and in spawned `bookrack` subprocesses, which
+/// inherit the environment) never touches the user's real per-user
+/// data directory.
+fn isolate_daemon_state_dir() {
+    DAEMON_STATE_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("daemon state tempdir");
+        // SAFETY: env is mutated exactly once, inside
+        // `OnceLock::get_or_init`'s single-initialization guarantee,
+        // as the first statement of every test in this binary, before
+        // any concurrent env reads.
+        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+        dir
+    });
+}
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
@@ -32,6 +51,7 @@ fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
@@ -77,6 +97,7 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
@@ -121,6 +142,7 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_lock_exits_three() -> Result<()> {
+    isolate_daemon_state_dir();
     use std::io::Write;
 
     use fs2::FileExt;
@@ -171,6 +193,7 @@ async fn stale_lock_exits_three() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
+    isolate_daemon_state_dir();
     // Covers one representative leg of the five shutdown paths that
     // share `shutdown_tx.send(())`: the control-plane `daemon.shutdown`
     // RPC. The other four (SIGINT, REPL disconnect, MCP

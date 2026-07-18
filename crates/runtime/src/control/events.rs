@@ -139,7 +139,7 @@ pub struct JobOutcomeSummary {
 }
 
 /// Coarse view of the queue at one persisted moment. Each tick
-/// follows a `save_atomic` on `.bookrack-queue.json`, so the values
+/// follows a `save_atomic` on the queue snapshot, so the values
 /// here are guaranteed to be derivable from the on-disk document.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(test, derive(TS))]

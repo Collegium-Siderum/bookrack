@@ -499,8 +499,26 @@ impl DaemonRuntime {
             Arc::clone(&signal_triggered),
         ));
 
-        // 11. queue state load + (opt) worker spawn
-        let queue_state_path = cfg.data_dir().join(".bookrack-queue.json");
+        // 11. queue state load + (opt) worker spawn. The snapshot lives
+        //     in the daemon state directory, not under any library's
+        //     data root: the queue spans libraries (each job carries its
+        //     target `library`), so its document belongs to the daemon
+        //     process. A snapshot written by a binary that kept it
+        //     under the data root is moved over once.
+        let daemon_state_dir =
+            bookrack_config::daemon_state_dir().context("resolve the daemon state directory")?;
+        std::fs::create_dir_all(&daemon_state_dir).with_context(|| {
+            format!(
+                "create daemon state directory {}",
+                daemon_state_dir.display()
+            )
+        })?;
+        let queue_state_path = daemon_state_dir.join("queue.json");
+        migrate_queue_snapshot(
+            &cfg.data_dir().join(".bookrack-queue.json"),
+            &queue_state_path,
+        )
+        .context("migrate the queue snapshot into the daemon state directory")?;
         let initial_queue_state =
             queue::load(&queue_state_path).context("load persistent queue state")?;
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
@@ -843,6 +861,35 @@ impl DaemonRuntime {
     }
 }
 
+/// Move a queue snapshot left under a library's data root by an older
+/// binary into the daemon state directory. A no-op when the target
+/// already exists (the migration ran before) or no legacy document is
+/// present. `rename` is tried first; a cross-device rename failure
+/// falls back to copy + remove. The job schema is unchanged by the
+/// move — each job already carries its target `library`.
+fn migrate_queue_snapshot(legacy: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    if target.exists() || !legacy.exists() {
+        return Ok(());
+    }
+    if std::fs::rename(legacy, target).is_err() {
+        std::fs::copy(legacy, target).with_context(|| {
+            format!(
+                "copy queue snapshot {} to {}",
+                legacy.display(),
+                target.display()
+            )
+        })?;
+        std::fs::remove_file(legacy)
+            .with_context(|| format!("remove migrated queue snapshot {}", legacy.display()))?;
+    }
+    tracing::info!(
+        from = %legacy.display(),
+        to = %target.display(),
+        "queue snapshot migrated into the daemon state directory",
+    );
+    Ok(())
+}
+
 /// Build the [`IngestParams`] template the queue worker reuses for
 /// every job.
 /// Consecutive respawn attempts within one reranker outage after
@@ -1013,6 +1060,47 @@ mod tests {
         };
         let cfg = Config::resolve(&selection).expect("resolve synthetic cfg");
         (cfg, dir)
+    }
+
+    #[test]
+    fn migrate_queue_snapshot_moves_a_legacy_document_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(".bookrack-queue.json");
+        let target = dir.path().join("state").join("queue.json");
+        std::fs::create_dir_all(target.parent().unwrap()).expect("create state dir");
+        std::fs::write(&legacy, b"{\"jobs\":[]}").expect("write legacy");
+
+        migrate_queue_snapshot(&legacy, &target).expect("migrate");
+        assert!(!legacy.exists(), "legacy document must be moved away");
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            b"{\"jobs\":[]}"
+        );
+    }
+
+    #[test]
+    fn migrate_queue_snapshot_never_clobbers_an_existing_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(".bookrack-queue.json");
+        let target = dir.path().join("queue.json");
+        std::fs::write(&legacy, b"legacy").expect("write legacy");
+        std::fs::write(&target, b"current").expect("write target");
+
+        migrate_queue_snapshot(&legacy, &target).expect("migrate");
+        assert_eq!(std::fs::read(&target).expect("read target"), b"current");
+        assert!(
+            legacy.exists(),
+            "a superseded legacy document is left in place"
+        );
+    }
+
+    #[test]
+    fn migrate_queue_snapshot_is_a_no_op_with_no_legacy_document() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy = dir.path().join(".bookrack-queue.json");
+        let target = dir.path().join("queue.json");
+        migrate_queue_snapshot(&legacy, &target).expect("migrate");
+        assert!(!target.exists());
     }
 
     #[test]

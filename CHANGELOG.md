@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **runtime: the queue snapshot moves into a daemon state
+  directory.** The persistent ingest queue used to live as
+  `.bookrack-queue.json` under the served library's data root; a
+  queue that spans libraries does not belong to any one of them. It
+  now lives as `queue.json` under a daemon state directory —
+  `BOOKRACK_DAEMON_STATE_DIR` when set, the platform per-user data
+  directory (`bookrack/daemon`) otherwise. A snapshot found at the
+  old location is migrated on daemon start; the job schema is
+  unchanged.
+
 ### Fixed
 
 - **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's

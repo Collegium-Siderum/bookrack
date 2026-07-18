@@ -78,6 +78,11 @@ pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 /// to. When unset, a `backup/` directory under the data root is used.
 pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
 
+/// Environment variable naming the daemon state directory. When unset,
+/// the platform per-user data directory is used; see
+/// [`daemon_state_dir`].
+pub const DAEMON_STATE_DIR_ENV: &str = "BOOKRACK_DAEMON_STATE_DIR";
+
 /// Resolved configuration. Construct with [`Config::load`] (from the
 /// environment) or [`Config::new`] (from an explicit data root, e.g. a
 /// CLI override).
@@ -259,6 +264,13 @@ pub enum ConfigError {
         /// What replaces the key and how to get rid of the line.
         help: &'static str,
     },
+    /// The daemon state directory could not be resolved: the override
+    /// is unset and the platform reports no per-user data directory.
+    #[error(
+        "no daemon state directory: set {DAEMON_STATE_DIR_ENV} to a writable \
+         directory"
+    )]
+    DaemonStateDirUnavailable,
 }
 
 impl Config {
@@ -458,6 +470,32 @@ fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
     env_trimmed(override_dir)
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("backup"))
+}
+
+/// Directory for daemon-scoped state that spans libraries: the ingest
+/// queue snapshot, and daemon-process assets that must not live under
+/// any single library's data root. Unlike the [`Config`] path accessors
+/// it is not derived from a data root — one daemon process owns exactly
+/// one of these regardless of how many libraries it serves.
+///
+/// The [`DAEMON_STATE_DIR_ENV`] override wins when set and non-blank;
+/// otherwise the per-user platform data directory is used
+/// (`<data_dir>/bookrack/daemon`, the same base the managed PDFium and
+/// reranker installs live under). The directory is not created here;
+/// callers create it before first use.
+pub fn daemon_state_dir() -> Result<PathBuf, ConfigError> {
+    daemon_state_dir_from(std::env::var(DAEMON_STATE_DIR_ENV).ok())
+}
+
+/// The pure layer of [`daemon_state_dir`], factored out so it can be
+/// tested without mutating process-global environment variables.
+fn daemon_state_dir_from(override_dir: Option<String>) -> Result<PathBuf, ConfigError> {
+    if let Some(dir) = env_trimmed(override_dir) {
+        return Ok(PathBuf::from(dir));
+    }
+    dirs::data_dir()
+        .map(|d| d.join("bookrack").join("daemon"))
+        .ok_or(ConfigError::DaemonStateDirUnavailable)
 }
 
 /// One entry in the library registry: a name, its data root, and a flag
@@ -3105,6 +3143,20 @@ mod tests {
         assert_eq!(cfg.papers_catalog_db(), root.join("papers_catalog.db"));
         assert_eq!(cfg.papers_lancedb_dir(), root.join("lancedb_papers"));
         assert_eq!(cfg.logs_dir(), root.join("logs"));
+    }
+
+    #[test]
+    fn daemon_state_dir_honours_the_override_and_falls_back_to_the_platform_dir() {
+        // A set value wins, taken verbatim.
+        assert_eq!(
+            daemon_state_dir_from(Some("/elsewhere/daemon-state".to_string())).unwrap(),
+            PathBuf::from("/elsewhere/daemon-state")
+        );
+        // Whitespace-only counts as unset and falls through to the
+        // platform directory (present on every platform CI runs on).
+        let fallback = daemon_state_dir_from(Some("   ".to_string())).unwrap();
+        assert!(fallback.ends_with(Path::new("bookrack").join("daemon")));
+        assert_eq!(daemon_state_dir_from(None).unwrap(), fallback);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! abruptly, then brings a second runtime up against the same data
 //! directory and verifies that `events.snapshot { channels:
 //! ["queue.list", "queue.tick"] }` agrees with the on-disk
-//! `.bookrack-queue.json`.
+//! queue snapshot in the daemon state directory.
 //!
 //! Ignored by default because the runtime calls
 //! [`bookrack_query::Library::open`], which probes the configured
@@ -16,6 +16,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
@@ -25,6 +26,24 @@ use eyre::{Context, Result, eyre};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
+
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// bring-up never touches the user's real per-user data directory.
+fn isolate_daemon_state_dir() -> &'static std::path::Path {
+    DAEMON_STATE_DIR
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().expect("daemon state tempdir");
+            // SAFETY: env is mutated exactly once, inside
+            // `OnceLock::get_or_init`'s single-initialization guarantee,
+            // as the first statement of every test in this binary,
+            // before any concurrent env reads.
+            unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+            dir
+        })
+        .path()
+}
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
@@ -56,6 +75,7 @@ async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Val
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn replay_after_restart_matches_disk_state() -> Result<()> {
+    let state_dir = isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root_a = tempfile::tempdir()?;
 
@@ -95,7 +115,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
         let _ = shutdown_tx;
     }
 
-    let queue_path = data_root.path().join(".bookrack-queue.json");
+    let queue_path = state_dir.join("queue.json");
     let on_disk: QueueState = serde_json::from_slice(&std::fs::read(&queue_path)?)
         .context("parse on-disk queue state")?;
     assert!(!on_disk.jobs.is_empty(), "queue document was not persisted");
@@ -130,7 +150,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
         let on_disk_jobs = serde_json::to_value(&on_disk.jobs).unwrap();
         assert_eq!(
             snapshot_jobs, &on_disk_jobs,
-            "snapshot queue.list.jobs diverges from .bookrack-queue.json"
+            "snapshot queue.list.jobs diverges from the on-disk queue snapshot"
         );
 
         send(
