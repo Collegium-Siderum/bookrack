@@ -4,21 +4,23 @@
 //! headless `bookrack-mcp` binary.
 //!
 //! [`DaemonRuntime::start`] performs the fixed eleven-step bring-up:
-//! resolve the runtime directory, acquire the session [`TtyLock`] and
-//! the served root's [`RootLock`], initialise observability, build the
-//! embedding client, preflight the catalog schema, open the query
-//! [`Library`], wrap it in an [`Ops`], warm a one-handle
-//! [`LibraryRegistry`], install the platform signal aggregator, load
-//! the persistent ingest queue state, and — in the `bookrack run`
-//! profile — spawn the queue worker.
+//! resolve the runtime directory, acquire the session [`TtyLock`],
+//! decide the mount set and acquire every served root's [`RootLock`],
+//! initialise observability, build one warm handle per mounted
+//! library ([`build_library_handle`]: embedding clients, catalog
+//! preflight, query [`Library`] opens, the [`Ops`] wrap), assemble
+//! the [`LibraryRegistry`], install the platform signal aggregator,
+//! load the persistent ingest queue state, and — in the `bookrack
+//! run` profile — spawn the queue worker.
 //!
 //! Callers wire the MCP listener and any REPL surface as separate
 //! [`tokio::task::JoinHandle`]s and hand them to
 //! [`DaemonRuntime::run_until_shutdown`], which joins each one through
 //! the shared `broadcast::Sender<()>`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -27,8 +29,8 @@ use chrono::{DateTime, Utc};
 
 use bookrack_catalog::Catalog;
 use bookrack_config::{
-    Config, EmbedConfig, LibraryIdentification, LibrarySelection, LogConfig, McpConfig,
-    ResolutionSource, SearchConfig,
+    Config, EmbedConfig, LibraryEntry, LibraryIdentification, LibrarySelection, LogConfig,
+    McpConfig, ResolutionSource, SearchConfig,
 };
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
@@ -201,11 +203,12 @@ pub struct DaemonRuntime {
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
     pub _tty_lock: TtyLock,
-    /// Drop-only field: holds the exclusive flock on the served data
-    /// root for the daemon's whole life, so no second daemon and no
-    /// offline destructive command touches the root behind its back.
-    /// `None` when the root cannot host a lock file (read-only volume).
-    pub _root_lock: Option<RootLock>,
+    /// Drop-only field: holds the exclusive flock on every served
+    /// data root for the daemon's whole life, so no second daemon and
+    /// no offline destructive command touches a served root behind
+    /// its back. A root that cannot host a lock file (read-only
+    /// volume) is served without an entry here.
+    pub _root_locks: Vec<RootLock>,
     /// Drop-only field: holds the tracing non-blocking writer's
     /// background-thread guard. Dropping flushes buffered log lines
     /// and joins the writer thread, so this lives until the runtime
@@ -302,30 +305,68 @@ impl DaemonRuntime {
         tty_lock
             .record_library_root(cfg.data_dir(), cfg.library())
             .context("record library root in session lock")?;
-        // 4b. Take the data-root lock before anything under the root is
-        //     opened (log files, SQLite, LanceDB, the queue snapshot),
-        //     so a contended root fails with no half-open handles.
-        //     A root that cannot host a lock file at all — a read-only
-        //     volume, which `libraries add` already supports — is served
-        //     unlocked: read-only media have no writers to exclude.
-        let root_lock = match RootLock::acquire(cfg.data_dir(), std::process::id(), "daemon") {
-            Ok(lock) => {
-                tracing::info!(
-                    path = %root_lock_path(cfg.data_dir()).display(),
-                    "bookrack data root lock acquired",
-                );
-                Some(lock)
-            }
-            Err(err) if is_root_lock_conflict(&err) => return Err(err),
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    root = %cfg.data_dir().display(),
-                    "data root lock could not be created; serving the root unlocked",
-                );
-                None
-            }
+        // 4b. Decide the mount set and take every served root's lock
+        //     before anything expensive comes up, so a contended root
+        //     fails with no reranker spawned and no half-open handles.
+        //     With the primary root selected through the registry the
+        //     daemon serves every registered library; a path-class
+        //     root the registry does not know (or a machine with no
+        //     registry) keeps the single-library form. Runtime
+        //     mount/unmount and auto-registration of unregistered
+        //     roots are later milestones.
+        let primary_name = cfg.library().unwrap_or("default").to_string();
+        let registry_entries = if cfg.library().is_some() {
+            bookrack_config::list_libraries()
+                .context("read the library registry for eager mounting")?
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
+        let plan = plan_mounts(&primary_name, &registry_entries);
+        let mut mounts: Vec<(String, Arc<Config>)> = Vec::with_capacity(plan.names.len());
+        if plan.eager {
+            for name in &plan.names {
+                // A named selection resolves through the registry and
+                // is immune to a set BOOKRACK_DATA_DIR.
+                let lib_cfg = Config::resolve(&LibrarySelection {
+                    data_dir: None,
+                    library: Some(name.clone()),
+                })
+                .with_context(|| format!("resolve configuration for library '{name}'"))?;
+                mounts.push((name.clone(), Arc::new(lib_cfg)));
+            }
+        } else {
+            mounts.push((primary_name.clone(), Arc::clone(&cfg)));
+        }
+        // A root that cannot host a lock file at all — a read-only
+        // volume, which `libraries add` already supports — is served
+        // unlocked: read-only media have no writers to exclude.
+        let mut roots_seen: HashMap<PathBuf, String> = HashMap::new();
+        let mut root_locks: Vec<RootLock> = Vec::with_capacity(mounts.len());
+        for (name, lib_cfg) in &mounts {
+            claim_unique_root(&mut roots_seen, lib_cfg.data_dir(), name)?;
+            match RootLock::acquire(lib_cfg.data_dir(), std::process::id(), "daemon") {
+                Ok(lock) => {
+                    tracing::info!(
+                        library = %name,
+                        path = %root_lock_path(lib_cfg.data_dir()).display(),
+                        "bookrack data root lock acquired",
+                    );
+                    root_locks.push(lock);
+                }
+                Err(err) if is_root_lock_conflict(&err) => {
+                    return Err(err.wrap_err(format!("lock the data root of library '{name}'")));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        library = %name,
+                        root = %lib_cfg.data_dir().display(),
+                        "data root lock could not be created; serving the root unlocked",
+                    );
+                }
+            }
+        }
         // The daemon state directory holds process-scoped assets that
         // span libraries: the log stream (below) and the queue
         // snapshot (step 11). Resolved once, before the subscriber
@@ -398,19 +439,33 @@ impl DaemonRuntime {
         .context("bring up the reranker backend")?;
         let rerank_supervisor = reranker.as_ref().and_then(|r| r.supervisor.clone());
 
-        // 6.-8. One warm handle for the served library, registered
-        //    under its registry name (or "default" for a path-class
-        //    root), then wrapped in a one-entry registry.
-        let library_name = cfg.library().unwrap_or("default").to_string();
-        let handle = build_library_handle(
-            &cfg,
-            &library_name,
-            reranker.as_ref().map(|r| &r.stage),
-            opts.caller,
-        )
-        .await?;
-        let registry = LibraryRegistry::single(handle);
-        tracing::info!(library = %library_name, "library registry warmed up");
+        // 6.-8. One warm handle per mounted library, then the
+        //    registry. Any library failing to come up fails the whole
+        //    bring-up with its name on the error; skip-and-degrade is
+        //    a later milestone.
+        let mut handles = Vec::with_capacity(mounts.len());
+        for (name, lib_cfg) in &mounts {
+            let handle = build_library_handle(
+                lib_cfg,
+                name,
+                reranker.as_ref().map(|r| &r.stage),
+                opts.caller.clone(),
+            )
+            .await
+            .with_context(|| format!("bring up library '{name}'"))?;
+            handles.push(handle);
+        }
+        let registry = LibraryRegistry::from_handles(handles, plan.default_name.clone())
+            .context("assemble the library registry")?;
+        // Single-value snapshot consumed by `library.changed` and the
+        // queue worker's no-name fallback; per-library status surfaces
+        // are a later milestone.
+        let library_name = primary_name;
+        tracing::info!(
+            libraries = mounts.len(),
+            default = %plan.default_name,
+            "library registry warmed up",
+        );
 
         // 9. LibraryInfoContext
         let info_context = LibraryInfoContext {
@@ -706,7 +761,7 @@ impl DaemonRuntime {
             method_context: method_ctx,
             rerank_supervisor,
             _tty_lock: tty_lock,
-            _root_lock: root_lock,
+            _root_locks: root_locks,
             _obs_guard: obs_guard,
             queue_worker,
             signal_handle,
@@ -738,7 +793,7 @@ impl DaemonRuntime {
             // Bound (not folded into `..`) so the flocks live across
             // the drain timeouts below; `..` would drop them here.
             _tty_lock,
-            _root_lock,
+            _root_locks,
             ..
         } = self;
 
@@ -793,6 +848,61 @@ impl DaemonRuntime {
         }
         Ok(())
     }
+}
+
+/// The mount set decided at bring-up.
+struct MountPlan {
+    /// Libraries to mount, in registry order for the eager form.
+    names: Vec<String>,
+    /// Name the registry's default pointer starts at.
+    default_name: String,
+    /// Whether each name resolves through the registry (`true`) or
+    /// the set is the single primary selection (`false`).
+    eager: bool,
+}
+
+/// Decide which libraries the daemon serves. `primary_name` is the
+/// bring-up selection's resolved name; when it matches a registry
+/// entry the daemon mounts every entry, otherwise it serves the
+/// primary root alone (a path-class root the registry does not know,
+/// or a machine with no registry). The default pointer starts at the
+/// registry's `default` entry, falling back to the primary when the
+/// registry declares none.
+fn plan_mounts(primary_name: &str, entries: &[LibraryEntry]) -> MountPlan {
+    if entries.iter().any(|e| e.name == primary_name) {
+        MountPlan {
+            names: entries.iter().map(|e| e.name.clone()).collect(),
+            default_name: entries
+                .iter()
+                .find(|e| e.is_default)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| primary_name.to_string()),
+            eager: true,
+        }
+    } else {
+        MountPlan {
+            names: vec![primary_name.to_string()],
+            default_name: primary_name.to_string(),
+            eager: false,
+        }
+    }
+}
+
+/// Register `root` as claimed by library `name`, canonicalizing so two
+/// registry spellings of one directory collide. Two entries naming the
+/// same root is a registry error the operator must fix: the second
+/// lock acquisition would fail against the first, so the duplicate is
+/// reported up front with both entry names.
+fn claim_unique_root(seen: &mut HashMap<PathBuf, String>, root: &Path, name: &str) -> Result<()> {
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if let Some(previous) = seen.insert(canonical, name.to_string()) {
+        eyre::bail!(
+            "registry entries '{previous}' and '{name}' point at the same data root {}; \
+             fix the registry before starting the daemon",
+            root.display(),
+        );
+    }
+    Ok(())
 }
 
 /// Build one library's warm [`LibraryHandle`]: resolve the library's
@@ -1105,6 +1215,72 @@ mod tests {
         };
         let cfg = Config::resolve(&selection).expect("resolve synthetic cfg");
         (cfg, dir)
+    }
+
+    fn entry(name: &str, root: &Path, is_default: bool) -> LibraryEntry {
+        LibraryEntry {
+            name: name.to_string(),
+            data_dir: root.to_path_buf(),
+            is_default,
+            kind: bookrack_config::LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: None,
+            uuid: None,
+        }
+    }
+
+    #[test]
+    fn plan_mounts_registered_primary_mounts_every_entry() {
+        let root = Path::new("root");
+        let entries = [entry("a", root, true), entry("b", root, false)];
+        let plan = plan_mounts("b", &entries);
+        assert!(plan.eager);
+        assert_eq!(plan.names, ["a", "b"]);
+        // The default pointer starts at the registry's default entry,
+        // not at the bring-up selection.
+        assert_eq!(plan.default_name, "a");
+    }
+
+    #[test]
+    fn plan_mounts_unregistered_primary_keeps_the_single_library_form() {
+        let root = Path::new("root");
+        let entries = [entry("a", root, true)];
+        let plan = plan_mounts("default", &entries);
+        assert!(!plan.eager);
+        assert_eq!(plan.names, ["default"]);
+        assert_eq!(plan.default_name, "default");
+    }
+
+    #[test]
+    fn plan_mounts_default_falls_back_to_the_primary_without_a_registry_default() {
+        let root = Path::new("root");
+        let entries = [entry("a", root, false), entry("b", root, false)];
+        let plan = plan_mounts("b", &entries);
+        assert!(plan.eager);
+        assert_eq!(plan.default_name, "b");
+    }
+
+    #[test]
+    fn claim_unique_root_rejects_two_entries_on_one_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut seen = HashMap::new();
+        claim_unique_root(&mut seen, dir.path(), "a").expect("first claim");
+        let err = claim_unique_root(&mut seen, dir.path(), "b").expect_err("duplicate root");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("'a'") && message.contains("'b'"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn claim_unique_root_accepts_distinct_roots() {
+        let dir_a = tempfile::tempdir().expect("tempdir");
+        let dir_b = tempfile::tempdir().expect("tempdir");
+        let mut seen = HashMap::new();
+        claim_unique_root(&mut seen, dir_a.path(), "a").expect("first claim");
+        claim_unique_root(&mut seen, dir_b.path(), "b").expect("second claim");
     }
 
     #[test]

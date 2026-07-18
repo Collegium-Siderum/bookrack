@@ -42,6 +42,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: the daemon mounts every registered library.** With the
+  primary root selected through the registry (`--library` or the
+  registry `default`), bring-up now warms a handle for each registry
+  entry: every library answers reads, queue jobs route to their
+  target library by name, and each served root's lock is held for the
+  daemon's lifetime (so `libraries remove --purge` on any registered
+  root needs `bookrack quit` first). Two registry entries pointing at
+  the same root refuse startup naming both. A path-class root the
+  registry does not know keeps the previous single-library form.
+  Runtime mount/unmount and per-library status surfaces are later
+  milestones.
+
 - **cli: `bookrack status`, a one-screen status card.** One
   no-argument command answers "is a daemon running, which library does
   it serve, is it busy": with a live daemon it renders a single card

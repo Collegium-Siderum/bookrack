@@ -30,14 +30,19 @@ registry, held only for a write.
 | Data root | `<data_root>/.bookrack.lock` | one writer per data root, whether a daemon or an offline destructive command | the daemon's lifetime; briefly for an offline writer |
 | Registry | `<registry>.lock` | one writer at a time through a registry file's read-modify-write window | a single write; milliseconds |
 
-The daemon takes the data-root lock during bring-up, after resolving
-its configuration and before opening anything under the root, and holds
-it until shutdown: mounting a root means owning it. A second daemon
-pointed at the same root — even from a different runtime directory —
-fails to start and names the holder's recorded `pid=` and `role=`.
-`bookrack libraries remove --purge` takes the same lock before its
-detect gate, so purging a root a daemon is serving is refused (exit 2)
-rather than silently destroying live data.
+The daemon takes one data-root lock per mounted library during
+bring-up, after resolving its configuration and before opening
+anything under a root, and holds them until shutdown: mounting a root
+means owning it. When the primary root is selected through the
+registry, the daemon mounts — and so locks — every registered
+library's root; a path-class root the registry does not know is served
+alone. A second daemon pointed at a served root — even from a
+different runtime directory — fails to start and names the holder's
+recorded `pid=` and `role=`. `bookrack libraries remove --purge` takes
+the same lock before its detect gate, so purging a root a daemon is
+serving is refused (exit 2) rather than silently destroying live data
+— with eager mounting that covers every registered library, stop the
+daemon first.
 
 The registry lock is different in kind: short, not long. The library
 registry has two kinds of writer — the offline CLI verbs and the daemon
@@ -172,11 +177,13 @@ the exit-code bucket does not distinguish the two.
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
   `queue_worker_enabled` is `false` on a headless entry point without
-  a queue worker. `library` is the registry name of the served
-  library, `null` when the data root was selected directly by path;
-  `data_dir` is the served root. Both identity fields are a
-  single-library snapshot — a daemon serves exactly one library — and
-  will become plural when a daemon can serve several.
+  a queue worker. `library` is the registry name of the primary
+  (bring-up-selected) library, `null` when the data root was selected
+  directly by path; `data_dir` is that library's root. Both identity
+  fields are a single-library snapshot of the primary — an eager
+  daemon serves every registered library (see `library.list` for the
+  full set) — and will become plural with the multi-library status
+  surface.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints.
 - `daemon.methods` — the live method table: every name this daemon
@@ -191,7 +198,8 @@ the exit-code bucket does not distinguish the two.
 - `queue.resume` — `{ ok: true, paused: false }`.
 - `queue.clear` — `{ ok: true, cleared }`. Drops every not-yet-running
   job; a running job is untouched.
-- `library.list` — array of `{ name, default, dimension }` entries.
+- `library.list` — array of `{ name, default, dimension }` entries,
+  one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
   `params.name` selects which.
 - `library.fork` — `{ new_name, data_dir }` → the fork report. Clones

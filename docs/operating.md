@@ -10,19 +10,30 @@ control plane see [control-plane.md](control-plane.md).
 
 ## The daemon
 
-`bookrack run` starts a foreground daemon that owns one library. It
-serves MCP over streamable-HTTP at `127.0.0.1:8765/mcp` and a local
-control socket where the one-shot write subcommands arrive.
+`bookrack run` starts a foreground daemon. It serves MCP over
+streamable-HTTP at `127.0.0.1:8765/mcp` and a local control socket
+where the one-shot write subcommands arrive.
 
-It takes two locks for its lifetime, and they answer different
-questions. The session lock under the runtime directory admits one daemon
-per runtime directory, and carries the lines other tools read to find the
-session. The data-root lock, `<data_root>/.bookrack.lock`, admits one
-writer per library: a second daemon pointed at the same root — even from
-a different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
+When its root is selected through the registry (`--library`, or the
+registry's `default`), the daemon mounts **every** registered library
+at bring-up: each one answers reads, and queue jobs route to their
+target library by name. A root selected directly by path that the
+registry does not know is served alone, as before. Mounting and
+unmounting libraries at runtime is not available yet — change the
+registry, then restart the daemon.
+
+It takes the session lock plus one data-root lock per mounted library
+for its lifetime, and they answer different questions. The session lock
+under the runtime directory admits one daemon per runtime directory,
+and carries the lines other tools read to find the session. The
+data-root lock, `<data_root>/.bookrack.lock`, admits one writer per
+library: a second daemon pointed at a served root — even from a
+different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
 Offline commands that would destroy data take it too, so `bookrack
-libraries remove --purge` refuses a root a daemon is serving rather than
-deleting it underneath. Read-only commands take neither.
+libraries remove --purge` refuses a root a daemon is serving rather
+than deleting it underneath — and since an eager daemon holds the lock
+on every registered library's root, run `bookrack quit` before purging
+any of them. Read-only commands take neither.
 
 For a headless deployment — a systemd unit, a Windows service — run
 `bookrack-mcp` instead. It serves the same MCP endpoint, and takes

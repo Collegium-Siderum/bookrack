@@ -73,6 +73,10 @@ pub struct MethodContext {
     pub shutdown_tx: broadcast::Sender<()>,
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
+    /// Name of the primary (bring-up-selected) library. A single-value
+    /// snapshot consumed by the `library.changed` event and the queue
+    /// worker's no-name fallback; per-library status surfaces are a
+    /// later milestone.
     pub library_name: String,
     /// Cached MCP tool list, populated by the daemon at startup from
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
