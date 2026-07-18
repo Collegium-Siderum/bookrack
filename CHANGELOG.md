@@ -20,6 +20,13 @@ release workflow extracts the matching section verbatim from this file.
   old location is migrated on daemon start; the job schema is
   unchanged.
 
+- **embed, query: the dimension probe is cached per model and
+  URL.** Opening several libraries (or the books and papers sides of
+  one) against the same embedding model used to pay one probe
+  round-trip per open; the first successful response now records the
+  model's dimension process-wide and later probes for the same
+  `(model, url)` answer locally.
+
 - **obs, runtime: daemon logs move into the daemon state
   directory.** The rolling JSON log and crash reports used to land
   under the served library's data root (`<data_root>/logs/`); they

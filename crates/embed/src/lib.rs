@@ -20,6 +20,8 @@
 //! crate's retry loop only smooths a transient transport failure of a
 //! single request.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,39 @@ struct EmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+/// The fixed text a dimension probe embeds to learn a model's output
+/// dimension. Public so the probing caller and the cache below agree
+/// on one string: a single-element batch of exactly this text is
+/// answered from [`DIMENSION_CACHE`] once any earlier request for the
+/// same `(model, base_url)` succeeded.
+pub const DIMENSION_PROBE_TEXT: &str = "dimension probe";
+
+/// Process-wide record of the embedding dimension observed per
+/// `(model, base_url)` pair, filled by every successful
+/// [`OllamaEmbedClient::embed_batch`] response. Clients are cheap and
+/// short-lived while the daemon may open several per bring-up (books
+/// and papers sides, once per mounted library); sharing the observed
+/// dimension across them keeps the probe's network round-trip to one
+/// per distinct pair.
+static DIMENSION_CACHE: OnceLock<Mutex<HashMap<(String, String), usize>>> = OnceLock::new();
+
+/// Read the cached dimension for a `(model, base_url)` pair.
+fn cached_dimension(model: &str, base_url: &str) -> Option<usize> {
+    DIMENSION_CACHE
+        .get()?
+        .lock()
+        .ok()?
+        .get(&(model.to_string(), base_url.to_string()))
+        .copied()
+}
+
+/// Record the dimension observed in a successful response.
+fn record_dimension(model: &str, base_url: &str, dimension: usize) {
+    if let Ok(mut map) = DIMENSION_CACHE.get_or_init(Mutex::default).lock() {
+        map.insert((model.to_string(), base_url.to_string()), dimension);
+    }
+}
+
 /// Wrap a search query with the asymmetric instruction prefix the
 /// embedding model expects on the query side. The document side is
 /// embedded as bare normalized text, with no prefix — the asymmetry is
@@ -163,14 +198,32 @@ impl OllamaEmbedClient {
     /// A transient transport failure is retried with backoff; an
     /// overloaded server and operator errors are returned at once, so
     /// the caller can shrink the batch or fail fast.
+    ///
+    /// A batch that is exactly `[`[`DIMENSION_PROBE_TEXT`]`]` is
+    /// answered without HTTP once any earlier request for the same
+    /// `(model, base_url)` succeeded: the probe contract consumes only
+    /// the vector's length, so the returned zero vector of the
+    /// observed dimension is a valid answer. Any other batch always
+    /// goes to the server.
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
+        if let [only] = texts
+            && only == DIMENSION_PROBE_TEXT
+            && let Some(dimension) = cached_dimension(&self.model, &self.base_url)
+        {
+            return Ok(vec![vec![0.0; dimension]]);
+        }
         let mut attempt = 0u32;
         loop {
             match self.embed_once(texts).await {
-                Ok(vectors) => return Ok(vectors),
+                Ok(vectors) => {
+                    if let Some(first) = vectors.first() {
+                        record_dimension(&self.model, &self.base_url, first.len());
+                    }
+                    return Ok(vectors);
+                }
                 Err(e) => {
                     if !e.is_transient() || attempt >= self.max_retries {
                         return Err(e);
@@ -465,6 +518,132 @@ mod tests {
             .await
             .expect("ok");
         assert!(vectors.is_empty());
+    }
+
+    /// Spawn a mock HTTP server that answers every request with the
+    /// same 2-dimensional embedding response and counts the requests
+    /// it serves. Returns the base URL and the request counter.
+    async fn mock_counting() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_srv = Arc::clone(&hits);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                hits_srv.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0u8; 8192];
+                let _ = socket.read(&mut scratch).await;
+                let body = r#"{"embeddings":[[1.0,2.0]]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn probe_batch() -> Vec<String> {
+        vec![DIMENSION_PROBE_TEXT.to_string()]
+    }
+
+    #[tokio::test]
+    async fn a_probe_for_a_known_model_and_url_skips_the_network() {
+        use std::sync::atomic::Ordering;
+
+        let (url, hits) = mock_counting().await;
+        // Two clients, same (model, url): the first probe pays one
+        // round-trip, the second is served from the cache.
+        let first = OllamaEmbedClient::new(
+            &url,
+            "cache-model-shared",
+            Duration::from_secs(5),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let probed = first.embed_batch(&probe_batch()).await.expect("probe ok");
+        assert_eq!(probed[0].len(), 2);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let second = OllamaEmbedClient::new(
+            &url,
+            "cache-model-shared",
+            Duration::from_secs(5),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let cached = second.embed_batch(&probe_batch()).await.expect("probe ok");
+        // Only the length carries meaning; the cached answer is a zero
+        // vector of the observed dimension.
+        assert_eq!(cached, vec![vec![0.0, 0.0]]);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "second probe must not hit HTTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_probe_for_a_different_model_pays_its_own_round_trip() {
+        use std::sync::atomic::Ordering;
+
+        let (url, hits) = mock_counting().await;
+        let a = OllamaEmbedClient::new(
+            &url,
+            "cache-model-a",
+            Duration::from_secs(5),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        a.embed_batch(&probe_batch()).await.expect("probe ok");
+        let b = OllamaEmbedClient::new(
+            &url,
+            "cache-model-b",
+            Duration::from_secs(5),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        b.embed_batch(&probe_batch()).await.expect("probe ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_real_text_batch_never_consults_the_cache() {
+        use std::sync::atomic::Ordering;
+
+        let (url, hits) = mock_counting().await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "cache-model-real-text",
+            Duration::from_secs(5),
+            0,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        client.embed_batch(&probe_batch()).await.expect("probe ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // A non-probe batch goes to the server even though the pair's
+        // dimension is cached.
+        client
+            .embed_batch(&["real text".to_string()])
+            .await
+            .expect("batch ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
     #[test]

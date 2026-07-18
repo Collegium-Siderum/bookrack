@@ -553,9 +553,13 @@ impl<E: Embedder> Library<E> {
 }
 
 /// Embed a fixed probe string to learn the model's output dimension.
+/// The text is [`bookrack_embed::DIMENSION_PROBE_TEXT`], so a probe
+/// against a `(model, url)` pair the process already embedded with is
+/// answered from the embed crate's dimension cache without a network
+/// round-trip.
 async fn probe_dimension<E: Embedder>(embedder: &E) -> Result<usize> {
     let probe = embedder
-        .embed_batch(&["dimension probe".to_string()])
+        .embed_batch(&[bookrack_embed::DIMENSION_PROBE_TEXT.to_string()])
         .await?;
     probe.first().map(Vec::len).ok_or(QueryError::EmptyProbe)
 }

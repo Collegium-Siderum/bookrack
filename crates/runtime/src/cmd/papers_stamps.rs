@@ -14,7 +14,7 @@ pub async fn reconcile(cfg: &Config) -> Result<()> {
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder = embedder(cfg, &embed_cfg)?;
     let probe = embedder
-        .embed_batch(&["dimension probe".to_string()])
+        .embed_batch(&[bookrack_embed::DIMENSION_PROBE_TEXT.to_string()])
         .await
         .context("probe papers embedding dimension")?;
     let dim = probe

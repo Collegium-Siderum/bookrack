@@ -16,7 +16,7 @@ pub async fn reconcile(cfg: &Config) -> Result<()> {
     // probe is the only network call this command makes; the corpus
     // write happens locally.
     let probe = embedder
-        .embed_batch(&["dimension probe".to_string()])
+        .embed_batch(&[bookrack_embed::DIMENSION_PROBE_TEXT.to_string()])
         .await
         .context("probe embedding dimension")?;
     let dim = probe
