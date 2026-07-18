@@ -69,18 +69,26 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
             ));
         }
     };
+    let registry_path = registry_target_path().ok_or_else(|| {
+        RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            "library.fork: no registry location: set BOOKRACK_REGISTRY=<path> or ensure the \
+             platform config directory is available",
+        )
+    })?;
     let cfg = ctx.cfg.clone();
     let target = parsed.data_dir.clone();
     let new_name = parsed.new_name.clone();
     run_write(ctx, move || async move {
-        crate::cmd::libraries::fork(&cfg, &new_name, &target, mode, true, |_| Ok(true)).map_err(
-            |e| {
-                RpcError::new(
-                    crate::control::jsonrpc::INTERNAL_ERROR,
-                    format!("library.fork: {e:#}"),
-                )
-            },
-        )?;
+        crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
+            Ok(true)
+        })
+        .map_err(|e| {
+            RpcError::new(
+                crate::control::jsonrpc::INTERNAL_ERROR,
+                format!("library.fork: {e:#}"),
+            )
+        })?;
         Ok(json!({
             "new_name": new_name,
             "data_dir": target,

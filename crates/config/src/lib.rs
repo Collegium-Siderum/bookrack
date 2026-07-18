@@ -514,6 +514,15 @@ fn list_libraries_from(env: Option<String>) -> Result<Option<Vec<LibraryEntry>>,
     Ok(Some(library_entries(&registry)))
 }
 
+/// List the entries of the registry at an explicit `path`, bypassing
+/// [`REGISTRY_ENV`] and the platform default. A missing file resolves
+/// to an empty list, matching the write side, which creates the file
+/// on first use. For callers that already hold a registry path and
+/// must read the same file they are about to write.
+pub fn list_libraries_at(path: &Path) -> Result<Vec<LibraryEntry>, ConfigError> {
+    Ok(library_entries(&load_registry_at(path)?))
+}
+
 /// Project a parsed [`Registry`] into a sorted entry list. Pure so the
 /// projection can be tested without touching the filesystem.
 fn library_entries(registry: &Registry) -> Vec<LibraryEntry> {

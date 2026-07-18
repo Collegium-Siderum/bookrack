@@ -14,7 +14,7 @@ use bookrack_config::{
     Config, LibraryEntryFields, LibraryKind, load_manifest, new_manifest, upsert_library_entry,
     write_manifest,
 };
-use eyre::{Context, ContextCompat, Result, bail, eyre};
+use eyre::{Context, ContextCompat, Result, bail};
 
 use crate::render;
 
@@ -47,10 +47,16 @@ pub enum CopyMode {
 /// catalog, corpus, and envelope store into a sibling library. The
 /// vector store is NOT carried over; the caller runs `vectors reset`
 /// against the new library to rebuild it under the new model.
+///
+/// `registry_path` names the registry file the new library is
+/// registered in; the caller resolves it (normally via
+/// [`bookrack_config::registry_target_path`]) so this function never
+/// consults the process environment.
 pub fn fork<F>(
     cfg: &Config,
     new_name: &str,
     target: &Path,
+    registry_path: &Path,
     mode: CopyMode,
     yes: bool,
     ask: F,
@@ -58,12 +64,7 @@ pub fn fork<F>(
 where
     F: FnOnce(&str) -> Result<bool>,
 {
-    validate_inputs(cfg, new_name, target)?;
-    let registry_path = bookrack_config::registry_target_path().ok_or_else(|| {
-        eyre!(
-            "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform config directory is available"
-        )
-    })?;
+    validate_inputs(cfg, new_name, target, registry_path)?;
 
     let source_books = cfg.books_dir();
     let source_catalog = cfg.catalog_db();
@@ -158,7 +159,7 @@ where
         created_at: manifest.created_at.clone(),
         uuid: Some(manifest.uuid.clone()),
     };
-    upsert_library_entry(&registry_path, new_name, &entry)
+    upsert_library_entry(registry_path, new_name, &entry)
         .with_context(|| format!("register '{}' in {}", new_name, registry_path.display()))?;
 
     println!();
@@ -173,8 +174,15 @@ where
     Ok(())
 }
 
-/// Reject the obvious user errors before any filesystem write.
-fn validate_inputs(cfg: &Config, new_name: &str, target: &Path) -> Result<()> {
+/// Reject the obvious user errors before any filesystem write. The
+/// duplicate-name check reads the same registry file `fork` writes,
+/// so the two sides can never disagree on which registry governs.
+fn validate_inputs(
+    cfg: &Config,
+    new_name: &str,
+    target: &Path,
+    registry_path: &Path,
+) -> Result<()> {
     if new_name.trim().is_empty() {
         bail!("new library name must not be empty");
     }
@@ -197,9 +205,9 @@ fn validate_inputs(cfg: &Config, new_name: &str, target: &Path) -> Result<()> {
             target.display()
         );
     }
-    if let Some(entries) = bookrack_config::list_libraries().context("list libraries")?
-        && entries.iter().any(|e| e.name == new_name)
-    {
+    let entries = bookrack_config::list_libraries_at(registry_path)
+        .with_context(|| format!("list libraries in registry {}", registry_path.display()))?;
+    if entries.iter().any(|e| e.name == new_name) {
         bail!(
             "registry already has a library named '{}'; choose another name",
             new_name
@@ -332,10 +340,7 @@ mod tests {
         write_manifest(&source, &source_manifest).expect("write source manifest");
         // Point the registry into the tempdir and register the source,
         // so fork's registry lookups and its own upsert stay contained.
-        // Sound: nextest runs each test in its own process, so no other
-        // thread reads the environment concurrently.
         let registry_path = dir.path().join("registry.toml");
-        unsafe { std::env::set_var("BOOKRACK_REGISTRY", &registry_path) };
         let entry = LibraryEntryFields {
             data_dir: source.clone(),
             kind: LibraryKind::Prod,
@@ -348,7 +353,16 @@ mod tests {
 
         let target = dir.path().join("copy");
         let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
-        fork(&cfg, "copy", &target, CopyMode::Copy, true, |_| Ok(true)).expect("fork");
+        fork(
+            &cfg,
+            "copy",
+            &target,
+            &registry_path,
+            CopyMode::Copy,
+            true,
+            |_| Ok(true),
+        )
+        .expect("fork");
 
         let copied = load_manifest(&target)
             .expect("read copy manifest")
@@ -374,8 +388,8 @@ mod tests {
         std::os::windows::fs::symlink_dir(&source, &link).expect("symlink");
 
         let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
-        let err =
-            validate_inputs(&cfg, "clone", &link).expect_err("symlink to source must be rejected");
+        let err = validate_inputs(&cfg, "clone", &link, &dir.path().join("registry.toml"))
+            .expect_err("symlink to source must be rejected");
         assert!(
             format!("{err:#}").contains("resolves to the same path"),
             "want self-clone bail, got: {err:#}",
@@ -392,7 +406,8 @@ mod tests {
         let loopy = source.join("..").join("source");
 
         let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
-        let err = validate_inputs(&cfg, "clone", &loopy).expect_err("dotdot loop must be rejected");
+        let err = validate_inputs(&cfg, "clone", &loopy, &dir.path().join("registry.toml"))
+            .expect_err("dotdot loop must be rejected");
         assert!(
             format!("{err:#}").contains("resolves to the same path"),
             "want self-clone bail, got: {err:#}",
@@ -410,7 +425,8 @@ mod tests {
         let target = dir.path().join("clone");
 
         let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
-        validate_inputs(&cfg, "clone", &target).expect("sibling target accepted");
+        validate_inputs(&cfg, "clone", &target, &dir.path().join("registry.toml"))
+            .expect("sibling target accepted");
     }
 
     #[test]
