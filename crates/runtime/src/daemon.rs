@@ -358,22 +358,17 @@ impl DaemonRuntime {
             Err(e) => tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE"),
         }
 
-        // 5. EmbedConfig + OllamaEmbedClient. The model resolves by the
-        //    full chain (env > config.toml > index profile > default),
-        //    so a profile-reference or embed-model conflict and an
-        //    undefined profile each refuse startup here with the
-        //    repair spelled out, rather than embedding under a
-        //    combination the operator never declared.
+        // 5. Effective embed configuration for the served library. The
+        //    model resolves by the full chain (env > config.toml >
+        //    index profile > default), so a profile-reference or
+        //    embed-model conflict and an undefined profile each refuse
+        //    startup here with the repair spelled out, rather than
+        //    embedding under a combination the operator never
+        //    declared. `build_library_handle` below re-runs the same
+        //    (pure) resolution for the handle's own clients; this copy
+        //    feeds the queue templates and `library.info`.
         let embed_cfg = crate::profile::effective_embed_config(&cfg)
             .context("resolve effective embed configuration")?;
-        let embedder = OllamaEmbedClient::new(
-            cfg.ollama_url(),
-            &embed_cfg.model,
-            embed_cfg.request_timeout,
-            embed_cfg.max_retries,
-            embed_cfg.backoff_base,
-        )
-        .context("build embedding client")?;
 
         // Event stream and daemon-state flag come up before the
         // reranker so the supervisor's state observer can drive the
@@ -403,83 +398,17 @@ impl DaemonRuntime {
         .context("bring up the reranker backend")?;
         let rerank_supervisor = reranker.as_ref().and_then(|r| r.supervisor.clone());
 
-        // 6. Catalog preflight: migrate each on-disk catalog forward
-        //    to the binary's `TARGET_VERSION` (with the usual one-shot
-        //    backup) before exposing a listener, then drop the handle
-        //    so `Library::open` below claims the read-write connection
-        //    fresh. A read-only check would refuse a database one
-        //    schema behind the binary even though the migration step
-        //    is forward-compatible — read-write open lets routine
-        //    binary upgrades just work.
-        if cfg.catalog_db().exists() {
-            Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir())
-                .context("preflight catalog schema check failed")?;
-        }
-        if cfg.papers_catalog_db().exists() {
-            Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
-                .context("preflight papers catalog schema check failed")?;
-        }
-
-        // 7. Library::open — books + papers. Each pipeline owns its
-        //    chunk-version stamp; papers warms unconditionally so the
-        //    first glean into an empty data dir lights up the read
-        //    path the same way the book side does.
-        let search_cfg = SearchConfig::resolve(cfg.root_config());
-        let library = Library::open(
-            cfg.corpus_db(),
-            cfg.catalog_db(),
-            &cfg.lancedb_dir(),
-            embedder,
-            embed_cfg.model.clone(),
-            search_cfg.top_k,
-            bookrack_ingest::CHUNK_VERSION,
-        )
-        .await
-        .context("open query library")?;
-        let papers_embedder = OllamaEmbedClient::new(
-            cfg.ollama_url(),
-            &embed_cfg.model,
-            embed_cfg.request_timeout,
-            embed_cfg.max_retries,
-            embed_cfg.backoff_base,
-        )
-        .context("build papers embedding client")?;
-        let papers_library = Library::open(
-            cfg.papers_corpus_db(),
-            cfg.papers_catalog_db(),
-            &cfg.papers_lancedb_dir(),
-            papers_embedder,
-            embed_cfg.model.clone(),
-            search_cfg.top_k,
-            bookrack_glean::CHUNK_VERSION,
-        )
-        .await
-        .context("open papers query library")?
-        .with_kind(bookrack_core::ItemKind::Paper);
-        let papers_paths = PapersPaths {
-            corpus_db: cfg.papers_corpus_db(),
-            catalog_db: cfg.papers_catalog_db(),
-            lancedb_dir: cfg.papers_lancedb_dir(),
-            papers_dir: cfg.papers_dir(),
-        };
-
-        // 8. Ops::with_library; LibraryRegistry::single
-        let ops = Ops::with_library(
-            library,
-            cfg.corpus_db(),
-            cfg.catalog_db(),
-            &cfg.lancedb_dir(),
-            cfg.books_dir(),
-            cfg.backup_dir(),
+        // 6.-8. One warm handle for the served library, registered
+        //    under its registry name (or "default" for a path-class
+        //    root), then wrapped in a one-entry registry.
+        let library_name = cfg.library().unwrap_or("default").to_string();
+        let handle = build_library_handle(
+            &cfg,
+            &library_name,
+            reranker.as_ref().map(|r| &r.stage),
             opts.caller,
         )
-        .with_papers(papers_library, papers_paths);
-        let ops = match &reranker {
-            Some(runtime) => ops.with_reranker(runtime.stage.clone()),
-            None => ops,
-        };
-        let library_name = cfg.library().unwrap_or("default").to_string();
-        let handle = LibraryHandle::new(&library_name, ops);
+        .await?;
         let registry = LibraryRegistry::single(handle);
         tracing::info!(library = %library_name, "library registry warmed up");
 
@@ -864,6 +793,117 @@ impl DaemonRuntime {
         }
         Ok(())
     }
+}
+
+/// Build one library's warm [`LibraryHandle`]: resolve the library's
+/// effective embed configuration, construct the books and papers
+/// embedding clients, preflight both catalog schemas, open both query
+/// libraries, and assemble the [`Ops`] the handle wraps.
+///
+/// Inputs are one per-library [`Config`] plus process-level shared
+/// state: the reranker stage (when the daemon brought one up; it is
+/// cloned into the handle's `Ops`) and the [`Caller`] attribution
+/// baked into control-socket writes. The handle is registered under
+/// `name`. Every handle built here is fully serveable
+/// (`Ops::with_library`) — read, ingest, and glean paths all work,
+/// unlike an `Ops::catalog_only` handle, whose pipeline entry points
+/// report an error.
+async fn build_library_handle(
+    cfg: &Config,
+    name: &str,
+    reranker_stage: Option<&bookrack_ops::RerankStage>,
+    caller: Caller,
+) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
+    // The embed model resolves per library by the full chain
+    // (env > config.toml > index profile > default); a conflict or an
+    // undefined profile refuses the handle with the repair spelled
+    // out, rather than embedding under a combination the operator
+    // never declared.
+    let embed_cfg = crate::profile::effective_embed_config(cfg)
+        .context("resolve effective embed configuration")?;
+    let embedder = OllamaEmbedClient::new(
+        cfg.ollama_url(),
+        &embed_cfg.model,
+        embed_cfg.request_timeout,
+        embed_cfg.max_retries,
+        embed_cfg.backoff_base,
+    )
+    .context("build embedding client")?;
+
+    // Catalog preflight: migrate each on-disk catalog forward to the
+    // binary's `TARGET_VERSION` (with the usual one-shot backup)
+    // before the handle serves, then drop the handle so
+    // `Library::open` below claims the read-write connection fresh. A
+    // read-only check would refuse a database one schema behind the
+    // binary even though the migration step is forward-compatible —
+    // read-write open lets routine binary upgrades just work.
+    if cfg.catalog_db().exists() {
+        Catalog::open_with_backup(&cfg.catalog_db(), &cfg.backup_dir())
+            .context("preflight catalog schema check failed")?;
+    }
+    if cfg.papers_catalog_db().exists() {
+        Catalog::open_with_backup(&cfg.papers_catalog_db(), &cfg.backup_dir())
+            .context("preflight papers catalog schema check failed")?;
+    }
+
+    // Library::open — books + papers. Each pipeline owns its
+    // chunk-version stamp; papers warms unconditionally so the first
+    // glean into an empty data dir lights up the read path the same
+    // way the book side does.
+    let search_cfg = SearchConfig::resolve(cfg.root_config());
+    let library = Library::open(
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        embedder,
+        embed_cfg.model.clone(),
+        search_cfg.top_k,
+        bookrack_ingest::CHUNK_VERSION,
+    )
+    .await
+    .context("open query library")?;
+    let papers_embedder = OllamaEmbedClient::new(
+        cfg.ollama_url(),
+        &embed_cfg.model,
+        embed_cfg.request_timeout,
+        embed_cfg.max_retries,
+        embed_cfg.backoff_base,
+    )
+    .context("build papers embedding client")?;
+    let papers_library = Library::open(
+        cfg.papers_corpus_db(),
+        cfg.papers_catalog_db(),
+        &cfg.papers_lancedb_dir(),
+        papers_embedder,
+        embed_cfg.model.clone(),
+        search_cfg.top_k,
+        bookrack_glean::CHUNK_VERSION,
+    )
+    .await
+    .context("open papers query library")?
+    .with_kind(bookrack_core::ItemKind::Paper);
+    let papers_paths = PapersPaths {
+        corpus_db: cfg.papers_corpus_db(),
+        catalog_db: cfg.papers_catalog_db(),
+        lancedb_dir: cfg.papers_lancedb_dir(),
+        papers_dir: cfg.papers_dir(),
+    };
+
+    let ops = Ops::with_library(
+        library,
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
+        caller,
+    )
+    .with_papers(papers_library, papers_paths);
+    let ops = match reranker_stage {
+        Some(stage) => ops.with_reranker(stage.clone()),
+        None => ops,
+    };
+    Ok(LibraryHandle::new(name, ops))
 }
 
 /// Move a queue snapshot left under a library's data root by an older
