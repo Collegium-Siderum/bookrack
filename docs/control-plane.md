@@ -12,7 +12,11 @@ stays read-only and tool-scoped.
 - Windows: named pipe bound at `\\.\pipe\bookrack-control`.
 - Discovery: clients read `<runtime_dir>/bookrack.tty.lock` and pick
   up the `control_sock=<path>` line. The lock file's `pid=` and
-  `mcp=` lines are unchanged.
+  `mcp=` lines are unchanged. The daemon appends `data_dir=` and,
+  for a registry-selected root, `library_name=` once its
+  configuration resolves; served-library identity is nevertheless
+  answered over RPC (`status`, `library.info`), not from these
+  display-only lines.
 
 ## Locks
 
@@ -22,7 +26,7 @@ registry, held only for a write.
 
 | Lock | File | Guarantee | Held for |
 | --- | --- | --- | --- |
-| Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above | the daemon's lifetime |
+| Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above and the `data_dir=` / `library_name=` identity lines | the daemon's lifetime |
 | Data root | `<data_root>/.bookrack.lock` | one writer per data root, whether a daemon or an offline destructive command | the daemon's lifetime; briefly for an offline writer |
 | Registry | `<registry>.lock` | one writer at a time through a registry file's read-modify-write window | a single write; milliseconds |
 
@@ -163,9 +167,16 @@ the exit-code bucket does not distinguish the two.
 - `daemon.version` — `{ version, started_at }`.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
-- `status` — `{ state, queue_pending, queue_running }`. `state` is
-  one of `idle`, `writing`, `working`, `degraded`, `stopping`; see
-  the `daemon.state` event for the semantics of each value.
+- `status` — `{ state, queue_pending, queue_running,
+  queue_worker_enabled, library, data_dir }`. `state` is one of
+  `idle`, `writing`, `working`, `degraded`, `stopping`; see the
+  `daemon.state` event for the semantics of each value.
+  `queue_worker_enabled` is `false` on a headless entry point without
+  a queue worker. `library` is the registry name of the served
+  library, `null` when the data root was selected directly by path;
+  `data_dir` is the served root. Both identity fields are a
+  single-library snapshot — a daemon serves exactly one library — and
+  will become plural when a daemon can serve several.
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints.
 - `daemon.methods` — the live method table: every name this daemon
