@@ -342,9 +342,24 @@ impl Catalogs {
     // ----- per-book validation ------------------------------------------
 
     /// Run every book-level rule against a parsed `book.toml`. The
-    /// rule numbering mirrors the seven listed in §3 phase 4 of the
+    /// rule numbering mirrors the eight listed in §3 phase 4 of the
     /// v2 distill execution manual.
     pub fn validate_book(&self, book: &BookToml) -> Result<(), ParseError> {
+        // Rule 8: slug grammar. The slug is the authority segment of
+        // refs:// URIs, whose parser splits at the first '#'; the closed
+        // character set keeps that split unambiguous.
+        if book.book_slug.is_empty()
+            || !book
+                .book_slug
+                .chars()
+                .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-'))
+        {
+            return Err(ParseError::CatalogViolation(format!(
+                "book slug {:?} must be non-empty and match [a-z0-9_-]+",
+                book.book_slug
+            )));
+        }
+
         // Rule 4: declared writes_properties ⊆ property_catalog.
         for prop in &book.parser.writes_properties {
             if !self.properties.entries.contains_key(prop) {
@@ -521,6 +536,24 @@ stages = [
         let cats = Catalogs::load_all().expect("load_all");
         let book = BookToml::parse_str(VALID_BOOK_TOML).expect("parse valid book.toml");
         cats.validate_book(&book).expect("validate clean book");
+    }
+
+    #[test]
+    fn slug_outside_the_closed_character_set_raises_catalog_violation() {
+        let cats = Catalogs::load_all().expect("load_all");
+        for bad_slug in ["Fake_Book", "fake#book", "fake book", "", "\u{4e66}"] {
+            let toml = VALID_BOOK_TOML.replace("\"fake_book\"", &format!("{bad_slug:?}"));
+            let book = BookToml::parse_str(&toml).unwrap();
+            match cats.validate_book(&book).unwrap_err() {
+                ParseError::CatalogViolation(msg) => {
+                    assert!(
+                        msg.contains(&format!("{bad_slug:?}")),
+                        "violation message must quote the offending slug {bad_slug:?}: {msg}"
+                    );
+                }
+                other => panic!("expected CatalogViolation for {bad_slug:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

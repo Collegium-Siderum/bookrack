@@ -17,6 +17,12 @@ release workflow extracts the matching section verbatim from this file.
   keys — so `Objet a` finds the entry keyed `objeta`. The reply still
   echoes the original query; CJK keys stay exact-match.
 
+- **distill: book slugs are validated against `[a-z0-9_-]+`.** A
+  `book.toml` whose `book_slug` is empty or steps outside the closed
+  lower-case character set is rejected at validation time. The slug
+  is the authority segment of `refs://` URIs, whose parser splits at
+  the first `#`; the closed set keeps that split unambiguous.
+
 - **runtime: the queue snapshot moves into a daemon state
   directory.** The persistent ingest queue used to live as
   `.bookrack-queue.json` under the served library's data root; a
