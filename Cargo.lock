@@ -1296,6 +1296,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-translate"
+version = "0.10.0-dev"
+dependencies = [
+ "bookrack-catalog",
+ "bookrack-dbkit",
+ "rusqlite",
+ "rusqlite_migration",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bookrack-vectors"
 version = "0.10.0-dev"
 dependencies = [

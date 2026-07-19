@@ -1,0 +1,16 @@
+[package]
+name = "bookrack-translate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bookrack-dbkit = { path = "../dbkit" }
+bookrack-catalog = { path = "../catalog" }
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

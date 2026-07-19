@@ -78,6 +78,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **translate: new crate with the `translate.db` schema.** The
+  translation working store arrives as a schema-only foundation:
+  seven tables (immutable units, mutable segments, the two-layer
+  glossary, witness anchoring, append-only audit, and a key/value
+  meta table) with closed-set `CHECK` constraints, in-database
+  foreign keys, and soft cross-database references. Opening migrates
+  to the baseline revision, verifies the live schema against the
+  table specs, and enforces the reader-version stamp. Read and write
+  surfaces land in later milestones.
+
 - **runtime: the daemon mounts every registered library.** With the
   primary root selected through the registry (`--library` or the
   registry `default`), bring-up now warms a handle for each registry
