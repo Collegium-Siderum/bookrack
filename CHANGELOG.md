@@ -88,6 +88,10 @@ release workflow extracts the matching section verbatim from this file.
   table specs, and enforces the reader-version stamp. Read and write
   surfaces land in later milestones.
 
+- **config: `translate.db` path helper.** The data-root layout gains
+  the translation store's canonical location beside the other
+  per-library databases; no new environment knob.
+
 - **runtime: the daemon mounts every registered library.** With the
   primary root selected through the registry (`--library` or the
   registry `default`), bring-up now warms a handle for each registry

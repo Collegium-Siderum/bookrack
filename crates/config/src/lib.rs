@@ -409,6 +409,13 @@ impl Config {
         self.data_dir.join("catalog.db")
     }
 
+    /// SQLite database for translation units, segments, glossary and
+    /// audit (source of truth for translation work; never rebuilt from
+    /// other stores).
+    pub fn translate_db(&self) -> PathBuf {
+        self.data_dir.join("translate.db")
+    }
+
     /// LanceDB directory for the vector store.
     pub fn lancedb_dir(&self) -> PathBuf {
         self.data_dir.join("lancedb")
