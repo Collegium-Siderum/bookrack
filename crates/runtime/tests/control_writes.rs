@@ -16,6 +16,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
@@ -74,9 +75,26 @@ async fn await_channel(
     }
 }
 
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// bring-up never touches the user's real per-user data directory.
+fn isolate_daemon_state_dir() {
+    DAEMON_STATE_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("daemon state tempdir");
+        // SAFETY: env is mutated exactly once, inside
+        // `OnceLock::get_or_init`'s single-initialization guarantee,
+        // as the first statement of every test in this binary, before
+        // any concurrent env reads.
+        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+        dir
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
@@ -106,8 +124,7 @@ async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
         let mut wr_reader = BufReader::new(wr_r).lines();
         send(
             &mut wr_w,
-            r#"{"jsonrpc":"2.0","id":2,"method":"ingest.submit",
-                 "params":{"paths":["/tmp/phase2-fixture.txt"]}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"ingest.submit","params":{"paths":["/tmp/phase2-fixture.txt"]}}"#,
         )
         .await?;
         let submit = recv(&mut wr_reader).await?;
@@ -138,6 +155,7 @@ async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn second_write_returns_busy_error() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(

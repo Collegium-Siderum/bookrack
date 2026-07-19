@@ -19,6 +19,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
@@ -56,9 +57,26 @@ async fn recv_line(
     Ok(serde_json::from_str(&line)?)
 }
 
+static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+/// Redirect the daemon state directory into a per-binary tempdir so
+/// bring-up never touches the user's real per-user data directory.
+fn isolate_daemon_state_dir() {
+    DAEMON_STATE_DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("daemon state tempdir");
+        // SAFETY: env is mutated exactly once, inside
+        // `OnceLock::get_or_init`'s single-initialization guarantee,
+        // as the first statement of every test in this binary, before
+        // any concurrent env reads.
+        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
+        dir
+    });
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a reachable Ollama embedding daemon"]
 async fn full_loop_subscribe_doctor_shutdown() -> Result<()> {
+    isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(

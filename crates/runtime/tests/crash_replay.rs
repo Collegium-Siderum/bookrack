@@ -96,8 +96,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
             let mut reader = BufReader::new(r).lines();
             send(
                 &mut w,
-                r#"{"jsonrpc":"2.0","id":1,"method":"ingest.submit",
-                     "params":{"paths":["/tmp/phase2-replay-fixture.txt"]}}"#,
+                r#"{"jsonrpc":"2.0","id":1,"method":"ingest.submit","params":{"paths":["/tmp/phase2-replay-fixture.txt"]}}"#,
             )
             .await?;
             let resp = recv(&mut reader).await?;
@@ -136,8 +135,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
         let mut reader = BufReader::new(r).lines();
         send(
             &mut w,
-            r#"{"jsonrpc":"2.0","id":1,"method":"events.snapshot",
-                 "params":{"channels":["queue.list","queue.tick"]}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"events.snapshot","params":{"channels":["queue.list","queue.tick"]}}"#,
         )
         .await?;
         let resp = recv(&mut reader).await?;
