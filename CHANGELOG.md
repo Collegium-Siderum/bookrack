@@ -46,6 +46,13 @@ release workflow extracts the matching section verbatim from this file.
   now subscribed when the channel is created, so a pre-drain shutdown
   is buffered and honoured.
 
+- **obs: a second tracing-subscriber install no longer panics.**
+  `bookrack_obs::init` called the panicking `init()`, so a process
+  that already carries a global subscriber — an embedding host with
+  its own tracing setup, or a test booting two runtimes back to back
+  — aborted at bring-up. It now keeps the first subscriber and prints
+  a notice; a process that owns its subscriber is unaffected.
+
 - **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's
   finalize step resolved the registry through the platform-default-only
   path helper, so with `BOOKRACK_REGISTRY` set the new library's

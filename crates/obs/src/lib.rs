@@ -97,11 +97,22 @@ pub fn init(logs_dir: &Path, log: &LogConfig) -> (Option<WorkerGuard>, LogStream
     let log_stream = LogStreamHandle::default();
     let broadcast = BroadcastLayer::new(log_stream.clone()).with_filter(broadcast_filter);
 
-    tracing_subscriber::registry()
+    // `try_init` instead of `init`: a process that already installed a
+    // global subscriber — an embedding host with its own tracing
+    // setup, or a test booting two runtimes back to back — keeps the
+    // first subscriber instead of panicking. The layers built above
+    // are then dropped, and the returned stream handle serves no
+    // events; every entry point that owns its process gets the full
+    // three-layer stack as before.
+    if tracing_subscriber::registry()
         .with(console)
         .with(file_layer)
         .with(broadcast)
-        .init();
+        .try_init()
+        .is_err()
+    {
+        eprintln!("bookrack: tracing subscriber already installed; keeping the existing one");
+    }
 
     install_crash_hook(logs_dir);
 
