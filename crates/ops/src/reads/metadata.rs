@@ -40,7 +40,7 @@ pub fn show_metadata_audit<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<
                 .map(|r| r.status);
             let stored_verdict = attrs.as_ref().and_then(|a| a.audit_verdict.clone());
             let stored_confidence = attrs.as_ref().and_then(|a| a.confidence.clone());
-            let corpus = Corpus::open(ops.corpus_db())?;
+            let corpus = Corpus::open_read_only(ops.corpus_db())?;
             let toc_stats = corpus
                 .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
                 .map(TocStats::from);

@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **refs, corpus, ops, query: read paths no longer materialize
+  database files.** `Refs::open` and `Corpus::open` create the
+  database when it is absent, so a read reaching for them left an
+  empty schema behind as a side effect of a query — and a later
+  "does this library have reference data?" check on file existence
+  read the wrong answer. `refs` gains `Refs::open_read_only`
+  (strict read-only flags, no migration, a `user_version` past the
+  target refused as `SchemaTooNew`), and every corpus read path in
+  `ops` and `query` moves to the existing `Corpus::open_read_only`.
+  The read connections now block writes outright and skip the
+  schema-apply and version-reconciliation writers. MCP
+  `reference.lookup` against a library that has never run `distill`
+  now reports an open error instead of silently creating
+  `reference.db`; `reference.overlay_set` keeps the writable door.
+
 - **refs: a lookup miss now retries with the latin key form.** An
   exact `reference_lookup` query that yields no hit is retried once
   with the query lower-cased and stripped of non-alphanumeric
