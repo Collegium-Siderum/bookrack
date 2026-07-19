@@ -227,7 +227,8 @@ impl Refs {
     }
 
     /// Disambiguation-shaped lookup. Wraps [`Self::lookup_resolved`]
-    /// with one redirect hop and the `primary_by_authority` index.
+    /// with one redirect hop, the `primary_by_authority` index, and a
+    /// latin-key fallback retry.
     ///
     /// Redirect rules (mother doc §5.5):
     /// - If the query yields exactly one hit and that hit's payload
@@ -238,7 +239,36 @@ impl Refs {
     ///   the original hit is returned with `redirect_loop` stamped onto
     ///   its `quality_flags`, and `redirect_followed = None`.
     /// - Multi-hit queries and zero-hit queries skip the follow.
+    ///
+    /// Fallback rules:
+    /// - When the exact query yields no hit, the query is projected
+    ///   through [`latin_fallback_key`] and, if the projection differs
+    ///   from the original and is non-empty, looked up once more.
+    /// - Only the latin key form is retried; CJK entry keys are exact,
+    ///   trim-only matches and get no fallback.
+    /// - The result's `entry_key` always echoes the original query
+    ///   string; canonical `(slug, key)` pairs come from the hits. A
+    ///   fallback hit that carries `redirect_to` follows the redirect
+    ///   rules above, so `redirect_followed` then names the normalized
+    ///   key and the two fields together record the full resolution
+    ///   chain.
     pub fn lookup(&self, book_slug: Option<&str>, entry_key: &str) -> RefsResult<LookupResult> {
+        let direct = self.lookup_at(book_slug, entry_key)?;
+        if !direct.hits.is_empty() {
+            return Ok(direct);
+        }
+        let fallback = latin_fallback_key(entry_key);
+        if fallback == entry_key || fallback.is_empty() {
+            return Ok(direct);
+        }
+        let mut retried = self.lookup_at(book_slug, &fallback)?;
+        retried.entry_key = entry_key.to_string();
+        Ok(retried)
+    }
+
+    /// One lookup pass at a literal key: resolved-view hits plus the
+    /// redirect hop, without the latin-key fallback retry.
+    fn lookup_at(&self, book_slug: Option<&str>, entry_key: &str) -> RefsResult<LookupResult> {
         let hits = self.lookup_resolved(book_slug, entry_key)?;
 
         if hits.len() == 1
@@ -293,6 +323,18 @@ impl Refs {
     pub fn register_book(&mut self, book_slug: &str, specs: &[IndexSpec]) -> RefsResult<()> {
         indexes::apply(&self.conn, book_slug, specs)
     }
+}
+
+/// Project a query string into the latin lookup-key form: lower-case
+/// with every non-alphanumeric character removed. Mirrors the distill
+/// side's `KeyNormalizer::NormalizeLatinKey`; a cli-side test pins the
+/// two together.
+pub fn latin_fallback_key(query: &str) -> String {
+    query
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 /// Serialize a string array to its FTS sidecar / overlay JSON form, or
@@ -715,6 +757,99 @@ mod refs_tests {
             "expected redirect_loop flag, got {:?}",
             result.hits[0].quality_flags
         );
+    }
+
+    #[test]
+    fn lookup_exact_hit_skips_the_latin_fallback() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "objeta",
+            "Objet a",
+            json!({"lang": "fr"}),
+        ))
+        .expect("upsert objeta");
+
+        let result = refs.lookup(Some("book_a"), "objeta").expect("lookup");
+        assert_eq!(result.entry_key, "objeta");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_key, "objeta");
+        assert_eq!(result.redirect_followed, None);
+    }
+
+    #[test]
+    fn lookup_falls_back_to_the_latin_key_and_echoes_the_original_query() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "objeta",
+            "Objet a",
+            json!({"lang": "fr"}),
+        ))
+        .expect("upsert objeta");
+
+        let result = refs.lookup(Some("book_a"), "Objet a").expect("lookup");
+        assert_eq!(result.entry_key, "Objet a");
+        assert_eq!(result.primary_by_authority, Some(0));
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_key, "objeta");
+    }
+
+    #[test]
+    fn lookup_fallback_miss_returns_empty_hits_with_the_original_query() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+
+        let result = refs.lookup(Some("book_a"), "No Such Key").expect("lookup");
+        assert_eq!(result.entry_key, "No Such Key");
+        assert!(result.hits.is_empty());
+        assert_eq!(result.primary_by_authority, None);
+        assert_eq!(result.redirect_followed, None);
+    }
+
+    #[test]
+    fn lookup_fallback_hit_still_follows_a_redirect() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "objeta",
+            "Objet a",
+            json!({"redirect_to": "target"}),
+        ))
+        .expect("upsert objeta");
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "target",
+            "Target",
+            json!({"lang": "fr"}),
+        ))
+        .expect("upsert target");
+
+        let result = refs.lookup(Some("book_a"), "Objet a").expect("lookup");
+        assert_eq!(result.entry_key, "Objet a");
+        assert_eq!(result.redirect_followed.as_deref(), Some("objeta"));
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_key, "target");
+    }
+
+    #[test]
+    fn lookup_skips_the_fallback_when_the_projection_is_empty_or_unchanged() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+
+        for query in ["", "  ", "!!!"] {
+            let result = refs.lookup(Some("book_a"), query).expect("lookup");
+            assert_eq!(result.entry_key, query);
+            assert!(result.hits.is_empty(), "query {query:?} must stay empty");
+        }
     }
 
     #[test]

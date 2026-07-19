@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **refs: a lookup miss now retries with the latin key form.** An
+  exact `reference_lookup` query that yields no hit is retried once
+  with the query lower-cased and stripped of non-alphanumeric
+  characters — the same projection distill uses to build latin entry
+  keys — so `Objet a` finds the entry keyed `objeta`. The reply still
+  echoes the original query; CJK keys stay exact-match.
+
 - **runtime: the queue snapshot moves into a daemon state
   directory.** The persistent ingest queue used to live as
   `.bookrack-queue.json` under the served library's data root; a

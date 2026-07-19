@@ -958,6 +958,22 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// Pins the refs-side lookup fallback projection to the distill-side
+    /// key normalizer. The two crates do not depend on each other; this
+    /// crate depends on both, so the equivalence is asserted here.
+    #[test]
+    fn latin_fallback_key_matches_the_distill_key_normalizer() {
+        use bookrack_distill::finalize::KeyNormalizer;
+
+        for sample in ["Objet a", "Dasein!", "  jouissance  "] {
+            assert_eq!(
+                bookrack_refs::latin_fallback_key(sample),
+                KeyNormalizer::NormalizeLatinKey.normalize(sample),
+                "projection diverged for {sample:?}"
+            );
+        }
+    }
+
     const TINY_BOOK_TOML: &str = r#"
 book_slug      = "tiny"
 schema_name    = "name_translation"
