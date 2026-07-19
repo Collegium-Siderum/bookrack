@@ -53,14 +53,22 @@ pub struct DaemonProcess {
     child: Child,
     stdout_handle: JoinHandle<String>,
     stderr_handle: JoinHandle<String>,
+    /// Keeps the per-spawn daemon state directory alive for the
+    /// child's lifetime; the spawned daemon writes its queue snapshot
+    /// and logs here instead of the user's real per-user directory.
+    _daemon_state_dir: tempfile::TempDir,
 }
 
 impl DaemonProcess {
     /// Spawn the configured command with stdin closed and stdout/stderr
     /// piped; immediately start background drainer tasks so the
-    /// child's pipes never fill while the test holds `wait()`.
+    /// child's pipes never fill while the test holds `wait()`. The
+    /// child's daemon state directory is pinned to a fresh tempdir,
+    /// overriding any value the caller or the environment carries.
     pub fn spawn(cmd: &mut Command) -> Result<Self> {
+        let daemon_state_dir = tempfile::tempdir().context("daemon state tempdir")?;
         let mut child = cmd
+            .env("BOOKRACK_DAEMON_STATE_DIR", daemon_state_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -75,6 +83,7 @@ impl DaemonProcess {
             child,
             stdout_handle,
             stderr_handle,
+            _daemon_state_dir: daemon_state_dir,
         })
     }
 
