@@ -37,6 +37,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: a shutdown fired before the drain begins is no longer
+  lost.** `DaemonRuntime::run_until_shutdown` subscribed to the
+  shutdown broadcast only when it started draining, so a shutdown
+  sent in the window between bring-up and the drain — a fast signal,
+  an early `daemon.shutdown`, or an embedding caller's direct send —
+  was silently dropped and the daemon waited forever. The receiver is
+  now subscribed when the channel is created, so a pre-drain shutdown
+  is buffered and honoured.
+
 - **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's
   finalize step resolved the registry through the platform-default-only
   path helper, so with `BOOKRACK_REGISTRY` set the new library's

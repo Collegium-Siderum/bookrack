@@ -215,6 +215,15 @@ pub struct DaemonRuntime {
     /// is torn down (either because bring-up after `obs::init` failed
     /// or the daemon exited cleanly).
     _obs_guard: Option<WorkerGuard>,
+    /// Receiver subscribed when the shutdown channel is created,
+    /// consumed by [`DaemonRuntime::run_until_shutdown`]'s foreground
+    /// wait. Held here — rather than subscribed inside the drain — so
+    /// a shutdown fired between bring-up and the drain (a signal, an
+    /// early `daemon.shutdown`, or an embedding caller's direct
+    /// `shutdown_tx.send`) is buffered for the drain instead of lost:
+    /// a broadcast subscriber only sees messages sent after it
+    /// subscribes.
+    shutdown_rx: broadcast::Receiver<()>,
     queue_worker: Option<JoinHandle<Result<()>>>,
     signal_handle: JoinHandle<Result<()>>,
     control_accept_handle: JoinHandle<Result<()>>,
@@ -489,7 +498,7 @@ impl DaemonRuntime {
         };
 
         // 10. broadcast::channel; signal_task::spawn
-        let (shutdown_tx, _) = broadcast::channel::<()>(8);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(8);
         let signal_triggered = Arc::new(AtomicBool::new(false));
         let signal_handle = tokio::spawn(signal_task(
             shutdown_tx.clone(),
@@ -763,6 +772,7 @@ impl DaemonRuntime {
             _tty_lock: tty_lock,
             _root_locks: root_locks,
             _obs_guard: obs_guard,
+            shutdown_rx,
             queue_worker,
             signal_handle,
             control_accept_handle,
@@ -782,7 +792,7 @@ impl DaemonRuntime {
         repl_handle: JoinHandle<Result<()>>,
     ) -> Result<()> {
         let Self {
-            shutdown_tx,
+            shutdown_rx,
             signal_triggered,
             queue_worker,
             signal_handle,
@@ -797,7 +807,7 @@ impl DaemonRuntime {
             ..
         } = self;
 
-        let mut foreground_rx = shutdown_tx.subscribe();
+        let mut foreground_rx = shutdown_rx;
         let _ = foreground_rx.recv().await;
         tracing::info!("shutdown signalled, joining session tasks");
 
