@@ -42,6 +42,15 @@ pub enum RefsError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// A read-only open found a `user_version` past [`TARGET_VERSION`]:
+    /// the file was written by a newer schema this build cannot read.
+    /// The writable [`Refs::open`] would migrate forward; the read path
+    /// refuses rather than touch a database it does not understand.
+    #[error(
+        "reference.db schema is newer than this build supports: found user_version {found}, supports {supported}"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+
     /// A slug or field path failed identifier validation before being
     /// interpolated into a DDL statement.
     #[error("invalid identifier: {0}")]
@@ -69,6 +78,27 @@ impl Refs {
     pub fn open(path: &Path) -> RefsResult<Self> {
         let mut conn = bookrack_dbkit::open_production(path)?;
         migrate::migrations().to_latest(&mut conn)?;
+        Ok(Self { conn })
+    }
+
+    /// Open the `reference.db` at `path` for reading without creating it
+    /// and without writing through the connection.
+    ///
+    /// Mirrors the corpus read-only door in intent: the strict read-only
+    /// flags block writes and refuse a missing file rather than
+    /// materialize an empty schema, no migration runs, and a
+    /// `user_version` past [`TARGET_VERSION`] is refused with
+    /// [`RefsError::SchemaTooNew`]. A file at or below the target reads as
+    /// is — the writable [`Refs::open`] is the only path that migrates.
+    pub fn open_read_only(path: &Path) -> RefsResult<Self> {
+        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
+        let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if found > TARGET_VERSION {
+            return Err(RefsError::SchemaTooNew {
+                found,
+                supported: TARGET_VERSION,
+            });
+        }
         Ok(Self { conn })
     }
 
@@ -887,5 +917,84 @@ mod refs_tests {
             )
             .expect("count fts hits");
         assert_eq!(matched, 1);
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// The read-only door refuses a path with no `reference.db` rather
+    /// than materializing an empty schema through it.
+    #[test]
+    fn open_read_only_refuses_missing_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+
+        let Err(err) = Refs::open_read_only(&path) else {
+            panic!("missing file must fail to open");
+        };
+        assert!(
+            matches!(err, RefsError::Sqlite(_)),
+            "expected a SQLite open failure, got {err}"
+        );
+        assert!(
+            !path.exists(),
+            "read-only open must not create reference.db"
+        );
+    }
+
+    /// A file already built by the writable door reads back through the
+    /// read-only door, and the connection rejects writes.
+    #[test]
+    fn open_read_only_reads_existing_and_blocks_writes() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        drop(Refs::open(&path).expect("build reference.db"));
+
+        let refs = Refs::open_read_only(&path).expect("open existing read-only");
+        let count: i64 = refs
+            .connection()
+            .query_row("SELECT count(*) FROM reference_books", [], |row| row.get(0))
+            .expect("read reference_books");
+        assert_eq!(count, 0);
+
+        let err = refs
+            .connection()
+            .execute("CREATE TABLE t (x INTEGER)", [])
+            .expect_err("read-only connection must reject writes");
+        assert!(
+            format!("{err}").to_lowercase().contains("readonly"),
+            "expected a readonly rejection, got {err}"
+        );
+    }
+
+    /// A `user_version` past the target is refused: the file was written
+    /// by a newer schema this build cannot read.
+    #[test]
+    fn open_read_only_refuses_newer_schema() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        {
+            let refs = Refs::open(&path).expect("build reference.db");
+            refs.connection()
+                .pragma_update(None, "user_version", TARGET_VERSION + 1)
+                .expect("bump user_version");
+        }
+
+        let Err(err) = Refs::open_read_only(&path) else {
+            panic!("newer schema must be refused");
+        };
+        assert!(
+            matches!(
+                err,
+                RefsError::SchemaTooNew {
+                    found,
+                    supported,
+                } if found == TARGET_VERSION + 1 && supported == TARGET_VERSION
+            ),
+            "expected SchemaTooNew, got {err}"
+        );
     }
 }

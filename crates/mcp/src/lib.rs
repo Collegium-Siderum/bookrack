@@ -1734,7 +1734,7 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let refs_path = handle.ops().reference_db_path();
-        let refs = bookrack_refs::Refs::open(&refs_path)
+        let refs = bookrack_refs::Refs::open_read_only(&refs_path)
             .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
         let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
         let result = reference::reference_lookup_logic(&refs, catalogs, &args)
