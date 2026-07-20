@@ -773,22 +773,27 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
 }
 
 /// The built embed-model/dimension stamp pair for the book pipeline;
-/// see [`crate::profile::built_stamps`].
-fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
+/// see [`crate::profile::built_stamps`] for the three-way contract
+/// (missing / unreadable / stamped) this passes through.
+fn built_stamps(data_dir: &Path) -> Result<Option<(String, u32)>, String> {
     crate::profile::built_stamps(&crate::profile::Pipeline::Books.corpus_db(data_dir))
-        .and_then(|b| b.embed_pair())
+        .map(|stamps| stamps.and_then(|b| b.embed_pair()))
 }
 
 /// Classify one entry's index-profile reference against its resolution
-/// outcome and (optionally) the built stamps. Pure, so a test drives it
-/// without a filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
+/// outcome and the built stamps. Pure, so a test drives it without a
+/// filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
 /// for a valid profile, `Ok(None)` when the name does not resolve, and
-/// `Err(reason)` when the file failed to load.
+/// `Err(reason)` when the file failed to load. `built` is
+/// `Ok(Some(pair))` for a stamped index, `Ok(None)` when no index has
+/// been built, and `Err(reason)` when the corpus database exists but
+/// cannot be opened — the latter is reported instead of being passed
+/// off as a clean skip.
 fn coherence_issue(
     entry_name: &str,
     profile_name: &str,
     resolved: Result<Option<(String, u32, bool)>, String>,
-    built: Option<(String, u32)>,
+    built: Result<Option<(String, u32)>, String>,
 ) -> Option<String> {
     match resolved {
         Err(reason) => Some(format!(
@@ -801,14 +806,20 @@ fn coherence_issue(
             "'{entry_name}' references index profile '{profile_name}', which has validation errors \
              (run `bookrack index-profile validate {profile_name}`)"
         )),
-        Ok(Some((model, dim, false))) => built.and_then(|(built_model, built_dim)| {
-            (built_model != model || built_dim != dim).then(|| {
-                format!(
-                    "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
-                     the built index is {built_model}/{built_dim}; the daemon will refuse to start"
-                )
-            })
-        }),
+        Ok(Some((model, dim, false))) => match built {
+            Err(reason) => Some(format!(
+                "corpus database for '{entry_name}' cannot be opened ({reason}); coherence with \
+                 index profile '{profile_name}' was not checked"
+            )),
+            Ok(built) => built.and_then(|(built_model, built_dim)| {
+                (built_model != model || built_dim != dim).then(|| {
+                    format!(
+                        "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
+                         the built index is {built_model}/{built_dim}; the daemon will refuse to start"
+                    )
+                })
+            }),
+        },
     }
 }
 
@@ -1393,18 +1404,20 @@ mod tests {
     #[test]
     fn coherence_unresolved_and_invalid_and_mismatch_are_flagged() {
         // Unresolved profile.
-        assert!(coherence_issue("lib", "p", Ok(None), None).is_some());
+        assert!(coherence_issue("lib", "p", Ok(None), Ok(None)).is_some());
         // Failed to load.
-        assert!(coherence_issue("lib", "p", Err("boom".to_string()), None).is_some());
+        assert!(coherence_issue("lib", "p", Err("boom".to_string()), Ok(None)).is_some());
         // Has validation errors.
-        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), None).is_some());
+        assert!(
+            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), Ok(None)).is_some()
+        );
         // Valid and coherent with the built stamps.
         assert!(
             coherence_issue(
                 "lib",
                 "p",
                 Ok(Some(("m".to_string(), 8, false))),
-                Some(("m".to_string(), 8)),
+                Ok(Some(("m".to_string(), 8))),
             )
             .is_none()
         );
@@ -1413,7 +1426,7 @@ mod tests {
             "lib",
             "p",
             Ok(Some(("m".to_string(), 8, false))),
-            Some(("other".to_string(), 8)),
+            Ok(Some(("other".to_string(), 8))),
         )
         .expect("mismatch flagged");
         assert!(note.contains("refuse to start"), "{note}");
@@ -1421,9 +1434,26 @@ mod tests {
 
     #[test]
     fn coherence_skips_the_stamp_check_when_the_index_is_unbuilt() {
-        // No built stamps (corpus missing/unbuilt) and a valid profile is
-        // not a problem — the check simply cannot compare.
-        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), None).is_none());
+        // No built stamps (corpus missing, so no index built yet) and a
+        // valid profile is not a problem — the check cannot compare.
+        assert!(
+            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), Ok(None)).is_none()
+        );
+    }
+
+    #[test]
+    fn coherence_flags_an_unreadable_corpus_instead_of_skipping() {
+        // An existing corpus that cannot be opened is a distinct state
+        // from "unbuilt": the check must surface it, not report clean.
+        let note = coherence_issue(
+            "lib",
+            "p",
+            Ok(Some(("m".to_string(), 8, false))),
+            Err("schema version 99 is newer than this binary".to_string()),
+        )
+        .expect("unreadable corpus flagged");
+        assert!(note.contains("cannot be opened"), "{note}");
+        assert!(note.contains("was not checked"), "{note}");
     }
 
     #[test]

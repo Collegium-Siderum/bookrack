@@ -270,9 +270,14 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
     let profile_model = resolved.as_ref().map(|(p, _)| p.embed.model.as_str());
     let effective_model = EmbedConfig::resolve(profile_model).model;
     // An unstamped corpus reports as "no built index", same as a
-    // missing one: there is nothing to compare a profile against.
-    let built = crate::profile::built_stamps(&Pipeline::Books.corpus_db(&entry.data_dir))
-        .filter(|b| !b.is_unstamped());
+    // missing one: there is nothing to compare a profile against. An
+    // unreadable corpus is reported alongside instead, this being a
+    // best-effort status surface rather than a hard failure.
+    let (built, built_error) =
+        match crate::profile::built_stamps(&Pipeline::Books.corpus_db(&entry.data_dir)) {
+            Ok(stamps) => (stamps.filter(|b| !b.is_unstamped()), None),
+            Err(reason) => (None, Some(reason)),
+        };
     let findings = match (&resolved, &built) {
         (Some((profile, _)), Some(stamps)) => {
             let target = Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
@@ -297,6 +302,7 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
                 "chunk_version": b.chunk_version,
                 "normalize_version": b.normalize_version,
             })),
+            "built_stamps_error": built_error,
             "stamp_findings": findings,
             "consistent": findings.as_ref().map(|f| f.is_empty()),
         });
@@ -344,7 +350,10 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
     }
     println!("effective embed model: {effective_model}");
     match (&built, &findings) {
-        (None, _) => println!("stamps: no built index to compare against"),
+        (None, _) => match &built_error {
+            Some(reason) => println!("stamps: corpus database cannot be opened ({reason})"),
+            None => println!("stamps: no built index to compare against"),
+        },
         (Some(b), None) => {
             println!(
                 "stamps: built index is {} (no profile to compare against)",
