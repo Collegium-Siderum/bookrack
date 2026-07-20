@@ -409,6 +409,13 @@ impl Config {
         self.data_dir.join("catalog.db")
     }
 
+    /// SQLite database for the distilled reference store, opened by
+    /// the `refs` crate on the MCP `reference.*` and CLI `distill`
+    /// surfaces.
+    pub fn reference_db(&self) -> PathBuf {
+        reference_db_in(&self.data_dir)
+    }
+
     /// LanceDB directory for the vector store.
     pub fn lancedb_dir(&self) -> PathBuf {
         self.data_dir.join("lancedb")
@@ -471,6 +478,14 @@ fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
     env_trimmed(override_dir)
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("backup"))
+}
+
+/// The reference-store database under `data_dir`. The single
+/// definition of that file's name and location: [`Config::reference_db`]
+/// and callers that hold a data root without a `Config` both route
+/// through it.
+pub fn reference_db_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("reference.db")
 }
 
 /// Directory for daemon-scoped state that spans libraries: the ingest

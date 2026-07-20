@@ -374,10 +374,8 @@ impl<E: Embedder> Ops<E> {
     /// `distill build / verify` invocation; no warm handle is held
     /// here because both call paths are stateless across requests.
     pub fn reference_db_path(&self) -> PathBuf {
-        self.catalog_db
-            .parent()
-            .map(|p| p.join("reference.db"))
-            .unwrap_or_else(|| PathBuf::from("reference.db"))
+        let data_root = self.catalog_db.parent().unwrap_or_else(|| Path::new(""));
+        bookrack_config::reference_db_in(data_root)
     }
 
     /// Borrow the warm embedder, if this `Ops` was built with a library.

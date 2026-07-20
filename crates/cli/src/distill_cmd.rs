@@ -54,9 +54,8 @@ struct DistillPaths {
 impl DistillPaths {
     fn resolve(selection: &bookrack_config::LibrarySelection) -> Result<Self> {
         let cfg = Config::resolve(selection).context("resolve configuration")?;
-        let data_dir = cfg.data_dir().to_path_buf();
         Ok(Self {
-            refs_path: data_dir.join("reference.db"),
+            refs_path: cfg.reference_db(),
             catalog_path: cfg.catalog_db(),
         })
     }
@@ -1008,7 +1007,7 @@ stages = [
 
     fn make_paths(root: &Path) -> DistillPaths {
         DistillPaths {
-            refs_path: root.join("reference.db"),
+            refs_path: bookrack_config::reference_db_in(root),
             catalog_path: root.join("catalog.db"),
         }
     }
