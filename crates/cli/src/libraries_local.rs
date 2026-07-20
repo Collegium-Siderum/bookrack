@@ -600,17 +600,53 @@ fn root_config_set_error(err: RootConfigSetError) -> Report {
 }
 
 /// The detect gate for `remove --purge`: the target must look like a
-/// data root (confirmed or probable) before its bytes are deleted, so an
-/// entry that points at an unrelated directory cannot destroy it.
+/// data root before its bytes are deleted, so an entry that points at
+/// an unrelated directory cannot destroy it. `Confirmed` — a readable
+/// manifest — passes on its own. `Probable` rests on two filenames
+/// alone, which `touch catalog.db corpus.db` satisfies, so it must
+/// also show a real SQLite store behind at least one of the names.
+/// The header probe deliberately stops short of a schema-validating
+/// open: a root whose schema is older or newer than this binary is
+/// still a data root the operator may purge. `Unreadable` refuses
+/// with the reason rather than blending into "not a library".
 fn gate_purge_target(data_dir: &Path) -> Result<()> {
+    let refuse = |message: String| Report::new(BookrackCliError::LocalUserError { message });
     match detect_library(data_dir) {
-        Ok(DetectVerdict::Confirmed(_) | DetectVerdict::Probable { .. }) => Ok(()),
-        _ => Err(Report::new(BookrackCliError::LocalUserError {
-            message: format!(
-                "refusing to purge {}: it is not a confirmed or probable data root",
-                data_dir.display()
-            ),
-        })),
+        Ok(DetectVerdict::Confirmed(_)) => Ok(()),
+        Ok(DetectVerdict::Probable { .. }) => {
+            if ["catalog.db", "corpus.db"]
+                .iter()
+                .any(|name| has_sqlite_header(&data_dir.join(name)))
+            {
+                Ok(())
+            } else {
+                Err(refuse(format!(
+                    "refusing to purge {}: catalog.db / corpus.db are present but neither \
+                     is a SQLite database",
+                    data_dir.display()
+                )))
+            }
+        }
+        Ok(DetectVerdict::Unreadable { reason }) => Err(refuse(format!(
+            "refusing to purge {}: the root cannot be assessed: {reason}",
+            data_dir.display()
+        ))),
+        _ => Err(refuse(format!(
+            "refusing to purge {}: it is not a confirmed or probable data root",
+            data_dir.display()
+        ))),
+    }
+}
+
+/// Whether the file begins with the SQLite format-3 magic bytes. An
+/// empty, truncated, or non-SQLite file does not match.
+fn has_sqlite_header(path: &Path) -> bool {
+    use std::io::Read as _;
+    const MAGIC: &[u8; 16] = b"SQLite format 3\0";
+    let mut buf = [0u8; 16];
+    match std::fs::File::open(path) {
+        Ok(mut file) => file.read_exact(&mut buf).is_ok() && &buf == MAGIC,
+        Err(_) => false,
     }
 }
 
@@ -768,4 +804,31 @@ fn print_scan_json(outcome: &ScanOutcome) {
         "{}",
         serde_json::to_string(&value).expect("scan serializes")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purge_gate_refuses_touched_empty_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("catalog.db"), b"").expect("touch catalog");
+        std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
+
+        let err = gate_purge_target(dir.path()).expect_err("two empty files must not authorise");
+        assert!(
+            err.to_string().contains("neither is a SQLite database"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    #[test]
+    fn purge_gate_accepts_a_probable_root_with_a_real_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        drop(bookrack_catalog::Catalog::open(&dir.path().join("catalog.db")).expect("seed"));
+        std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
+
+        gate_purge_target(dir.path()).expect("a real store behind the name authorises");
+    }
 }
