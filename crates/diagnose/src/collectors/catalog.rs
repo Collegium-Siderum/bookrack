@@ -20,17 +20,22 @@ const RECENT_ROW_CAP: u32 = 1000;
 const INTAKE_HEAD_CAP: u32 = 50;
 
 /// Write `<bundle>/catalog/{intakes-head,tool-calls,pipeline-audit,
-/// metadata-audit}.json`. A catalog that fails to open is reported as
-/// an error; missing or empty tables write an empty JSON array.
+/// metadata-audit}.json`. A catalog.db that is missing or fails to
+/// open writes `open-error.json` in place of the four payload files;
+/// empty tables write an empty JSON array.
 pub fn collect(cfg: &Config, since_ts: &str, bundle_dir: &Path, scrubber: &Scrubber) -> Result<()> {
     let dst = bundle_dir.join("catalog");
     std::fs::create_dir_all(&dst)?;
 
-    let catalog = match Catalog::open_read_only(&cfg.catalog_db()) {
+    let catalog_db = cfg.catalog_db();
+    if !catalog_db.exists() {
+        return super::write_open_error(&dst, &catalog_db, None);
+    }
+    let catalog = match Catalog::open_read_only(&catalog_db) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "diagnose: could not open catalog read-only");
-            return Ok(());
+            return super::write_open_error(&dst, &catalog_db, Some(&e.to_string()));
         }
     };
 

@@ -3,11 +3,11 @@
 //! End-to-end smoke test for [`bookrack_diagnose::collect`].
 //!
 //! The test seeds a tempdir-backed data root with a crash report, a
-//! rolling log file, and a small catalog (one intake plus one row of
-//! each observability table), then calls `collect` and verifies the
-//! resulting tarball: it lands at the expected path, contains every
-//! collector's output, and decodes back to non-empty bytes for each
-//! one.
+//! rolling log file, a small catalog (one intake plus one row of each
+//! observability table), and an empty corpus, then calls `collect`
+//! and verifies the resulting tarball: it lands at the expected path,
+//! contains every collector's output, and decodes back to non-empty
+//! bytes for each one.
 
 use std::io::Read;
 use std::path::Path;
@@ -19,6 +19,7 @@ use bookrack_catalog::{
 };
 use bookrack_config::Config;
 use bookrack_core::ItemKind;
+use bookrack_corpus::Corpus;
 use bookrack_diagnose::{Options, collect};
 
 /// A fixed unix-ms timestamp the test runs against so the bundle name
@@ -96,6 +97,10 @@ impl Fixture {
             catalog.record_metadata_audit(&meta_audit).unwrap();
         }
 
+        // Seed an (unstamped) corpus so the corpus collector reads a
+        // real store instead of reporting a missing one.
+        drop(Corpus::open(&data_dir.join("corpus.db")).unwrap());
+
         let cfg = Config::new(data_dir, "http://localhost:0/".to_string());
         Fixture { _tmp: tmp, cfg }
     }
@@ -170,6 +175,18 @@ fn collect_with_an_empty_logs_dir_still_succeeds() {
     assert!(report.out_path.exists());
     let names = list_archive_files(&report.out_path);
     assert!(names.iter().any(|n| n == "manifest.json"));
+    // The database collectors record the missing stores explicitly
+    // instead of omitting their sections.
+    for needle in ["catalog/open-error.json", "corpus/open-error.json"] {
+        assert!(
+            names.iter().any(|n| n == needle),
+            "expected {needle} in bundle; got: {names:?}"
+        );
+    }
+    assert!(
+        !cfg.catalog_db().exists() && !cfg.corpus_db().exists(),
+        "collect must not materialise databases on a bare data dir"
+    );
 }
 
 #[test]
