@@ -100,7 +100,11 @@ mod tests {
         Config::new(data_dir.to_path_buf(), "http://localhost:11434".to_string())
     }
 
-    fn entries(dir: &Path) -> Vec<String> {
+    /// Database files under `dir`. Sidecar `-shm` / `-wal` files are
+    /// excluded: a read-only connection to an existing WAL database
+    /// may create them, so the no-materialisation contract is about
+    /// `.db` files, not about the directory being byte-identical.
+    fn db_files(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("read data dir")
             .map(|e| {
@@ -109,6 +113,7 @@ mod tests {
                     .to_string_lossy()
                     .into_owned()
             })
+            .filter(|name| name.ends_with(".db"))
             .collect();
         names.sort();
         names
@@ -122,7 +127,10 @@ mod tests {
         assert!(report.catalog_missing);
         assert!(report.corpus_missing);
         assert!(
-            entries(dir.path()).is_empty(),
+            std::fs::read_dir(dir.path())
+                .expect("read data dir")
+                .next()
+                .is_none(),
             "verify must not create files"
         );
     }
@@ -132,7 +140,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = config_for(dir.path());
         drop(Catalog::open(&cfg.catalog_db()).expect("create catalog"));
-        let before = entries(dir.path());
+        let before = db_files(dir.path());
 
         let report = build_verify_report(&cfg);
         assert!(!report.not_initialised);
@@ -141,7 +149,7 @@ mod tests {
         assert!(!report.corpus_schema_ok);
         assert!(report.corpus_schema_error.is_none());
         assert_eq!(
-            entries(dir.path()),
+            db_files(dir.path()),
             before,
             "verify must not materialise corpus.db"
         );

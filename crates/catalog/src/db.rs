@@ -207,9 +207,11 @@ impl Catalog {
     /// Open the `catalog.db` at `path` for read-only access.
     ///
     /// Skips the migration step entirely — the file must already be at
-    /// the current schema revision — and locks the connection with
-    /// `PRAGMA query_only = ON`, so any subsequent write through the
-    /// resulting handle is rejected by SQLite with `SQLITE_READONLY`.
+    /// the current schema revision — and opens with the strict
+    /// read-only flags plus `PRAGMA query_only = ON`, so any write
+    /// through the resulting handle is rejected by SQLite with
+    /// `SQLITE_READONLY` and a missing file is an open failure rather
+    /// than an empty database materialised on disk.
     ///
     /// Designed for daemon-side query consumers that share one schema
     /// migration owned by a separate read-write entry point at process
@@ -217,7 +219,7 @@ impl Catalog {
     /// unmigrated or schema-drifted database is refused at open rather
     /// than discovered halfway through a query.
     pub fn open_read_only(path: &Path) -> Result<Catalog> {
-        let conn = bookrack_dbkit::open_production_query_only(path)?;
+        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current > TARGET_VERSION {
             return Err(CatalogError::SchemaTooNew {
@@ -610,6 +612,21 @@ mod tests {
         let catalog = Catalog::open_in_memory().expect("open");
         bookrack_dbkit::verify_all(&catalog.conn, SPECS)
             .expect("the rendered schema must conform to every spec");
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_missing_file_without_creating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("missing file must refuse to open")
+        };
+        assert!(
+            matches!(err, CatalogError::Sqlite(_)),
+            "expected a SQLite open failure, got {err:?}"
+        );
+        assert!(!path.exists(), "read-only open must not create catalog.db");
     }
 
     #[test]
