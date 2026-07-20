@@ -23,8 +23,21 @@ use eyre::{Context as _, Result};
 pub fn run(selection: &bookrack_config::LibrarySelection, action: RetrievalAction) -> Result<()> {
     let cfg = Config::resolve(selection).context("resolve configuration")?;
     let catalog_db = cfg.catalog_db();
-    let catalog =
-        Catalog::open(&catalog_db).with_context(|| format!("open {}", catalog_db.display()))?;
+    // A missing catalog means nothing was ever recorded: report the
+    // explicit zero instead of materialising a database to read it.
+    if !catalog_db.exists() {
+        return match action {
+            RetrievalAction::List { .. } => {
+                println!("{}", render_retrieval_list(&[]));
+                Ok(())
+            }
+            RetrievalAction::Show { call_id } => Err(eyre::eyre!(
+                "no retrieval detail recorded for call id {call_id}"
+            )),
+        };
+    }
+    let catalog = Catalog::open_read_only(&catalog_db)
+        .with_context(|| format!("open {}", catalog_db.display()))?;
     match action {
         RetrievalAction::List {
             last,
