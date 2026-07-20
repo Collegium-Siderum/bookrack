@@ -212,9 +212,15 @@ pub fn audit_profile_diff(a_name: &str, a: &AuditProfile, b_name: &str, b: &Audi
 /// counts that depend on it.
 #[derive(Default, serde::Serialize)]
 pub struct VerifyReport {
-    /// Set when the data directory has no `catalog.db` yet — verify
-    /// short-circuits in that case and reports nothing else.
+    /// Set when the data directory has neither `catalog.db` nor
+    /// `corpus.db` — verify short-circuits in that case and reports
+    /// nothing else.
     pub not_initialised: bool,
+    /// Set when `catalog.db` is absent while `corpus.db` exists; the
+    /// store is reported missing rather than opened into existence.
+    pub catalog_missing: bool,
+    /// Set when `corpus.db` is absent while `catalog.db` exists.
+    pub corpus_missing: bool,
     pub catalog_schema_ok: bool,
     pub catalog_schema_error: Option<String>,
     pub corpus_schema_ok: bool,
@@ -231,12 +237,14 @@ pub struct VerifyReport {
 pub fn verify(report: &VerifyReport) {
     if report.not_initialised {
         println!("data directory not initialised yet.");
-        println!("  no catalog.db / corpus.db / lancedb on disk;");
+        println!("  neither catalog.db nor corpus.db on disk;");
         println!("  run `bookrack ingest <path>` to create them, then verify again.");
         return;
     }
     println!("catalog.db:");
-    if report.catalog_schema_ok {
+    if report.catalog_missing {
+        println!("  missing on disk (corpus.db is present)");
+    } else if report.catalog_schema_ok {
         println!("  schema:         ok");
     } else if let Some(err) = &report.catalog_schema_error {
         println!("  schema:         FAILED");
@@ -260,7 +268,9 @@ pub fn verify(report: &VerifyReport) {
 
     println!();
     println!("corpus.db:");
-    if report.corpus_schema_ok {
+    if report.corpus_missing {
+        println!("  missing on disk (catalog.db is present)");
+    } else if report.corpus_schema_ok {
         println!("  schema:         ok");
     } else if let Some(err) = &report.corpus_schema_error {
         println!("  schema:         FAILED");
