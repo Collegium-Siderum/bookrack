@@ -54,34 +54,51 @@ pub struct LibraryInfoContext {
 
 /// Read the one-page library status card.
 ///
-/// Errors are swallowed for the live values (corpus stamps, vectors
-/// meta, chunk count, intake counts, disk sizes) so this stays
-/// informational rather than failing on a half-built library.
+/// Errors are swallowed for the count-class values (chunk and intake
+/// counts, disk sizes) so the card stays informational on a half-built
+/// library. Store-open failures are health signals, not counts: a
+/// database or vector store that exists but cannot be read reports the
+/// reason in the `*_error` fields instead of collapsing into the same
+/// absent values a fresh library shows.
 pub async fn show_library_info<E: Embedder>(
     ops: &Ops<E>,
     ctx: LibraryInfoContext,
 ) -> Result<LibraryInfo> {
     record_call_async!(ops, "library.info", serde_json::Value::Null, {
-        let corpus_stamps = read_corpus_stamps(ops.corpus_db()).unwrap_or_default();
-        let vectors_meta = bookrack_vectors::meta::load(ops.lancedb_dir())
-            .ok()
-            .flatten();
-        let current_chunks = read_current_chunk_count(ops.lancedb_dir(), &corpus_stamps).await;
-        // Open the catalog only when its file is on disk: rusqlite's
-        // open creates the file on demand, which on a fresh data root
-        // would materialise `catalog.db` just to read three numbers off it.
-        let catalog = if ops.catalog_db().exists() {
-            Catalog::open_read_only(ops.catalog_db()).ok()
+        let (corpus_stamps, corpus_error) = match read_corpus_stamps(ops.corpus_db()) {
+            Ok(stamps) => (stamps, None),
+            Err(e) => (CorpusStamps::default(), Some(e.to_string())),
+        };
+        let (vectors_meta, meta_error) = match bookrack_vectors::meta::load(ops.lancedb_dir()) {
+            Ok(meta) => (meta, None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let (current_chunks, chunks_error) = read_current_chunk_count(ops.lancedb_dir()).await;
+        let vectors_error = meta_error.or(chunks_error);
+        // A missing catalog is a fresh root, not an error; an existing
+        // one that fails to open carries the reason instead of posing
+        // as missing.
+        let (catalog, mut catalog_error) = if ops.catalog_db().exists() {
+            match Catalog::open_read_only(ops.catalog_db()) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
         } else {
-            None
+            (None, None)
         };
         let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
         let ready_book_count = catalog
             .as_ref()
             .and_then(|c| c.count_book_states_by_stage("ready").ok());
-        let catalog_schema_version_on_disk = catalog
-            .as_ref()
-            .and_then(|c| c.schema_version_on_disk().ok().flatten());
+        let catalog_schema_version_on_disk =
+            match catalog.as_ref().map(|c| c.schema_version_on_disk()) {
+                Some(Ok(version)) => version,
+                Some(Err(e)) => {
+                    catalog_error.get_or_insert_with(|| e.to_string());
+                    None
+                }
+                None => None,
+            };
         let papers = read_papers_info(ops).await;
         Ok(LibraryInfo {
             data_dir: ctx.data_dir,
@@ -94,9 +111,12 @@ pub async fn show_library_info<E: Embedder>(
             corpus_schema_version_expected: bookrack_corpus::SCHEMA_VERSION,
             catalog_schema_version_expected: bookrack_catalog::SCHEMA_VERSION,
             catalog_schema_version_on_disk,
+            catalog_error,
             corpus_stamps,
+            corpus_error,
             vectors_meta,
             current_chunks,
+            vectors_error,
             intake_count,
             ready_book_count,
             disk: disk_usage(ops.catalog_db(), ops.corpus_db(), ops.lancedb_dir()),
@@ -107,26 +127,40 @@ pub async fn show_library_info<E: Embedder>(
 
 /// Read the paper-side companion section, mirroring the book-side
 /// reads above. Returns `None` when the calling `Ops` was built
-/// without a papers backend; otherwise tolerates missing files for the
-/// same reason the book-side path does (informational, not authoritative).
+/// without a papers backend; otherwise missing files are tolerated
+/// and unreadable stores report through the same `*_error` fields the
+/// book-side path uses.
 async fn read_papers_info<E: Embedder>(ops: &Ops<E>) -> Option<PapersInfo> {
     let corpus_db = ops.papers_corpus_db()?;
     let catalog_db = ops.papers_catalog_db()?;
     let lancedb_dir = ops.papers_lancedb_dir()?;
-    let corpus_stamps = read_corpus_stamps(corpus_db).unwrap_or_default();
-    let vectors_meta = bookrack_vectors::meta::load(lancedb_dir).ok().flatten();
-    let current_chunks = read_current_chunk_count(lancedb_dir, &corpus_stamps).await;
-    let catalog = if catalog_db.exists() {
-        Catalog::open_read_only(catalog_db).ok()
+    let (corpus_stamps, corpus_error) = match read_corpus_stamps(corpus_db) {
+        Ok(stamps) => (stamps, None),
+        Err(e) => (CorpusStamps::default(), Some(e.to_string())),
+    };
+    let (vectors_meta, meta_error) = match bookrack_vectors::meta::load(lancedb_dir) {
+        Ok(meta) => (meta, None),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    let (current_chunks, chunks_error) = read_current_chunk_count(lancedb_dir).await;
+    let vectors_error = meta_error.or(chunks_error);
+    let (catalog, catalog_error) = if catalog_db.exists() {
+        match Catalog::open_read_only(catalog_db) {
+            Ok(c) => (Some(c), None),
+            Err(e) => (None, Some(e.to_string())),
+        }
     } else {
-        None
+        (None, None)
     };
     let intake_count = catalog.as_ref().and_then(|c| c.count_intakes().ok());
     Some(PapersInfo {
         corpus_stamps,
+        corpus_error,
         vectors_meta,
         current_chunks,
+        vectors_error,
         intake_count,
+        catalog_error,
         disk: disk_usage(catalog_db, corpus_db, lancedb_dir),
     })
 }
@@ -145,9 +179,17 @@ fn read_corpus_stamps(corpus_db: &Path) -> Result<CorpusStamps> {
     })
 }
 
-async fn read_current_chunk_count(lancedb_dir: &Path, _stamps: &CorpusStamps) -> Option<usize> {
-    let store = ChunkStore::try_open(lancedb_dir).await.ok()??;
-    store.count_rows().await.ok()
+/// Live chunk count plus the reason it could not be read. A missing
+/// store is `(None, None)`; a store this binary cannot read — e.g. a
+/// reader-version refusal — is `(None, Some(reason))` rather than
+/// posing as missing. A count failure on an open store stays
+/// best-effort.
+async fn read_current_chunk_count(lancedb_dir: &Path) -> (Option<usize>, Option<String>) {
+    match ChunkStore::try_open(lancedb_dir).await {
+        Ok(Some(store)) => (store.count_rows().await.ok(), None),
+        Ok(None) => (None, None),
+        Err(e) => (None, Some(e.to_string())),
+    }
 }
 
 fn disk_usage(catalog_db: &Path, corpus_db: &Path, lancedb_dir: &Path) -> DiskUsage {
