@@ -10,6 +10,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **ops: `library.info` distinguishes broken stores from missing
+  ones.** Every failure used to collapse into the same absent values
+  a fresh library shows: an unopenable corpus fell back to blank
+  stamps, a catalog with a newer schema showed an empty on-disk
+  version next to the expected one, and a vector store refused for
+  reader age looked identical to one never built. The card gains
+  `catalog_error` / `corpus_error` / `vectors_error` fields (papers
+  side included) carrying the open failure's reason; a missing store
+  stays a plain absence, and count-class fields keep their
+  best-effort behaviour.
+
+- **diagnose: bundles record why a store section is absent.** The
+  corpus collector opened corpus.db through the writable door —
+  creating it on a bare root and taking the write lock on a live one
+  — and both database collectors reduced an open failure to a log
+  line, leaving the bundle section silently missing. Collectors now
+  open read-only, and a store that is missing or unopenable writes
+  `<section>/open-error.json` distinguishing the two states (file
+  name only, never the full path). A vectors sidecar that exists but
+  fails to load is recorded the same way.
+
 - **refs, corpus, ops, query: read paths no longer materialize
   database files.** `Refs::open` and `Corpus::open` create the
   database when it is absent, so a read reaching for them left an
@@ -64,6 +85,59 @@ release workflow extracts the matching section verbatim from this file.
   `bookrack diagnose` collects from both locations.
 
 ### Fixed
+
+- **dbkit, catalog: the catalog read-only door no longer creates
+  catalog.db.** `Catalog::open_read_only` opened with default flags,
+  so any catalog read on a fresh root — `library.stats`,
+  `library.info`, and every other consumer — left a zero-byte
+  database behind and then failed schema verification on it. The
+  door now uses the strict read-only flags, a missing file is
+  refused at open, and the default-flags helper is deleted: its
+  recorded rationale (readers need default flags to create the WAL
+  sidecars) does not hold on the pinned SQLite, where a strict
+  read-only connection creates the sidecars itself.
+
+- **runtime: `bookrack verify` no longer creates the corpus it
+  reports on.** The not-initialised guard checked only catalog.db
+  while the corpus was opened through the writable door, so a root
+  mid-ingest — catalog present, corpus not yet — had corpus.db
+  created, schema-stamped, and reported `ok` by a read-only
+  diagnostic, which also took the daemon's exclusive write lock.
+  Each store is now probed independently and opened read-only; an
+  absent store renders as missing.
+
+- **runtime: doctor no longer calls an unopenable corpus coherent.**
+  A corpus.db that exists but cannot be opened — corrupt, newer
+  schema, locked — collapsed into the same state as "no index built",
+  and the index-profile coherence check printed a green "coherent
+  with their built indexes". The unreadable state now surfaces as a
+  WARN row carrying the reason, `index-profile apply` planning
+  refuses instead of planning against it, and `index-profile status`
+  reports it.
+
+- **ops: `library.vectors_status` no longer materialises an empty
+  lance layout.** With a `vector_dim` stamp present but the lancedb
+  store deleted or never built, the status query created the
+  directory and an empty chunks table as a side effect; it now
+  attaches through the non-creating open and reports the empty
+  status.
+
+- **cli, runtime: read-shaped commands stop opening the catalog
+  writable.** `bookrack retrieval` and the book side of `bookrack
+  runs` materialised and migrated catalog.db on a fresh root just to
+  read from it; the dryrun previews created and migrated a library to
+  record a single lifecycle row. All of them probe for the file
+  first, the readers open read-only, and a missing catalog renders
+  as an explicit zero.
+
+- **cli: `remove --purge` no longer trusts two file names.** The
+  purge gate accepted a probable root on the existence of
+  `catalog.db` and `corpus.db` alone, so two empty files created by
+  hand authorised deleting a directory's bytes. A probable root must
+  now show the SQLite magic behind at least one of the two names —
+  deliberately not a schema-validating open, so roots from older or
+  newer binaries stay purgeable — and an unreadable root refuses
+  with its reason.
 
 - **runtime: a shutdown fired before the drain begins is no longer
   lost.** `DaemonRuntime::run_until_shutdown` subscribed to the
