@@ -190,6 +190,35 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         .await?;
         assert_eq!(code, INVALID_PARAMS, "vectors.reembed unknown book: {msg}");
 
+        // `ingest.submit` with a path the extractor has no adapter for
+        // is refused before a job is enqueued; mobi/azw3 carry a
+        // conversion hint.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            6,
+            "ingest.submit",
+            serde_json::json!({ "paths": ["/tmp/book.mobi"] }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "ingest.submit mobi path: {msg}");
+        assert!(
+            msg.contains("convert to EPUB"),
+            "ingest.submit mobi hint: {msg}"
+        );
+
+        // `glean.submit` runs the same extractor and applies the same
+        // allowlist.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            7,
+            "glean.submit",
+            serde_json::json!({ "paths": ["/tmp/paper.mobi"] }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "glean.submit mobi path: {msg}");
+
         send(
             &mut w,
             r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,

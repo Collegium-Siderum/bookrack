@@ -74,6 +74,35 @@ pub fn save_atomic(state: &QueueState, path: &Path) -> Result<()> {
 /// cannot accept a format the extractor has no adapter for.
 pub use bookrack_extract::SUPPORTED_EXTENSIONS;
 
+/// Check an explicitly submitted path against [`SUPPORTED_EXTENSIONS`]
+/// before it is enqueued, so a file the extractor cannot handle is
+/// rejected up front instead of becoming a job that fails at EXTRACT.
+/// The error is the operator-facing message; mobi and azw3 get a
+/// conversion hint because they are common e-book formats.
+pub fn check_extension_supported(path: &Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some(ext) if SUPPORTED_EXTENSIONS.contains(&ext) => Ok(()),
+        Some("mobi" | "azw3") => Err(format!(
+            "{}: mobi/azw3 are not supported; convert to EPUB first (e.g. Calibre's ebook-convert)",
+            path.display()
+        )),
+        Some(ext) => Err(format!(
+            "{}: .{ext} is not a supported format (supported: {})",
+            path.display(),
+            SUPPORTED_EXTENSIONS.join(", ")
+        )),
+        None => Err(format!(
+            "{}: file has no extension (supported: {})",
+            path.display(),
+            SUPPORTED_EXTENSIONS.join(", ")
+        )),
+    }
+}
+
 /// Walk `dir` depth-first and collect every regular file whose extension
 /// is in [`SUPPORTED_EXTENSIONS`]. Hidden files (those whose name starts
 /// with `.`) are skipped. The returned list is sorted by path so
@@ -968,6 +997,33 @@ mod tests {
         // html is in the allowlist; mobi has no extraction adapter and
         // stays out of the walk.
         assert_eq!(names, vec!["a.epub", "b.pdf", "e.html", "d.txt"]);
+    }
+
+    #[test]
+    fn check_extension_supported_accepts_allowlisted_case_insensitively() {
+        assert!(check_extension_supported(&PathBuf::from("/tmp/a.epub")).is_ok());
+        assert!(check_extension_supported(&PathBuf::from("/tmp/B.HTML")).is_ok());
+    }
+
+    #[test]
+    fn check_extension_supported_hints_conversion_for_mobi_and_azw3() {
+        for name in ["a.mobi", "b.azw3", "C.MOBI"] {
+            let err = check_extension_supported(&PathBuf::from(name)).unwrap_err();
+            assert!(err.contains("convert to EPUB"), "no hint in: {err}");
+        }
+    }
+
+    #[test]
+    fn check_extension_supported_lists_allowlist_for_other_extensions() {
+        let err = check_extension_supported(&PathBuf::from("a.docx")).unwrap_err();
+        assert!(err.contains(".docx"), "extension missing from: {err}");
+        assert!(err.contains("epub"), "allowlist missing from: {err}");
+    }
+
+    #[test]
+    fn check_extension_supported_rejects_missing_extension() {
+        let err = check_extension_supported(&PathBuf::from("/tmp/noext")).unwrap_err();
+        assert!(err.contains("no extension"), "unexpected message: {err}");
     }
 
     #[test]

@@ -62,7 +62,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("stored_path")
             .comment("opaque store location; set once the file is stored"),
         ColumnSpec::text("original_path").comment("forensic: where the file came from"),
-        ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
+        ColumnSpec::text("format").comment("adapter label: pdf / epub / txt / html / ocr-markdown"),
         ColumnSpec::int("byte_size"),
         ColumnSpec::text("adapter").comment("extraction adapter, stamped at EXTRACT"),
         ColumnSpec::int("extractor_version")
