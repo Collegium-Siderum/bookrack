@@ -25,6 +25,13 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **distill: the `splits` coverage counter is actually written.** The
+  `Coverage` doc promised its counters were written by the matching
+  stages, but neither splitter stage touched `splits`, so every
+  `book_distill_audit` row stored `splits = 0` regardless of the run.
+  Both splitters now record their output count; audit rows written
+  before the fix keep the zero until their book is re-distilled.
+
 - **ingest, glean, runtime: the vectors-reset `--resume` hint prints
   when a reset actually fails.** Both reset reports carried a
   `failed_intake` field documented as "returned to the caller

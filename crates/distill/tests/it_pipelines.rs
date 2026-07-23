@@ -91,6 +91,10 @@ fn assert_name_translation(
 ) {
     assert!(!drafts.is_empty(), "{slug}: pipeline produced zero drafts");
     assert_eq!(coverage.entries, drafts.len());
+    assert!(
+        coverage.splits > 0,
+        "{slug}: the splitter stage recorded zero splits"
+    );
     // Recipes that declare `country` in `writes_properties` populate
     // it whenever `partition_body_around_match` finds a bracketed-tag
     // region. A live book is expected to surface dozens; the loose
@@ -126,6 +130,10 @@ fn assert_name_translation(
 fn assert_philosophy(slug: &str, drafts: &[EntryDraft], coverage: &Coverage) {
     assert!(!drafts.is_empty(), "{slug}: pipeline produced zero drafts");
     assert_eq!(coverage.entries, drafts.len());
+    assert!(
+        coverage.splits > 0,
+        "{slug}: the splitter stage recorded zero splits"
+    );
 
     // `pair_bilingual_entries` stamps `pair_mismatch` on entries the
     // pairing stage leaves unpaired; the count surfaced in
