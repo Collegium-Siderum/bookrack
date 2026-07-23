@@ -1816,10 +1816,11 @@ release workflow extracts the matching section verbatim from this file.
   full-width-folded raw PDFium page text plus the source filename,
   rather than the structured Body block stream. Filename-encoded
   DOIs (`10.XXX_YYY.pdf`, `arxiv-NNNN.NNNNN.pdf`) and publisher
-  templates (`N19-1423`, `RJ-2016-007`) are folded to canonical
+  templates (`A00-0000`, `RJ-0000-000`) are folded to canonical
   identifiers and used in preference to text scans, since curator
-  naming is more reliable than character-level recovery for ACL
-  Anthology / R Journal / Acta Petrologica Sinica fullwidth glyphs.
+  naming is more reliable than character-level recovery for the few
+  publishers that drop, split, or render identifiers in fullwidth
+  glyphs.
   `detect_doi` adds a permissive variant that collapses internal
   kerning whitespace and rejects ACM camera-ready placeholders
   (`10.1145/nnnnnnn.nnnnnnn`); `detect_arxiv_id` requires an

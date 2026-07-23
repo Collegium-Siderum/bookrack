@@ -477,7 +477,7 @@ pub async fn glean_paper<E: Embedder>(
     let filename_stem = file.file_stem().map(|s| s.to_string_lossy().into_owned());
     let mut biblio = extraction.biblio.clone();
     // Title sniff overrides the PDF /Info /Title field unconditionally:
-    // template-rendered titles (`PLME0208_696-701.indd`, rotated arXiv
+    // template-rendered titles (`XMPL0101_100-105.indd`, rotated arXiv
     // banners) are noisier than `None` for the downstream metadata
     // audit.
     biblio.title = identify::sniff_title(biblio.title.as_deref());

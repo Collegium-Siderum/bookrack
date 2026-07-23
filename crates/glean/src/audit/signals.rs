@@ -625,7 +625,7 @@ mod tests {
         assert!(ARXIV_NEW_RE.is_match("0704.1234"));
         assert!(!ARXIV_NEW_RE.is_match("xyz/1234567"));
         assert!(ARXIV_OLD_RE.is_match("cs/0001001"));
-        assert!(ARXIV_OLD_RE.is_match("math.CO/0211159"));
+        assert!(ARXIV_OLD_RE.is_match("math.CO/0000000"));
         assert!(!ARXIV_OLD_RE.is_match("2401.12345"));
     }
 

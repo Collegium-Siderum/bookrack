@@ -13,13 +13,12 @@
 //!   [`bookrack_extract::extract_paper_metadata_text`]. Empty for
 //!   non-PDF inputs.
 //! * `filename_stem` — the source file stem. DOI- and arXiv-encoded
-//!   names (`10.18654_1000-0569_2025.04.17.pdf`, `arxiv-1706.03762.pdf`,
-//!   `N19-1423.pdf`, `RJ-2016-007.pdf`) are folded to canonical
+//!   names (`10.5555_1000-0000_2025.04.17.pdf`, `arxiv-0000.00001.pdf`,
+//!   `A00-0000.pdf`, `RJ-0000-000.pdf`) are folded to canonical
 //!   identifiers and used in preference to text scans, since curator
 //!   naming is more reliable than character-level PDF text recovery
 //!   for the few publishers that drop or split the identifier in the
-//!   visible layer (ACL Anthology, R Journal, Acta Petrologica
-//!   Sinica fullwidth glyphs).
+//!   visible layer or render it in fullwidth glyphs.
 //! * `info_title` — the PDF `/Info /Title` field. Used only as a
 //!   secondary source for the arXiv id (old-form ids are sometimes
 //!   stamped there) after a sniff filter rejects template filenames
@@ -63,17 +62,17 @@ static DOI_PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Filename DOI rules. The cache convention encodes the DOI as the
 /// file stem with `/` folded to `_`; the suffix may also contain `_`
-/// where the original DOI had `/` (Acta Petrologica Sinica's
-/// `10.18654/1000-0569/2025.04.17`).
+/// where the original DOI had `/` (journal DOIs shaped like
+/// `10.5555/1000-0000/2025.04.17`).
 static FN_DOI_NUMERIC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(10\.\d{4,9})_(.+)$").expect("filename DOI regex"));
 
-/// ACL Anthology codes (`N19-1423`, `D21-1234`, ...) map to
+/// ACL Anthology codes (`A00-0000`, `D00-0000`, ...) map to
 /// `10.18653/v1/<lowercase>` per the publisher's DOI scheme.
 static FN_ACL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?i)[A-Z]\d{2}-\d{3,4}$").expect("ACL anthology regex"));
 
-/// R Journal codes (`RJ-2016-007`) map to `10.32614/<lowercase>` per
+/// R Journal codes (`RJ-0000-000`) map to `10.32614/<lowercase>` per
 /// the publisher's DOI scheme.
 static FN_RJ_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?i)RJ-\d{4}-\d{3,4}$").expect("R Journal regex"));
@@ -89,7 +88,7 @@ static ARXIV_NEW_PREFIXED_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// arXiv new-form identifier immediately followed by a subject
-/// bracket — covers the page-banner shape `1706.03762 [cs.CL]` that
+/// bracket — covers the page-banner shape `0000.00001 [cs.XX]` that
 /// arXiv PDFs print without the `arXiv:` prefix repeated.
 static ARXIV_NEW_BRACKET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -113,11 +112,11 @@ static ARXIV_OLD_RAW_IN_TITLE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("arXiv old raw regex")
 });
 
-/// Filename rule for new-form arXiv IDs (`arxiv-1706.03762.pdf`).
+/// Filename rule for new-form arXiv IDs (`arxiv-0000.00001.pdf`).
 static FN_ARXIV_NEW_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^arxiv-(\d{4}\.\d{4,5})$").expect("filename arXiv new regex"));
 
-/// Filename rule for old-form arXiv IDs (`arxiv-math_0211159.pdf`)
+/// Filename rule for old-form arXiv IDs (`arxiv-math_0000000.pdf`)
 /// — the `/` is escaped to `_` in the on-disk name.
 static FN_ARXIV_OLD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^arxiv-([a-z][a-z\-]*)_(\d{7})$").expect("filename arXiv old regex")
@@ -155,8 +154,8 @@ static D_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^D:[0-9]{8,}").expect("PDF date regex"));
 
 /// Year embedded in a DOI suffix between slashes, hyphens, or dots
-/// (`10.1038/s41467-2024-NNNN`, `10.1360/csb-2025-0635`,
-/// `10.18654/1000-0569/2025.04.17`).
+/// (`10.5555/s0000-2024-0000`, `10.5555/jnl-2025-0001`,
+/// `10.5555/1000-0000/2025.04.17`).
 static DOI_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\-|/|\.)(20\d{2}|19\d{2})(?:\-|/|\.)").expect("DOI-embedded year regex")
 });
@@ -176,14 +175,14 @@ static VOL_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Production source-filename extensions that show up in `/Info.Title`
 /// when the camera-ready PDF was rendered straight from the typesetter
-/// (`PLME0208_696-701.indd`, `paper.tex`).
+/// (`XMPL0101_100-105.indd`, `paper.tex`).
 static TITLE_FILENAME_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\.(indd|docx?|tex|qxd|qxp|pages|ppt|key)\b")
         .expect("title-filename sniff regex")
 });
 
 /// Minimum alphabetic-character ratio for a string to be accepted as
-/// a title. Production filenames like `CSB-2025-0635-online 1..13`
+/// a title. Production filenames like `XYZ-2025-0000-online 1..13`
 /// land well below this cap. Pure-CJK titles score 1.0 since
 /// `char::is_alphabetic` recognises ideographs as letters.
 const TITLE_MIN_ALPHA_RATIO: f32 = 0.55;
@@ -254,8 +253,8 @@ pub fn detect_issn(metadata_text: Option<&str>) -> Option<String> {
 ///
 /// Source order:
 ///
-/// 1. The four-digit prefix of an arXiv id (`1706.03762` → 2017,
-///    `math/0211159` → 2002).
+/// 1. The four-digit prefix of an arXiv id (`2504.99999` → 2025,
+///    `math/0200000` → 2002).
 /// 2. A four-digit year encoded in a DOI suffix between separators.
 /// 3. A copyright stamp (`© YYYY`) or `Vol. NN, YYYY` line in
 ///    `metadata_text`.
@@ -638,24 +637,24 @@ mod tests {
     #[test]
     fn detect_doi_filename_handles_acl_anthology_code() {
         assert_eq!(
-            detect_doi(None, Some("N19-1423")),
-            Some("10.18653/v1/n19-1423".to_string()),
+            detect_doi(None, Some("A00-0000")),
+            Some("10.18653/v1/a00-0000".to_string()),
         );
     }
 
     #[test]
     fn detect_doi_filename_handles_r_journal_code() {
         assert_eq!(
-            detect_doi(None, Some("RJ-2016-007")),
-            Some("10.32614/rj-2016-007".to_string()),
+            detect_doi(None, Some("RJ-0000-000")),
+            Some("10.32614/rj-0000-000".to_string()),
         );
     }
 
     #[test]
     fn detect_doi_filename_handles_arxiv_new() {
         assert_eq!(
-            detect_doi(None, Some("arxiv-1706.03762")),
-            Some("10.48550/arxiv.1706.03762".to_string()),
+            detect_doi(None, Some("arxiv-0000.00001")),
+            Some("10.48550/arxiv.0000.00001".to_string()),
         );
     }
 
@@ -680,8 +679,8 @@ mod tests {
     #[test]
     fn detect_arxiv_id_matches_subject_bracket() {
         assert_eq!(
-            detect_arxiv_id(None, Some("1706.03762 [cs.CL] page header"), None),
-            Some("1706.03762".to_string()),
+            detect_arxiv_id(None, Some("0000.00001 [cs.XX] page header"), None),
+            Some("0000.00001".to_string()),
         );
     }
 
@@ -704,16 +703,16 @@ mod tests {
     #[test]
     fn detect_arxiv_id_filename_handles_new_form() {
         assert_eq!(
-            detect_arxiv_id(None, None, Some("arxiv-1706.03762")),
-            Some("1706.03762".to_string()),
+            detect_arxiv_id(None, None, Some("arxiv-0000.00001")),
+            Some("0000.00001".to_string()),
         );
     }
 
     #[test]
     fn detect_arxiv_id_filename_handles_old_form() {
         assert_eq!(
-            detect_arxiv_id(None, None, Some("arxiv-math_0211159")),
-            Some("math/0211159".to_string()),
+            detect_arxiv_id(None, None, Some("arxiv-math_0000000")),
+            Some("math/0000000".to_string()),
         );
     }
 
@@ -753,7 +752,7 @@ mod tests {
     fn detect_year_uses_arxiv_id_first() {
         assert_eq!(
             detect_year(
-                Some("2504.13684"),
+                Some("2504.99999"),
                 None,
                 Some(1999),
                 Some("D:19990101"),
@@ -766,7 +765,7 @@ mod tests {
     #[test]
     fn detect_year_recovers_old_arxiv_year() {
         assert_eq!(
-            detect_year(Some("math/0211159"), None, None, None, None),
+            detect_year(Some("math/0200000"), None, None, None, None),
             Some(2002),
         );
     }
@@ -776,7 +775,7 @@ mod tests {
         assert_eq!(
             detect_year(
                 None,
-                Some("10.18654/1000-0569/2025.04.17"),
+                Some("10.5555/1000-0000/2025.04.17"),
                 None,
                 Some("D:20240101"),
                 None,
@@ -827,7 +826,7 @@ mod tests {
 
     #[test]
     fn sniff_title_rejects_indesign_source_filename() {
-        assert_eq!(sniff_title(Some("PLME0208_696-701.indd")), None);
+        assert_eq!(sniff_title(Some("XMPL0101_100-105.indd")), None);
     }
 
     #[test]
@@ -840,7 +839,7 @@ mod tests {
 
     #[test]
     fn sniff_title_rejects_print_management_code() {
-        assert_eq!(sniff_title(Some("CSB-2025-0635-online 1..13")), None);
+        assert_eq!(sniff_title(Some("XYZ-2025-0000-online 1..13")), None);
     }
 
     #[test]
