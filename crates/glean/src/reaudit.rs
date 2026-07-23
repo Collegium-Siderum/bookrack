@@ -189,32 +189,31 @@ mod tests {
     fn sample_extraction(doi: Option<&str>) -> Extraction {
         Extraction {
             biblio: Biblio {
-                title: Some("Attention Is All You Need".to_string()),
+                title: Some("Synthetic Findings in Test Spaces".to_string()),
                 subtitle: None,
                 publisher: None,
-                year: Some(2017),
-                year_raw: Some("2017".to_string()),
+                year: Some(2020),
+                year_raw: Some("2020".to_string()),
                 isbn: None,
                 series: None,
                 language: Some("en".to_string()),
                 contributors: vec![Contributor {
-                    name: "Ashish Vaswani".to_string(),
+                    name: "First Author".to_string(),
                     role: ContributorRole::Author,
-                    family: Some("Vaswani".to_string()),
-                    given: Some("Ashish".to_string()),
+                    family: Some("Author".to_string()),
+                    given: Some("First".to_string()),
                     orcid: None,
                 }],
                 doi: doi.map(|s| s.to_string()),
-                arxiv_id: Some("1706.03762".to_string()),
+                arxiv_id: Some("0000.00001".to_string()),
                 issn: None,
-                container_title: Some("NeurIPS Proceedings".to_string()),
+                container_title: Some("Proceedings of the Synthetic Conference".to_string()),
                 abstract_text: Some(
-                    "The dominant sequence transduction models are based on complex \
-                     recurrent or convolutional neural networks that include an encoder \
-                     and a decoder. The best performing models also connect the encoder \
-                     and decoder through an attention mechanism. We propose a new simple \
-                     network architecture, the Transformer, based solely on attention \
-                     mechanisms, dispensing with recurrence and convolutions entirely."
+                    "This synthetic abstract describes a deliberately fictional study \
+                     of test spaces. We introduce a placeholder method, evaluate it on \
+                     invented data, and report results that exist only to give the \
+                     extraction pipeline a realistically shaped abstract to carry \
+                     through its stages."
                         .to_string(),
                 ),
                 csl_type: Some(CslType::PaperConference),

@@ -515,9 +515,9 @@ mod tests {
                 extract_outcome: "extracted".to_string(),
                 doi: Some("10.1/abc".to_string()),
                 arxiv_id: Some("2304.00001".to_string()),
-                venue: Some("NeurIPS".to_string()),
+                venue: Some("Synthetic Conference".to_string()),
                 abstract_source: Some("heading".to_string()),
-                title: Some("Attention Is All You Need".to_string()),
+                title: Some("Synthetic Findings in Test Spaces".to_string()),
                 year: Some(2017),
                 ..Default::default()
             },

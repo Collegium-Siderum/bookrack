@@ -648,7 +648,9 @@ mod tests {
     fn looks_like_arxiv_banner_catches_common_forms() {
         assert!(looks_like_arxiv_banner("arXiv:2401.12345"));
         assert!(looks_like_arxiv_banner("arxiv 2401.12345"));
-        assert!(!looks_like_arxiv_banner("Attention Is All You Need"));
+        assert!(!looks_like_arxiv_banner(
+            "Synthetic Findings in Test Spaces"
+        ));
     }
 
     #[test]
