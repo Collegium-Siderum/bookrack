@@ -3,17 +3,8 @@
 //! End-to-end round-trip for `bookrack exec library.info` against a
 //! live `bookrack run` daemon.
 //!
-//! Marked `#[ignore]` because the daemon's startup path opens a
-//! `bookrack_query::Library`, which probes the configured embedder
-//! (Ollama by default). That is a real network call that cannot
-//! be made on a CI runner without a local Ollama or a stand-in.
-//!
-//! Run it manually after wiring up Ollama against the configured
-//! `BOOKRACK_DATA_DIR`:
-//!
-//! ```text
-//! cargo test -p bookrack-cli --test exec_e2e -- --ignored --nocapture
-//! ```
+//! The embedder probe on the daemon's startup path is answered by the
+//! loopback stub in `common`, so no Ollama daemon is required.
 
 mod common;
 
@@ -24,7 +15,6 @@ use tokio::process::Command;
 use crate::common::{DaemonProcess, bookrack_bin, wait_for_lock};
 
 #[tokio::test]
-#[ignore]
 async fn library_info_round_trips_through_running_daemon() {
     let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
     let data_dir = tempfile::tempdir().expect("data tempdir");

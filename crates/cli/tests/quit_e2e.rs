@@ -6,13 +6,8 @@
 //! foreground task that blocks an OS thread would stall the tokio
 //! runtime's teardown and leave a drained-but-alive process behind.
 //!
-//! Marked `#[ignore]` because the daemon's startup path opens a
-//! `bookrack_query::Library`, which probes the configured embedder
-//! (Ollama by default). Run it manually:
-//!
-//! ```text
-//! cargo test -p bookrack-cli --test quit_e2e -- --ignored --nocapture
-//! ```
+//! The embedder probe on the daemon's startup path is answered by the
+//! loopback stub in `common`, so no Ollama daemon is required.
 
 mod common;
 
@@ -23,7 +18,6 @@ use tokio::process::Command;
 use crate::common::{DaemonProcess, bookrack_bin, wait_for_lock};
 
 #[tokio::test]
-#[ignore]
 async fn quit_terminates_the_daemon_process() {
     let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
     let data_dir = tempfile::tempdir().expect("data tempdir");

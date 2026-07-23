@@ -5,11 +5,14 @@
 //! and exits zero; a lock pointing at a dead daemon exits with status
 //! three so the operator removes it by hand.
 //!
-//! Ignored by default because the spawned `bookrack` binary opens an
-//! embedding client; without a reachable Ollama daemon the second
-//! launch never finishes its `daemon.version` probe.
+//! The embedder probe daemon bring-up performs — in-process and in
+//! spawned `bookrack` subprocesses, which inherit the environment —
+//! is answered by the loopback stub in `common`, so no Ollama daemon
+//! is required.
 
 #![cfg(unix)]
+
+mod common;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -24,8 +27,10 @@ static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
 /// Redirect the daemon state directory into a per-binary tempdir so
 /// bring-up (in-process and in spawned `bookrack` subprocesses, which
 /// inherit the environment) never touches the user's real per-user
-/// data directory.
+/// data directory, and answer the embedder probe from the loopback
+/// stub.
 fn isolate_daemon_state_dir() {
+    common::embed_stub_url();
     DAEMON_STATE_DIR.get_or_init(|| {
         let dir = tempfile::tempdir().expect("daemon state tempdir");
         // SAFETY: env is mutated exactly once, inside
@@ -49,7 +54,6 @@ fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
     isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
@@ -95,7 +99,6 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
     isolate_daemon_state_dir();
     let data_root = tempfile::tempdir()?;
@@ -191,7 +194,6 @@ async fn stale_lock_exits_three() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
     isolate_daemon_state_dir();
     // Covers one representative leg of the five shutdown paths that
