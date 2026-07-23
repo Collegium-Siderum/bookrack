@@ -25,6 +25,18 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **ingest, glean, runtime: the vectors-reset `--resume` hint prints
+  when a reset actually fails.** Both reset reports carried a
+  `failed_intake` field documented as "returned to the caller
+  alongside this report", but every failure path dropped the report
+  while returning the error, so the field was `None` in every report
+  a caller could observe — and the `vectors reset` / `papers vectors
+  reset` commands checked it on the success path, leaving their
+  resume guidance unreachable. The dead field and branches are gone;
+  the commands now print the resume hint on the actual failure path.
+  The failing intake remains identifiable on disk: it keeps its
+  `Extracted` status and the pipeline audit records the failure.
+
 - **runtime: the `mcp.availability` snapshot reports the real write
   state.** `events.snapshot` and the `events.subscribe` burst
   hardcoded `paused: false` for the `mcp.availability` channel, so a

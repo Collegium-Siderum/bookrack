@@ -29,8 +29,6 @@ pub struct ResetReport {
     /// chunking produced no plans. Their catalog status is left at
     /// `Extracted` so a follow-up can pick them up.
     pub skipped_empty: Vec<i64>,
-    /// The first intake an embed call failed on, if any.
-    pub failed_intake: Option<i64>,
 }
 
 /// Drop `lancedb_papers`'s chunks table, demote every `Embedded`
@@ -134,7 +132,6 @@ pub async fn reset_and_rechunk<E: Embedder>(
                         None,
                         Some(&e.to_string()),
                     );
-                    report.failed_intake = Some(intake_id);
                     return Err(e);
                 }
             };

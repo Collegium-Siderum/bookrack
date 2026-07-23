@@ -43,9 +43,6 @@ pub struct ResetReport {
     /// produced no plans. Their catalog status is left at `Extracted`
     /// so a follow-up run can pick them up if the corpus is repaired.
     pub skipped_empty: Vec<i64>,
-    /// The first intake an embed call failed on, if any. The error is
-    /// returned to the caller alongside this report.
-    pub failed_intake: Option<i64>,
 }
 
 /// Drop the chunks table, demote every `Embedded` intake to `Extracted`,
@@ -115,7 +112,6 @@ pub async fn reset_and_rechunk<E: Embedder>(
                     None,
                     Some(&error_chain(&e)),
                 );
-                report.failed_intake = Some(intake_id);
                 return Err(e);
             }
         };
@@ -157,7 +153,6 @@ pub async fn reset_and_rechunk<E: Embedder>(
                     None,
                     Some(&error_chain(&e)),
                 );
-                report.failed_intake = Some(intake_id);
                 return Err(e);
             }
         };
@@ -346,7 +341,6 @@ mod tests {
         .expect("reset");
 
         assert_eq!(report.intakes_reembedded, intake_ids.len());
-        assert!(report.failed_intake.is_none());
         assert!(report.chunks_written > 0);
 
         // Stamps reflect the new model + new dim.
@@ -483,6 +477,6 @@ mod tests {
         .await
         .expect("resume noop");
         assert_eq!(report.intakes_reembedded, 0);
-        assert!(report.failed_intake.is_none());
+        assert!(report.chunks_written == 0);
     }
 }
