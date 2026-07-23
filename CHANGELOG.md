@@ -25,6 +25,17 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **rerank: the client enforces `top_n` and descending-score order
+  itself.** The rerank client passed the server's result list through
+  unchanged apart from an index bounds check, so a backend that
+  ignored `top_n` or answered out of order silently broke the
+  documented "at most `top_n`, descending relevance" contract that
+  the search pipeline's rerank stage builds on. The client now sorts
+  by descending score (stable, total order) and truncates to `top_n`
+  after parsing; a mock test feeds a shuffled, overlong response to
+  pin the enforcement. The supervised llama-server backend already
+  conformed, so searches against it are unaffected.
+
 - **runtime: `papers.metadata.set` names the abstract field
   `abstract_text`.** The paper write surface accepted `abstract`, a
   field name the effective view never produces — an override stored

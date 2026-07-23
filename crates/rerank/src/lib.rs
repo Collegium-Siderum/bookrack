@@ -230,6 +230,12 @@ impl RerankClient {
                     score: entry.relevance_score,
                 });
             }
+            // The ordering and length contract is enforced here rather
+            // than trusted to the server: a stable sort on the total
+            // f32 order keeps the server's relative order between
+            // equal scores, then the list is cut to `top_n`.
+            ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+            ranked.truncate(top_n);
             Ok(ranked)
         } else {
             let code = status.as_u16();
@@ -452,6 +458,37 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, RerankError::Unreachable(_)), "got {err:?}");
         assert!(err.is_transient());
+    }
+
+    #[tokio::test]
+    async fn a_shuffled_overlong_response_is_sorted_and_truncated() {
+        // A backend that ignores `top_n` and returns ascending scores:
+        // the client enforces the ordering and length contract itself
+        // instead of trusting the server.
+        let url = mock_once(
+            "200 OK",
+            r#"{"results":[{"index":0,"relevance_score":0.1},
+                           {"index":2,"relevance_score":0.9},
+                           {"index":1,"relevance_score":0.5}]}"#,
+        )
+        .await;
+        let ranked = test_client(&url)
+            .rerank("q", &docs(3), 2)
+            .await
+            .expect("ok");
+        assert_eq!(
+            ranked,
+            vec![
+                RankedDocument {
+                    index: 2,
+                    score: 0.9
+                },
+                RankedDocument {
+                    index: 1,
+                    score: 0.5
+                },
+            ]
+        );
     }
 
     #[tokio::test]
