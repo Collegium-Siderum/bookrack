@@ -43,7 +43,7 @@ static EDITABLE_FIELDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "arxiv_id",
         "issn",
         "container_title",
-        "abstract",
+        "abstract_text",
         "csl_type",
     ]
     .into_iter()
@@ -394,6 +394,19 @@ mod tests {
             family: None,
             given: None,
             orcid: None,
+        }
+    }
+
+    #[test]
+    fn paper_editable_fields_are_a_subset_of_the_catalog_editable_set() {
+        // Every field this surface accepts must name a real
+        // effective-attrs field, or the stored override is invisible
+        // to every effective-view consumer (including the audit).
+        for field in EDITABLE_FIELDS.iter() {
+            assert!(
+                bookrack_catalog::EDITABLE_FIELDS.contains(field),
+                "{field} is not a catalog editable field",
+            );
         }
     }
 

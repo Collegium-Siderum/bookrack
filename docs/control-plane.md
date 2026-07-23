@@ -337,7 +337,7 @@ the exit-code bucket does not distinguish the two.
   library? }`. Writes an override on one paper field. `field` must
   belong to the editable set
   (`title`, `subtitle`, `publisher`, `year`, `language`, `series`,
-  `doi`, `arxiv_id`, `issn`, `container_title`, `abstract`,
+  `doi`, `arxiv_id`, `issn`, `container_title`, `abstract_text`,
   `csl_type`). `confirmed` marks the override as having been checked
   against the source.
 - `papers.metadata.clear` — `{ intake_id, field, library? }`.

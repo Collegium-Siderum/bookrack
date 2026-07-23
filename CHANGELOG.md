@@ -25,6 +25,16 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **runtime: `papers.metadata.set` names the abstract field
+  `abstract_text`.** The paper write surface accepted `abstract`, a
+  field name the effective view never produces — an override stored
+  under it was invisible to every effective-view consumer, including
+  the audit. The editable set now uses the effective-attrs name
+  (`abstract_text`), matching the book-side surface; `abstract` is
+  rejected with the usual not-editable error. Any override row
+  already stored under `abstract` should be re-set under
+  `abstract_text`.
+
 ### Changed
 
 - **extract, runtime: one format allowlist, enforced before
