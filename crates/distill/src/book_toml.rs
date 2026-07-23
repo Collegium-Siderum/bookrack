@@ -122,7 +122,7 @@ mod tests {
     /// downstream of `walk_anchors` so `into_pipeline` actually
     /// constructs each builtin.
     const LEGAL_BOOK: &str = r#"
-book_slug      = "name_translation_xinhua"
+book_slug      = "name_translation_alpha"
 schema_name    = "name_translation"
 schema_version = 1
 parser_version = "0.1.0"
@@ -182,7 +182,7 @@ field = "year_span.birth"
         // split_at_first_cjk, extract_year_span, extract_gender_tag,
         // partition_body_around_match, to_entry_draft.
         assert_eq!(pipeline.len(), 8);
-        assert_eq!(pipeline.name(), "name_translation_xinhua");
+        assert_eq!(pipeline.name(), "name_translation_alpha");
         // Both declared indexes survive the deserialize.
         assert_eq!(book.indexes.len(), 2);
         assert_eq!(book.indexes[0].field, "country");

@@ -275,7 +275,7 @@ mod tests {
         let mut ctx = Ctx::new();
         ctx.extras.insert(
             "book_slug".to_string(),
-            JsonValue::String("name_translation_xinhua".to_string()),
+            JsonValue::String("name_translation_alpha".to_string()),
         );
         let drafts = run_finalize(
             stage,
@@ -284,7 +284,7 @@ mod tests {
         );
         let draft = &drafts[0];
 
-        assert_eq!(draft.book_slug, "name_translation_xinhua");
+        assert_eq!(draft.book_slug, "name_translation_alpha");
         assert_eq!(draft.entry_key, "smithj");
         assert!(
             draft.fts_text.contains("Smith, J.")
@@ -335,7 +335,7 @@ mod tests {
         let mut ctx = Ctx::new();
         ctx.extras.insert(
             "book_slug".to_string(),
-            JsonValue::String("name_translation_xinhua".to_string()),
+            JsonValue::String("name_translation_alpha".to_string()),
         );
         ctx.extras.insert(
             "distill_run_id".to_string(),
@@ -343,7 +343,7 @@ mod tests {
         );
         ctx.extras.insert(
             "ocr_engine".to_string(),
-            JsonValue::String("polyocr glm 2026-06-22".to_string()),
+            JsonValue::String("ocr-engine 1.0".to_string()),
         );
         let drafts = run_finalize(
             stage,
@@ -351,6 +351,6 @@ mod tests {
             &mut ctx,
         );
         assert_eq!(drafts[0].source["distill_run_id"], "2026-06-25T10:23:00Z");
-        assert_eq!(drafts[0].source["ocr_engine"], "polyocr glm 2026-06-22");
+        assert_eq!(drafts[0].source["ocr_engine"], "ocr-engine 1.0");
     }
 }
