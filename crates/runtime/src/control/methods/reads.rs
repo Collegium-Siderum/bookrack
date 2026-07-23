@@ -52,7 +52,12 @@ pub fn snapshot_for(channel: &str, ctx: &MethodContext) -> Option<Value> {
         }
         "library.list" => ctx.registry.list().ok().map(library_list_value),
         "library.changed" => Some(json!({ "library": ctx.library_name })),
-        "mcp.availability" => Some(Event::McpAvailability { paused: false }.value()),
+        "mcp.availability" => Some(
+            Event::McpAvailability {
+                paused: ctx.event_stream.rpc_write_active(),
+            }
+            .value(),
+        ),
         "daemon.version" => Some(daemon_version(ctx)),
         _ => None,
     }
@@ -388,6 +393,43 @@ mod tests {
             queue_paused: Arc::new(AtomicBool::new(false)),
             log_stream: LogStreamHandle::new(8, 8),
             plan_registry: Arc::new(PlanRegistry::new()),
+        }
+    }
+
+    #[test]
+    fn mcp_availability_snapshot_tracks_the_rpc_write_source() {
+        // A client reconnecting mid-write must see `paused: true`,
+        // the same view a subscriber of the live event stream holds.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), None);
+        assert_eq!(
+            snapshot_for("mcp.availability", &ctx).unwrap(),
+            json!({ "paused": false })
+        );
+        ctx.event_stream.set_rpc_write(true);
+        assert_eq!(
+            snapshot_for("mcp.availability", &ctx).unwrap(),
+            json!({ "paused": true })
+        );
+        ctx.event_stream.set_rpc_write(false);
+        assert_eq!(
+            snapshot_for("mcp.availability", &ctx).unwrap(),
+            json!({ "paused": false })
+        );
+    }
+
+    #[test]
+    fn every_snapshot_channel_produces_a_value() {
+        // `events.subscribe` promises a full bundle; a channel whose
+        // snapshot silently resolves to None would leave reconnecting
+        // clients with a stale view of that channel.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), Some("main"));
+        for channel in SNAPSHOT_CHANNELS {
+            assert!(
+                snapshot_for(channel, &ctx).is_some(),
+                "channel {channel} must produce a snapshot value",
+            );
         }
     }
 

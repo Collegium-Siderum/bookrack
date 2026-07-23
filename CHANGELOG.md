@@ -25,6 +25,14 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **runtime: the `mcp.availability` snapshot reports the real write
+  state.** `events.snapshot` and the `events.subscribe` burst
+  hardcoded `paused: false` for the `mcp.availability` channel, so a
+  client connecting while a write command held the runtime-wide write
+  mutex saw the opposite of the truth — in the same bundle whose
+  `daemon.state` said `writing`. The snapshot now derives `paused`
+  from the RPC write source that the live events already track.
+
 - **rerank: the client enforces `top_n` and descending-score order
   itself.** The rerank client passed the server's result list through
   unchanged apart from an index bounds check, so a backend that

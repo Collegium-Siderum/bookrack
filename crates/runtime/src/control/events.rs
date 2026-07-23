@@ -361,6 +361,17 @@ impl EventStreamHandle {
         self.update_sources(|s| s.rpc_write = active);
     }
 
+    /// Whether an RPC write session currently holds the runtime-wide
+    /// write mutex — the state `mcp.availability` reports. Reads under
+    /// the same lock the producers update, so a snapshot taken between
+    /// two transitions sees one of them, never a torn value.
+    pub fn rpc_write_active(&self) -> bool {
+        self.sources
+            .lock()
+            .expect("state sources mutex poisoned")
+            .rpc_write
+    }
+
     /// Count a queue job as executing for the guard's lifetime. The
     /// guard's `Drop` decrements the count, so a panicking or aborted
     /// job cannot leave the daemon stranded in `working`.
