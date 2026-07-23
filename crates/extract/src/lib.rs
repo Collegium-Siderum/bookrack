@@ -25,6 +25,7 @@ mod quality;
 mod txt;
 
 pub use contract::*;
+pub use detect::SUPPORTED_EXTENSIONS;
 pub use envelope::{
     ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
     envelope_filename, envelope_filename_legacy, read_envelope, read_envelope_with_fallback,

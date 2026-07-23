@@ -68,11 +68,11 @@ pub fn save_atomic(state: &QueueState, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// File-extension allowlist for the `queue add <dir>` walk. The same
-/// list that the legacy `bookrack ingest --recursive` walker uses, so
-/// queueing a directory enqueues the same set the operator would have
-/// gotten from the standalone command.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["epub", "pdf", "mobi", "azw3", "txt"];
+/// File-extension allowlist for the `queue add <dir>` walk and the
+/// pre-enqueue check on explicit paths. Re-exported from
+/// `bookrack_extract`, the owner of the adapter surface, so the queue
+/// cannot accept a format the extractor has no adapter for.
+pub use bookrack_extract::SUPPORTED_EXTENSIONS;
 
 /// Walk `dir` depth-first and collect every regular file whose extension
 /// is in [`SUPPORTED_EXTENSIONS`]. Hidden files (those whose name starts
@@ -958,12 +958,16 @@ mod tests {
         std::fs::write(root.join("c.unsupported"), b"x").unwrap();
         std::fs::write(root.join(".hidden.epub"), b"h").unwrap();
         std::fs::write(root.join("sub/d.txt"), b"t").unwrap();
+        std::fs::write(root.join("e.html"), b"<p>h</p>").unwrap();
+        std::fs::write(root.join("f.mobi"), b"m").unwrap();
         let files = collect_supported_files(root).unwrap();
         let names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["a.epub", "b.pdf", "d.txt"]);
+        // html is in the allowlist; mobi has no extraction adapter and
+        // stays out of the walk.
+        assert_eq!(names, vec!["a.epub", "b.pdf", "e.html", "d.txt"]);
     }
 
     #[test]
