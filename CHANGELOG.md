@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **extract, runtime: one format allowlist, enforced before
+  enqueueing.** The queue's directory-walk allowlist had drifted from
+  the extractor's adapter surface: it admitted `mobi`/`azw3`, which
+  have no adapter and always failed later at EXTRACT as a `failed`
+  queue job with a buried error, and it silently skipped
+  `html`/`htm`/`xhtml`, which extract fine. Explicitly submitted
+  single files bypassed the list entirely. The allowlist now lives in
+  `bookrack_extract` next to the format detector (EPUB / PDF / TXT /
+  HTML), the walk consumes it from there, and `ingest.submit`,
+  `glean.submit`, and the direct single-file ingest command check it
+  up front — an unsupported file is refused with an actionable
+  message (mobi/azw3 point to EPUB conversion) instead of becoming a
+  job that cannot succeed.
+
 - **ops: `library.info` distinguishes broken stores from missing
   ones.** Every failure used to collapse into the same absent values
   a fresh library shows: an unopenable corpus fell back to blank
