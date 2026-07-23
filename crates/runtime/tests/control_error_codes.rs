@@ -8,57 +8,25 @@
 //! sequence of intentionally-bad write RPCs through a single
 //! connection and asserts on `error.code` for each.
 //!
-//! Ignored by default because the runtime calls
-//! [`bookrack_query::Library::open`], which probes the configured
-//! Ollama daemon for the embedding model's dimension. Run manually
-//! with `cargo test -p bookrack-runtime --test control_error_codes
-//! -- --ignored`.
+//! The embedder probe daemon bring-up performs is answered by the
+//! loopback stub in `common`, so no Ollama daemon is required.
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
+mod common;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Result, eyre};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
-use tokio::net::UnixStream;
+
+use crate::common::{Reader, Writer};
+use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
 
 const INVALID_PARAMS: i64 = -32602;
 const INVALID_LIBRARY: i64 = -32010;
 
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
-
-async fn send(stream: &mut WriteHalf<UnixStream>, line: &str) -> Result<()> {
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Value> {
-    let line = reader
-        .next_line()
-        .await?
-        .ok_or_else(|| eyre!("eof while expecting response"))?;
-    Ok(serde_json::from_str(&line)?)
-}
-
 async fn rpc_code(
-    writer: &mut WriteHalf<UnixStream>,
-    reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>,
+    writer: &mut Writer,
+    reader: &mut Reader,
     id: u64,
     method: &str,
     params: Value,
@@ -78,41 +46,22 @@ async fn rpc_code(
     Ok((code, message))
 }
 
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() {
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
-    isolate_daemon_state_dir();
+    init_test_env();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
+        true,
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = UnixStream::connect(&sock).await?;
-        let (r, mut w) = tokio::io::split(stream);
-        let mut reader = BufReader::new(r).lines();
+        let (mut reader, mut w) = connect(&sock).await?;
 
         // `library.set_default` with an unknown name has always returned
         // INVALID_LIBRARY (-32010); this guards the regression.
@@ -228,7 +177,5 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         Ok::<(), eyre::Report>(())
     });
 
-    runtime.run_until_shutdown(None, repl_handle).await?;
-    driver.await??;
-    Ok(())
+    join_with_deadline(runtime, repl_handle, driver).await
 }

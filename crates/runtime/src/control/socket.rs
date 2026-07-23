@@ -270,7 +270,19 @@ async fn serve_connection(
 
     loop {
         tokio::select! {
-            _ = shutdown_rx.recv() => break,
+            _ = shutdown_rx.recv() => {
+                // Flush events already queued on the subscription —
+                // in particular the `daemon.state = stopping`
+                // transition the shutdown dispatcher publishes ahead
+                // of the broadcast — before tearing the client down.
+                if let Some(rx) = event_rx.as_mut() {
+                    while let Ok(event) = rx.try_recv() {
+                        let notif = Notification::event(event.channel(), event.value());
+                        write_notification(&mut writer, notif).await?;
+                    }
+                }
+                break;
+            }
             line = reader.next_line() => {
                 match line {
                     Ok(Some(line)) => {

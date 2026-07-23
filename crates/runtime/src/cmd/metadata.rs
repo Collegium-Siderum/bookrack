@@ -120,12 +120,14 @@ fn set(
             println!("Set {field} on book {book}.");
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
-        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            eyre::bail!("{e}");
-        }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => Err(e.into()),
         Err(e) => Err(eyre::Report::from(e).wrap_err("set metadata field via ops")),
     }
 }
@@ -150,12 +152,14 @@ fn clear(
             }
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
-        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            eyre::bail!("{e}");
-        }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => Err(e.into()),
         Err(e) => Err(eyre::Report::from(e).wrap_err("clear metadata field via ops")),
     }
 }
@@ -182,12 +186,14 @@ fn void(
             }
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
-        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => {
-            eyre::bail!("{e}");
-        }
+        Err(e @ bookrack_ops::OpsError::UnknownMetadataField { .. }) => Err(e.into()),
         Err(e) => Err(eyre::Report::from(e).wrap_err("void metadata field via ops")),
     }
 }
@@ -212,8 +218,12 @@ fn reaudit(
             );
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e) => Err(eyre::Report::from(e).wrap_err("reaudit metadata via ops")),
     }
@@ -242,8 +252,12 @@ fn contributor_add(
             );
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e @ bookrack_ops::OpsError::UnknownContributorRole { .. }) => {
             eyre::bail!("{e}");
@@ -268,8 +282,12 @@ fn contributor_remove(
             println!("Removed contributor row {contributor_id} from book {book}.");
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e @ bookrack_ops::OpsError::ContributorNotFound { .. }) => {
             eyre::bail!("{e}");
@@ -288,8 +306,12 @@ fn ack(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
             println!("Acknowledged metadata gap on book {book}.");
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e) => Err(eyre::Report::from(e).wrap_err("acknowledge metadata gap via ops")),
     }
@@ -308,8 +330,12 @@ fn approve(ops: &Ops<OllamaEmbedClient>, book: i64, reason: Option<&str>) -> Res
             println!("Approved metadata on book {book}.");
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e) => Err(eyre::Report::from(e).wrap_err("approve metadata via ops")),
     }
@@ -328,8 +354,12 @@ fn reject(ops: &Ops<OllamaEmbedClient>, book: i64, reason: &str) -> Result<()> {
             println!("Rejected book {book}.");
             Ok(())
         }
-        Err(bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
-            eyre::bail!("no intake registered for book {intake_id}");
+        Err(e @ bookrack_ops::OpsError::IntakeNotFound { intake_id }) => {
+            // The typed error stays in the chain so the control plane
+            // maps it to INVALID_PARAMS; the context line carries the
+            // operator-facing "book" wording.
+            Err(eyre::Report::from(e)
+                .wrap_err(format!("no intake registered for book {intake_id}")))
         }
         Err(e) => Err(eyre::Report::from(e).wrap_err("reject metadata via ops")),
     }

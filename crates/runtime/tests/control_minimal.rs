@@ -7,151 +7,103 @@
 //! handshake the contract guarantees:
 //!
 //! 1. `daemon.version` returns the workspace version.
-//! 2. `events.subscribe` returns `{ subscribed: true }` and then a
-//!    snapshot bundle of four channels.
+//! 2. `events.subscribe` returns `{ subscribed: true }` and then the
+//!    snapshot bundle, one notification per contract channel, in
+//!    contract order.
 //! 3. `doctor.gather` returns a structured report.
 //! 4. `daemon.shutdown` triggers a `daemon.state = stopping` notification.
 //!
-//! Ignored by default because the runtime calls
-//! [`bookrack_query::Library::open`], which probes the configured
-//! Ollama daemon for the embedding model's dimension.
+//! The embedder probe daemon bring-up performs is answered by the
+//! loopback stub in `common`, so no Ollama daemon is required.
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
+mod common;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::Result;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
+use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
 
-async fn send(stream: &mut tokio::io::WriteHalf<UnixStream>, line: &str) -> Result<()> {
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
-}
+/// The documented `events.subscribe` snapshot bundle, in broadcast
+/// order. Pinned literally so a channel added to or removed from the
+/// runtime's `SNAPSHOT_CHANNELS` fails here until the control-plane
+/// contract moves with it.
+const SNAPSHOT_CONTRACT: [&str; 7] = [
+    "daemon.state",
+    "queue.list",
+    "queue.tick",
+    "library.list",
+    "library.changed",
+    "mcp.availability",
+    "daemon.version",
+];
 
-async fn recv_line(
-    reader: &mut tokio::io::Lines<BufReader<tokio::io::ReadHalf<UnixStream>>>,
-) -> Result<Value> {
-    let line = reader
-        .next_line()
-        .await?
-        .ok_or_else(|| eyre::eyre!("eof while expecting response"))?;
-    Ok(serde_json::from_str(&line)?)
-}
-
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() {
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_loop_subscribe_doctor_shutdown() -> Result<()> {
-    isolate_daemon_state_dir();
+    init_test_env();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
+        false,
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
-    let shutdown_tx = runtime.shutdown_tx.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
-    let driver = {
-        let sock = sock.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let stream = UnixStream::connect(&sock).await?;
-            let (read_half, mut write_half) = tokio::io::split(stream);
-            let mut reader = BufReader::new(read_half).lines();
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut writer) = connect(&sock).await?;
 
-            send(
-                &mut write_half,
-                r#"{"jsonrpc":"2.0","id":1,"method":"daemon.version"}"#,
-            )
-            .await?;
-            let v = recv_line(&mut reader).await?;
-            assert!(v["result"]["version"].as_str().is_some(), "{v}");
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"daemon.version"}"#,
+        )
+        .await?;
+        let v = recv(&mut reader).await?;
+        assert!(v["result"]["version"].as_str().is_some(), "{v}");
 
-            send(
-                &mut write_half,
-                r#"{"jsonrpc":"2.0","id":2,"method":"events.subscribe"}"#,
-            )
-            .await?;
-            let resp = recv_line(&mut reader).await?;
-            assert_eq!(resp["result"]["subscribed"], Value::from(true), "{resp}");
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"events.subscribe"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["result"]["subscribed"], Value::from(true), "{resp}");
 
-            let mut channels = Vec::new();
-            for _ in 0..4 {
-                let notif = recv_line(&mut reader).await?;
-                channels.push(
-                    notif["params"]["channel"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string(),
-                );
-            }
-            assert!(channels.iter().any(|c| c == "daemon.state"), "{channels:?}");
-            assert!(
-                channels.iter().any(|c| c == "daemon.version"),
-                "{channels:?}"
+        let mut channels = Vec::new();
+        for _ in 0..SNAPSHOT_CONTRACT.len() {
+            let notif = recv(&mut reader).await?;
+            channels.push(
+                notif["params"]["channel"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
             );
+        }
+        assert_eq!(channels, SNAPSHOT_CONTRACT, "snapshot bundle drifted");
 
-            send(
-                &mut write_half,
-                r#"{"jsonrpc":"2.0","id":3,"method":"doctor.gather"}"#,
-            )
-            .await?;
-            let v = recv_line(&mut reader).await?;
-            assert!(v["result"]["rows"].is_array(), "{v}");
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":3,"method":"doctor.gather"}"#,
+        )
+        .await?;
+        let v = recv(&mut reader).await?;
+        assert!(v["result"]["rows"].is_array(), "{v}");
 
-            send(
-                &mut write_half,
-                r#"{"jsonrpc":"2.0","id":4,"method":"daemon.shutdown"}"#,
-            )
-            .await?;
-            let _ = recv_line(&mut reader).await?;
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":4,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
 
-            let stopping = recv_line(&mut reader).await?;
-            assert_eq!(stopping["params"]["channel"], "daemon.state");
-            assert_eq!(stopping["params"]["value"], "stopping");
-            Ok::<(), eyre::Report>(())
-        })
-    };
+        let stopping = recv(&mut reader).await?;
+        assert_eq!(stopping["params"]["channel"], "daemon.state");
+        assert_eq!(stopping["params"]["value"], "stopping");
+        Ok::<(), eyre::Report>(())
+    });
 
-    runtime.run_until_shutdown(None, repl_handle).await?;
-    driver.await??;
-    let _ = shutdown_tx; // keep the broadcast alive in scope
-    Ok(())
+    join_with_deadline(runtime, repl_handle, driver).await
 }

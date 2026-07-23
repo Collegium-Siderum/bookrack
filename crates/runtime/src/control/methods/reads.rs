@@ -77,6 +77,13 @@ pub fn daemon_version_rpc(_params: &Option<Value>, ctx: &MethodContext) -> Resul
 }
 
 pub fn daemon_shutdown(ctx: &MethodContext) -> Value {
+    // Publish the `daemon.state = stopping` transition before firing
+    // the shutdown broadcast: connection tasks exit on the broadcast,
+    // and flush events queued ahead of it on their way out, so this
+    // order is what guarantees attached subscribers see the stopping
+    // notification. (`run_until_shutdown` calls `set_stopping` again
+    // for the non-RPC shutdown paths; the repeat is a no-op.)
+    ctx.event_stream.set_stopping();
     let _ = ctx.shutdown_tx.send(());
     Value::Null
 }
