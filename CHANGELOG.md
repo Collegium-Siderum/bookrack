@@ -25,6 +25,17 @@ release workflow extracts the matching section verbatim from this file.
   `missing` grades until their papers are re-audited
   (`papers.metadata.reaudit`).
 
+- **glean: a thesis with its institution can audit clean.** The CSL
+  requirement matrix marks `publisher` (the institution, in CSL
+  terms) as required for a thesis, but no grader produced that field,
+  so the roll-up saw it as missing on every thesis and floored the
+  verdict to `needs_work` with low confidence regardless of the
+  actual metadata. A presence-only publisher grader now feeds the
+  roll-up; the grade travels in the report JSON and has no dedicated
+  `grade_*` column on `node_paper_audit`. Thesis rows audited before
+  the fix stay `needs_work` until re-audited
+  (`papers.metadata.reaudit`).
+
 - **distill: the `splits` coverage counter is actually written.** The
   `Coverage` doc promised its counters were written by the matching
   stages, but neither splitter stage touched `splits`, so every

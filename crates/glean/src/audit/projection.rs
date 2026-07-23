@@ -203,6 +203,7 @@ mod tests {
         let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
         attrs.title = Some("Synthetic Findings in Test Spaces".to_string());
         attrs.year = Some("2019".to_string());
+        attrs.publisher = Some("Journal of Synthetic Results Press".to_string());
         attrs.doi = Some("10.18653/v1/n19-1423".to_string());
         attrs.arxiv_id = Some("2401.12345".to_string());
         attrs.issn = Some("0378-5955".to_string());
@@ -269,8 +270,23 @@ mod tests {
     fn grade_columns_cover_every_audited_field() {
         // The set of field keys a real audit emits must equal the set
         // GRADE_COLUMNS projects from, so neither side can drift.
+        // `publisher` is the one deliberate exception: graded for the
+        // roll-up (a thesis requires its institution) but carried only
+        // in the report JSON, with no grade_* column of its own.
+        const UNPROJECTED: &[&str] = &["publisher"];
         let report = fully_populated_report();
-        let mut emitted: Vec<&str> = report.fields.keys().copied().collect();
+        for key in UNPROJECTED {
+            assert!(
+                report.fields.contains_key(key),
+                "{key} must still be graded; prune it from UNPROJECTED otherwise",
+            );
+        }
+        let mut emitted: Vec<&str> = report
+            .fields
+            .keys()
+            .copied()
+            .filter(|key| !UNPROJECTED.contains(key))
+            .collect();
         let mut projected: Vec<&str> = GRADE_COLUMNS.iter().map(|(_, key)| *key).collect();
         emitted.sort_unstable();
         projected.sort_unstable();

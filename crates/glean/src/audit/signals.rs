@@ -71,6 +71,7 @@ pub fn audit_paper(
     grade_arxiv(input, profile, &mut fields);
     grade_issn(input, profile, &mut fields);
     grade_container(input, profile, data, &mut fields);
+    grade_publisher(input, &mut fields);
     grade_abstract(input, profile, &mut fields);
     grade_author(input, profile, data, &mut fields);
     grade_language(input, profile, &mut fields);
@@ -236,6 +237,17 @@ fn grade_container(
         report.weaken_to(PaperFieldGrade::Weak, PaperFlag::VenueNotInList);
     }
     fields.insert("container_title", report);
+}
+
+/// Presence-only grade for the publisher — a thesis's institution in
+/// CSL terms. The field has no weakening signals, so it reads Strong
+/// when the effective view carries a value and Missing otherwise; the
+/// roll-up floors the verdict only where the CSL matrix marks it
+/// Required (thesis).
+fn grade_publisher(input: &PaperAuditInput, fields: &mut BTreeMap<&'static str, PaperFieldReport>) {
+    let value = input.effective.get("publisher");
+    let report = start_field("publisher", value);
+    fields.insert("publisher", report);
 }
 
 fn grade_abstract(
@@ -704,6 +716,81 @@ mod tests {
                 .cross_field_flags
                 .contains(&PaperFlag::NoStableIdentifier)
         );
+    }
+
+    /// Effective attrs for a thesis-shaped paper: title, year, and a
+    /// valid DOI always set, the publisher (institution) per argument.
+    fn effective_thesis(publisher: Option<&str>) -> EffectiveAttrs {
+        use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
+        use bookrack_core::ItemKind;
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("beefbeef".to_string()).format("pdf".to_string()),
+            )
+            .expect("register");
+        let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
+        attrs.title = Some("A Study of Synthetic Test Corpora".to_string());
+        attrs.year = Some("2020".to_string());
+        attrs.doi = Some("10.18653/v1/n19-1423".to_string());
+        attrs.publisher = publisher.map(str::to_string);
+        catalog.upsert_publication_attrs(&attrs).expect("upsert");
+        catalog
+            .effective_publication_attrs(intake.intake().intake_id, ItemKind::Paper)
+            .expect("effective")
+    }
+
+    fn thesis_biblio() -> Biblio {
+        let mut biblio = empty_biblio();
+        biblio.csl_type = Some(CslType::Thesis);
+        biblio.contributors = vec![Contributor {
+            name: "Alex Sample".to_string(),
+            role: bookrack_extract::ContributorRole::Author,
+            family: None,
+            given: None,
+            orcid: None,
+        }];
+        biblio
+    }
+
+    #[test]
+    fn a_thesis_with_its_institution_audits_clean() {
+        let profile = PaperAuditProfile::default_profile();
+        let data = PaperAuditData::empty();
+        let biblio = thesis_biblio();
+        let provenance = empty_provenance();
+        let effective = effective_thesis(Some("Synthetic Institute of Technology"));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        assert_eq!(report.verdict, PaperVerdict::Clean, "{report:?}");
+        assert_eq!(report.confidence, PaperConfidence::High, "{report:?}");
+    }
+
+    #[test]
+    fn a_thesis_missing_its_institution_stays_needs_work() {
+        let profile = PaperAuditProfile::default_profile();
+        let data = PaperAuditData::empty();
+        let biblio = thesis_biblio();
+        let provenance = empty_provenance();
+        let effective = effective_thesis(None);
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        assert_eq!(report.verdict, PaperVerdict::NeedsWork, "{report:?}");
+        let publisher = report.fields.get("publisher").expect("publisher graded");
+        assert_eq!(publisher.grade, PaperFieldGrade::Missing);
     }
 
     fn empty_biblio() -> Biblio {
