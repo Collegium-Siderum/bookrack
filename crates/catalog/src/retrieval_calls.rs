@@ -443,11 +443,9 @@ mod tests {
 
     #[test]
     fn delete_mcp_tool_call_cascades_to_retrieval_calls_and_hits() {
+        // No manual `PRAGMA foreign_keys` here: the open path itself must
+        // deliver a connection with enforcement on.
         let catalog = Catalog::open_in_memory().expect("open");
-        catalog
-            .conn
-            .pragma_update(None, "foreign_keys", "ON")
-            .expect("enable foreign keys");
         let call_id = seed_call(&catalog, "deadbeefcafef00d", &[("p-alpha", 0.12)]);
 
         catalog
@@ -469,5 +467,35 @@ mod tests {
             })
             .expect("count hits");
         assert_eq!((calls, hits), (0, 0));
+    }
+
+    #[test]
+    fn prune_cascades_on_a_reopened_current_version_database() {
+        // A file-backed database reopened at the current schema revision
+        // takes the no-migration branch of the open path; the cascade must
+        // fire on that connection too, not only on a freshly migrated one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+        {
+            let catalog = Catalog::open(&path).expect("first open");
+            seed_call(
+                &catalog,
+                "feedfacecafebeef",
+                &[("p-alpha", 0.5), ("p-beta", 0.25)],
+            );
+        }
+
+        let catalog = Catalog::open(&path).expect("reopen");
+        let deleted = catalog
+            .prune_retrieval_calls_with_stale_fingerprint("0123456789abcdef")
+            .expect("prune");
+        assert_eq!(deleted, 1);
+        let hits: i64 = catalog
+            .conn
+            .query_row("SELECT COUNT(*) FROM retrieval_call_hits", [], |row| {
+                row.get(0)
+            })
+            .expect("count hits");
+        assert_eq!(hits, 0, "hits must cascade with the pruned call");
     }
 }

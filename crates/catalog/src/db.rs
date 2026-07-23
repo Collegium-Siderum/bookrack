@@ -142,17 +142,15 @@ impl Catalog {
                 {
                     backup_catalog(&conn, dir, stem, current)?;
                 }
-                // Foreign keys are toggled around the migration, not
-                // inside it: a future 12-step table rebuild needs them
-                // off, and `PRAGMA foreign_keys` is a no-op within the
-                // migration's transaction. `catalog.db` declares none
-                // today; the dance keeps the seam ready for one that
-                // does.
+                // Foreign keys are switched off for the migration: a
+                // 12-step table rebuild needs them off, and `PRAGMA
+                // foreign_keys` is a no-op within the migration's
+                // transaction. The unconditional enable below restores
+                // enforcement once the migration has committed.
                 conn.pragma_update(None, "foreign_keys", "OFF")?;
                 migrations()
                     .to_latest(&mut conn)
                     .map_err(CatalogError::Migrate)?;
-                conn.pragma_update(None, "foreign_keys", "ON")?;
             }
             OpenDecision::Match => {}
             // `catalog.db` is source-of-truth and never produces this
@@ -160,6 +158,15 @@ impl Catalog {
             // forward, and there is no derived-stamp axis to disagree on.
             OpenDecision::Rederive { .. } => unreachable!("catalog.db is never rederived"),
         }
+
+        // `foreign_keys` is a per-connection PRAGMA whose default is a
+        // compile-time option of the linked SQLite: the bundled build
+        // sets `SQLITE_DEFAULT_FOREIGN_KEYS=1`, stock SQLite defaults
+        // to off. The schema declares `ON DELETE CASCADE` edges
+        // (distill stage rows, pipeline run summaries, retrieval calls
+        // and hits), so enable enforcement explicitly on every open
+        // rather than relying on the vendored build flag.
+        conn.pragma_update(None, "foreign_keys", "ON")?;
 
         // Acceptance gate, run on every open: `rusqlite_migration` advances
         // `user_version` but does not check the resulting schema shape.
@@ -419,6 +426,25 @@ mod tests {
             reopened.meta_get(SCHEMA_VERSION_KEY).expect("read")
         };
         assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn reopening_a_current_version_database_enforces_foreign_keys() {
+        // The second open takes the no-migration branch; enforcement must
+        // be on regardless of the linked SQLite's compile-time default.
+        let dir = unique_dir("fk-steady-state");
+        let path = dir.join("catalog.db");
+        Catalog::open(&path).expect("first open");
+        {
+            let reopened = Catalog::open(&path).expect("second open");
+            let fk: i64 = reopened
+                .conn
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+                .expect("read pragma");
+            assert_eq!(fk, 1, "foreign_keys must be on for a current-version open");
+        }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
