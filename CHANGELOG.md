@@ -8,6 +8,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **glean, catalog: three paper-audit grade columns no longer stuck
+  at `missing`.** The audit's per-field reports and the
+  `node_paper_audit` projection disagreed on field-key names:
+  `GRADE_COLUMNS` looked up `arxiv` and `container` where the graders
+  record `arxiv_id` and `container_title`, so `grade_arxiv` and
+  `grade_container` wrote `missing` regardless of the paper; and the
+  abstract grader read the nonexistent effective key `abstract` where
+  the effective view names it `abstract_text`, so `grade_abstract`
+  always graded `missing` and the `abstract_too_short` signal could
+  never fire. The keys are now unified on the effective-attrs names
+  end to end (graders, roll-up candidates, CSL requirement matrix,
+  projection). Audit rows written before the fix carry the stuck
+  `missing` grades until their papers are re-audited
+  (`papers.metadata.reaudit`).
+
 ### Changed
 
 - **extract, runtime: one format allowlist, enforced before

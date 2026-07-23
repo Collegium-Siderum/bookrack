@@ -37,12 +37,12 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
     match csl_type {
         Some(CslType::ArticleJournal) => match field {
             "title" | "author" | "year" | "container_title" | "doi" => Required,
-            "issn" | "abstract" | "volume" => Recommended,
+            "issn" | "abstract_text" | "volume" => Recommended,
             _ => Optional,
         },
         Some(CslType::PaperConference) => match field {
             "title" | "author" | "year" | "container_title" => Required,
-            "doi" | "abstract" | "page" => Recommended,
+            "doi" | "abstract_text" | "page" => Recommended,
             _ => Optional,
         },
         Some(CslType::Chapter) => match field {
@@ -52,7 +52,7 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
         },
         Some(CslType::Thesis) => match field {
             "title" | "author" | "year" | "publisher" => Required,
-            "abstract" => Recommended,
+            "abstract_text" => Recommended,
             _ => Optional,
         },
         Some(CslType::Report) => match field {
@@ -67,7 +67,7 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
         },
         None => match field {
             "title" | "author" | "year" => Required,
-            "doi" | "abstract" => Recommended,
+            "doi" | "abstract_text" => Recommended,
             _ => Optional,
         },
     }
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(requirement(t, "container_title"), Required);
         assert_eq!(requirement(t, "doi"), Required);
         assert_eq!(requirement(t, "issn"), Recommended);
-        assert_eq!(requirement(t, "abstract"), Recommended);
+        assert_eq!(requirement(t, "abstract_text"), Recommended);
         assert_eq!(requirement(t, "arxiv_id"), Optional);
     }
 

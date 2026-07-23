@@ -215,6 +215,17 @@ async fn glean_paper_walks_the_five_stage_pipeline_and_is_idempotent() {
             "grade column must hold a known token, got {grade:?}",
         );
     }
+    // Fields the fixture populates must not project as missing.
+    for col in ["grade_arxiv", "grade_abstract"] {
+        let idx = GRADE_COLUMNS
+            .iter()
+            .position(|(name, _)| *name == col)
+            .expect("grade column present");
+        assert_ne!(
+            paper_audit.grades[idx], "missing",
+            "{col} must reflect the populated field",
+        );
+    }
     assert_eq!(paper_audit.flags.len(), FLAG_COLUMNS.len());
     for flag in &paper_audit.flags {
         assert!(*flag == 0 || *flag == 1, "flag column must be 0 or 1");

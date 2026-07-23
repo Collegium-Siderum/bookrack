@@ -265,9 +265,9 @@ impl PaperFieldReport {
 /// Full audit report for one paper.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaperReport {
-    /// Per-field outcomes, keyed by field name (e.g. `"title"`,
-    /// `"doi"`, `"abstract"`). Field-name keys are stable strings
-    /// suitable for JSON.
+    /// Per-field outcomes, keyed by the effective-attrs field name
+    /// (e.g. `"title"`, `"doi"`, `"abstract_text"`). Field-name keys
+    /// are stable strings suitable for JSON.
     pub fields: BTreeMap<&'static str, PaperFieldReport>,
     pub verdict: PaperVerdict,
     pub confidence: PaperConfidence,

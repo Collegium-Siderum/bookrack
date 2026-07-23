@@ -243,15 +243,15 @@ fn grade_abstract(
     profile: &PaperAuditProfile,
     fields: &mut BTreeMap<&'static str, PaperFieldReport>,
 ) {
-    let value = input.effective.get("abstract");
-    let mut report = start_field("abstract", value);
+    let value = input.effective.get("abstract_text");
+    let mut report = start_field("abstract_text", value);
     if let Some(val) = value
         && profile.abstract_.required
         && (val.trim().chars().count() as u32) < profile.abstract_.min_chars
     {
         report.weaken_to(PaperFieldGrade::Weak, PaperFlag::AbstractTooShort);
     }
-    fields.insert("abstract", report);
+    fields.insert("abstract_text", report);
 }
 
 fn grade_author(
@@ -555,7 +555,7 @@ const REQUIRED_FIELD_CANDIDATES: &[&str] = &[
     "container_title",
     "doi",
     "publisher",
-    "abstract",
+    "abstract_text",
 ];
 
 // ─── pinned regexes ────────────────────────────────────────────────

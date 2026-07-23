@@ -181,23 +181,113 @@ mod tests {
         }
     }
 
+    /// Run the real audit over a paper whose nine audited fields are
+    /// all populated, and return its report.
+    fn fully_populated_report() -> PaperReport {
+        use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
+        use bookrack_core::ItemKind;
+        use bookrack_extract::{
+            Biblio, Contributor, ContributorRole, Provenance, TextLayerQuality,
+        };
+
+        use crate::audit::data::PaperAuditData;
+        use crate::audit::signals::{PaperAuditInput, audit_paper};
+
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("cafebabe".to_string()).format("pdf".to_string()),
+            )
+            .expect("register");
+        let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
+        attrs.title = Some("Synthetic Findings in Test Spaces".to_string());
+        attrs.year = Some("2019".to_string());
+        attrs.doi = Some("10.18653/v1/n19-1423".to_string());
+        attrs.arxiv_id = Some("2401.12345".to_string());
+        attrs.issn = Some("0378-5955".to_string());
+        attrs.container_title = Some("Journal of Synthetic Results".to_string());
+        attrs.abstract_text = Some(
+            "A synthetic abstract long enough to clear the minimum length \
+             the default profile requires for the abstract field."
+                .to_string(),
+        );
+        attrs.language = Some("en".to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("upsert");
+        let effective = catalog
+            .effective_publication_attrs(intake.intake().intake_id, ItemKind::Paper)
+            .expect("effective");
+
+        let biblio = Biblio {
+            title: None,
+            subtitle: None,
+            publisher: None,
+            year: None,
+            year_raw: None,
+            isbn: None,
+            series: None,
+            language: None,
+            contributors: vec![Contributor {
+                name: "Alex Sample".to_string(),
+                role: ContributorRole::Author,
+                family: None,
+                given: None,
+                orcid: None,
+            }],
+            doi: None,
+            arxiv_id: None,
+            issn: None,
+            container_title: None,
+            abstract_text: None,
+            csl_type: None,
+        };
+        let provenance = Provenance {
+            adapter: "pdf".to_string(),
+            extractor_version: 1,
+            text_layer_quality: TextLayerQuality::Usable,
+            skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+        };
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "The quick brown fox jumps over the lazy dog.",
+            source_stem: Some("paper-0001"),
+        };
+        audit_paper(
+            &input,
+            &PaperAuditProfile::default_profile(),
+            &PaperAuditData::empty(),
+        )
+    }
+
     #[test]
     fn grade_columns_cover_every_audited_field() {
-        // Every grade column's field-key matches a key the audit
-        // emits. The audit's nine graders feed exactly these keys.
-        let expected = [
-            "title",
-            "year",
-            "doi",
-            "arxiv",
-            "issn",
-            "container",
-            "abstract",
-            "author",
-            "language",
-        ];
-        let actual: Vec<&str> = GRADE_COLUMNS.iter().map(|(_, k)| *k).collect();
-        assert_eq!(actual, expected);
+        // The set of field keys a real audit emits must equal the set
+        // GRADE_COLUMNS projects from, so neither side can drift.
+        let report = fully_populated_report();
+        let mut emitted: Vec<&str> = report.fields.keys().copied().collect();
+        let mut projected: Vec<&str> = GRADE_COLUMNS.iter().map(|(_, key)| *key).collect();
+        emitted.sort_unstable();
+        projected.sort_unstable();
+        assert_eq!(projected, emitted);
+    }
+
+    #[test]
+    fn a_fully_populated_paper_grades_no_column_missing() {
+        let report = fully_populated_report();
+        let row = row(&report);
+        for ((col, _), grade) in GRADE_COLUMNS.iter().zip(row.grades.iter()) {
+            assert_ne!(
+                grade.as_str(),
+                "missing",
+                "{col} must not grade missing when every audited field is populated",
+            );
+        }
     }
 
     #[test]
