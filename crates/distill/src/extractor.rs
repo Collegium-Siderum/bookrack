@@ -542,14 +542,14 @@ mod tests {
     }
 
     /// In name-translation dictionaries the year span often rides on
-    /// the latin headword (`Balch, Emily Greene (1867-1961)`) after
+    /// the latin headword (`Smith, Mary Anne (1870-1955)`) after
     /// `split_at_first_cjk` has cut the CJK gloss out into the body.
     /// `search_in = "headword"` finds it there and strips it from the
     /// headword without touching the body.
     #[test]
     fn extract_year_span_with_search_in_headword_strips_from_headword_only() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1867-1961)",
+            "Smith, Mary Anne (1870-1955)",
             "American sociologist",
         )];
         let out = run(
@@ -558,9 +558,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].headword, "Smith, Mary Anne");
         assert_eq!(out[0].body, "American sociologist");
     }
 
@@ -570,8 +570,8 @@ mod tests {
     #[test]
     fn extract_year_span_with_search_in_both_prefers_body() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1900-1980)",
-            "American sociologist (1867-1961)",
+            "Smith, Mary Anne (1900-1980)",
+            "American sociologist (1870-1955)",
         )];
         let out = run(
             extract_year_span("year_span".to_string(), SearchTarget::Both),
@@ -579,9 +579,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene (1900-1980)");
+        assert_eq!(out[0].headword, "Smith, Mary Anne (1900-1980)");
         assert_eq!(out[0].body, "American sociologist");
     }
 
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn extract_year_span_with_search_in_both_falls_back_to_headword() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1867-1961)",
+            "Smith, Mary Anne (1870-1955)",
             "American sociologist",
         )];
         let out = run(
@@ -599,9 +599,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].headword, "Smith, Mary Anne");
         assert_eq!(out[0].body, "American sociologist");
     }
 

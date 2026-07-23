@@ -179,11 +179,11 @@ mod tests {
         // them through and leave splitting to `split_at_first_cjk`.
         assert!(
             AnchorRule::LatinHeadword
-                .matches("Andra\u{0301}scsik \u{963F}\u{4F26}\u{5FB7} [\u{5308}]")
+                .matches("Nova\u{0301}kfi \u{8BFA}\u{74E6}\u{514B} [\u{5308}]")
         );
         assert!(
             AnchorRule::LatinHeadword.matches(
-                "Balch, Emily Greene (1867-1961) \u{5DF4}\u{5C14}\u{5947}\u{3008}\u{7F8E}\u{3009}\u{793E}\u{4F1A}\u{5B66}\u{5BB6}"
+                "Smith, Mary Anne (1870-1955) \u{53F2}\u{5BC6}\u{65AF}\u{3008}\u{7F8E}\u{3009}\u{793E}\u{4F1A}\u{5B66}\u{5BB6}"
             )
         );
     }
