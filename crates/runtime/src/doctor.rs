@@ -10,10 +10,13 @@
 //! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
 //! script can branch on the result.
 //!
-//! The store rows deliberately stop at `path.exists()`. Opening the
-//! catalog or corpus would race the daemon's exclusive write lock and
-//! could deadlock or corrupt a running session; deeper introspection
-//! lives behind the REPL `status` command instead.
+//! The store-presence rows deliberately stop at `path.exists()`: a
+//! read-write open would apply pending migrations and contend for the
+//! daemon's exclusive write lock. The registry-coherence rows do open
+//! the corpus read-only to read its built stamps — a `query_only` WAL
+//! open takes no write lock and is safe alongside a running daemon —
+//! but no row opens a store read-write. Deeper introspection lives
+//! behind the REPL `status` command instead.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
