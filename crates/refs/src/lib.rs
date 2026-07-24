@@ -274,8 +274,12 @@ impl Refs {
     /// - When the exact query yields no hit, the query is projected
     ///   through [`latin_fallback_key`] and, if the projection differs
     ///   from the original and is non-empty, looked up once more.
-    /// - Only the latin key form is retried; CJK entry keys are exact,
-    ///   trim-only matches and get no fallback.
+    /// - The projection keeps every alphanumeric character — CJK
+    ///   included, since those characters count as alphanumeric — so a
+    ///   query differing from a stored key only by case, spacing, or
+    ///   punctuation is retried once whatever its script. A query that
+    ///   already equals its projection (e.g. a compact CJK key) gets
+    ///   no second lookup.
     /// - The result's `entry_key` always echoes the original query
     ///   string; canonical `(slug, key)` pairs come from the hits. A
     ///   fallback hit that carries `redirect_to` follows the redirect
@@ -867,6 +871,80 @@ mod refs_tests {
         assert_eq!(result.redirect_followed.as_deref(), Some("objeta"));
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].entry_key, "target");
+    }
+
+    #[test]
+    fn lookup_with_multiple_hits_skips_the_redirect_follow() {
+        // Two books resolve the same key, and both entries carry a
+        // redirect. Following either would silently pick a side, so
+        // the follow is gated on exactly one hit: the caller gets the
+        // unresolved pair back for disambiguation.
+        let refs = fresh_refs();
+        for slug in ["book_a", "book_b"] {
+            refs.upsert_book(&sample_book(slug, 10, "2026-06-25T00:00:00Z"))
+                .expect("upsert book");
+            refs.upsert_entry(&sample_entry(
+                slug,
+                "shared",
+                "Shared",
+                json!({"redirect_to": "target"}),
+            ))
+            .expect("upsert shared entry");
+            refs.upsert_entry(&sample_entry(
+                slug,
+                "target",
+                "Target",
+                json!({"country": "USA"}),
+            ))
+            .expect("upsert target entry");
+        }
+
+        let result = refs.lookup(None, "shared").expect("global lookup");
+        assert_eq!(result.hits.len(), 2, "both books answer");
+        assert_eq!(result.redirect_followed, None, "no follow on multi-hit");
+        assert!(
+            result.hits.iter().all(|h| h.entry_key == "shared"),
+            "the unresolved originals come back, not the targets: {:?}",
+            result
+                .hits
+                .iter()
+                .map(|h| h.entry_key.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn latin_fallback_key_keeps_cjk_characters() {
+        // `char::is_alphanumeric` is true for CJK, so the projection
+        // lowercases and strips punctuation but keeps the characters:
+        // a spaced CJK query projects onto its compact form, while an
+        // already-compact CJK key projects to itself.
+        assert_eq!(latin_fallback_key("Foo-Bar"), "foobar");
+        assert_eq!(latin_fallback_key("\u{6C49} \u{5B57}"), "\u{6C49}\u{5B57}");
+        assert_eq!(latin_fallback_key("\u{6C49}\u{5B57}"), "\u{6C49}\u{5B57}");
+    }
+
+    #[test]
+    fn lookup_retries_a_spaced_cjk_query_onto_the_compact_key() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "\u{6C49}\u{5B57}",
+            "Han Zi",
+            json!({"lang": "zh"}),
+        ))
+        .expect("upsert compact CJK key");
+
+        // The spaced form misses exactly, projects onto the compact
+        // key, and the retry hits — same treatment as a latin key.
+        let result = refs
+            .lookup(Some("book_a"), "\u{6C49} \u{5B57}")
+            .expect("lookup spaced CJK");
+        assert_eq!(result.entry_key, "\u{6C49} \u{5B57}");
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].entry_key, "\u{6C49}\u{5B57}");
     }
 
     #[test]

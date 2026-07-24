@@ -194,6 +194,49 @@ async fn build_stamped_index(corpus_db: &std::path::Path, lancedb_dir: &std::pat
 }
 
 #[tokio::test]
+async fn search_in_an_unknown_intake_returns_empty_not_an_error() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
+    build_stamped_index(&corpus_db, &lancedb_dir).await;
+
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+        bookrack_ingest::CHUNK_VERSION,
+    )
+    .await
+    .expect("open library");
+
+    // The known book answers, proving the store itself is warm…
+    let hits = library
+        .search_in_book(1, "anything", None)
+        .await
+        .expect("search known intake");
+    assert_eq!(hits.len(), 1);
+
+    // …while an intake nobody ingested yields an empty list, not an
+    // error: its partition simply owns no chunks. Both partition
+    // facades share the contract.
+    let hits = library
+        .search_in_book(999, "anything", None)
+        .await
+        .expect("search unknown book intake");
+    assert!(hits.is_empty());
+    let hits = library
+        .search_in_paper(999, "anything", None)
+        .await
+        .expect("search unknown paper intake");
+    assert!(hits.is_empty());
+}
+
+#[tokio::test]
 async fn opening_with_a_different_model_is_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let corpus_db = dir.path().join("corpus.db");

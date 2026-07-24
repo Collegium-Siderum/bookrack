@@ -388,6 +388,49 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawn a counting mock: the first `failures` connections are
+    /// dropped after the request is read (a transient transport
+    /// failure), every later request is answered with `status_line`
+    /// and `body`. Returns the base URL and the connection counter.
+    async fn counting_mock(
+        failures: usize,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0u8; 8192];
+                let _ = socket.read(&mut scratch).await;
+                if attempt < failures {
+                    // Close without a response: the client sees the
+                    // connection die mid-request, a transient failure.
+                    continue;
+                }
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
     /// A client with a short request timeout and no retries, for the
     /// body-read-timeout path.
     fn short_timeout_client(base_url: &str) -> OllamaEmbedClient {
@@ -422,6 +465,75 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
         format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_until_the_server_recovers() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(2, "200 OK", r#"{"embeddings":[[1.0,2.0]]}"#).await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let vectors = client
+            .embed_batch(&["a".to_string()])
+            .await
+            .expect("recovers inside the retry budget");
+        assert_eq!(vectors, vec![vec![1.0, 2.0]]);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "two dropped attempts plus the success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_max_retries_attempts() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(usize::MAX, "200 OK", "{}").await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            2,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.embed_batch(&["a".to_string()]).await.unwrap_err();
+        assert!(matches!(err, EmbedError::Unreachable(_)), "got {err:?}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "the initial attempt plus exactly max_retries retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_transient_failure_does_not_consume_the_retry_budget() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(0, "400 Bad Request", r#"{"error":"bad"}"#).await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.embed_batch(&["a".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbedError::BadRequest { status: 400, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a 4xx fails fast instead of retrying"
+        );
     }
 
     #[tokio::test]
