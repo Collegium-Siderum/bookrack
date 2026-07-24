@@ -2133,25 +2133,48 @@ mod tests {
     }
 
     #[test]
-    fn planning_chunks_for_an_empty_book_is_empty() {
-        // A book whose only leaf is structural (no prose) yields no chunks.
+    fn structural_leaves_are_excluded_from_chunk_plans() {
+        // A caption is the one block kind the book-side structure pass
+        // maps to a structural leaf. A book that is only structural
+        // leaves is rejected upstream as EmptyExtraction, so the
+        // reachable case is a mixed book: prose is chunked, the
+        // structural leaf contributes neither a span endpoint nor text.
+        let caption_text = "Figure 1: a caption beside the prose.";
         let ex = extraction(
-            vec![Block {
-                kind: BlockKind::Body,
-                text: "Only paragraph.".to_string(),
-                source_unit: 0,
-                style: None,
-            }],
+            vec![
+                body("Prose before the figure.", 0),
+                Block {
+                    kind: BlockKind::Caption,
+                    text: caption_text.to_string(),
+                    source_unit: 0,
+                    style: None,
+                },
+                body("Prose after the figure.", 1),
+            ],
             Vec::new(),
             None,
         );
         let mut corpus = Corpus::open_in_memory().expect("open");
         let report = ingest(&mut corpus, 1, &ex);
-        // Re-chunking a real book yields the same plans twice (determinism
-        // across a corpus round-trip).
-        let a = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
-        let b = plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).unwrap();
-        assert_eq!(a, b);
+
+        // Guard against a vacuous fixture: the caption must have landed
+        // as a structural leaf in the tree.
+        let nodes = corpus.book_nodes(report.book_root_id).expect("nodes");
+        let structural_ids: Vec<NodeId> = nodes
+            .iter()
+            .filter(|n| n.node_type.is_structural_leaf())
+            .map(|n| n.node_id)
+            .collect();
+        assert_eq!(structural_ids.len(), 1);
+
+        let plans =
+            plan_book_chunks(&corpus, report.book_root_id, &ChunkParams::default()).expect("chunk");
+        assert!(!plans.is_empty());
+        for plan in &plans {
+            assert!(!structural_ids.contains(&plan.start_node_id));
+            assert!(!structural_ids.contains(&plan.end_node_id));
+            assert!(!plan.text.contains(caption_text));
+        }
     }
 }
 
