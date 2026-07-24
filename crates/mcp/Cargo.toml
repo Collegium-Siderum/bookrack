@@ -40,3 +40,8 @@ eyre.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# Tempdir-backed catalog fixtures for the handler-level tool-call
+# tests, which drive `serve` through a real streamable-HTTP client.
+tempfile.workspace = true

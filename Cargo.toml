@@ -102,10 +102,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # Rolling-file, non-blocking writer for the JSON log layer. Entry-point
 # only, alongside tracing-subscriber.
 tracing-appender = "0.2"
-# MCP protocol SDK, used only by the `mcp` entry-point crate. Features are
-# trimmed to a streamable-HTTP server: no client, no reqwest, no auth. The
-# `server` feature pulls schemars (re-exported, used for tool input
-# schemas) and chrono transitively.
+# MCP protocol SDK. The `mcp` entry-point crate hosts the streamable-HTTP
+# server; the client-side features exist for `bookrack exec` and the mcp
+# crate's own transport-level tests, which drive the server through a real
+# client session. No auth features. The `server` feature pulls schemars
+# (re-exported, used for tool input schemas) and chrono transitively.
 rmcp = { version = "1.7", default-features = false, features = [
     "server",
     "macros",

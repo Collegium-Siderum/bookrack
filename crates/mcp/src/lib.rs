@@ -2309,4 +2309,54 @@ mod tests {
         let args: super::ReadSpanArgs = serde_json::from_value(payload).expect("deserialize");
         assert_eq!(args.kind, ItemKind::Book);
     }
+
+    #[test]
+    fn edit_errors_promote_caller_input_variants_to_invalid_params() {
+        use bookrack_ops::OpsError;
+        use rmcp::model::ErrorCode;
+
+        for err in [
+            OpsError::UnknownMetadataField {
+                field: "bogus".to_string(),
+            },
+            OpsError::UnknownContributorRole {
+                role: "bogus".to_string(),
+            },
+            OpsError::ContributorNotFound {
+                contributor_id: 7,
+                intake_id: 1,
+            },
+        ] {
+            let mapped = super::ops_error_to_edit_error(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        // Every other variant stays an environmental fault.
+        let mapped = super::ops_error_to_edit_error(OpsError::SearchUnavailable);
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn reference_errors_split_into_caller_input_and_environmental() {
+        use rmcp::model::ErrorCode;
+
+        use super::reference::ReferenceError;
+
+        let invalid = [
+            ReferenceError::InvalidArgument("bad".to_string()),
+            ReferenceError::UnknownOverlayProperty {
+                key: "bogus".to_string(),
+            },
+        ];
+        for err in invalid {
+            let mapped = super::reference_error_to_mcp(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        let mapped = super::reference_error_to_mcp(ReferenceError::Refs(
+            bookrack_refs::RefsError::SchemaTooNew {
+                found: 99,
+                supported: 1,
+            },
+        ));
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+    }
 }
