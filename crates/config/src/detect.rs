@@ -449,7 +449,9 @@ mod tests {
         // A plain directory that is not a library.
         std::fs::create_dir(root.path().join("not-a-lib")).expect("plain");
 
-        let outcome = scan_for_libraries(&[root.path().to_path_buf()], 1);
+        // Depth 2 keeps the nested directory within the walk's range, so
+        // only the prune at the parent hit excludes it from the report.
+        let outcome = scan_for_libraries(&[root.path().to_path_buf()], 2);
         assert_eq!(outcome.found.len(), 1, "only the top-level library");
         assert_eq!(outcome.found[0].0, lib);
     }
