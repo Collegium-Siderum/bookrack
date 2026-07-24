@@ -34,7 +34,10 @@ mod tests {
         let stamps = current_index_stamps("qwen3-embedding:0.6b", 1024);
         assert_eq!(stamps.embed_model, "qwen3-embedding:0.6b");
         assert_eq!(stamps.vector_dim, 1024);
-        assert_eq!(stamps.chunk_version, CHUNK_VERSION);
-        assert_eq!(stamps.normalize_version, NORMALIZE_VERSION);
+        // Literal values, not the constants the function copies: the
+        // stamps drive index invalidation, so a version bump must fail
+        // here and be acknowledged by updating the pinned numbers.
+        assert_eq!(stamps.chunk_version, 1);
+        assert_eq!(stamps.normalize_version, 1);
     }
 }
