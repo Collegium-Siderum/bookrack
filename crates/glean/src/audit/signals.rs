@@ -674,6 +674,42 @@ mod tests {
     }
 
     #[test]
+    fn roll_up_consults_required_only_recommended_absence_is_inert() {
+        let csl = Some(CslType::ArticleJournal);
+        // Every Required field for `article-journal` present and Strong;
+        // no Recommended field (issn / abstract_text / volume) recorded.
+        let mut fields: BTreeMap<&'static str, PaperFieldReport> = BTreeMap::new();
+        for name in ["title", "author", "year", "container_title", "doi"] {
+            fields.insert(name, PaperFieldReport::new(PaperFieldGrade::Strong));
+        }
+        assert_eq!(
+            roll_up(csl, &fields, &[]),
+            (PaperVerdict::Clean, PaperConfidence::High),
+        );
+
+        // Recording a Recommended field as Missing changes nothing: the
+        // roll-up never consults a non-Required level.
+        let mut with_recommended_missing = fields.clone();
+        with_recommended_missing.insert(
+            "abstract_text",
+            PaperFieldReport::new(PaperFieldGrade::Missing),
+        );
+        assert_eq!(
+            roll_up(csl, &with_recommended_missing, &[]),
+            (PaperVerdict::Clean, PaperConfidence::High),
+            "a missing Recommended field must not weaken the verdict",
+        );
+
+        // Non-vacuous anchor: dropping a Required field does flip it.
+        let mut missing_required = fields.clone();
+        missing_required.remove("doi");
+        assert_eq!(
+            roll_up(csl, &missing_required, &[]),
+            (PaperVerdict::NeedsWork, PaperConfidence::Low),
+        );
+    }
+
+    #[test]
     fn audit_disabled_returns_empty_clean_report() {
         // Constructing a full PaperAuditInput requires a Catalog
         // round-trip; the trust-source profile path is the cheapest
