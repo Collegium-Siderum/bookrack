@@ -1777,7 +1777,9 @@ impl ServerHandler for BookrackServer {
              (browse and search the registry), `library.show_book` / `library.show_toc` \
              (per-book metadata and table of contents), `library.search` (vector \
              search across the whole library), `library.search_in_book` (vector \
-             search confined to one book)."
+             search confined to one book). Curation tools also write: the \
+             `library.metadata.*` family edits a book's bibliographic record and \
+             review status, and `reference.overlay_set` edits a reference entry."
                 .to_string(),
         )
     }

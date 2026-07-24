@@ -4,7 +4,10 @@ The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
 alongside its MCP HTTP listener. Operator tooling — one-shot CLI
 subcommands, `bookrack exec` for ad-hoc RPCs, and the desktop tray —
 reaches the running daemon through this surface; the MCP listener
-stays read-only and tool-scoped.
+stays tool-scoped — agent clients see a fixed tool set rather than the
+full method registry, and the bulk, queue-bound, and library-lifecycle
+operations are reachable only over the control plane. The tool set is
+not read-only: see *MCP tool surface* below.
 
 ## Transport
 
@@ -426,6 +429,45 @@ catalog and corpus handles the daemon already holds.
   `needs_ocr` intake anchor with no successfully-processed OCR product
   derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
 
+## MCP tool surface
+
+The MCP listener publishes a fixed tool set, enumerated at daemon
+start-up by `bookrack_mcp::list_tools()` and answered over the control
+plane by `daemon.mcp_tools`. The full name list is pinned by
+`crates/mcp/tests/tool_surface.rs`, split into the read and write
+buckets below; adding, renaming, or removing a tool fails that test
+until the list is updated, which is the point at which the version
+discipline (a tool-surface change is a minor bump) applies.
+
+Eleven of the tools write:
+
+- `library.metadata.set` / `library.metadata.clear` — add or remove an
+  override on one bibliographic field.
+- `library.metadata.void` — suppress an extracted field value.
+- `library.metadata.contributor_add` /
+  `library.metadata.contributor_remove` — edit the contributor list.
+- `library.metadata.reaudit` — recompute and store the audit verdict.
+- `library.metadata.ack` / `library.metadata.approve` /
+  `library.metadata.reject` — move the review row.
+- `reference.overlay_set` — layer a user edit on a reference entry.
+- `session.shutdown` — stop the daemon.
+
+Every write tool runs attributed to `Caller::mcp()`, so its audit rows
+carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface
+that launched the daemon. The metadata write tools all require a
+`reason`, which lands on the audit row.
+
+Two properties the tool set deliberately does *not* have:
+
+- **The read tools are not side-effect free.** The four search tools
+  append a `retrieval_calls` row (and its hits) per call, so a
+  read-only data root cannot serve them.
+- **Write tools do not take the runtime write mutex.** That mutex is
+  held by control-plane write methods only (`run_write`), and
+  `mcp.availability` is an advisory broadcast, not enforcement — the
+  daemon does not reject an MCP write tool issued while an RPC write
+  session is open.
+
 ## Events (Phase 2)
 
 - `daemon.state` — `idle` / `writing` / `working` / `degraded` /
@@ -462,9 +504,11 @@ catalog and corpus handles the daemon already holds.
 - `library.changed` — `{ library }` published after every successful
   write command finishes.
 - `mcp.availability` — `{ paused }` published `true` at the start of
-  every write command and `false` after it returns, so subscribers
-  can advertise the MCP write surface as temporarily paused even
-  though the runtime currently does not expose any MCP write tools.
+  every control-plane write command and `false` after it returns, so
+  subscribers can advertise the MCP write surface as temporarily
+  paused. The signal is advisory: it reports the state of the runtime
+  write mutex, which the MCP write tools do not take, so a client that
+  ignores it can still issue one mid-session.
 
 ## Phase log
 
@@ -479,9 +523,11 @@ catalog and corpus handles the daemon already holds.
   `vectors.{rebuild,reembed,reset,drop}`, `corpus.rebuild`,
   `stamps.reconcile`, `remove`, `dryrun`. New events: `queue.tick`,
   `worker.progress`, `library.changed`, `mcp.availability`. New error
-  codes: `-32010 invalid_library`, `-32011 job_not_found`. The MCP
-  tool set is still read-only and unchanged; the REPL still runs
-  in-process; the on-disk queue document keeps its v1 schema.
+  codes: `-32010 invalid_library`, `-32011 job_not_found`. At this
+  phase the MCP tool set was still read-only and unchanged; the metadata
+  and reference write tools (see *MCP tool surface*) landed later. The
+  REPL still runs in-process; the on-disk queue document keeps its v1
+  schema.
 - **Phase 3 (superseded)** — split the REPL into a standalone
   client and stood up the `bookrack-control-client` transport.
   The REPL surface was later removed entirely in 0.7.0; see
