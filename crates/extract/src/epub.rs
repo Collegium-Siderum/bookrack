@@ -132,19 +132,7 @@ fn build_toc(
     let mut entries = Vec::new();
     let mut depth_saturate_logged = false;
     for entry in root.flatten() {
-        // rbook depth counts the (omitted) root as 0; topmost real
-        // entries are 1. The contract wants 0 = topmost.
-        let raw_depth = entry.depth();
-        if raw_depth == 0 && !depth_saturate_logged {
-            FallbackEvent::record(
-                fallbacks,
-                ADAPTER,
-                fallback_kinds::EPUB_NAV_DEPTH_SATURATE,
-                None,
-            );
-            depth_saturate_logged = true;
-        }
-        let depth = raw_depth.saturating_sub(1).min(u8::MAX as usize) as u8;
+        let depth = contract_depth(entry.depth(), &mut depth_saturate_logged, fallbacks);
 
         let start_block = entry.manifest_entry().and_then(|manifest_entry| {
             let unit = *unit_of_manifest.get(manifest_entry.id())?;
@@ -165,6 +153,35 @@ fn build_toc(
         });
     }
     Toc { entries }
+}
+
+/// Map rbook's depth scale onto the contract's. rbook counts the
+/// (omitted) nav root as 0 and topmost real entries as 1; the contract
+/// wants 0 = topmost, so the mapping is `saturating_sub(1)`, clamped
+/// to the contract's `u8` range. A reported depth of 0 saturates to 0
+/// — depth information is hidden there — and records
+/// [`fallback_kinds::EPUB_NAV_DEPTH_SATURATE`] once per document.
+///
+/// Under the pinned rbook (0.7.6), `flatten()` on the nav root yields
+/// descendants only, at depth >= 1, so the saturate arm is unreachable
+/// through `build_toc`; it guards the mapping against a future rbook
+/// revision changing that convention (rbook is a behaviour-sensitive
+/// pinned dependency).
+fn contract_depth(
+    raw_depth: usize,
+    depth_saturate_logged: &mut bool,
+    fallbacks: &mut Vec<FallbackEvent>,
+) -> u8 {
+    if raw_depth == 0 && !*depth_saturate_logged {
+        FallbackEvent::record(
+            fallbacks,
+            ADAPTER,
+            fallback_kinds::EPUB_NAV_DEPTH_SATURATE,
+            None,
+        );
+        *depth_saturate_logged = true;
+    }
+    raw_depth.saturating_sub(1).min(u8::MAX as usize) as u8
 }
 
 /// Transcribe the OPF Dublin Core metadata. Absent fields stay `None` —
@@ -324,6 +341,35 @@ fn as_isbn(value: &str, fallbacks: &mut Vec<FallbackEvent>) -> Option<String> {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
+
+    #[test]
+    fn depth_zero_saturates_and_records_the_fallback_once() {
+        // Unreachable through build_toc under the pinned rbook (its
+        // flatten() starts at depth 1) — exercised directly so the
+        // guard against a future rbook depth-convention change stays
+        // pinned. Two zero-depth entries: the fallback records once.
+        let mut fallbacks = Vec::new();
+        let mut logged = false;
+        assert_eq!(contract_depth(0, &mut logged, &mut fallbacks), 0);
+        assert_eq!(contract_depth(0, &mut logged, &mut fallbacks), 0);
+        assert_eq!(fallbacks.len(), 1, "recorded once, got {fallbacks:?}");
+        assert_eq!(fallbacks[0].kind, fallback_kinds::EPUB_NAV_DEPTH_SATURATE);
+        assert_eq!(fallbacks[0].detail, None);
+    }
+
+    #[test]
+    fn positive_depths_map_onto_the_contract_scale_without_a_fallback() {
+        let mut fallbacks = Vec::new();
+        let mut logged = false;
+        assert_eq!(contract_depth(1, &mut logged, &mut fallbacks), 0);
+        assert_eq!(contract_depth(2, &mut logged, &mut fallbacks), 1);
+        assert_eq!(
+            contract_depth(usize::MAX, &mut logged, &mut fallbacks),
+            u8::MAX,
+            "depths past the contract range clamp to u8::MAX",
+        );
+        assert!(fallbacks.is_empty(), "got {fallbacks:?}");
+    }
 
     #[test]
     fn urn_isbn_prefix_records_nothing() {
