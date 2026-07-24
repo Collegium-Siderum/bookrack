@@ -501,44 +501,51 @@ mod tests {
         );
     }
 
+    // The rule strings are API surface — they land in stored audit
+    // rows — so the tests pin the literal values, not the constants
+    // `rule()` itself returns.
+
     #[test]
-    fn whitelist_match_rule_names_round_trip() {
+    fn whitelist_match_rule_names_are_pinned_literals() {
         assert_eq!(
             WhitelistMatch::ExactLower.rule(),
-            rules::WHITELIST_EXACT_LOWER
+            "publisher:whitelist_exact_lower"
         );
         assert_eq!(
             WhitelistMatch::Normalized.rule(),
-            rules::WHITELIST_NORMALIZED
+            "publisher:whitelist_normalized"
         );
         assert_eq!(
             WhitelistMatch::AbbrevExpand.rule(),
-            rules::WHITELIST_ABBREV_EXPAND
+            "publisher:whitelist_abbrev_expand"
         );
     }
 
     #[test]
-    fn watermark_kind_rule_names_round_trip() {
+    fn watermark_kind_rule_names_are_pinned_literals() {
         assert_eq!(
             WatermarkKind::UrlSubstring.rule(),
-            rules::WATERMARK_URL_SUBSTRING
+            "publisher:watermark_url_substring"
         );
         assert_eq!(
             WatermarkKind::EmailSubstring.rule(),
-            rules::WATERMARK_EMAIL_SUBSTRING
+            "publisher:watermark_email_substring"
         );
         assert_eq!(
             WatermarkKind::ContactToken.rule(),
-            rules::WATERMARK_CONTACT_TOKEN
+            "publisher:watermark_contact_token"
         );
         assert_eq!(
             WatermarkKind::PromoToken.rule(),
-            rules::WATERMARK_PROMO_TOKEN
+            "publisher:watermark_promo_token"
         );
         assert_eq!(
             WatermarkKind::AsciiDistribution.rule(),
-            rules::WATERMARK_ASCII_DISTRIBUTION
+            "publisher:watermark_ascii_distribution"
         );
-        assert_eq!(WatermarkKind::CjkToken.rule(), rules::WATERMARK_CJK_TOKEN);
+        assert_eq!(
+            WatermarkKind::CjkToken.rule(),
+            "publisher:watermark_cjk_token"
+        );
     }
 }
