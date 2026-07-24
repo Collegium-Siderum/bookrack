@@ -327,8 +327,38 @@ mod tests {
         );
     }
 
+    /// Freezes the whole pipeline byte-for-byte: one input exercising
+    /// all nine steps, pinned to a hard-coded output string and hash.
+    /// If this fails, the algorithm changed — that requires bumping
+    /// [`NORMALIZE_VERSION`] and rebuilding the whole corpus, then
+    /// updating the three pinned values here together.
     #[test]
-    fn normalize_version_is_one() {
+    fn golden_full_pipeline_output_and_hash_are_frozen() {
         assert_eq!(NORMALIZE_VERSION, 1);
+        // BOM + leading spaces, fullwidth digit (NFKC), tab, curly
+        // quotes and horizontal bar (punctuation), CRLF run (line
+        // endings + blank-line fold), CJK-flanked space, zero-width
+        // space (invisibles), ideographic space (NFKC), line
+        // separator, and trailing whitespace (line + whole trim).
+        let input = "\u{FEFF}  Chapter\u{FF11}\t\u{201C}Q\u{201D}\r\n\r\n\r\n\
+                     \u{4F60} \u{597D}\u{200B}\u{4E16}\u{3000}\u{754C}\u{2015}end  \
+                     \u{2028}last line \n\n\n";
+        let expected = "Chapter1 \"Q\"\n\n\u{4F60}\u{597D}\u{4E16}\u{754C}\u{2014}end\nlast line";
+        assert_eq!(normalize(input), expected);
+        assert_eq!(
+            norm_text_sha256(input),
+            "69a5270839a4fc2cde0450ed957ac4a6058174767cccdae76a3b3c7b3720d7b8"
+        );
+    }
+
+    #[test]
+    fn glyphs_are_never_touched() {
+        // No case folding.
+        assert_eq!(normalize("MiXeD Case"), "MiXeD Case");
+        // No Han traditional/simplified conversion: traditional "shu"
+        // (U+66F8, book) stays itself and hashes apart from the
+        // simplified form (U+4E66).
+        assert_eq!(normalize("\u{66F8}"), "\u{66F8}");
+        assert_ne!(norm_text_sha256("\u{66F8}"), norm_text_sha256("\u{4E66}"));
     }
 }
