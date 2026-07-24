@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookrack_config::{DEFAULT_LOG, DEFAULT_LOG_CONSOLE, LogConfig};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Layer, fmt, prelude::*};
 
 pub mod stream;
 
@@ -63,9 +64,6 @@ pub use tracing_appender::non_blocking::WorkerGuard;
 /// `main` — so buffered lines flush on exit.
 pub fn init(logs_dir: &Path, log: &LogConfig) -> (Option<WorkerGuard>, LogStreamHandle) {
     let logs_dir = logs_dir.to_path_buf();
-    // The directory may not exist yet; the appender does not create
-    // it, so do it here.
-    let logs_dir_writable = std::fs::create_dir_all(&logs_dir).is_ok() && probe_writable(&logs_dir);
 
     let file_filter =
         EnvFilter::try_new(&log.directive).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
@@ -74,21 +72,7 @@ pub fn init(logs_dir: &Path, log: &LogConfig) -> (Option<WorkerGuard>, LogStream
     let broadcast_filter =
         EnvFilter::try_new(&log.directive).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG));
 
-    let (file_layer, guard) = if logs_dir_writable {
-        let file_appender = tracing_appender::rolling::daily(&logs_dir, "bookrack.log");
-        let (file_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
-        let file = fmt::layer()
-            .json()
-            .with_writer(file_writer)
-            .with_filter(file_filter);
-        (Some(file), Some(worker_guard))
-    } else {
-        eprintln!(
-            "bookrack: file logging disabled; {} is not writable",
-            logs_dir.display()
-        );
-        (None, None)
-    };
+    let (file_layer, guard) = build_file_layer(&logs_dir, file_filter);
 
     let console = fmt::layer()
         .with_writer(io::stderr)
@@ -117,6 +101,41 @@ pub fn init(logs_dir: &Path, log: &LogConfig) -> (Option<WorkerGuard>, LogStream
     install_crash_hook(logs_dir);
 
     (guard, log_stream)
+}
+
+/// Assemble the JSON file layer that writes to a daily-rolling
+/// `bookrack.log` under `logs_dir`, creating the directory if it is
+/// missing.
+///
+/// Layer and guard travel together: when `logs_dir` cannot be created or
+/// does not accept file creation, both are `None` and a notice goes to
+/// stderr, so a caller holding a `Some` guard always has a live file
+/// layer behind it and a `None` guard always means file logging is off.
+fn build_file_layer<S>(
+    logs_dir: &Path,
+    filter: EnvFilter,
+) -> (Option<impl Layer<S>>, Option<WorkerGuard>)
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    // The directory may not exist yet; the appender does not create
+    // it, so do it here.
+    let writable = std::fs::create_dir_all(logs_dir).is_ok() && probe_writable(logs_dir);
+    if !writable {
+        eprintln!(
+            "bookrack: file logging disabled; {} is not writable",
+            logs_dir.display()
+        );
+        return (None, None);
+    }
+
+    let file_appender = tracing_appender::rolling::daily(logs_dir, "bookrack.log");
+    let (file_writer, worker_guard) = tracing_appender::non_blocking(file_appender);
+    let file = fmt::layer()
+        .json()
+        .with_writer(file_writer)
+        .with_filter(filter);
+    (Some(file), Some(worker_guard))
 }
 
 /// Probe whether `dir` accepts file creation by writing and removing a
@@ -237,6 +256,107 @@ fn render_crash_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::Registry;
+
+    /// A unique, not-yet-created directory path under the system temp
+    /// directory.
+    fn scratch_dir(tag: &str, line: u32) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-obs-{tag}-{}-{line}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Concatenate every rolling log file the appender wrote into `dir`.
+    fn read_log_files(dir: &Path) -> String {
+        let mut body = String::new();
+        for entry in std::fs::read_dir(dir).expect("read logs dir") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("bookrack.log") {
+                body.push_str(&std::fs::read_to_string(entry.path()).expect("read log file"));
+            }
+        }
+        body
+    }
+
+    #[test]
+    fn file_layer_writes_json_lines_into_a_created_logs_dir() {
+        let dir = scratch_dir("filelayer-ok", line!());
+        let (layer, guard) = build_file_layer::<Registry>(&dir, EnvFilter::new("info"));
+        let layer = layer.expect("file layer present for a writable dir");
+        let guard = guard.expect("guard present whenever the file layer is");
+
+        with_default(Registry::default().with(layer), || {
+            tracing::info!(target: "obs_test", count = 7_i64, "to the file");
+        });
+        // Dropping the guard flushes the non-blocking writer's queue.
+        drop(guard);
+
+        let body = read_log_files(&dir);
+        let line = body
+            .lines()
+            .find(|l| l.contains("to the file"))
+            .expect("event reached the log file");
+        let parsed: serde_json::Value = serde_json::from_str(line).expect("log line is JSON");
+        assert_eq!(parsed["level"], "INFO");
+        assert_eq!(parsed["target"], "obs_test");
+        assert_eq!(parsed["fields"]["message"], "to the file");
+        assert_eq!(parsed["fields"]["count"], 7);
+        // The writability probe leaves nothing behind.
+        assert!(!dir.join(".bookrack-writable-probe").exists());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn file_layer_honours_the_supplied_filter() {
+        let dir = scratch_dir("filelayer-filter", line!());
+        let (layer, guard) = build_file_layer::<Registry>(&dir, EnvFilter::new("warn"));
+        let layer = layer.expect("file layer present for a writable dir");
+
+        with_default(Registry::default().with(layer), || {
+            tracing::info!(target: "obs_test", "below the directive");
+            tracing::error!(target: "obs_test", "above the directive");
+        });
+        drop(guard);
+
+        let body = read_log_files(&dir);
+        assert!(body.contains("above the directive"));
+        assert!(!body.contains("below the directive"));
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_layer_and_guard_are_both_absent_when_the_logs_dir_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("filelayer-readonly", line!());
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let mut perms = std::fs::metadata(&dir).expect("read perms").permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).expect("chmod 555");
+
+        let (layer, guard) = build_file_layer::<Registry>(&dir, EnvFilter::new("info"));
+        let layer_absent = layer.is_none();
+        let guard_absent = guard.is_none();
+
+        // Logging through the remaining stack must stay quiet on disk.
+        with_default(Registry::default().with(layer), || {
+            tracing::error!(target: "obs_test", "dropped on the floor");
+        });
+        drop(guard);
+        let body = read_log_files(&dir);
+
+        let mut restore = std::fs::metadata(&dir).expect("read perms").permissions();
+        restore.set_mode(0o755);
+        std::fs::set_permissions(&dir, restore).expect("chmod 755");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert!(layer_absent, "file layer must be omitted");
+        assert!(guard_absent, "guard must be None when the layer is omitted");
+        assert!(body.is_empty(), "no log file may be written");
+    }
 
     #[test]
     fn render_includes_the_key_fields() {
