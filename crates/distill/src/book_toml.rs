@@ -272,21 +272,18 @@ field = "year_span.birth"
 
     #[test]
     fn load_pipeline_round_trip_can_run_a_synthetic_source() {
-        use std::io::Write;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("book.toml");
         std::fs::write(&path, LEGAL_BOOK).expect("write fixture book.toml");
         let pipeline = crate::load_pipeline(&path).expect("load_pipeline");
         assert_eq!(pipeline.len(), 8);
-        // Smoke a minimal source through the assembled pipeline; the
-        // shape of the output is exercised more thoroughly in phase 8.
+        // Run a minimal source through the assembled pipeline and pin
+        // the drafted entry, so an assembled-but-inert pipeline (zero
+        // drafts) cannot pass as a successful round trip.
         let source = "<!-- page 1 (sheet 1) -->\nSmith\n1900-2000\nan american baseball player\n";
         let (drafts, coverage) = pipeline.run(source.to_string()).expect("pipeline run");
-        let _ = writeln!(
-            std::io::sink(),
-            "synthetic pipeline drafted {} entries / pages={}",
-            drafts.len(),
-            coverage.pages,
-        );
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].headword, "Smith");
+        assert_eq!(coverage.pages, 1);
     }
 }
