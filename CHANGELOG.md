@@ -372,6 +372,24 @@ release workflow extracts the matching section verbatim from this file.
 - **cli: `libraries fork` and `vectors reset` guidance points at the
   index profile** rather than at the removed environment variable.
 
+### Security
+
+- **deps: `quinn-proto` moves to 0.11.16, clearing GHSA-4w2j-m93h-cj5j.**
+  The advisory (high) is remote memory exhaustion from unbounded
+  out-of-order stream reassembly in QUIC. `quinn-proto` enters the
+  lockfile only through `reqwest`'s optional QUIC path, which this
+  workspace does not enable — `reqwest` is taken with
+  `default-features = false` and a narrow feature set — so the crate
+  resolves but never compiles into a binary. This clears a lockfile
+  advisory rather than fixing anything reachable in bookrack.
+
+- **deps: `postcss` moves to 8.5.22, clearing GHSA-r28c-9q8g-f849.**
+  The advisory (high) is a path traversal in the previous-source-map
+  auto-loader that discloses arbitrary `.map` files. `postcss` is a
+  build-time dependency of the desktop shell's web assets, reached
+  transitively through `vite`; it runs only during `pnpm build` and
+  ships nothing into the released bundle.
+
 ## [0.9.0] - 2026-07-17
 
 ### Added
