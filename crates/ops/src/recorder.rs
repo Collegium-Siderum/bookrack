@@ -341,16 +341,57 @@ mod tests {
         });
     }
 
+    /// Test stub: implements [`Embedder`] without any network or model,
+    /// so `Recorder::start` can be exercised on a real [`Ops`] handle.
+    struct FakeEmbedder;
+
+    impl bookrack_embed::Embedder for FakeEmbedder {
+        async fn embed_batch(
+            &self,
+            _texts: &[String],
+        ) -> std::result::Result<Vec<Vec<f32>>, bookrack_embed::EmbedError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A catalog-only [`Ops`] whose catalog path is the seeded temp
+    /// catalog, so rows recorded through `Recorder::start` land where
+    /// the test can read them back. The other paths are never opened.
+    fn ops_over(catalog_db: &std::path::Path) -> crate::Ops<FakeEmbedder> {
+        let dir = catalog_db.parent().expect("catalog dir");
+        crate::Ops::catalog_only(
+            dir.join("corpus.db"),
+            catalog_db.to_path_buf(),
+            &dir.join("lancedb"),
+            dir.join("books"),
+            dir.join("backup"),
+            crate::Caller::cli(),
+        )
+    }
+
     #[test]
     fn start_drops_null_args_to_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (path, catalog) = open_catalog(&tmp);
-        let mut recorder = Recorder::for_test(&path, DEFAULT_SOURCE, "library.test");
-        // Mirror what `Recorder::start` does when args is Null.
-        recorder.args = None;
-        recorder.finish::<()>(&Ok(()));
-        let rows = catalog.tool_calls_for_tool("library.test").expect("read");
+        let ops = ops_over(&path);
+
+        Recorder::start(&ops, "library.null_args", serde_json::Value::Null).finish::<()>(&Ok(()));
+        let rows = catalog
+            .tool_calls_for_tool("library.null_args")
+            .expect("read");
+        assert_eq!(rows.len(), 1);
         assert!(rows[0].args.is_none());
+        assert_eq!(rows[0].source, "cli");
+
+        // The complementary branch: non-null args are serialized into
+        // the row rather than dropped.
+        let args = serde_json::json!({"top_k": 3});
+        Recorder::start(&ops, "library.real_args", args).finish::<()>(&Ok(()));
+        let rows = catalog
+            .tool_calls_for_tool("library.real_args")
+            .expect("read");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].args.as_deref(), Some("{\"top_k\":3}"));
     }
 
     #[test]
