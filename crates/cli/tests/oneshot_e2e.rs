@@ -1051,6 +1051,80 @@ async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
     Ok(())
 }
 
+/// Drive `libraries remove --purge` without `--yes`, answering the
+/// retype prompt with `typed`. Returns the exit code and whether the
+/// data root and its registry entry survived.
+async fn purge_answering(typed: &str) -> Result<(Option<i32>, bool, bool)> {
+    use tokio::io::AsyncWriteExt;
+
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let holder = tempfile::tempdir()?;
+    let root = holder.path().join("data");
+    std::fs::create_dir(&root)?;
+    write_manifest_uuid(&root, "shelf", "01890a5d-0000-7000-8000-00000000000e");
+    std::fs::write(
+        &registry_path,
+        format!("[libraries]\nshelf = \"{}\"\n", root.display()),
+    )?;
+    let mut child = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "remove", "shelf", "--purge"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(typed.as_bytes())
+        .await?;
+    let output = child.wait_with_output().await?;
+    let entry_survives = std::fs::read_to_string(&registry_path)?.contains("shelf");
+    Ok((output.status.code(), root.exists(), entry_survives))
+}
+
+/// The Hard retype gate, end to end: an answer that is not the library
+/// name leaves the data root and the registry entry exactly where they
+/// were. The `--yes` cases above skip this path entirely, so this is
+/// the one that proves the typed token is compared at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_keeps_the_data_when_the_retype_misses() -> Result<()> {
+    for typed in ["yes\n", "y\n", "SHELF\n", "shel\n", "\n", ""] {
+        let (code, root_survives, entry_survives) = purge_answering(typed).await?;
+        assert_eq!(
+            code,
+            Some(0),
+            "a declined purge is a clean abort, not a failure; answer={typed:?}",
+        );
+        assert!(
+            root_survives,
+            "a mistyped confirmation must leave the data root on disk; answer={typed:?}",
+        );
+        assert!(
+            entry_survives,
+            "a mistyped confirmation must leave the registry entry; answer={typed:?}",
+        );
+    }
+    Ok(())
+}
+
+/// The same gate from the other side: the library name retyped exactly
+/// does purge, so the test above pins a real comparison rather than a
+/// path that never deletes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_deletes_when_the_name_is_retyped() -> Result<()> {
+    let (code, root_survives, entry_survives) = purge_answering("shelf\n").await?;
+    assert_eq!(code, Some(0), "an accepted purge exits 0");
+    assert!(!root_survives, "the retyped name must purge the data root");
+    assert!(!entry_survives, "the retyped name must forget the entry");
+    Ok(())
+}
+
 /// `libraries remove --purge` refuses a data root another writer holds:
 /// the data survives and the registry entry stays, so the operator can
 /// retry once the holder is stopped (exit 2).
