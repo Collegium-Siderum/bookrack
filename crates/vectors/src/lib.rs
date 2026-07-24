@@ -1190,6 +1190,108 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn try_open_on_a_missing_dir_returns_none_without_materializing_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let lancedb_dir = dir.path().join("lancedb");
+        let opened = ChunkStore::try_open(&lancedb_dir).await.expect("try_open");
+        assert!(opened.is_none(), "no table on disk must read as None");
+        assert!(
+            !lancedb_dir.exists(),
+            "a read-only probe must not leave a half-built lancedb layout on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_open_refuses_a_meta_stamp_above_this_binarys_reader_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let too_new = bookrack_dbkit::READER_VERSION + 1;
+        // Only the sidecar exists — no chunks table. The reader-version
+        // guard must fire before the table probe, so the refusal wins
+        // over the `Ok(None)` a missing table would otherwise produce.
+        let forged = meta::VectorsMeta {
+            schema_version: meta::SCHEMA_VERSION,
+            min_reader_version: Some(too_new),
+            kind: "ivf-flat".to_string(),
+            num_partitions: 64,
+            num_sub_vectors: None,
+            num_bits: None,
+            default_nprobes: 40,
+            default_refine_factor: None,
+            built_at: "2026-06-04T00:00:00Z".to_string(),
+            built_at_chunk_count: 0,
+            churn_since_rebuild: 0,
+            lance_index_name: crate::DEFAULT_INDEX_NAME.to_string(),
+        };
+        meta::store(dir.path(), &forged).expect("store forged meta");
+
+        let Err(err) = ChunkStore::try_open(dir.path()).await else {
+            panic!("try_open must refuse a too-new reader stamp")
+        };
+        assert!(
+            matches!(err, VectorsError::ReaderTooOld { required, current }
+                if required == too_new && current == bookrack_dbkit::READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_open_finds_the_existing_table_and_its_dimension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        {
+            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("append");
+        }
+        let store = ChunkStore::try_open(dir.path())
+            .await
+            .expect("try_open")
+            .expect("table present");
+        assert_eq!(store.dimension(), DIM);
+        assert_eq!(store.count_rows().await.expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn open_with_a_mismatched_dim_hint_adopts_the_on_disk_dimension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        {
+            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("append");
+        }
+        // Reopen with a wrong hint: the table schema is the source of
+        // truth, so the handle must reflect the on-disk dimension.
+        let reopened = ChunkStore::open(dir.path(), DIM + 3).await.expect("reopen");
+        assert_eq!(
+            reopened.dimension(),
+            DIM,
+            "the on-disk schema, not the caller's hint, fixes the dimension"
+        );
+        // Write validation follows the adopted dimension on both sides:
+        // an on-disk-dim row is accepted, a hint-dim row is rejected.
+        reopened
+            .append(&[row(1, 2, [0.0, 1.0, 0.0, 0.0])])
+            .await
+            .expect("append at the on-disk dimension");
+        let mut bad = row(1, 3, [0.0, 0.0, 1.0, 0.0]);
+        bad.vector = vec![0.0; DIM + 3];
+        let err = reopened.append(&[bad]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::DimensionMismatch {
+                    got: 7,
+                    expected: 4
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
     #[test]
     fn default_for_ivf_flat_matches_c1_recommendation() {
         let cfg = AnnConfig::default_for(AnnKind::IvfFlat);
@@ -1887,6 +1989,64 @@ mod tests {
             .await
             .expect("search_with");
         assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn nprobes_and_refine_overrides_apply_on_a_real_ivf_index() {
+        // Build a real IVF-flat index so the overrides reach an actual
+        // ANN query plan instead of the no-index brute-force fallback.
+        let (dir, store) = fresh_store().await;
+        let rows: Vec<ChunkRow> = (0..300)
+            .map(|i| {
+                let v = i as f32 / 300.0;
+                row(1, i + 1, [v, 1.0 - v, 0.5, 0.25])
+            })
+            .collect();
+        store.append(&rows).await.expect("append");
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 2,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 1,
+            refine_factor: None,
+        };
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("build");
+
+        // With nprobes covering every IVF cell, the indexed search is
+        // exhaustive and must agree with a brute-force scan of the
+        // same query — result set and order both.
+        let query = [0.0, 1.0, 0.5, 0.25];
+        let indexed = store
+            .search_with(
+                &query,
+                3,
+                SearchOptions {
+                    nprobes: Some(2),
+                    refine_factor: Some(2),
+                    bypass_index: false,
+                },
+            )
+            .await
+            .expect("indexed search");
+        let brute = store
+            .search_with(
+                &query,
+                3,
+                SearchOptions {
+                    bypass_index: true,
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("brute-force search");
+        let indexed_texts: Vec<&str> = indexed.iter().map(|h| h.text.as_str()).collect();
+        let brute_texts: Vec<&str> = brute.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(indexed_texts, brute_texts);
+        assert_eq!(indexed[0].text, "chunk p1 o1", "exact match ranks first");
     }
 
     #[tokio::test]
