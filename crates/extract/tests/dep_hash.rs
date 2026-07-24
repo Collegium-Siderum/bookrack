@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_extract::FROZEN_DEPS_HASH;
+use bookrack_extract::{EXTRACTOR_VERSION, FROZEN_DEPS_HASH};
 use sha2::{Digest, Sha256};
 
 const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &[
@@ -19,6 +19,22 @@ const BEHAVIOR_SENSITIVE_CRATES: &[&str] = &[
     "scraper",
     "unicode-normalization",
 ];
+
+#[test]
+fn extractor_version_and_frozen_deps_hash_are_pinned_as_a_pair() {
+    // The two constants move in lockstep: a deps-hash refresh without
+    // the version bump (or the reverse) must not slip through as a
+    // one-sided edit. Restating the pair here makes every bump an
+    // explicit, reviewable confirmation of both sides.
+    assert_eq!(
+        (EXTRACTOR_VERSION, FROZEN_DEPS_HASH),
+        (
+            6,
+            "b4ad0eff4a4f766e81081f72e9313a2ef7ffb0dd60e8bcfb8e05e1aaf4d806ae"
+        ),
+        "EXTRACTOR_VERSION and FROZEN_DEPS_HASH bump together; restate the pair here"
+    );
+}
 
 #[test]
 fn behavior_sensitive_deps_hash_matches_frozen_value() {
