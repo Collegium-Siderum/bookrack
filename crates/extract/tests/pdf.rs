@@ -15,6 +15,8 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use bookrack_extract::{
     BlockKind, ContributorRole, ExtractError, ExtractOutcome, Extraction, TextLayerQuality, extract,
@@ -352,5 +354,72 @@ fn pdf_extraction_is_deterministic() {
         )
         .unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(first, second, "{name} extracts deterministically");
+    }
+}
+
+#[test]
+fn concurrent_extractions_agree_with_the_serial_outcomes() {
+    if !pdfium_available() {
+        return;
+    }
+    // PDFium is entered by one extraction at a time; the caller-facing
+    // promise is that `extract` may still be called from many threads
+    // and yields what a serial run yields. Threads within this one test
+    // process contend for the same PDFium handle, which per-test process
+    // isolation alone never produces.
+    const FIXTURES: [&str; 4] = [
+        "prose_en.pdf",
+        "prose_cjk.pdf",
+        "two_column.pdf",
+        "toc_deep.pdf",
+    ];
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 3;
+
+    let serial: Vec<ExtractOutcome> = FIXTURES
+        .iter()
+        .map(|name| {
+            extract(
+                &pdf_fixture(name),
+                &common::default_audit_profile(),
+                &common::default_heading_patterns(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+        })
+        .collect();
+
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let workers: Vec<_> = (0..THREADS)
+        .map(|thread_index| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                // Release every thread at once, and start each on a
+                // different fixture, so distinct documents are in flight
+                // together rather than one document being repeated.
+                barrier.wait();
+                (0..ROUNDS)
+                    .map(|round| {
+                        let fixture = (thread_index + round) % FIXTURES.len();
+                        let outcome = extract(
+                            &pdf_fixture(FIXTURES[fixture]),
+                            &common::default_audit_profile(),
+                            &common::default_heading_patterns(),
+                        );
+                        (fixture, outcome)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+
+    for worker in workers {
+        for (fixture, outcome) in worker.join().expect("extraction thread") {
+            let name = FIXTURES[fixture];
+            let outcome = outcome.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(
+                outcome, serial[fixture],
+                "{name} extracts under contention exactly as it does serially",
+            );
+        }
     }
 }
