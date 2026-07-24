@@ -253,3 +253,264 @@ async fn read_chunk_plans(
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+
+    use bookrack_catalog::NewIntake;
+    use bookrack_core::ItemKind;
+    use bookrack_embed::{EmbedError, Result as EmbedResult};
+    use bookrack_vectors::ChunkRow;
+
+    /// A toy embedder whose vector encodes its call generation, so
+    /// tests can prove the vectors changed.
+    struct Fake {
+        generation: u8,
+    }
+
+    impl Embedder for Fake {
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            let n = texts.len();
+            let generation = self.generation;
+            async move {
+                Ok((0..n)
+                    .map(|_| {
+                        let mut v = vec![0.0f32; 4];
+                        v[1] = generation as f32;
+                        v
+                    })
+                    .collect())
+            }
+        }
+    }
+
+    /// A fake embedder that always fails, forcing the abort path.
+    struct Offline;
+
+    impl Embedder for Offline {
+        fn embed_batch(
+            &self,
+            _texts: &[String],
+        ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+            std::future::ready(Err(EmbedError::Unreachable(
+                "test embedder offline".to_string(),
+            )))
+        }
+    }
+
+    fn fake_row(intake_id: i64, offset: i64, text: &str) -> ChunkRow {
+        let node = PartitionIdx::new(intake_id)
+            .node_id(offset)
+            .expect("offset in range");
+        ChunkRow {
+            vector: vec![0.0; 4],
+            text: text.to_string(),
+            start_node_id: node,
+            start_char_offset: 0,
+            end_node_id: node,
+            end_char_offset: text.len() as i32,
+            norm_chunk_sha256: format!("sha-p{intake_id}-o{offset}"),
+        }
+    }
+
+    async fn seed_partition(lancedb_dir: &Path, intake_id: i64, count: usize) {
+        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        let rows: Vec<ChunkRow> = (0..count as i64)
+            .map(|o| fake_row(intake_id, o + 1, &format!("chunk {intake_id}-{o}")))
+            .collect();
+        store.append(&rows).await.expect("seed");
+    }
+
+    fn seed_catalog_embedded(catalog: &mut Catalog, intake_ids: &[i64]) {
+        for &id in intake_ids {
+            let reg = catalog
+                .register_intake(
+                    ItemKind::Paper,
+                    &NewIntake::new(format!("sha-{id}")).format("pdf".to_string()),
+                )
+                .expect("register");
+            assert_eq!(reg.intake().intake_id, id);
+            catalog
+                .set_intake_status(ItemKind::Paper, id, IntakeStatus::Embedded)
+                .expect("status");
+        }
+    }
+
+    fn embed_cfg(model: &str) -> EmbedConfig {
+        EmbedConfig {
+            model: model.to_string(),
+            ..EmbedConfig::default()
+        }
+    }
+
+    async fn partition_tags(lancedb_dir: &Path, intake_id: i64) -> Vec<f32> {
+        let store = ChunkStore::open(lancedb_dir, 4).await.expect("open");
+        store
+            .scan_partition(PartitionIdx::new(intake_id))
+            .await
+            .expect("scan")
+            .iter()
+            .map(|row| row.vector[1])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn plan_reembed_aborts_on_unknown_and_non_embedded_pinned_ids() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1]);
+        seed_partition(dir.path(), 1, 3).await;
+
+        let err = plan_reembed(&catalog, dir.path(), None, Some(&[1, 9_999]), false)
+            .await
+            .expect_err("an unknown pinned id must abort");
+        assert!(
+            matches!(err, GleanError::UnknownIntake(9_999)),
+            "got {err:?}"
+        );
+
+        // A known id outside `Embedded` aborts too.
+        let pending = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("sha-pending".to_string()).format("pdf".to_string()),
+            )
+            .expect("register")
+            .intake()
+            .intake_id;
+        let err = plan_reembed(&catalog, dir.path(), None, Some(&[1, pending]), false)
+            .await
+            .expect_err("a non-embedded pinned id must abort");
+        match err {
+            GleanError::IntakeNotRebuildable(id) => assert_eq!(id, pending),
+            other => panic!("expected IntakeNotRebuildable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reembed_all_only_ids_pins_the_set_and_ignores_only_and_stale_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1, 2]);
+        seed_partition(dir.path(), 1, 3).await;
+        seed_partition(dir.path(), 2, 2).await;
+
+        // `only` names an unknown id and `stale_only` is on: were
+        // either consulted, the call would abort or filter the pinned
+        // target away. The pinned list alone decides.
+        let report = reembed_all(
+            &catalog,
+            &mut corpus,
+            dir.path(),
+            &embed_cfg("fake-1"),
+            &Fake { generation: 7 },
+            Some(9_999),
+            Some(&[1]),
+            true,
+        )
+        .await
+        .expect("reembed");
+        assert_eq!(report.intakes.len(), 1);
+        assert_eq!(report.intakes[0].intake_id, 1);
+        assert_eq!(report.intakes[0].chunks_written, 3);
+
+        // The pinned partition was rewritten; the unpinned one was not.
+        assert!(
+            partition_tags(dir.path(), 1)
+                .await
+                .iter()
+                .all(|&t| t == 7.0)
+        );
+        assert!(
+            partition_tags(dir.path(), 2)
+                .await
+                .iter()
+                .all(|&t| t == 0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn reembed_all_aborts_on_embed_failure_and_audits_the_fail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1]);
+        seed_partition(dir.path(), 1, 3).await;
+
+        let err = reembed_all(
+            &catalog,
+            &mut corpus,
+            dir.path(),
+            &embed_cfg("fake-1"),
+            &Offline,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect_err("the offline embedder must abort the run");
+        assert!(matches!(err, GleanError::Embed(_)), "got {err:?}");
+
+        // The failure landed as an audit row on the partition root.
+        let work_root_raw = PartitionIdx::new(1).root().get();
+        let rows = catalog
+            .pipeline_audit_for_book(work_root_raw)
+            .expect("audit rows");
+        assert!(
+            rows.iter().any(|r| {
+                r.stage == "embed"
+                    && r.outcome == "fail"
+                    && r.actor_detail.as_deref() == Some("glean-reembed")
+            }),
+            "expected a glean-reembed fail row, got {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_partition_is_skipped_and_planning_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        seed_catalog_embedded(&mut catalog, &[1, 2]);
+        // Partition 1 left empty; partition 2 carries chunks.
+        seed_partition(dir.path(), 2, 2).await;
+
+        // The planner lists only the non-empty partition and leaves
+        // the stored vectors untouched.
+        let plans = plan_reembed(&catalog, dir.path(), None, None, false)
+            .await
+            .expect("plan");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].intake_id, 2);
+        assert_eq!(plans[0].chunk_count, 2);
+        assert!(
+            partition_tags(dir.path(), 2)
+                .await
+                .iter()
+                .all(|&t| t == 0.0)
+        );
+
+        // The driver buckets the empty partition as skipped, not failed.
+        let report = reembed_all(
+            &catalog,
+            &mut corpus,
+            dir.path(),
+            &embed_cfg("fake-1"),
+            &Fake { generation: 7 },
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("reembed");
+        assert_eq!(report.skipped_empty, vec![1]);
+        assert_eq!(report.intakes.len(), 1);
+        assert_eq!(report.intakes[0].intake_id, 2);
+    }
+}
