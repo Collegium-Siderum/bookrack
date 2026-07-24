@@ -74,17 +74,27 @@ impl Corpus {
     /// writing through the connection.
     ///
     /// Mirrors [`Catalog::open_read_only`][bookrack_catalog::Catalog::open_read_only]:
-    /// the `query_only` PRAGMA blocks writes, the schema-apply and the
-    /// version-reconciliation writers are skipped, and the table-spec
-    /// conformance check still runs so a drifted file is refused at open.
-    /// A missing file is reported as a SQLite open failure rather than
-    /// silently materialized.
+    /// the `query_only` PRAGMA blocks writes and the stamp *writers* are
+    /// skipped, but every read-side check the read-write path runs still
+    /// runs here — the table-spec conformance check, the `schema_version`
+    /// stamp, and the `min_reader_version` stamp — so a drifted or
+    /// incompatible file is refused at open. A missing file is reported as
+    /// a SQLite open failure rather than silently materialized.
     pub fn open_read_only(path: &Path) -> Result<Corpus> {
         let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         bookrack_dbkit::verify_all(&conn, SPECS).map_err(CorpusError::Verify)?;
         let corpus = Corpus {
             conn: TimedConnection::new(conn, "corpus"),
         };
+        // Verify the schema-version stamp without writing: a missing stamp
+        // (fresh file) is accepted as-is, a differing revision is refused.
+        let found = corpus.meta_get(SCHEMA_VERSION_KEY)?;
+        if let OpenDecision::Rederive { .. } = decide(found.as_deref()) {
+            return Err(CorpusError::SchemaMismatch {
+                found: found.unwrap_or_default(),
+                expected: SCHEMA_VERSION,
+            });
+        }
         let stored = corpus.read_min_reader_version()?;
         if let OpenDecision::Refuse { .. } = reader_version_decision(stored) {
             return Err(CorpusError::ReaderTooOld {
@@ -273,6 +283,41 @@ mod tests {
         // possible, so re-run the check directly.
         let err = corpus.reconcile_schema_version().expect_err("must reject");
         assert!(matches!(err, CorpusError::SchemaMismatch { .. }));
+    }
+
+    #[test]
+    fn open_read_only_checks_the_schema_version_stamp() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-roschema-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("corpus.db");
+
+        Corpus::open(&path).expect("first open stamps the current schema version");
+        // A matching stamp opens read-only cleanly.
+        Corpus::open_read_only(&path).expect("read-only open of a matching corpus");
+
+        // Overwrite the stamp with a revision this binary does not accept.
+        // The table DDL is untouched, so the spec-conformance check the
+        // read-only path already runs still passes; only the version stamp
+        // catches the mismatch.
+        let foreign = (SCHEMA_VERSION + 1).to_string();
+        {
+            let corpus = Corpus::open(&path).expect("reopen");
+            corpus
+                .meta_set(SCHEMA_VERSION_KEY, &foreign)
+                .expect("overwrite schema_version");
+        }
+
+        match Corpus::open_read_only(&path) {
+            Err(CorpusError::SchemaMismatch { found, expected }) => {
+                assert_eq!(found, foreign);
+                assert_eq!(expected, SCHEMA_VERSION);
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("read-only open must refuse a mismatched schema version"),
+        }
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
