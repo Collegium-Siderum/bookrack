@@ -257,3 +257,28 @@ impl Ctx {
         Self::default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_pct_spans_no_op_partial_and_total_loss() {
+        let mut coverage = Coverage::default();
+        assert_eq!(
+            coverage.coverage_pct(),
+            100.0,
+            "an empty run is a no-op, not a failure"
+        );
+        coverage.entries = 3;
+        coverage.unmatched_lines = 1;
+        assert_eq!(coverage.coverage_pct(), 75.0);
+        coverage.entries = 0;
+        coverage.unmatched_lines = 4;
+        assert_eq!(
+            coverage.coverage_pct(),
+            0.0,
+            "dropping every candidate scores zero"
+        );
+    }
+}

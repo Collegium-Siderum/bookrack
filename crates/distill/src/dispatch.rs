@@ -506,4 +506,53 @@ mod tests {
             other => panic!("expected Regex, got {other:?}"),
         }
     }
+
+    /// The module doc calls adding a builtin a three-place edit: a
+    /// stage_catalog entry, a constructor, and a dispatch arm. Guard
+    /// the catalog→dispatch half: every cataloged name must reach an
+    /// arm. A missing-param error is fine here; only `StageNotFound`
+    /// marks drift.
+    #[test]
+    fn every_cataloged_stage_dispatches_to_a_builtin() {
+        let cats = crate::catalogs::Catalogs::load_all().expect("catalogs");
+        assert!(!cats.stages.entries.is_empty());
+        for name in cats.stages.entries.keys() {
+            let result = dispatch_stage(name, None);
+            assert!(
+                !matches!(result, Err(ParseError::StageNotFound(_))),
+                "stage {name:?} is cataloged but has no dispatch arm"
+            );
+        }
+    }
+
+    /// The other half of the drift guard: the catalog's name set is
+    /// pinned literally, so an arm added without a catalog entry (or a
+    /// silent rename / removal) fails here and forces the three-place
+    /// edit to stay complete.
+    #[test]
+    fn the_stage_catalog_pins_the_builtin_name_set() {
+        let cats = crate::catalogs::Catalogs::load_all().expect("catalogs");
+        let names: Vec<&str> = cats.stages.entries.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "extract_bracketed_tag",
+                "extract_gender_tag",
+                "extract_quotes",
+                "extract_year_span",
+                "one_block_per_page",
+                "pair_bilingual_entries",
+                "partition_body_around_match",
+                "split_at_first_cjk",
+                "split_bilingual_blocks",
+                "split_headline_only",
+                "split_pages",
+                "split_variants",
+                "to_entry_draft",
+                "unpack_paired_body",
+                "walk_anchors",
+                "walk_anchors_per_lang",
+            ],
+        );
+    }
 }
