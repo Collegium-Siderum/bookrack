@@ -2465,10 +2465,20 @@ fn default_registry_path_from(config_dir: Option<PathBuf>) -> Option<PathBuf> {
 /// the offline CLI write verbs and the daemon's `fork` helper so the
 /// two agree on which file is the registry.
 pub fn registry_target_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(REGISTRY_ENV) {
-        return Some(PathBuf::from(path));
+    registry_target_path_from(std::env::var(REGISTRY_ENV).ok(), default_registry_path())
+}
+
+/// Pure resolution for [`registry_target_path`], factored out so the
+/// precedence can be tested without touching the process environment.
+/// A blank [`REGISTRY_ENV`] value is ignored and falls through to
+/// `default`, matching the read side ([`load_registry`]) so the two
+/// agree on which file is the registry rather than one resolving to an
+/// empty path.
+fn registry_target_path_from(env: Option<String>, default: Option<PathBuf>) -> Option<PathBuf> {
+    match env_trimmed(env) {
+        Some(path) => Some(PathBuf::from(path)),
+        None => default,
     }
-    default_registry_path()
 }
 
 /// Load the platform-default registry, if present. A missing file is
@@ -3789,6 +3799,39 @@ mod tests {
             Some(parent.join("bookrack").join(DEFAULT_REGISTRY_NAME)),
         );
         assert!(default_registry_path_from(None).is_none());
+    }
+
+    #[test]
+    fn registry_target_path_prefers_a_non_blank_env_over_the_default() {
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        assert_eq!(
+            registry_target_path_from(Some("/custom/reg.toml".to_string()), default),
+            Some(PathBuf::from("/custom/reg.toml")),
+        );
+    }
+
+    #[test]
+    fn registry_target_path_ignores_a_blank_env_matching_the_read_side() {
+        // A blank BOOKRACK_REGISTRY must fall through to the platform
+        // default just as `load_registry` does — never resolve to an
+        // empty path the write verbs would then try to create.
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                registry_target_path_from(Some(blank.to_string()), default.clone()),
+                default,
+                "blank env {blank:?} must fall through to the default",
+            );
+        }
+        // With no default either, a blank env yields None, never Some("").
+        assert_eq!(registry_target_path_from(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn registry_target_path_falls_back_when_env_is_unset() {
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        assert_eq!(registry_target_path_from(None, default.clone()), default);
+        assert_eq!(registry_target_path_from(None, None), None);
     }
 
     #[test]
