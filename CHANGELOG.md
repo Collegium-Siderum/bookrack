@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **extract: a fullwidth References heading terminates the paper
+  metadata-scan window.** `extract_paper_metadata_text` documented its
+  References-heading match as running against the fullwidth-folded
+  page text, but the fold was applied only after the window was cut,
+  so a heading printed in fullwidth forms (U+FF01..U+FF5E) never
+  closed the window and bibliography text leaked into the DOI / venue
+  scan. Each page is now folded before the heading match, making the
+  documented order the real one.
+
 - **glean, catalog: three paper-audit grade columns no longer stuck
   at `missing`.** The audit's per-field reports and the
   `node_paper_audit` projection disagreed on field-key names:

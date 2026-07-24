@@ -263,12 +263,29 @@ pub fn extract_paper_metadata_text(path: &Path) -> Result<Option<String>, Extrac
                 detail: e.to_string(),
             })?;
 
+    metadata_text_from_pages(document.pages().iter().map(|page| {
+        page.text()
+            .map(|text| text.all())
+            .map_err(|e| ExtractError::CorruptFile {
+                detail: e.to_string(),
+            })
+    }))
+}
+
+/// Accumulate fullwidth-folded page text until the first References
+/// heading or the size cap — the pure scan-window core of
+/// [`extract_paper_metadata_text`]. Pages are consumed lazily, so a
+/// window closed by the References heading never decodes the pages
+/// behind it.
+fn metadata_text_from_pages<I>(pages: I) -> Result<Option<String>, ExtractError>
+where
+    I: IntoIterator<Item = Result<String, ExtractError>>,
+{
     let mut out = String::new();
-    for page in document.pages().iter() {
-        let text = page.text().map_err(|e| ExtractError::CorruptFile {
-            detail: e.to_string(),
-        })?;
-        out.push_str(&text.all());
+    for text in pages {
+        // Fold before the heading match, so a References heading
+        // spelled in fullwidth forms terminates the window too.
+        out.push_str(&fold_fullwidth_to_ascii(&text?));
         out.push('\n');
         if let Some(m) = REFS_HEADING_RE.find(&out) {
             out.truncate(m.start());
@@ -278,11 +295,10 @@ pub fn extract_paper_metadata_text(path: &Path) -> Result<Option<String>, Extrac
             break;
         }
     }
-    let folded = fold_fullwidth_to_ascii(&out);
-    if folded.trim().is_empty() {
+    if out.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(folded))
+        Ok(Some(out))
     }
 }
 
@@ -1388,5 +1404,127 @@ mod tests {
         ];
         let _ = extract_paper_structured(&mut blocks, &Toc::default());
         assert!(blocks.iter().all(|b| matches!(b.kind, BlockKind::Body)));
+    }
+
+    // --- the metadata-scan window --------------------------------------
+
+    fn pages(texts: &[&str]) -> Vec<Result<String, ExtractError>> {
+        texts.iter().map(|t| Ok((*t).to_string())).collect()
+    }
+
+    fn window(texts: &[&str]) -> String {
+        metadata_text_from_pages(pages(texts))
+            .expect("no page errors")
+            .expect("non-empty window")
+    }
+
+    #[test]
+    fn the_references_heading_ends_the_metadata_window() {
+        let out = window(&[
+            "A Title\nDOI 10.1234/bkr.777\nsome body text",
+            "more body\nReferences\n[1] a cited work",
+        ]);
+        assert!(out.contains("DOI 10.1234/bkr.777"), "got {out:?}");
+        assert!(out.contains("more body"), "got {out:?}");
+        assert!(!out.contains("References"), "the heading itself is cut");
+        assert!(!out.contains("a cited work"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_page_behind_the_references_heading_is_never_decoded() {
+        // The page after the heading errors; lazy consumption means the
+        // window closes without ever surfacing that error.
+        let pages = vec![
+            Ok("body\nBIBLIOGRAPHY\n[1] entry".to_string()),
+            Err(ExtractError::CorruptFile {
+                detail: "page behind the window".to_string(),
+            }),
+        ];
+        let out = metadata_text_from_pages(pages)
+            .expect("the error page sits behind the closed window")
+            .expect("non-empty window");
+        assert!(
+            !out.contains("BIBLIOGRAPHY"),
+            "case-insensitive heading cut"
+        );
+    }
+
+    #[test]
+    fn the_spaced_cjk_references_heading_ends_the_metadata_window() {
+        // "can kao wen xian" with the interior spaces some CJK layouts
+        // carry in the extracted text layer.
+        let out = window(&[
+            "\u{6B63}\u{6587}",
+            "\u{53C2} \u{8003} \u{6587} \u{732E}\n[1] \u{6761}\u{76EE}",
+        ]);
+        assert!(out.contains('\u{6B63}'), "got {out:?}");
+        assert!(!out.contains('\u{732E}'), "got {out:?}");
+        assert!(!out.contains("[1]"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_fullwidth_references_heading_still_ends_the_metadata_window() {
+        // "References" spelled in fullwidth forms (U+FF32 etc.): the
+        // fold runs before the heading match, so the fullwidth spelling
+        // terminates the window like the ASCII one.
+        let fullwidth_refs =
+            "\u{FF32}\u{FF45}\u{FF46}\u{FF45}\u{FF52}\u{FF45}\u{FF4E}\u{FF43}\u{FF45}\u{FF53}";
+        let out = window(&["body text", &format!("{fullwidth_refs}\n[1] a cited work")]);
+        assert!(out.contains("body text"), "got {out:?}");
+        assert!(!out.contains("a cited work"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_mid_line_references_mention_keeps_the_window_open() {
+        let out = window(&[
+            "the references to prior work are sparse",
+            "see the bibliography of styles\ntail sentinel",
+        ]);
+        assert!(out.contains("tail sentinel"), "got {out:?}");
+    }
+
+    #[test]
+    fn the_metadata_window_caps_at_max_metadata_chars() {
+        let long_page = "a".repeat(MAX_METADATA_CHARS + 100);
+        let out = window(&[&long_page, "tail sentinel"]);
+        assert!(!out.contains("tail sentinel"), "the cap closes the window");
+    }
+
+    #[test]
+    fn an_all_whitespace_scan_yields_none() {
+        let result = metadata_text_from_pages(pages(&["", " \n\t"])).expect("no page errors");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn a_page_error_inside_the_window_propagates() {
+        let pages = vec![
+            Ok("front matter".to_string()),
+            Err(ExtractError::CorruptFile {
+                detail: "bad page".to_string(),
+            }),
+        ];
+        assert!(metadata_text_from_pages(pages).is_err());
+    }
+
+    // --- fullwidth folding ----------------------------------------------
+
+    #[test]
+    fn fullwidth_latin_digits_and_punctuation_fold_to_ascii() {
+        // A fullwidth DOI banner: "DOI:10.1/a-b" spelled entirely in
+        // U+FF01..U+FF5E forms.
+        let banner = "\u{FF24}\u{FF2F}\u{FF29}\u{FF1A}\u{FF11}\u{FF10}\u{FF0E}\u{FF11}\u{FF0F}\u{FF41}\u{FF0D}\u{FF42}";
+        assert_eq!(fold_fullwidth_to_ascii(banner), "DOI:10.1/a-b");
+    }
+
+    #[test]
+    fn the_ideographic_space_folds_to_a_plain_space() {
+        assert_eq!(fold_fullwidth_to_ascii("a\u{3000}b"), "a b");
+    }
+
+    #[test]
+    fn cjk_ideographs_and_ascii_pass_through_the_fold_unchanged() {
+        let text = "DOI 10.1/x \u{6D77}\u{5CB8}\u{7EBF}";
+        assert_eq!(fold_fullwidth_to_ascii(text), text);
     }
 }
