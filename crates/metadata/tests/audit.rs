@@ -1561,6 +1561,194 @@ fn confirmed_override_keeps_validation_failures() {
 }
 
 #[test]
+fn confirmed_override_keeps_a_non_bcp47_language() {
+    // "english language" fails the BCP-47 syntax check; confirmation
+    // must not lift the grade over an objectively malformed tag.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            KIND,
+            "language",
+            Some("english language".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("language", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let language = field(&report, "language");
+    assert!(language.flags.contains(&Flag::NonBcp47));
+    assert_eq!(language.grade, FieldGrade::Medium);
+}
+
+#[test]
+fn confirmed_override_keeps_a_language_the_body_contradicts() {
+    // A confirmed "zh" over an all-Latin body sample keeps the
+    // body-script mismatch and its weakening.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            KIND,
+            "language",
+            Some("zh".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("language", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let language = field(&report, "language");
+    assert!(!language.flags.contains(&Flag::NonBcp47));
+    assert!(language.flags.contains(&Flag::LangMismatchesBody));
+    assert_eq!(language.grade, FieldGrade::Medium);
+}
+
+#[test]
+fn confirmed_override_keeps_an_out_of_range_year() {
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            KIND,
+            "year",
+            Some("2999".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("year", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let year = field(&report, "year");
+    assert!(year.flags.contains(&Flag::YearOutOfRange));
+    assert_eq!(year.grade, FieldGrade::Medium);
+}
+
+#[test]
+fn confirmed_override_keeps_an_empty_value_missing() {
+    // A whitespace-only confirmed override is still an absent value:
+    // the Empty flag holds and the grade stays Missing, never pinned
+    // to Strong.
+    let catalog = Catalog::open_in_memory().expect("open");
+    seed_base(
+        &catalog,
+        Some("A Test Book"),
+        Some("Oxford University Press"),
+        Some("2005"),
+        None,
+        Some("en"),
+        None,
+        None,
+    );
+    catalog
+        .set_override(&bookrack_catalog::NewOverride::new(
+            INTAKE,
+            KIND,
+            "title",
+            Some("   ".to_string()),
+            "human",
+        ))
+        .expect("override");
+    let effective = effective_of(&catalog);
+    let prov = provenance("epub", TextLayerQuality::BornDigital);
+    let biblio = biblio();
+    let stats = toc_stats();
+    let mut origins = FieldOrigins::empty();
+    origins.add_override("title", true);
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("a-test-book"),
+        data: test_data(),
+        origins,
+    };
+    let report = audit(&input, &AuditProfile::default());
+    let title = field(&report, "title");
+    assert!(title.flags.contains(&Flag::Empty));
+    assert_eq!(title.grade, FieldGrade::Missing);
+}
+
+#[test]
 fn voided_should_field_reads_as_a_neutral_gap() {
     // A voided publisher is a deliberate, recorded gap: medium grade,
     // a single Voided flag, and the rollup caps at Medium instead of
