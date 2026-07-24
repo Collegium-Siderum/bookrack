@@ -540,15 +540,22 @@ where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<JobSuccess, JobError>> + Send,
 {
-    // Crash recovery once at startup.
+    // Crash recovery once at startup. A tick promises values
+    // derivable from the on-disk document, so a failed persist
+    // publishes nothing; the next successful save carries the full
+    // state.
     {
         let mut guard = state.lock().expect("queue state mutex poisoned");
         crash_recovery_reset(&mut guard);
-        if let Err(err) = save_atomic(&guard, &state_path) {
-            tracing::error!(error = %err, "queue worker: persist after crash recovery");
+        match save_atomic(&guard, &state_path) {
+            Ok(()) => {
+                let tick = derive_tick(&guard, None);
+                events.publish(Event::QueueTick(tick));
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "queue worker: persist after crash recovery");
+            }
         }
-        let tick = derive_tick(&guard, None);
-        events.publish(Event::QueueTick(tick));
     }
 
     loop {
@@ -565,11 +572,15 @@ where
             let mut guard = state.lock().expect("queue state mutex poisoned");
             let job = pull_pending(&mut guard);
             if job.is_some() {
-                if let Err(err) = save_atomic(&guard, &state_path) {
-                    tracing::error!(error = %err, "queue worker: persist after pull");
+                match save_atomic(&guard, &state_path) {
+                    Ok(()) => {
+                        let tick = derive_tick(&guard, None);
+                        events.publish(Event::QueueTick(tick));
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "queue worker: persist after pull");
+                    }
                 }
-                let tick = derive_tick(&guard, None);
-                events.publish(Event::QueueTick(tick));
             }
             job
         };
@@ -656,13 +667,15 @@ where
                     guard.paused = false;
                 }
             }
-            let last_finished = guard
-                .jobs
-                .iter()
-                .find(|j| j.id == job.id)
-                .map(summarize_outcome);
-            let tick = derive_tick(&guard, last_finished);
-            events.publish(Event::QueueTick(tick));
+            if save_result.is_ok() {
+                let last_finished = guard
+                    .jobs
+                    .iter()
+                    .find(|j| j.id == job.id)
+                    .map(summarize_outcome);
+                let tick = derive_tick(&guard, last_finished);
+                events.publish(Event::QueueTick(tick));
+            }
         }
     }
 }
@@ -1169,6 +1182,153 @@ mod tests {
         assert!(snapshot.jobs[0].finished_at.is_some());
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn worker_loop_publishes_no_tick_when_persist_fails() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        // Every tick promises values derivable from the on-disk
+        // document, so a worker whose persists all fail must publish
+        // nothing. A regular file blocks the state path's parent, so
+        // every save_atomic fails while the in-memory queue still
+        // advances.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"file-not-dir").unwrap();
+        let path = blocker.join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/only.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, flag);
+        let mut subscriber = events.subscribe();
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                |_job| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
+                events,
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+        // The job still settles in memory despite the failing persists.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let done = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Done)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not settle the job within 3 s"
+            );
+        }
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let mut ticks = 0;
+        while let Ok(event) = subscriber.try_recv() {
+            if matches!(event, Event::QueueTick(_)) {
+                ticks += 1;
+            }
+        }
+        assert_eq!(
+            ticks, 0,
+            "a queue.tick was published without a successful persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_loop_ticks_follow_each_successful_persist() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/only.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, flag);
+        let mut subscriber = events.subscribe();
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                |_job| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
+                events,
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let done = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Done)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not mark the job Done within 3 s"
+            );
+        }
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let mut ticks = Vec::new();
+        while let Ok(event) = subscriber.try_recv() {
+            if let Event::QueueTick(tick) = event {
+                ticks.push(tick);
+            }
+        }
+        // Startup, pull, and outcome each persisted and ticked.
+        assert!(
+            ticks.len() >= 3,
+            "expected startup, pull, and outcome ticks, got {}",
+            ticks.len()
+        );
+        assert!(
+            ticks.iter().any(|t| t.running == 1),
+            "the pull tick reports the running job"
+        );
+        let last = ticks.last().expect("at least one tick");
+        assert_eq!(last.pending, 0);
+        assert_eq!(last.running, 0);
+        assert!(
+            matches!(&last.last_finished, Some(s) if s.state == JobState::Done),
+            "the outcome tick carries the finished summary"
+        );
     }
 
     #[tokio::test]
