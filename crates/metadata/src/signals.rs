@@ -9,11 +9,27 @@
 //! report tells a reader why. The aggregate verdict and the row-level
 //! confidence are functions of the required-field grades.
 //!
-//! Every weakening signal is gated by a corresponding toggle in
-//! [`bookrack_audit_profile::AuditProfile`]. A signal whose toggle is
-//! off neither weakens the grade nor appends its flag, so the audit
-//! reduces to plain "present / missing" reporting under the
-//! `trust-source` profile.
+//! Weakening signals fall in two classes. The *value-heuristic* ones —
+//! placeholder and purely-numeric titles, the bracketed-title
+//! subtypes, non-BCP-47 and body-script language checks, the publisher
+//! watermark / whitelist rules, the year range / file-date / timestamp
+//! checks, the source prior, and the toggled TOC-shape signals — are
+//! each gated by a corresponding toggle in
+//! [`bookrack_audit_profile::AuditProfile`]; a signal whose toggle is
+//! off neither weakens the grade nor appends its flag.
+//!
+//! The remaining *structural* signals fire unconditionally, because
+//! they report an objective defect rather than a guess about a
+//! plausible value, and no toggle gates them: `IsbnCheckFailed` (a
+//! failed ISBN checksum), `EqualsFilename` and `EqualsPublisher` (a
+//! title degenerate to its own filename stem or publisher),
+//! `TocUnanchoredSome` / `TocUnanchoredHalf` (TOC entries that anchor
+//! to no content), and `DoubtfulTextLayer` (the extractor itself
+//! flagged the text layer as doubtful). These still fire under the
+//! `trust-source` profile, so the pure audit does not reduce to plain
+//! "present / missing" there — that reduction happens one layer up,
+//! where `trust-source` also sets `audit_enabled = false` and the
+//! caller skips the audit entirely.
 
 use bookrack_audit_profile::AuditProfile;
 use bookrack_extract::TextLayerQuality;

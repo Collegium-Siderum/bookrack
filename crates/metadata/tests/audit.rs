@@ -1260,6 +1260,115 @@ fn toggle_off_toc_shape_suppresses_empty_large_body_flag() {
 }
 
 #[test]
+fn trust_source_still_fires_the_ungated_structural_signals() {
+    // The module doc splits weakeners into toggle-gated value
+    // heuristics and unconditional structural signals. `trust-source`
+    // turns off every toggle, so the value heuristics fall silent —
+    // but the structural signals report objective defects and have no
+    // toggle, so they must still fire and still weaken. This pins that
+    // split: the pure audit does not reduce to plain present/missing
+    // under `trust-source`; that reduction lives one layer up, where
+    // `audit_enabled = false` skips the call.
+    let profile = AuditProfile::trust_source();
+    let catalog = Catalog::open_in_memory().expect("open");
+    // Title degenerate to both its filename stem and its publisher, an
+    // ISBN that fails its checksum, and a PDF text layer the extractor
+    // flagged doubtful — one input that trips every structural signal.
+    seed_base(
+        &catalog,
+        Some("Acme Press"),
+        Some("Acme Press"),
+        Some("2010"),
+        Some("978-3-16-148410-1"),
+        Some("en"),
+        None,
+        None,
+    );
+    let effective = effective_of(&catalog);
+    let prov = provenance("pdf", TextLayerQuality::Doubtful);
+    let biblio = biblio();
+    let stats = TocStats {
+        total_toc_entries: 4,
+        // A majority unanchored, so both the "some" and the "half"
+        // signals qualify.
+        unanchored_toc_entries: 3,
+        suspicious_flat: false,
+        heading_block_skew: false,
+    };
+    let input = AuditInput {
+        biblio: &biblio,
+        provenance: &prov,
+        effective: &effective,
+        toc_stats: &stats,
+        body_sample: "The quick brown fox jumps over the lazy dog.",
+        total_blocks: 100,
+        source_stem: Some("acme press"),
+        data: test_data(),
+        origins: FieldOrigins::empty(),
+    };
+    let report = audit(&input, &profile);
+
+    let title = field(&report, "title");
+    assert!(
+        title.flags.contains(&Flag::EqualsFilename),
+        "EqualsFilename must fire with no toggle: {:?}",
+        title.flags
+    );
+    assert!(
+        title.flags.contains(&Flag::EqualsPublisher),
+        "EqualsPublisher must fire with no toggle: {:?}",
+        title.flags
+    );
+    assert!(
+        title.flags.contains(&Flag::DoubtfulTextLayer),
+        "DoubtfulTextLayer must fire with no toggle: {:?}",
+        title.flags
+    );
+    // Three unconditional weakeners plus the born-doubtful layer drive
+    // the title well below Strong; the point is that trust-source did
+    // not neutralise them.
+    assert_ne!(
+        title.grade,
+        FieldGrade::Strong,
+        "structural signals must still weaken under trust-source"
+    );
+
+    let isbn = field(&report, "isbn");
+    assert!(
+        isbn.flags.contains(&Flag::IsbnCheckFailed),
+        "IsbnCheckFailed must fire with no toggle: {:?}",
+        isbn.flags
+    );
+
+    assert!(
+        report.shape_flags.contains(&Flag::TocUnanchoredSome),
+        "TocUnanchoredSome must fire with no toggle: {:?}",
+        report.shape_flags
+    );
+    assert!(
+        report.shape_flags.contains(&Flag::TocUnanchoredHalf),
+        "TocUnanchoredHalf must fire with no toggle: {:?}",
+        report.shape_flags
+    );
+
+    // The counterpart guarantee: a value heuristic that *is* gated
+    // stays silent, proving the toggles really are off and the
+    // structural firings above are not an artefact of a half-applied
+    // profile. The source prior is the sharp probe here — a `pdf`
+    // adapter on a non-overridden field raises `SourcePriorWeak` under
+    // the default profile, and trust-source's `source_prior.enabled =
+    // false` is the only thing suppressing it.
+    for report in &report.fields {
+        assert!(
+            !report.flags.contains(&Flag::SourcePriorWeak),
+            "the gated source prior must stay silent under trust-source: {} {:?}",
+            report.field,
+            report.flags
+        );
+    }
+}
+
+#[test]
 fn override_is_exempt_from_the_source_prior() {
     let catalog = Catalog::open_in_memory().expect("open");
     seed_base(
