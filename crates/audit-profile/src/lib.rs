@@ -857,6 +857,101 @@ mod tests {
     }
 
     #[test]
+    fn overlay_ratio_outside_unit_range_is_rejected() {
+        // One probe per rejection class: above 1.0, negative, and NaN.
+        // The field name in the error identifies which knob misfired.
+        let cases = [
+            (
+                "schema_version = 1\n\n[quality]\nreplacement_ocr = 1.5\n",
+                "quality.replacement_ocr",
+                1.5,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = -0.25\n",
+                "language.body_cjk_min_ratio",
+                -0.25,
+            ),
+            (
+                "schema_version = 1\n\n[quality]\npua_ocr = nan\n",
+                "quality.pua_ocr",
+                f64::NAN,
+            ),
+        ];
+        for (overlay_toml, expected_field, expected_value) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = AuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::RatioOutOfRange { field, value, .. } => {
+                    assert_eq!(field, expected_field);
+                    assert!(
+                        value == expected_value || (value.is_nan() && expected_value.is_nan()),
+                        "error carries the offending value: {value} vs {expected_value}",
+                    );
+                }
+                other => panic!("expected RatioOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_ratio_in_range_lands_as_basis_points() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[quality]\nreplacement_ocr = 0.35\n\n\
+             [language]\nbody_cjk_min_ratio = 0.0\nbody_cjk_max_ratio = 1.0\n",
+        )
+        .unwrap();
+        let loaded = AuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(loaded.quality.replacement_ocr_bp, 3500);
+        assert_eq!(loaded.language.body_cjk_min_ratio_bp, 0);
+        assert_eq!(loaded.language.body_cjk_max_ratio_bp, 10_000);
+    }
+
+    #[test]
+    fn overlay_chars_per_page_outside_u32_domain_is_rejected() {
+        // A negative, NaN, or oversized count must be refused, not
+        // silently saturated to 0 / u32::MAX by the float-to-int cast.
+        let cases = [
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_ocr = -50\n",
+                "quality.chars_per_page_ocr",
+            ),
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_doubt = nan\n",
+                "quality.chars_per_page_doubt",
+            ),
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_ocr = 5e9\n",
+                "quality.chars_per_page_ocr",
+            ),
+        ];
+        for (overlay_toml, expected_field) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = AuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::CountOutOfRange { field, .. } => assert_eq!(field, expected_field),
+                other => panic!("expected CountOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_chars_per_page_in_domain_truncates_to_the_stored_count() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[quality]\nchars_per_page_ocr = 72.9\nchars_per_page_doubt = 300\n",
+        )
+        .unwrap();
+        let loaded = AuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(loaded.quality.chars_per_page_ocr, 72);
+        assert_eq!(loaded.quality.chars_per_page_doubt, 300);
+    }
+
+    #[test]
     fn default_implementation_matches_default_profile() {
         assert_eq!(AuditProfile::default(), AuditProfile::default_profile());
     }
