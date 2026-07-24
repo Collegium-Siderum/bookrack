@@ -454,14 +454,10 @@ impl Stage for UnpackPairedBody {
                 s.payload
                     .insert(self.body_to.clone(), JsonValue::String(body_text));
                 s.body = String::new();
-            } else if !s.payload.contains_key(&self.head_to) {
-                // No markers, but make sure the keys are at least
-                // declared with an empty placeholder so downstream
-                // finalize keys never miss them; this keeps the
-                // book.toml-declared keyset consistent.
             }
-            // ensure quality_flags untouched
-            let _ = &s.quality_flags;
+            // Without both markers in order, the entry passes through
+            // untouched: no payload keys are declared, and the body is
+            // left as-is.
             s
         });
         Ok(StageData::Splits(out))
