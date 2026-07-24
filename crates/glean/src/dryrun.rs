@@ -86,7 +86,9 @@ pub struct DryrunPaperReport {
     /// series. Populated from `Biblio::container_title` or the venue
     /// cue scan.
     pub venue: Option<String>,
-    /// Source label of the abstract pick:
+    /// Source label of the abstract pick. The PDF paper path reports
+    /// `"heading-cn" | "heading-en" | "fallback-first-pages"`; the
+    /// block-level fallback reports
     /// `"heading" | "first_page_long_para" | "first_long_para"`.
     /// `None` when no body block could serve as the abstract.
     pub abstract_source: Option<String>,

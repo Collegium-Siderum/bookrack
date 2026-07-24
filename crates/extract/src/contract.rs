@@ -123,8 +123,8 @@ pub enum BlockKind {
     /// A caption attached to a figure or table.
     Caption,
     /// The paper's abstract. Emitted by the paper-side structuring
-    /// pass only; book-side adapters (TXT, EPUB, HTML, Markdown,
-    /// generic PDF) never carry this kind.
+    /// pass only; book-side adapters (TXT, EPUB, HTML, generic PDF)
+    /// never carry this kind.
     Abstract,
     /// Recognized non-prose extract cannot place precisely.
     Other,

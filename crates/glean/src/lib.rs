@@ -192,7 +192,10 @@ pub struct GleanReport {
     /// series. Populated from `Biblio::container_title` or the venue
     /// cue scan over the footer.
     pub venue: Option<String>,
-    /// Source label of the abstract pick:
+    /// Source label of the abstract pick. The PDF paper path delegates
+    /// to `extract_paper_abstract` and reports
+    /// `"heading-cn" | "heading-en" | "fallback-first-pages"`; the
+    /// block-level fallback reports
     /// `"heading" | "first_page_long_para" | "first_long_para"`.
     /// `None` when no body block could serve as the abstract.
     pub abstract_source: Option<String>,

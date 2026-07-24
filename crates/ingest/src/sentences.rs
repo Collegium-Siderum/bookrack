@@ -16,8 +16,12 @@
 
 /// Version of the sentence-counting algorithm.
 ///
-/// Bump on any change to [`count_sentences`]'s behaviour: the count is
-/// stored on each prose leaf, so a change is a re-derivation commitment.
+/// [`count_sentences`] derives the per-leaf `sentence_count` stored in
+/// `corpus.db`, so a change to its behaviour leaves existing counts
+/// stale. This constant records the algorithm revision for that reason.
+/// It is not yet wired into any stamp chain, so bumping it does not
+/// itself trigger a re-derivation — an existing corpus keeps its old
+/// counts until it is rebuilt.
 pub const SENTENCE_VERSION: u32 = 1;
 
 /// Count the sentences in `text`.

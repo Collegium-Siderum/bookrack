@@ -396,13 +396,6 @@ pub struct ChunkStore {
 }
 
 impl ChunkStore {
-    /// Open the chunks table under `lancedb_dir`, creating an empty one
-    /// if none exists.
-    ///
-    /// `dim` is the embedding vector dimension. It is fixed when the
-    /// table is first created; reopening a store with a different `dim`
-    /// than its rows were written with will fail later, on write or
-    /// read — a directory must be reused only with one embedding model.
     /// Open the existing chunks table under `lancedb_dir`, or return
     /// `None` if no such table is on disk.
     ///
@@ -481,6 +474,13 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Open the chunks table under `lancedb_dir`, creating an empty one
+    /// if none exists.
+    ///
+    /// `dim` is the embedding vector dimension. It is fixed when the
+    /// table is first created; reopening a store with a different `dim`
+    /// than its rows were written with will fail later, on write or
+    /// read — a directory must be reused only with one embedding model.
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
         // Reader-version axis: a meta file written by a future binary
