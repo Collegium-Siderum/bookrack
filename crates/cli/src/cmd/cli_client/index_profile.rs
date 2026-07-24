@@ -194,17 +194,37 @@ fn confirm_strength(has_destructive: bool, needs_soft: bool) -> ConfirmStrength 
 fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
     use std::io::IsTerminal;
 
-    let mode = match confirm_strength(plan.has_destructive(), plan.needs_soft_confirm()) {
+    confirm_plan_with(
+        &plan.entry.name,
+        confirm_strength(plan.has_destructive(), plan.needs_soft_confirm()),
+        yes,
+        std::io::stdin().is_terminal(),
+        |prompt, mode| confirm_destructive(prompt, mode, false),
+    )
+}
+
+/// [`confirm_plan`] over the plan facts it actually reads, with
+/// stdin's TTY-ness and the prompt itself supplied by the caller, so
+/// the refusal and both prompt strengths are reachable without a
+/// terminal.
+fn confirm_plan_with<F>(
+    library: &str,
+    strength: ConfirmStrength,
+    yes: bool,
+    stdin_is_tty: bool,
+    confirm: F,
+) -> Result<bool>
+where
+    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<bool>,
+{
+    let mode = match strength {
         ConfirmStrength::None => None,
         ConfirmStrength::Hard => Some((
-            ConfirmMode::Hard {
-                token: &plan.entry.name,
-            },
+            ConfirmMode::Hard { token: library },
             format!(
                 "This plan RESETS the vector store: existing vectors are dropped and\n\
                  re-embedded; the old vectors are unrecoverable.\n\
-                 Type the library name '{}' (exact) to continue:",
-                plan.entry.name
+                 Type the library name '{library}' (exact) to continue:"
             ),
         )),
         ConfirmStrength::Soft => Some((
@@ -221,18 +241,17 @@ fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
     if yes {
         return Ok(true);
     }
-    if !std::io::stdin().is_terminal() {
+    if !stdin_is_tty {
         return Err(BookrackCliError::LocalUserError {
             message: format!(
                 "index-profile apply needs confirmation for this plan and stdin is not a \
                  TTY; re-run with --yes, or rehearse on a fork first \
-                 (`bookrack libraries fork`); library: '{}'",
-                plan.entry.name
+                 (`bookrack libraries fork`); library: '{library}'"
             ),
         }
         .into());
     }
-    confirm_destructive(&prompt, mode, false).context("read index-profile apply confirmation")
+    confirm(&prompt, mode).context("read index-profile apply confirmation")
 }
 
 /// Write the target declaration before any action runs, so every handler
@@ -462,6 +481,107 @@ async fn execute_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plan with nothing destructive and nothing soft runs
+    /// unprompted, whatever stdin is.
+    #[test]
+    fn a_noop_plan_is_confirmed_without_a_prompt() {
+        for stdin_is_tty in [true, false] {
+            assert!(
+                confirm_plan_with(
+                    "shelf",
+                    ConfirmStrength::None,
+                    false,
+                    stdin_is_tty,
+                    |_, _| panic!("a plan with no destructive or soft action must not prompt"),
+                )
+                .expect("an unprompted plan confirms"),
+            );
+        }
+    }
+
+    /// `--yes` stands in for the answer at both strengths, including
+    /// on a non-TTY, and never reaches the refusal.
+    #[test]
+    fn yes_confirms_every_strength_without_a_prompt() {
+        for strength in [
+            ConfirmStrength::Hard,
+            ConfirmStrength::Soft,
+            ConfirmStrength::None,
+        ] {
+            assert!(
+                confirm_plan_with("shelf", strength, true, false, |_, _| panic!(
+                    "--yes must not prompt"
+                ))
+                .expect("--yes confirms"),
+            );
+        }
+    }
+
+    /// Without `--yes`, a plan that needs an answer stdin cannot carry
+    /// is a user error (exit 2), not a read that blocks.
+    #[test]
+    fn a_non_tty_is_refused_rather_than_prompted() {
+        for strength in [ConfirmStrength::Hard, ConfirmStrength::Soft] {
+            let err = confirm_plan_with("shelf", strength, false, false, |_, _| {
+                panic!("a non-TTY caller must never be prompted")
+            })
+            .expect_err("a non-TTY caller without --yes is refused");
+            let cli = err
+                .downcast_ref::<BookrackCliError>()
+                .expect("the refusal is a typed CLI error");
+            assert_eq!(cli.exit_code(), 2);
+            assert!(
+                cli.to_string().contains("stdin is not a TTY"),
+                "unexpected message: {cli}"
+            );
+        }
+    }
+
+    /// The prompt the operator actually sees: a destructive plan
+    /// demands the library name retyped, a soft one takes `yes`.
+    #[test]
+    fn the_prompt_strength_reaches_the_reader() {
+        /// The mode as an owned value: `ConfirmMode` borrows the token
+        /// for the call only, so it cannot leave the closure.
+        fn describe(mode: ConfirmMode<'_>) -> String {
+            match mode {
+                ConfirmMode::Soft => "soft".to_string(),
+                ConfirmMode::Hard { token } => format!("hard:{token}"),
+            }
+        }
+
+        let seen = std::cell::RefCell::new(None);
+        assert!(
+            !confirm_plan_with("shelf", ConfirmStrength::Hard, false, true, |text, mode| {
+                *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
+                Ok(false)
+            })
+            .expect("a declined plan is not an error"),
+        );
+        let (text, mode) = seen.into_inner().expect("the prompt ran");
+        assert_eq!(
+            mode, "hard:shelf",
+            "a destructive plan must demand the library name retyped"
+        );
+        assert!(text.contains("RESETS the vector store"), "{text}");
+        assert!(
+            text.contains("Type the library name 'shelf' (exact) to continue:"),
+            "the prompt must name the token it will compare against: {text}"
+        );
+
+        let seen = std::cell::RefCell::new(None);
+        assert!(
+            confirm_plan_with("shelf", ConfirmStrength::Soft, false, true, |text, mode| {
+                *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
+                Ok(true)
+            })
+            .expect("a confirmed plan"),
+        );
+        let (text, mode) = seen.into_inner().expect("the prompt ran");
+        assert_eq!(mode, "soft", "a re-embed asks for the soft answer");
+        assert!(text.contains("Type 'yes' to continue:"), "{text}");
+    }
 
     #[test]
     fn confirm_strength_tracks_the_worst_action() {
