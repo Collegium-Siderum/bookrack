@@ -192,7 +192,12 @@ fn validate_reranker(
                 "reranker.model",
                 "a cross-encoder reranker requires a model",
             )),
-            Some(model) => validate_reranker_family(profile, model, allow_unknown_model, findings),
+            Some(model) => validate_reranker_family(
+                models::embed_model(&profile.embed.model).map(|m| m.family),
+                model,
+                allow_unknown_model,
+                findings,
+            ),
         }
 
         match (reranker.top_k_in, reranker.top_k_out) {
@@ -217,19 +222,19 @@ fn validate_reranker(
     }
 }
 
-/// Flag a reranker whose family differs from the embed family. The
-/// official pairing table is unknown, so a cross-family pair is only a
+/// Flag a reranker whose family differs from the embed family
+/// (`None` when the embed model is not in the registry). The official
+/// pairing table is unknown, so a cross-family pair is only a
 /// warning. An unknown reranker model is an error under the registry
 /// check unless the caller opted out.
 fn validate_reranker_family(
-    profile: &IndexProfile,
+    embed_family: Option<&str>,
     model: &str,
     allow_unknown_model: bool,
     findings: &mut Vec<Finding>,
 ) {
     match models::reranker_model(model) {
         Some(info) => {
-            let embed_family = models::embed_model(&profile.embed.model).map(|m| m.family);
             if let Some(embed_family) = embed_family
                 && embed_family != info.family
             {
@@ -383,5 +388,141 @@ mod tests {
         };
         let findings = validate(&profile, false);
         assert!(findings.iter().any(|f| f.field_path == "reranker.top_k_in"));
+    }
+
+    /// A well-formed cross-encoder reranker section, for the tests that
+    /// knock out one field at a time.
+    fn cross_encoder() -> RerankerSpec {
+        RerankerSpec {
+            kind: RerankerKind::CrossEncoder,
+            backend: Some("llama-server".to_string()),
+            model: Some("Qwen3-Reranker-0.6B".to_string()),
+            top_k_in: Some(50),
+            top_k_out: Some(10),
+        }
+    }
+
+    #[test]
+    fn pq_zero_sub_vectors_is_an_error() {
+        // Zero gets its own arm: it must be reported as such, not fall
+        // through to the divisibility check.
+        let findings = validate(&pq_profile(1024, Some(0)), false);
+        assert!(
+            findings.iter().any(|f| {
+                f.severity == Severity::Error
+                    && f.field_path == "ann.num_sub_vectors"
+                    && f.message.contains("greater than 0")
+            }),
+            "{findings:?}",
+        );
+    }
+
+    #[test]
+    fn cross_encoder_missing_backend_is_an_error() {
+        let mut profile = pq_profile(1024, Some(128));
+        profile.reranker = cross_encoder();
+        profile.reranker.backend = None;
+        let findings = validate(&profile, false);
+        assert!(
+            findings.iter().any(|f| {
+                f.severity == Severity::Error
+                    && f.field_path == "reranker.backend"
+                    && f.message.contains("requires a backend")
+            }),
+            "{findings:?}",
+        );
+    }
+
+    #[test]
+    fn cross_encoder_missing_model_is_an_error() {
+        let mut profile = pq_profile(1024, Some(128));
+        profile.reranker = cross_encoder();
+        profile.reranker.model = None;
+        let findings = validate(&profile, false);
+        assert!(
+            findings.iter().any(|f| {
+                f.severity == Severity::Error
+                    && f.field_path == "reranker.model"
+                    && f.message.contains("requires a model")
+            }),
+            "{findings:?}",
+        );
+    }
+
+    #[test]
+    fn cross_encoder_missing_top_k_half_is_an_error() {
+        for (top_k_in, top_k_out) in [(None, Some(10)), (Some(50), None), (None, None)] {
+            let mut profile = pq_profile(1024, Some(128));
+            profile.reranker = cross_encoder();
+            profile.reranker.top_k_in = top_k_in;
+            profile.reranker.top_k_out = top_k_out;
+            let findings = validate(&profile, false);
+            assert!(
+                findings.iter().any(|f| {
+                    f.severity == Severity::Error
+                        && f.field_path == "reranker.top_k_in"
+                        && f.message.contains("requires top_k_in and top_k_out")
+                }),
+                "({top_k_in:?}, {top_k_out:?}): {findings:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn cross_encoder_zero_top_k_out_is_an_error() {
+        let mut profile = pq_profile(1024, Some(128));
+        profile.reranker = cross_encoder();
+        profile.reranker.top_k_out = Some(0);
+        let findings = validate(&profile, false);
+        assert!(
+            findings.iter().any(|f| {
+                f.severity == Severity::Error
+                    && f.field_path == "reranker.top_k_out"
+                    && f.message.contains("greater than 0")
+            }),
+            "{findings:?}",
+        );
+    }
+
+    #[test]
+    fn unknown_reranker_model_errors_unless_allowed() {
+        let mut profile = pq_profile(1024, Some(128));
+        profile.reranker = cross_encoder();
+        profile.reranker.model = Some("made-up-reranker".to_string());
+        let findings = validate(&profile, false);
+        assert!(
+            findings.iter().any(|f| {
+                f.severity == Severity::Error
+                    && f.field_path == "reranker.model"
+                    && f.message.contains("unknown reranker model")
+            }),
+            "{findings:?}",
+        );
+        assert!(!has_errors(&validate(&profile, true)));
+    }
+
+    #[test]
+    fn cross_family_reranker_pair_is_a_warning() {
+        // Exercised on the family helper directly: both shipped
+        // registries are single-family today, so no profile reaches
+        // this arm through `validate` until a second family lands.
+        let mut findings = Vec::new();
+        super::validate_reranker_family(
+            Some("other-family"),
+            "Qwen3-Reranker-0.6B",
+            false,
+            &mut findings,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert_eq!(findings[0].field_path, "reranker.model");
+        assert!(findings[0].message.contains("cross-family"));
+
+        // Same family, and an embed model outside the registry, both
+        // stay silent.
+        let mut findings = Vec::new();
+        super::validate_reranker_family(Some("qwen3"), "Qwen3-Reranker-0.6B", false, &mut findings);
+        super::validate_reranker_family(None, "Qwen3-Reranker-0.6B", false, &mut findings);
+        assert!(findings.is_empty(), "{findings:?}");
     }
 }
