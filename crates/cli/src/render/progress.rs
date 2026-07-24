@@ -72,12 +72,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quiet_mode_is_a_noop() {
+    fn quiet_mode_builds_no_progress_bar() {
         super::super::init(super::super::RenderCtx::new(
             super::super::OutputMode::Quiet,
             super::super::ColorMode::Never,
         ));
+        // The process-wide ctx is first-write-wins; require that this
+        // test's init actually took effect before reading the spinner.
+        assert!(super::super::ctx().is_quiet());
         let s = SpinnerWithStage::new("xxxxxxxx");
+        assert!(s.inner.is_none(), "quiet mode must not build a bar");
         s.set_stage("EXTRACT", Some(50));
         s.set_tail("reading file");
         s.finish_and_clear();
