@@ -829,6 +829,44 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_with_one_invalid_node_writes_nothing() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 2).expect("ids");
+
+        // A valid chapter ahead of an invalid node: the batch must be
+        // rejected as a whole, not truncated at the offender.
+        let batch = [
+            NewNode::child(ids[0], root, root, 0, 1, NodeType::Chapter).title("Kept?"),
+            NewNode::child(ids[1], root, root, 1, 1, NodeType::Paragraph).title("nope"),
+        ];
+        let err = corpus
+            .insert_nodes(&batch)
+            .expect_err("the batch must be rejected");
+        assert!(matches!(err, CorpusError::InvalidNode { .. }));
+        // Only the seeded root remains: the valid leading node was not
+        // kept behind the rejection.
+        assert_eq!(corpus.book_nodes(root).expect("nodes").len(), 1);
+    }
+
+    #[test]
+    fn a_negative_depth_or_ordinal_is_rejected() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        let (idx, root) = seed_book(&mut corpus, 1);
+        let ids = corpus.allocate_node_ids(idx, 2).expect("ids");
+
+        let negative_depth = NewNode::child(ids[0], root, root, 0, -1, NodeType::Chapter);
+        let negative_ordinal = NewNode::child(ids[1], root, root, -1, 1, NodeType::Chapter);
+        for bad in [negative_depth, negative_ordinal] {
+            assert!(matches!(
+                corpus.insert_node(&bad),
+                Err(CorpusError::InvalidNode { reason, .. })
+                    if reason == "depth and ordinal must be non-negative"
+            ));
+        }
+    }
+
+    #[test]
     fn a_child_with_no_real_parent_is_refused() {
         let mut corpus = Corpus::open_in_memory().expect("open");
         let (idx, root) = seed_book(&mut corpus, 1);

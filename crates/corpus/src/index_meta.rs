@@ -424,6 +424,18 @@ mod tests {
     }
 
     #[test]
+    fn compose_corpus_fingerprint_matches_the_frozen_golden() {
+        // SHA-256("qwen3-embedding:0.6b|1024|1|1|flat") truncated to 16
+        // hex characters, with the expected value computed outside this
+        // crate. Rows in other stores are keyed by the fingerprint, so
+        // any change to the digest's fields, their order, or the
+        // separator silently orphans those rows; this pin only moves
+        // together with a deliberate re-derivation of everything keyed
+        // by the fingerprint.
+        assert_eq!(fingerprint_with(&stamps(), "flat"), "dbd56c88f67cf50a");
+    }
+
+    #[test]
     fn compose_corpus_fingerprint_changes_with_each_stamp() {
         let base = fingerprint_with(&stamps(), "flat");
         let changed_model = IndexStamps {

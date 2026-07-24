@@ -321,6 +321,82 @@ mod tests {
     }
 
     #[test]
+    fn open_read_only_refuses_a_missing_file_without_creating_it() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-romissing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("corpus.db");
+
+        let Err(err) = Corpus::open_read_only(&path) else {
+            panic!("a missing file must not open")
+        };
+        assert!(
+            matches!(err, CorpusError::Sqlite(_)),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            !path.exists(),
+            "a read-only open must not materialize the file"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_drifted_table_shape() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-roverify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("corpus.db");
+
+        Corpus::open(&path).expect("create");
+        // Rename a column behind the specs' back. The version stamps are
+        // untouched, so only the spec-conformance check can catch this.
+        {
+            let conn = Connection::open(&path).expect("raw open");
+            conn.execute_batch("ALTER TABLE nodes RENAME COLUMN expression_id TO expr_id")
+                .expect("rename column");
+        }
+
+        let Err(err) = Corpus::open_read_only(&path) else {
+            panic!("a drifted schema must be refused")
+        };
+        assert!(
+            matches!(err, CorpusError::Verify(_)),
+            "unexpected error: {err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_stamp_above_this_binarys_reader_version() {
+        let dir =
+            std::env::temp_dir().join(format!("bookrack-corpus-roreader-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("corpus.db");
+
+        let too_new = READER_VERSION + 1;
+        {
+            let corpus = Corpus::open(&path).expect("first open");
+            corpus
+                .meta_set(MIN_READER_VERSION_KEY, &too_new.to_string())
+                .expect("overwrite stamp with a too-new value");
+        }
+
+        let Err(err) = Corpus::open_read_only(&path) else {
+            panic!("read-only reopen must refuse")
+        };
+        assert!(
+            matches!(err, CorpusError::ReaderTooOld { required, current }
+                if required == too_new && current == READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn index_meta_round_trips_and_overwrites() {
         let corpus = Corpus::open_in_memory().expect("open");
         assert_eq!(corpus.meta_get("embed_model").expect("get"), None);
