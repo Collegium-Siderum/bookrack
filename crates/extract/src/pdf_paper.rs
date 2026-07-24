@@ -1105,10 +1105,11 @@ mod tests {
     }
 
     #[test]
-    fn outline_with_only_figure_entries_falls_back_to_heuristic() {
-        // The outline contains only figure / table anchors; after the
-        // FIGURE_CAPTION_LABEL filter, the trust threshold of three
-        // section-shaped anchors is not met.
+    fn outline_with_only_figure_entries_promotes_nothing() {
+        // Every outline entry is a figure / table caption, so the
+        // FIGURE_CAPTION_LABEL filter drops them all and the outline
+        // pass has no anchor to work from; the strict-numbered
+        // heuristic finds no candidates in the caption bodies either.
         let mut blocks = vec![
             body_block("Caption 1.", 0, Some(style(10.0, false, 0.5))),
             body_block("Caption 2.", 1, Some(style(10.0, false, 0.5))),
