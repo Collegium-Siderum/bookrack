@@ -742,4 +742,57 @@ mod tests {
         let err = PaperAuditProfile::load_from(dir.path()).unwrap_err();
         assert!(matches!(err, LoadError::Parse { .. }));
     }
+
+    #[test]
+    fn overlay_ratio_outside_unit_range_is_rejected() {
+        // One probe per rejection class: above 1.0, negative, and NaN.
+        // The field name in the error identifies which knob misfired.
+        let cases = [
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = 1.5\n",
+                "language.body_cjk_min_ratio",
+                1.5,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_latin_min_ratio = -0.25\n",
+                "language.body_latin_min_ratio",
+                -0.25,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_max_ratio = nan\n",
+                "language.body_cjk_max_ratio",
+                f64::NAN,
+            ),
+        ];
+        for (overlay_toml, expected_field, expected_value) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = PaperAuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::RatioOutOfRange { field, value, .. } => {
+                    assert_eq!(field, expected_field);
+                    assert!(
+                        value == expected_value || (value.is_nan() && expected_value.is_nan()),
+                        "error carries the offending value: {value} vs {expected_value}",
+                    );
+                }
+                other => panic!("expected RatioOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_ratio_in_range_lands_as_basis_points() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = 0.0\n\
+             body_latin_min_ratio = 0.35\nbody_cjk_max_ratio = 1.0\n",
+        )
+        .unwrap();
+        let p = PaperAuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(p.language.body_cjk_min_ratio_bp, 0);
+        assert_eq!(p.language.body_latin_min_ratio_bp, 3500);
+        assert_eq!(p.language.body_cjk_max_ratio_bp, 10_000);
+    }
 }
