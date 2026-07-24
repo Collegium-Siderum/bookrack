@@ -503,6 +503,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_frame_rejects_an_event_without_params() {
+        let line = r#"{"jsonrpc":"2.0","method":"event"}"#;
+        let Err(err) = parse_frame(line) else {
+            panic!("an event with no params must be rejected")
+        };
+        assert!(
+            err.to_string().contains("event missing params"),
+            "unexpected message: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_frame_rejects_an_event_without_channel() {
+        let line = r#"{"jsonrpc":"2.0","method":"event","params":{"value":{"n":1}}}"#;
+        let Err(err) = parse_frame(line) else {
+            panic!("an event with no channel must be rejected")
+        };
+        assert!(
+            err.to_string().contains("event missing channel"),
+            "unexpected message: {err:#}"
+        );
+    }
+
+    #[test]
+    fn parse_frame_rejects_a_response_without_numeric_id() {
+        for line in [
+            // No id at all.
+            r#"{"jsonrpc":"2.0","result":{"ok":true}}"#,
+            // An id that is not a u64.
+            r#"{"jsonrpc":"2.0","id":"seven","result":{"ok":true}}"#,
+        ] {
+            let Err(err) = parse_frame(line) else {
+                panic!("a response without a numeric id must be rejected: {line}")
+            };
+            assert!(
+                err.to_string().contains("response missing numeric id"),
+                "unexpected message for {line}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_frame_rejects_an_rpc_error_without_code() {
+        let line = r#"{"jsonrpc":"2.0","id":4,"error":{"message":"no"}}"#;
+        let Err(err) = parse_frame(line) else {
+            panic!("an error object with no code must be rejected")
+        };
+        assert!(
+            err.to_string().contains("rpc error missing code"),
+            "unexpected message: {err:#}"
+        );
+    }
+
+    #[test]
     fn parse_event_lag() {
         let line = r#"{"jsonrpc":"2.0","method":"event","params":{"channel":"daemon.state","value":null,"lag":true}}"#;
         match parse_frame(line).unwrap() {
@@ -615,6 +669,89 @@ mod tests {
             matches!(err, ControlError::Closed | ControlError::Transport(_)),
             "expected Closed or Transport, got {err:?}"
         );
+    }
+
+    /// The reader task must skip lines it cannot decode — non-JSON
+    /// bytes, JSON with no recognisable frame shape, a non-numeric
+    /// id, blank lines — and keep serving the connection: pending
+    /// requests still resolve and events emitted after the bad input
+    /// still reach subscribers. A decode failure that ended the loop
+    /// would instead fail every in-flight call with `Closed`.
+    #[tokio::test]
+    async fn reader_loop_skips_undecodable_lines_and_keeps_the_connection_alive() {
+        let (client, remote) = paired_client();
+        // A mutated reader that dies on the bad input must surface as
+        // a bounded Timeout/Closed error, not a hung test runner.
+        client.set_default_timeout(Some(std::time::Duration::from_secs(5)));
+        let (read, mut write) = tokio::io::split(remote);
+
+        // Fake server: before answering each request, emit a burst of
+        // malformed lines plus one event, so the reply that resolves
+        // the pending call is only reachable if the reader survived
+        // the bad input.
+        let server = tokio::spawn(async move {
+            let mut reader = BufReader::new(read).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let frame: Value = serde_json::from_str(line.trim()).expect("request json");
+                let id = frame
+                    .get("id")
+                    .and_then(|i| i.as_u64())
+                    .expect("request id");
+                let bad_lines = [
+                    "this is not json",
+                    r#"{"jsonrpc":"2.0"}"#,
+                    r#"{"jsonrpc":"2.0","id":"seven","result":1}"#,
+                    "",
+                ];
+                for bad in bad_lines {
+                    write.write_all(bad.as_bytes()).await.expect("write bad");
+                    write.write_all(b"\n").await.expect("write nl");
+                }
+                let event = json!({
+                    "jsonrpc": "2.0",
+                    "method": "event",
+                    "params": {"channel": "queue.tick", "value": {"pending": 0}},
+                })
+                .to_string();
+                write
+                    .write_all(event.as_bytes())
+                    .await
+                    .expect("write event");
+                write.write_all(b"\n").await.expect("write nl");
+                let response =
+                    json!({"jsonrpc": "2.0", "id": id, "result": {"ok": true}}).to_string();
+                write
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+                write.write_all(b"\n").await.expect("write nl");
+            }
+        });
+
+        // The subscribe handshake itself already rides past one burst
+        // of bad lines (its response is written after them).
+        let mut rx = client
+            .subscribe()
+            .await
+            .expect("subscribe survives bad lines");
+        // A second request proves the request path stays alive, and
+        // its preceding event lands in the now-registered receiver.
+        let value = client
+            .call_raw("queue.list", Value::Null)
+            .await
+            .expect("call resolves after undecodable lines");
+        assert_eq!(value, json!({"ok": true}));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event within 2s")
+            .expect("event payload");
+        assert_eq!(event.channel, "queue.tick");
+        assert_eq!(event.value, json!({"pending": 0}));
+
+        // The fake server blocks on its next read and never sees EOF
+        // (the client's reader task keeps the duplex alive), so abort
+        // it instead of joining.
+        server.abort();
     }
 
     /// 32 concurrent subscribers must each end up with a receiver
