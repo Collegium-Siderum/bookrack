@@ -92,6 +92,95 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
             );
         }
 
+        // 3. The dry-run leg is exempt from the yes gate: confirmation
+        //    protects the execute leg; dry_run only reads and pins.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "papers.corpus_rebuild",
+            "params": {"dry_run": true},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        let exec_plan = resp["result"]["plan_id"]
+            .as_str()
+            .ok_or_else(|| eyre!("dry_run without yes must still pin a plan: {resp}"))?
+            .to_string();
+
+        // 4. The execute leg without a plan_id is refused: the
+        //    two-phase protocol requires the dry-run's pinned plan.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32602), "{resp}");
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("plan_id")),
+            "the refusal must name the missing plan_id: {resp}"
+        );
+
+        // 5. The yes gate runs ahead of the plan lookup: an
+        //    unconfirmed execute fails CONFIRMATION_REQUIRED even with
+        //    a bogus plan id.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "papers.corpus_rebuild",
+            "params": {"plan_id": "bogus-plan"},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32012), "{resp}");
+
+        // 6. A confirmed execute with an unknown plan id is
+        //    PLAN_NOT_FOUND.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": "bogus-plan"},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32013), "{resp}");
+
+        // 7. The pinned plan executes once against the empty library…
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": exec_plan.as_str()},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["result"]["rebuilt"],
+            json!([]),
+            "executing an empty pinned plan reports an empty rebuilt bucket: {resp}"
+        );
+
+        // 8. …and is consumed by that execute: a replay of the same
+        //    plan id is PLAN_NOT_FOUND, never a second run.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": exec_plan.as_str()},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32013),
+            "a consumed plan must not execute twice: {resp}"
+        );
+
         send(
             &mut w,
             r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,

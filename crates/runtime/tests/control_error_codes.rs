@@ -23,6 +23,7 @@ use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv
 
 const INVALID_PARAMS: i64 = -32602;
 const INVALID_LIBRARY: i64 = -32010;
+const CONFIRMATION_REQUIRED: i64 = -32012;
 
 async fn rpc_code(
     writer: &mut Writer,
@@ -111,6 +112,8 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         // `corpus.rebuild` targeting an unknown book surfaces
         // `IngestError::UnknownIntake` (or `OpsError::IntakeNotFound`,
         // depending on where the lookup happens first) as INVALID_PARAMS.
+        // The dry-run leg is what resolves the selector; the execute
+        // leg would fail earlier, on the missing plan_id.
         let (code, msg) = rpc_code(
             &mut w,
             &mut reader,
@@ -118,6 +121,7 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
             "corpus.rebuild",
             serde_json::json!({
                 "book": 9_999_999_i64,
+                "dry_run": true,
                 "yes": true,
             }),
         )
@@ -167,6 +171,76 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         )
         .await?;
         assert_eq!(code, INVALID_PARAMS, "glean.submit mobi path: {msg}");
+
+        // `corpus.rebuild` execute leg without a plan_id is refused:
+        // the two-phase protocol requires the dry-run's pinned plan.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            8,
+            "corpus.rebuild",
+            serde_json::json!({ "yes": true }),
+        )
+        .await?;
+        assert_eq!(
+            code, INVALID_PARAMS,
+            "corpus.rebuild without plan_id: {msg}"
+        );
+        assert!(
+            msg.contains("plan_id"),
+            "the refusal must name the missing plan_id: {msg}"
+        );
+
+        // The yes gate runs ahead of the plan lookup: an unconfirmed
+        // execute fails CONFIRMATION_REQUIRED even with a bogus plan.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            9,
+            "corpus.rebuild",
+            serde_json::json!({ "plan_id": "bogus-plan" }),
+        )
+        .await?;
+        assert_eq!(
+            code, CONFIRMATION_REQUIRED,
+            "corpus.rebuild unconfirmed execute: {msg}"
+        );
+
+        // `library.fork` fails closed without the client-side
+        // confirmation; nothing is copied or registered.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            10,
+            "library.fork",
+            serde_json::json!({ "new_name": "forked", "data_dir": "/tmp/fork-target" }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "library.fork without yes: {msg}");
+        assert!(
+            msg.contains("yes"),
+            "the refusal must name the missing confirmation: {msg}"
+        );
+
+        // `library.fork` validates copy_mode before doing any work.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            11,
+            "library.fork",
+            serde_json::json!({
+                "new_name": "forked",
+                "data_dir": "/tmp/fork-target",
+                "yes": true,
+                "copy_mode": "symlink",
+            }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "library.fork bad copy_mode: {msg}");
+        assert!(
+            msg.contains("copy_mode"),
+            "the refusal must name the offending knob: {msg}"
+        );
 
         send(
             &mut w,
