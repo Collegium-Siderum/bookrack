@@ -831,8 +831,12 @@ mod tests {
         assert_eq!(publisher.grade, PaperFieldGrade::Missing);
     }
 
-    /// Effective attrs carrying just a title, for the watermark pin.
-    fn effective_with_title(title: &str) -> EffectiveAttrs {
+    /// Effective attrs with `build` applied to an otherwise vacant
+    /// base, minted through the catalog round-trip (`EffectiveAttrs`
+    /// has no public constructor).
+    fn effective_with(
+        build: impl FnOnce(&mut bookrack_catalog::NewPublicationAttrs),
+    ) -> EffectiveAttrs {
         use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
         use bookrack_core::ItemKind;
         let mut catalog = Catalog::open_in_memory().expect("catalog");
@@ -843,11 +847,207 @@ mod tests {
             )
             .expect("register");
         let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
-        attrs.title = Some(title.to_string());
+        build(&mut attrs);
         catalog.upsert_publication_attrs(&attrs).expect("upsert");
         catalog
             .effective_publication_attrs(intake.intake().intake_id, ItemKind::Paper)
             .expect("effective")
+    }
+
+    /// Effective attrs carrying just a title, for the watermark pin.
+    fn effective_with_title(title: &str) -> EffectiveAttrs {
+        effective_with(|attrs| attrs.title = Some(title.to_string()))
+    }
+
+    #[test]
+    fn a_placeholder_title_is_graded_missing_while_the_toggle_is_on() {
+        let mut data = PaperAuditData::empty();
+        data.placeholder_titles = vec!["untitled".to_string()];
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        // The value differs from the list entry in case only, so the
+        // match must be case-insensitive.
+        let effective = effective_with(|attrs| attrs.title = Some("Untitled".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &PaperAuditProfile::default_profile(), &data);
+        let title = report.fields.get("title").expect("title graded");
+        assert_eq!(title.grade, PaperFieldGrade::Missing, "{title:?}");
+        assert!(title.flags.contains(&PaperFlag::PlaceholderValue));
+
+        let mut off = PaperAuditProfile::default_profile();
+        off.title.placeholder_check = false;
+        let report = audit_paper(&input, &off, &data);
+        let title = report.fields.get("title").expect("title graded");
+        assert!(
+            !title.flags.contains(&PaperFlag::PlaceholderValue),
+            "{title:?}"
+        );
+        assert_eq!(title.grade, PaperFieldGrade::Strong);
+    }
+
+    #[test]
+    fn a_title_matching_the_source_filename_is_weakened() {
+        let data = PaperAuditData::empty();
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        let effective =
+            effective_with(|attrs| attrs.title = Some("Synthetic Findings in Test Spaces".into()));
+        // The comparison strips case and non-alphanumerics, so a dashed
+        // lowercase stem still matches the spaced title.
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: Some("synthetic-findings-in-test-spaces"),
+        };
+        let report = audit_paper(&input, &PaperAuditProfile::default_profile(), &data);
+        let title = report.fields.get("title").expect("title graded");
+        assert_eq!(title.grade, PaperFieldGrade::Weak, "{title:?}");
+        assert!(title.flags.contains(&PaperFlag::EqualsFilename));
+
+        let mut off = PaperAuditProfile::default_profile();
+        off.title.equals_filename_check = false;
+        let report = audit_paper(&input, &off, &data);
+        let title = report.fields.get("title").expect("title graded");
+        assert!(
+            !title.flags.contains(&PaperFlag::EqualsFilename),
+            "{title:?}"
+        );
+        assert_eq!(title.grade, PaperFieldGrade::Strong);
+    }
+
+    #[test]
+    fn a_year_outside_the_profile_range_is_weakened_in_both_directions() {
+        let data = PaperAuditData::empty();
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        let profile = PaperAuditProfile::default_profile();
+        // The default range is 1900..=2100; probe one year below and
+        // one above.
+        for year in ["1815", "2150"] {
+            let effective = effective_with(|attrs| attrs.year = Some(year.to_string()));
+            let input = PaperAuditInput {
+                biblio: &biblio,
+                provenance: &provenance,
+                effective: &effective,
+                body_sample: "",
+                source_stem: None,
+            };
+            let report = audit_paper(&input, &profile, &data);
+            let field = report.fields.get("year").expect("year graded");
+            assert_eq!(field.grade, PaperFieldGrade::Weak, "year {year}: {field:?}");
+            assert!(field.flags.contains(&PaperFlag::YearOutOfRange), "{year}");
+        }
+
+        // An in-range year stays Strong; the toggle gates the signal.
+        let in_range = effective_with(|attrs| attrs.year = Some("2020".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &in_range,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let field = report.fields.get("year").expect("year graded");
+        assert_eq!(field.grade, PaperFieldGrade::Strong, "{field:?}");
+
+        let mut off = PaperAuditProfile::default_profile();
+        off.year.range_check = false;
+        let out_of_range = effective_with(|attrs| attrs.year = Some("1815".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &out_of_range,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &off, &data);
+        let field = report.fields.get("year").expect("year graded");
+        assert!(
+            !field.flags.contains(&PaperFlag::YearOutOfRange),
+            "{field:?}"
+        );
+        assert_eq!(field.grade, PaperFieldGrade::Strong);
+    }
+
+    #[test]
+    fn a_language_that_mismatches_the_body_script_is_weakened() {
+        let data = PaperAuditData::empty();
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        let profile = PaperAuditProfile::default_profile();
+        let latin_body = "plain latin prose for the synthetic body sample";
+        // Eight CJK ideographs, `\u{...}`-escaped so the source stays
+        // ASCII-clean per the repo's leak-check.
+        let cjk_body = "\u{4E00}\u{4E8C}\u{4E09}\u{56DB}\u{4E94}\u{516D}\u{4E03}\u{516B}";
+
+        // A declared CJK language over an overwhelmingly Latin body.
+        let cjk_declared = effective_with(|attrs| attrs.language = Some("zh".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &cjk_declared,
+            body_sample: latin_body,
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert_eq!(lang.grade, PaperFieldGrade::Weak, "{lang:?}");
+        assert!(lang.flags.contains(&PaperFlag::LangMismatchesBody));
+
+        // A declared Latin language over a CJK-heavy body.
+        let latin_declared = effective_with(|attrs| attrs.language = Some("en".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &latin_declared,
+            body_sample: cjk_body,
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert!(
+            lang.flags.contains(&PaperFlag::LangMismatchesBody),
+            "{lang:?}"
+        );
+
+        // A matching declaration stays Strong ...
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &latin_declared,
+            body_sample: latin_body,
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert_eq!(lang.grade, PaperFieldGrade::Strong, "{lang:?}");
+
+        // ... and the toggle gates the signal.
+        let mut off = PaperAuditProfile::default_profile();
+        off.language.body_script_match = false;
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &cjk_declared,
+            body_sample: latin_body,
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &off, &data);
+        let lang = report.fields.get("language").expect("language graded");
+        assert!(
+            !lang.flags.contains(&PaperFlag::LangMismatchesBody),
+            "{lang:?}"
+        );
+        assert_eq!(lang.grade, PaperFieldGrade::Strong);
     }
 
     #[test]
