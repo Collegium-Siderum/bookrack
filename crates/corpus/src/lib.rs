@@ -77,6 +77,13 @@ pub enum CorpusError {
     #[error("intake {0} already owns a node-id partition")]
     PartitionAlreadyAllocated(i64),
 
+    /// Partition allocation was asked for a non-positive intake id.
+    /// Intake ids are positive rowids, and partition index 0 is the
+    /// reserved sentinel that keeps a zero node id from ever naming a
+    /// book, so no partition may sit at or below zero.
+    #[error("intake id {0} cannot own a partition; intake ids are positive")]
+    InvalidIntakeId(i64),
+
     /// An operation named a partition that does not exist — typically
     /// allocating node ids before the partition itself was allocated.
     #[error("partition {0} does not exist")]

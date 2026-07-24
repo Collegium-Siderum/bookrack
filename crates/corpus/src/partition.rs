@@ -105,6 +105,8 @@ impl Corpus {
     /// intake was removed before a rebuild. `intake_id` must be a
     /// positive `catalog.intake` id; intake ids start at 1, so index 0
     /// stays free as a sentinel and a zero node id never names a book.
+    /// A non-positive id is refused with
+    /// [`CorpusError::InvalidIntakeId`] before anything is written.
     ///
     /// The root node itself is not created here — only its id is
     /// reserved, at local offset 1 — because the root carries a node
@@ -115,6 +117,9 @@ impl Corpus {
     /// [`CorpusError::PartitionAlreadyAllocated`]. Re-ingesting a book
     /// means removing it first, then allocating anew.
     pub fn allocate_partition(&mut self, intake_id: i64) -> Result<Partition> {
+        if intake_id < 1 {
+            return Err(CorpusError::InvalidIntakeId(intake_id));
+        }
         let idx = PartitionIdx::new(intake_id);
         let book_root_id = idx.root();
 
@@ -278,6 +283,27 @@ mod tests {
         assert_eq!(fetched.next_local_id, 2);
         assert_eq!(fetched.allocated_at, allocated.allocated_at);
         assert!(!fetched.allocated_at.is_empty());
+    }
+
+    #[test]
+    fn a_non_positive_intake_id_cannot_own_a_partition() {
+        let mut corpus = Corpus::open_in_memory().expect("open");
+        // Index 0 is the reserved sentinel — a zero node id must never
+        // name a book — and a negative index would compose negative
+        // node ids, so both are refused before anything is written.
+        for bad in [0, -3] {
+            let err = corpus
+                .allocate_partition(bad)
+                .expect_err("a non-positive intake id must be refused");
+            assert!(
+                matches!(err, CorpusError::InvalidIntakeId(id) if id == bad),
+                "unexpected error for intake id {bad}: {err:?}"
+            );
+        }
+        assert!(
+            corpus.partition_for_intake(0).expect("lookup").is_none(),
+            "the sentinel partition must stay unallocated"
+        );
     }
 
     #[test]
