@@ -104,7 +104,9 @@ pub enum PaperFlag {
     /// The field has no effective value at all.
     Empty,
     /// The field is voided (curator suppressed the extracted value
-    /// and set no replacement).
+    /// and set no replacement). Reserved: no signal emits it today —
+    /// the audit reads effective values and a voided field surfaces
+    /// as absent, so it grades as plain `Missing`.
     Voided,
     /// The field's value matches an entry in
     /// [`crate::audit::PaperAuditData::placeholder_titles`].
@@ -115,7 +117,8 @@ pub enum PaperFlag {
     /// [`crate::audit::PaperAuditData::watermark_tokens`].
     SourceWatermark,
     /// The field reads as a pure numeric string with no alphabetic
-    /// content — usually a stray identifier substring.
+    /// content — usually a stray identifier substring. Reserved: no
+    /// signal emits it today.
     PurelyNumeric,
     /// Year falls outside `[profile.year.min, profile.year.max]`.
     YearOutOfRange,
