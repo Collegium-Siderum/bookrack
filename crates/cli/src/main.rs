@@ -794,10 +794,12 @@ async fn run() -> Result<()> {
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
     // root locally (`run`, `init`, `audit-profile`, the `index-profile`
-    // verbs other than an executing `apply`,
-    // `distill`, `runs`, and the offline `libraries` verbs): the flag is a real
-    // switch there, not an assertion. Silent when no daemon is running,
-    // when no
+    // verbs other than an executing `apply`, `distill`, `runs`,
+    // `retrieval`, and the offline `libraries` verbs): the flag is a real
+    // switch there, not an assertion. `doctor` is not exempt — it
+    // resolves on its own below, but only after this check keeps a
+    // running daemon from being diagnosed under the wrong library.
+    // Silent when no daemon is running, when no
     // selection was given, or when the lock predates the identity
     // fields that make the comparison possible.
     let index_profile_is_local = match &cli.command {
