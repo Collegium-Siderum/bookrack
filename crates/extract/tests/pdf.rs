@@ -325,6 +325,57 @@ fn two_column_places_the_full_width_abstract_before_the_columns() {
 }
 
 #[test]
+fn two_column_reads_left_column_then_right_and_across_the_page_break() {
+    if !pdfium_available() {
+        return;
+    }
+    let ex = extracted("two_column.pdf");
+    let texts: Vec<&str> = ex.blocks.iter().map(|b| b.text.as_str()).collect();
+
+    // One phrase per section, in source order. The body flows down the
+    // left column, then the right, and the closing CJK section starts
+    // at the foot of page one and finishes on page two — so any column
+    // interleave or page-order slip inverts at least one pair, and the
+    // CJK phrases pin column reconstruction on ideographic text too.
+    let phrases = [
+        "Ask how long a coastline is",
+        "dividers set to one kilometre",
+        "also chosen a ruler",
+        "largest figure of the three",
+        "\u{6d77}\u{5cb8}\u{7ebf}\u{7684}\u{957f}\u{5ea6}",
+        "\u{7b80}\u{5355}\u{7684}\u{7eaa}\u{5f8b}",
+    ];
+    // Two phrases may share a block (page-two paragraphs merge), so
+    // order is pinned at (block index, byte offset) granularity.
+    let positions: Vec<(usize, usize)> = phrases
+        .iter()
+        .map(|phrase| {
+            texts
+                .iter()
+                .enumerate()
+                .find_map(|(i, t)| t.find(phrase).map(|off| (i, off)))
+                .unwrap_or_else(|| panic!("phrase {phrase:?} is missing from the blocks"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[0] < w[1]),
+        "the sections read in source order, got (block, offset) {positions:?}",
+    );
+
+    // The body crosses a page break: the stream stays in page order and
+    // the closing CJK section lands on a later page than the opening.
+    let units: Vec<u32> = ex.blocks.iter().map(|b| b.source_unit).collect();
+    assert!(
+        units.windows(2).all(|w| w[0] <= w[1]),
+        "page order: {units:?}"
+    );
+    assert!(
+        ex.blocks[positions[5].0].source_unit > ex.blocks[positions[0].0].source_unit,
+        "the closing paragraph sits past the page break",
+    );
+}
+
+#[test]
 fn pdf_extraction_is_deterministic() {
     if !pdfium_available() {
         return;
