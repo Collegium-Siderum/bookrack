@@ -43,6 +43,16 @@ release workflow extracts the matching section verbatim from this file.
   Both splitters now record their output count; audit rows written
   before the fix keep the zero until their book is re-distilled.
 
+- **glean: `venue_aliases` is actually consulted.** The paper-audit
+  data set documented `venue_aliases` as a map of informal-to-canonical
+  venue spellings, but no grader read it: `grade_container` checked
+  the whitelist against the raw value only, so an aliased spelling of
+  a whitelisted venue was still flagged `venue_not_in_list`. The
+  container grader now canonicalizes the value through the alias map
+  (case-insensitively) before the whitelist membership check. The
+  shipped default alias map is empty, so behaviour changes only for
+  libraries whose data overlay sets aliases.
+
 - **ingest, glean, runtime: the vectors-reset `--resume` hint prints
   when a reset actually fails.** Both reset reports carried a
   `failed_intake` field documented as "returned to the caller
