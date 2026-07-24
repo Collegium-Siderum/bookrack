@@ -236,12 +236,23 @@ fn grade_container(
     if let Some(val) = value
         && profile.venue.whitelist_check
         && !data.venue_whitelist.is_empty()
-        && !data
+    {
+        let trimmed = val.trim();
+        // Canonicalize an informal spelling through the alias map
+        // before the whitelist membership check.
+        let canonical = data
+            .venue_aliases
+            .iter()
+            .find(|(informal, _)| informal.eq_ignore_ascii_case(trimmed))
+            .map(|(_, canonical)| canonical.as_str())
+            .unwrap_or(trimmed);
+        if !data
             .venue_whitelist
             .iter()
-            .any(|v| v.eq_ignore_ascii_case(val.trim()))
-    {
-        report.weaken_to(PaperFieldGrade::Weak, PaperFlag::VenueNotInList);
+            .any(|v| v.eq_ignore_ascii_case(canonical))
+        {
+            report.weaken_to(PaperFieldGrade::Weak, PaperFlag::VenueNotInList);
+        }
     }
     fields.insert("container_title", report);
 }
@@ -1048,6 +1059,69 @@ mod tests {
             "{lang:?}"
         );
         assert_eq!(lang.grade, PaperFieldGrade::Strong);
+    }
+
+    #[test]
+    fn a_venue_alias_canonicalizes_before_the_whitelist_check() {
+        let mut data = PaperAuditData::empty();
+        data.venue_whitelist = vec!["Journal of Synthetic Results".to_string()];
+        data.venue_aliases.insert(
+            "j. synth. results".to_string(),
+            "Journal of Synthetic Results".to_string(),
+        );
+        let biblio = empty_biblio();
+        let provenance = empty_provenance();
+        let profile = PaperAuditProfile::default_profile();
+
+        // An aliased informal spelling resolves to the canonical name
+        // and passes the whitelist. The value differs from the alias
+        // key in case only, so the lookup must be case-insensitive.
+        let aliased =
+            effective_with(|attrs| attrs.container_title = Some("J. Synth. Results".to_string()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &aliased,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let venue = report.fields.get("container_title").expect("graded");
+        assert!(
+            !venue.flags.contains(&PaperFlag::VenueNotInList),
+            "an aliased venue must resolve to its canonical form: {venue:?}"
+        );
+        assert_eq!(venue.grade, PaperFieldGrade::Strong);
+
+        // A direct whitelist hit is unaffected by the alias map ...
+        let canonical = effective_with(|attrs| {
+            attrs.container_title = Some("Journal of Synthetic Results".to_string())
+        });
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &canonical,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let venue = report.fields.get("container_title").expect("graded");
+        assert_eq!(venue.grade, PaperFieldGrade::Strong, "{venue:?}");
+
+        // ... and an unlisted, unaliased venue is still flagged.
+        let unknown =
+            effective_with(|attrs| attrs.container_title = Some("Obscure Unlisted Venue".into()));
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &unknown,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+        let venue = report.fields.get("container_title").expect("graded");
+        assert_eq!(venue.grade, PaperFieldGrade::Weak, "{venue:?}");
+        assert!(venue.flags.contains(&PaperFlag::VenueNotInList));
     }
 
     #[test]

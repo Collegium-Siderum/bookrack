@@ -29,7 +29,9 @@ pub struct PaperAuditData {
     /// miss against this list downgrades `container_title` to Weak
     /// but never floors the verdict.
     pub venue_whitelist: Vec<String>,
-    /// Map of informal-to-canonical venue spellings.
+    /// Map of informal-to-canonical venue spellings, consulted by the
+    /// container grader to canonicalize a value before the whitelist
+    /// membership check.
     pub venue_aliases: BTreeMap<String, String>,
     /// Titles whose normalised form matches one of these are graded
     /// Missing rather than Strong.
