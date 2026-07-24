@@ -1059,16 +1059,14 @@ mod lock_tests {
     }
 
     /// How long one uncontended extraction of the probe fixture takes,
-    /// or `None` when the PDFium binary is absent: a valid PDF fails
-    /// with [`ExtractError::Io`] only when the native library could not
-    /// be loaded, so that error identifies the "binary absent" case.
+    /// or `None` when [`crate::pdfium_gate`] reports the native library
+    /// absent.
     fn uncontended_extraction() -> Option<Duration> {
+        if !crate::pdfium_gate::available() {
+            return None;
+        }
         let start = Instant::now();
         match extract(&probe_fixture(), &QualityThresholds::default()) {
-            Err(ExtractError::Io(e)) => {
-                eprintln!("skipping PDF test: PDFium native library unavailable ({e})");
-                None
-            }
             Ok(_) => Some(start.elapsed()),
             Err(e) => panic!("probe fixture failed to extract: {e}"),
         }

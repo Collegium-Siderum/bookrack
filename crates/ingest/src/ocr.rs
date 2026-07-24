@@ -663,18 +663,12 @@ mod tests {
     }
 
     /// Whether PDFium is available — the OCR adapter and
-    /// [`count_pdf_pages`] both need it. Pattern mirrors the extract
-    /// crate's `pdfium_available`: a real PDF that fails with `Io`
-    /// uniquely identifies "binary absent".
+    /// [`count_pdf_pages`] both need it. Delegates to the extract
+    /// crate's gate, so the probe follows the adapter's own resolution
+    /// chain and an environment that declares PDFium mandatory fails
+    /// instead of skipping.
     fn pdfium_available() -> bool {
-        match bookrack_extract::ocr::count_pdf_pages(&extract_fixture("sample.pdf")) {
-            Ok(_) => true,
-            Err(bookrack_extract::ExtractError::Io(e)) => {
-                eprintln!("skipping ingest-OCR test: PDFium unavailable ({e})");
-                false
-            }
-            Err(other) => panic!("unexpected probe failure: {other:?}"),
-        }
+        bookrack_extract::pdfium_gate::available()
     }
 
     /// Write a synthetic OCR markdown product to `path`, with one body

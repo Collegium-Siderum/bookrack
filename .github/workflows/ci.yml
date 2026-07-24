@@ -93,7 +93,14 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/.pdfium"
           tar -xzf pdfium.tgz -C "$GITHUB_WORKSPACE/.pdfium" lib/libpdfium.so
       - name: Export PDFium lib path
-        run: echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
+        # BOOKRACK_REQUIRE_PDFIUM turns the PDF tests' skip-when-absent
+        # gate into a hard failure: this job downloads the binary, so a
+        # library the tests cannot load means broken coverage, not an
+        # unequipped machine. Runners that cannot supply the binary set
+        # it to 0 to opt back into skipping.
+        run: |
+          echo "BOOKRACK_PDFIUM_LIB=$GITHUB_WORKSPACE/.pdfium/lib" >> "$GITHUB_ENV"
+          echo "BOOKRACK_REQUIRE_PDFIUM=1" >> "$GITHUB_ENV"
       - name: Install cargo-nextest
         # Prebuilt binary, pinned. nextest runs every test in its own
         # process, which some tests rely on for sound environment

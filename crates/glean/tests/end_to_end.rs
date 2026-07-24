@@ -461,11 +461,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
 }
 
 fn pdfium_available() -> bool {
-    // The extract crate's PDFium adapter resolves the runtime binary
-    // from `BOOKRACK_PDFIUM_LIB`, the executable's directory, or the
-    // per-user managed dir. Reading the env var is a cheap proxy for
-    // the same chain.
-    std::env::var("BOOKRACK_PDFIUM_LIB").is_ok()
-        || std::path::Path::new("/usr/local/lib/libpdfium.dylib").exists()
-        || std::path::Path::new("/usr/lib/libpdfium.so").exists()
+    // The extract crate's gate probes the PDF adapter's own loader, so
+    // this follows the whole resolution chain — the override variable,
+    // the executable's directory, and the per-user managed directory
+    // `bookrack doctor --install-pdfium` populates — and fails instead
+    // of skipping where the environment declares PDFium mandatory.
+    bookrack_extract::pdfium_gate::available()
 }

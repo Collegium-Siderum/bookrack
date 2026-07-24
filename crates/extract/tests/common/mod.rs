@@ -16,7 +16,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use bookrack_audit_profile::{AuditProfile, ExtractToggles, HeadingPatterns};
-use bookrack_extract::{ExtractError, ExtractOutcome, Extraction, extract};
+use bookrack_extract::{ExtractOutcome, Extraction, extract};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -59,25 +59,14 @@ pub fn pdf_fixture(name: &str) -> PathBuf {
 
 /// Whether the PDFium native library can be loaded. PDF tests call this
 /// first and skip — rather than fail — when it returns false, so a
-/// contributor without the binary still gets a green `cargo test`. CI
-/// always provides the binary (see the workflow), so coverage there is
-/// never silently lost.
+/// contributor without the binary still gets a green `cargo test`.
 ///
-/// The probe extracts a known-good fixture: a valid PDF can fail with
-/// [`ExtractError::Io`] only when PDFium itself could not be loaded, so
-/// that error uniquely identifies the "binary absent" case.
+/// Delegates to [`bookrack_extract::pdfium_gate::available`]: the probe
+/// and the "mandatory here" policy have one implementation for the
+/// whole workspace, and where the environment declares PDFium
+/// mandatory the gate fails instead of skipping.
 pub fn pdfium_available() -> bool {
-    match extract(
-        &pdf_fixture("prose_en.pdf"),
-        &default_audit_profile(),
-        &default_heading_patterns(),
-    ) {
-        Err(ExtractError::Io(e)) => {
-            eprintln!("skipping PDF test: PDFium native library unavailable ({e})");
-            false
-        }
-        _ => true,
-    }
+    bookrack_extract::pdfium_gate::available()
 }
 
 /// A fixture packed into a temporary `.epub`. Holds the temp directory
