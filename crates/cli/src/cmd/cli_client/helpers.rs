@@ -375,13 +375,39 @@ pub fn print_value(value: &Value) {
 pub async fn run_pinned_destructive(
     client: std::sync::Arc<ControlClient>,
     method: &str,
-    mut selectors: Value,
+    selectors: Value,
     user_dry_run: bool,
     user_yes: bool,
     confirm_prompt: &str,
 ) -> Result<()> {
     use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
 
+    run_pinned_destructive_with(
+        client,
+        method,
+        selectors,
+        user_dry_run,
+        confirm_prompt,
+        |text| confirm_destructive(text, ConfirmMode::Soft, user_yes),
+    )
+    .await
+}
+
+/// [`run_pinned_destructive`] with the confirmation step supplied by
+/// the caller, so the two-leg protocol can be driven without a
+/// terminal. `confirm` receives the prompt text and answers for the
+/// operator; returning `false` must leave the execute leg unsent.
+async fn run_pinned_destructive_with<F>(
+    client: std::sync::Arc<ControlClient>,
+    method: &str,
+    mut selectors: Value,
+    user_dry_run: bool,
+    confirm_prompt: &str,
+    confirm: F,
+) -> Result<()>
+where
+    F: FnOnce(&str) -> std::io::Result<bool>,
+{
     selectors["dry_run"] = Value::Bool(true);
     let plan = call_with_progress_value(client.clone(), method, selectors).await?;
     print_value(&plan);
@@ -398,8 +424,7 @@ pub async fn run_pinned_destructive(
             eyre::eyre!("{method}: daemon dry-run response did not include a plan_id")
         })?;
 
-    let confirmed = confirm_destructive(confirm_prompt, ConfirmMode::Soft, user_yes)
-        .context("read destructive-action confirmation")?;
+    let confirmed = confirm(confirm_prompt).context("read destructive-action confirmation")?;
     if !confirmed {
         println!("aborted; no changes written");
         return Ok(());
@@ -438,6 +463,33 @@ pub fn destructive_confirmation_decision(
         DestructiveConfirmation::Skip
     } else {
         DestructiveConfirmation::Prompt
+    }
+}
+
+/// What [`run_destructive`] does before the RPC leaves the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveGate {
+    /// Dispatch straight away — the caller already consented.
+    Proceed,
+    /// Read a confirmation from the operator first.
+    Prompt,
+    /// Refuse: confirmation is required but stdin cannot carry it.
+    RefuseNonTty,
+}
+
+/// Pure form of the whole pre-RPC gate: folds
+/// [`destructive_confirmation_decision`] together with whether stdin
+/// can actually carry an answer. Taking TTY-ness as an argument keeps
+/// the eight-case matrix unit-testable without a terminal.
+pub fn destructive_gate(
+    user_yes: bool,
+    confirmation_exempt: bool,
+    stdin_is_tty: bool,
+) -> DestructiveGate {
+    match destructive_confirmation_decision(user_yes, confirmation_exempt) {
+        DestructiveConfirmation::Skip => DestructiveGate::Proceed,
+        DestructiveConfirmation::Prompt if stdin_is_tty => DestructiveGate::Prompt,
+        DestructiveConfirmation::Prompt => DestructiveGate::RefuseNonTty,
     }
 }
 
@@ -484,7 +536,7 @@ pub struct DestructivePrompt<'a> {
 pub async fn run_destructive(
     client: Arc<ControlClient>,
     method: &str,
-    mut params: Value,
+    params: Value,
     user_yes: bool,
     confirmation_exempt: bool,
     prompt: DestructivePrompt<'_>,
@@ -493,22 +545,52 @@ pub async fn run_destructive(
 
     use bookrack_cli::render::confirm::confirm_destructive;
 
+    run_destructive_with(
+        client,
+        method,
+        params,
+        user_yes,
+        confirmation_exempt,
+        prompt,
+        std::io::stdin().is_terminal(),
+        |text, mode| confirm_destructive(text, mode, false),
+    )
+    .await
+}
+
+/// [`run_destructive`] with stdin's TTY-ness and the confirmation step
+/// supplied by the caller, so every arm of [`destructive_gate`] can be
+/// driven — and the RPC it does or does not emit observed — without a
+/// terminal.
+#[allow(clippy::too_many_arguments)]
+async fn run_destructive_with<F>(
+    client: Arc<ControlClient>,
+    method: &str,
+    mut params: Value,
+    user_yes: bool,
+    confirmation_exempt: bool,
+    prompt: DestructivePrompt<'_>,
+    stdin_is_tty: bool,
+    confirm: F,
+) -> Result<()>
+where
+    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<bool>,
+{
     assert!(
         params.is_object(),
         "run_destructive: params must be a JSON object; got {params:?}"
     );
 
-    if destructive_confirmation_decision(user_yes, confirmation_exempt)
-        == DestructiveConfirmation::Prompt
-    {
-        if !std::io::stdin().is_terminal() {
-            eyre::bail!("{}", prompt.non_tty_hint);
-        }
-        let confirmed = confirm_destructive(prompt.text, prompt.mode, false)
-            .with_context(|| format!("read {method} confirmation"))?;
-        if !confirmed {
-            println!("aborted; no changes written");
-            return Ok(());
+    match destructive_gate(user_yes, confirmation_exempt, stdin_is_tty) {
+        DestructiveGate::Proceed => {}
+        DestructiveGate::RefuseNonTty => eyre::bail!("{}", prompt.non_tty_hint),
+        DestructiveGate::Prompt => {
+            let confirmed = confirm(prompt.text, prompt.mode)
+                .with_context(|| format!("read {method} confirmation"))?;
+            if !confirmed {
+                println!("aborted; no changes written");
+                return Ok(());
+            }
         }
     }
 
@@ -678,6 +760,21 @@ mod tests {
         assert_eq!(destructive_confirmation_decision(true, true), Skip);
     }
 
+    /// The full gate, including the stdin axis: consent from either
+    /// flag dispatches regardless of stdin, and a still-needed
+    /// confirmation is refused rather than read off a non-TTY.
+    #[test]
+    fn destructive_gate_matrix() {
+        use DestructiveGate::{Proceed, Prompt, RefuseNonTty};
+        for stdin_is_tty in [true, false] {
+            assert_eq!(destructive_gate(true, false, stdin_is_tty), Proceed);
+            assert_eq!(destructive_gate(false, true, stdin_is_tty), Proceed);
+            assert_eq!(destructive_gate(true, true, stdin_is_tty), Proceed);
+        }
+        assert_eq!(destructive_gate(false, false, true), Prompt);
+        assert_eq!(destructive_gate(false, false, false), RefuseNonTty);
+    }
+
     fn rec(id: &str, state: JobOutcomeState) -> JobOutcomeRecord {
         JobOutcomeRecord {
             job_id: id.into(),
@@ -764,5 +861,319 @@ mod tests {
             BookrackCliError::IngestPartialFailure { .. }
         ));
         assert_eq!(cause.as_cli().exit_code(), 5);
+    }
+}
+
+/// Wire-level tests for the destructive helpers: what the confirmation
+/// gate decides has to show up as requests that do or do not reach the
+/// daemon, so the assertions run against a stub control socket and read
+/// back everything that arrived on it.
+///
+/// Unix-only because the stub speaks the Unix-domain half of the
+/// transport; the platform-independent decision logic is covered by
+/// [`tests::destructive_gate_matrix`] above.
+#[cfg(all(test, unix))]
+mod destructive_wire_tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use bookrack_cli::render::confirm::ConfirmMode;
+    use bookrack_control_client::{ControlClient, ControlSocket};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::sync::Mutex;
+
+    use super::{DestructivePrompt, run_destructive_with, run_pinned_destructive_with};
+
+    /// A control socket that answers every request with one canned
+    /// result and records the `(method, params)` pairs it received, in
+    /// arrival order.
+    struct StubDaemon {
+        socket: PathBuf,
+        seen: Arc<Mutex<Vec<(String, Value)>>>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl StubDaemon {
+        /// Bind a fresh socket and start answering. Every request is
+        /// recorded *before* its reply is written, so a completed
+        /// round-trip proves every earlier request on the connection
+        /// is already recorded.
+        fn start(result: Value) -> Self {
+            let dir = tempfile::tempdir().expect("stub socket dir");
+            let socket = dir.path().join("control.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).expect("bind stub socket");
+            let seen: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+            let seen_for_task = Arc::clone(&seen);
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let seen = Arc::clone(&seen_for_task);
+                    let result = result.clone();
+                    tokio::spawn(async move {
+                        let (read, mut write) = tokio::io::split(stream);
+                        let mut lines = BufReader::new(read).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let Ok(request) = serde_json::from_str::<Value>(&line) else {
+                                continue;
+                            };
+                            let id = request["id"].as_u64().unwrap_or_default();
+                            let method = request["method"].as_str().unwrap_or_default().to_string();
+                            seen.lock().await.push((method, request["params"].clone()));
+                            let mut frame = serde_json::to_vec(&json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": result,
+                            }))
+                            .expect("encode stub reply");
+                            frame.push(b'\n');
+                            if write.write_all(&frame).await.is_err() {
+                                break;
+                            }
+                            let _ = write.flush().await;
+                        }
+                    });
+                }
+            });
+            Self {
+                socket,
+                seen,
+                _dir: dir,
+            }
+        }
+
+        async fn client(&self) -> Arc<ControlClient> {
+            let socket = ControlSocket::from_path(&self.socket);
+            Arc::new(
+                bookrack_control_client::connect(&socket)
+                    .await
+                    .expect("connect to the stub control socket"),
+            )
+        }
+
+        /// Round-trip a sentinel request so the connection is drained,
+        /// then return every request the stub saw, minus the sentinel
+        /// and the event subscription that `call_with_progress` opens.
+        /// Absence in the returned list therefore means "never sent",
+        /// not "not yet arrived".
+        async fn drain(&self, client: &ControlClient) -> Vec<(String, Value)> {
+            client
+                .call_raw("stub.sentinel", json!({}))
+                .await
+                .expect("stub answers the sentinel");
+            self.seen
+                .lock()
+                .await
+                .iter()
+                .filter(|(method, _)| method != "stub.sentinel" && method != "events.subscribe")
+                .cloned()
+                .collect()
+        }
+    }
+
+    fn prompt() -> DestructivePrompt<'static> {
+        DestructivePrompt {
+            mode: ConfirmMode::Hard { token: "RESET" },
+            text: "Type RESET to continue:",
+            non_tty_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
+        }
+    }
+
+    #[tokio::test]
+    async fn run_destructive_declined_sends_nothing() {
+        let stub = StubDaemon::start(json!({"ok": true}));
+        let client = stub.client().await;
+        run_destructive_with(
+            Arc::clone(&client),
+            "vectors.reset",
+            json!({}),
+            false,
+            false,
+            prompt(),
+            true,
+            |_, _| Ok(false),
+        )
+        .await
+        .expect("a declined confirmation is not an error");
+        assert!(
+            stub.drain(&client).await.is_empty(),
+            "a declined confirmation must not put the destructive RPC on the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_destructive_confirmed_dispatches_with_yes_merged() {
+        let stub = StubDaemon::start(json!({"ok": true}));
+        let client = stub.client().await;
+        run_destructive_with(
+            Arc::clone(&client),
+            "vectors.reset",
+            json!({"resume": false}),
+            false,
+            false,
+            prompt(),
+            true,
+            |_, _| Ok(true),
+        )
+        .await
+        .expect("a confirmed reset dispatches");
+        let calls = stub.drain(&client).await;
+        assert_eq!(
+            calls,
+            vec![(
+                "vectors.reset".to_string(),
+                json!({"resume": false, "yes": true})
+            )],
+            "the confirmed call is dispatched exactly once, with yes merged in"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_destructive_refuses_a_non_tty_before_dispatching() {
+        let stub = StubDaemon::start(json!({"ok": true}));
+        let client = stub.client().await;
+        let err = run_destructive_with(
+            Arc::clone(&client),
+            "vectors.reset",
+            json!({}),
+            false,
+            false,
+            prompt(),
+            false,
+            |_, _| panic!("a non-TTY caller must never be prompted"),
+        )
+        .await
+        .expect_err("a non-TTY caller without --yes is refused");
+        assert!(
+            err.to_string().contains("pass --yes to confirm"),
+            "the refusal must carry the caller's directed hint: {err:#}"
+        );
+        assert!(
+            stub.drain(&client).await.is_empty(),
+            "a refused non-TTY call must not reach the daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_destructive_skips_the_prompt_when_the_caller_consented() {
+        for (user_yes, confirmation_exempt) in [(true, false), (false, true)] {
+            let stub = StubDaemon::start(json!({"ok": true}));
+            let client = stub.client().await;
+            run_destructive_with(
+                Arc::clone(&client),
+                "vectors.reset",
+                json!({}),
+                user_yes,
+                confirmation_exempt,
+                prompt(),
+                false,
+                |_, _| panic!("consent already given; the prompt must not run"),
+            )
+            .await
+            .expect("consent dispatches even on a non-TTY");
+            assert_eq!(
+                stub.drain(&client).await,
+                vec![("vectors.reset".to_string(), json!({"yes": true}))],
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_declined_sends_the_dry_run_leg_only() {
+        let stub = StubDaemon::start(json!({"plan_id": "plan-7", "books": 3}));
+        let client = stub.client().await;
+        run_pinned_destructive_with(
+            Arc::clone(&client),
+            "corpus.rebuild",
+            json!({"stale_only": true}),
+            false,
+            "Type 'yes' to continue:",
+            |_| Ok(false),
+        )
+        .await
+        .expect("a declined confirmation is not an error");
+        assert_eq!(
+            stub.drain(&client).await,
+            vec![(
+                "corpus.rebuild".to_string(),
+                json!({"stale_only": true, "dry_run": true})
+            )],
+            "declining must leave the execute leg unsent"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_confirmed_executes_against_the_plan_id_the_dry_run_returned() {
+        let stub = StubDaemon::start(json!({"plan_id": "plan-7", "books": 3}));
+        let client = stub.client().await;
+        run_pinned_destructive_with(
+            Arc::clone(&client),
+            "corpus.rebuild",
+            json!({"stale_only": true}),
+            false,
+            "Type 'yes' to continue:",
+            |_| Ok(true),
+        )
+        .await
+        .expect("a confirmed rebuild executes");
+        assert_eq!(
+            stub.drain(&client).await,
+            vec![
+                (
+                    "corpus.rebuild".to_string(),
+                    json!({"stale_only": true, "dry_run": true})
+                ),
+                (
+                    "corpus.rebuild".to_string(),
+                    json!({"yes": true, "plan_id": "plan-7"})
+                ),
+            ],
+            "the execute leg carries the plan id the daemon pinned, not the selectors"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_dry_run_stops_before_the_confirmation() {
+        let stub = StubDaemon::start(json!({"plan_id": "plan-7"}));
+        let client = stub.client().await;
+        run_pinned_destructive_with(
+            Arc::clone(&client),
+            "corpus.rebuild",
+            json!({"book": 4}),
+            true,
+            "Type 'yes' to continue:",
+            |_| panic!("--dry-run must return before any confirmation"),
+        )
+        .await
+        .expect("a dry run reports the plan and stops");
+        assert_eq!(
+            stub.drain(&client).await,
+            vec![(
+                "corpus.rebuild".to_string(),
+                json!({"book": 4, "dry_run": true})
+            )],
+        );
+    }
+
+    /// A daemon that answers the dry run without a `plan_id` is a
+    /// protocol violation: the helper must fail loudly rather than
+    /// prompt for an execute leg it cannot pin.
+    #[tokio::test]
+    async fn pinned_rejects_a_dry_run_response_without_a_plan_id() {
+        let stub = StubDaemon::start(json!({"books": 3}));
+        let client = stub.client().await;
+        let err = run_pinned_destructive_with(
+            Arc::clone(&client),
+            "corpus.rebuild",
+            json!({}),
+            false,
+            "Type 'yes' to continue:",
+            |_| panic!("an unpinnable plan must not reach the confirmation"),
+        )
+        .await
+        .expect_err("a plan-less dry-run response is an error");
+        assert!(
+            err.to_string().contains("did not include a plan_id"),
+            "unexpected message: {err:#}"
+        );
     }
 }
