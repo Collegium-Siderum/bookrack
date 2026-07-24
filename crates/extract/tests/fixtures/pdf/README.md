@@ -28,7 +28,7 @@ file itself is the auditable form and is written by hand.
 
 Tools used (pin these when regenerating):
 
-- Typst 0.14.2 — the `.typ` fixtures
+- Typst 0.14.2 — the `.typ` fixtures (`paper_cn` compiled with 0.15.0)
 - pikepdf 10.3 (a binding over qpdf) — the encrypted pair
 - Pillow 12.1 — the image-only fixture
 - fonts: Libertinus Serif (bundled with Typst), Source Han Serif SC
@@ -36,7 +36,7 @@ Tools used (pin these when regenerating):
 
 ```text
 typst compile prose_en.typ          # and prose_cjk, two_column,
-                                    # toc_deep, biblio_garbage
+                                    # toc_deep, biblio_garbage, paper_cn
 python make_encrypted.py            # derives the two encrypted PDFs
                                     # from prose_en.pdf
 python make_image_pdf.py            # draws the image-only PDF
@@ -56,6 +56,7 @@ stays stable.
 | `prose_cjk` | 2 | Single-column CJK prose, ragged. Pins extractor behaviour on ideographic text. |
 | `two_column` | 2 | Full-width title and abstract above a two-column body; Latin and CJK columns; reading order must run down the left column then the right, across a page break. |
 | `toc_deep` | 4 | A four-level `/Outline` (18 entries); depth must survive, and anchoring must spread across pages instead of collapsing onto one block. |
+| `paper_cn` | 1 | Chinese journal-article front matter: a CJK abstract heading closed by a keywords line, a full-width DOI banner (U+FF01..U+FF5E forms) the metadata fold must map to ASCII, an ASCII venue line, and a references section that must terminate the metadata-scan window before the bibliography entries. |
 | `biblio_garbage` | 2 | Deliberately unreliable `/Info`: a Word working-file name as title, an account name as author, a production date unrelated to the publication year. The trustworthy bibliography is on a faux title page in the body. |
 | `encrypted_userpw` | — | A user (open) password is set; the file cannot be opened without it. Expect `ExtractError::DrmProtected`. |
 | `encrypted_restricted` | 3 | Owner password only (opens with no password) at revision 6 / AES-256. It is `prose_en.pdf` re-saved with encryption, so its extracted content is identical to `prose_en`. |
