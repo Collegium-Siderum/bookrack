@@ -350,6 +350,36 @@ mod tests {
     }
 
     #[test]
+    fn a_duplicate_natural_key_is_refused() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let row = NewContributor::new(1, KIND, "author", 0, "extracted", "Ann");
+        catalog.add_contributor(&row).expect("first insert");
+
+        // The same (node, role, ordinal, origin) again: the UNIQUE
+        // natural key rejects it at the database.
+        let err = catalog
+            .add_contributor(&row)
+            .expect_err("a duplicate natural key must be refused");
+        assert!(
+            matches!(err, crate::CatalogError::Sqlite(_)),
+            "unexpected error: {err:?}"
+        );
+
+        // A different origin on the same (node, role, ordinal) is a
+        // separate layer, not a duplicate.
+        catalog
+            .add_contributor(&NewContributor::new(1, KIND, "author", 0, "user", "Ann"))
+            .expect("another origin layer");
+        assert_eq!(
+            catalog
+                .contributors_for_address(1, KIND)
+                .expect("read")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn contributors_come_back_ordered_by_role_then_ordinal() {
         let catalog = Catalog::open_in_memory().expect("open");
         // Insert out of order to prove the query sorts.

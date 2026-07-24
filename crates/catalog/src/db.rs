@@ -704,6 +704,89 @@ mod tests {
     }
 
     #[test]
+    fn open_read_only_refuses_an_unmigrated_older_schema() {
+        // A file stopped at an early revision: user_version is below
+        // target, so only the spec-conformance gate can catch it — the
+        // read-only path never migrates forward.
+        let dir = unique_dir("read-only-older");
+        let path = dir.join("catalog.db");
+        {
+            let mut conn = Connection::open(&path).expect("seed connection");
+            migrations()
+                .to_version(&mut conn, 2)
+                .expect("stop at an early revision");
+        }
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("an old-revision file must be refused")
+        };
+        assert!(matches!(err, CatalogError::Verify(_)), "{err:?}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_newer_schema_version() {
+        let dir = unique_dir("read-only-newer");
+        let path = dir.join("catalog.db");
+        {
+            let catalog = Catalog::open(&path).expect("create");
+            catalog
+                .conn
+                .pragma_update(None, "user_version", TARGET_VERSION + 1)
+                .expect("bump user_version");
+        }
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("a newer-revision file must be refused")
+        };
+        assert!(
+            matches!(err, CatalogError::SchemaTooNew { found, expected }
+                if found == TARGET_VERSION + 1 && expected == TARGET_VERSION),
+            "{err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_accepts_a_missing_reader_stamp_without_seeding_it() {
+        let dir = unique_dir("read-only-unseeded");
+        let path = dir.join("catalog.db");
+        {
+            let catalog = Catalog::open(&path).expect("create");
+            catalog
+                .conn
+                .execute(
+                    &format!("DELETE FROM catalog_meta WHERE key = '{MIN_READER_VERSION_KEY}'"),
+                    [],
+                )
+                .expect("remove the reader stamp");
+        }
+
+        // A missing stamp resolves to Match, and the read-only contract
+        // forbids writing the seed the read-write path would take.
+        {
+            let read_only = Catalog::open_read_only(&path).expect("open without a stamp");
+            assert_eq!(
+                read_only.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+                None,
+                "a read-only open must not seed the stamp"
+            );
+        }
+        // The next read-write open seeds it again.
+        {
+            let reopened = Catalog::open(&path).expect("read-write reopen");
+            assert_eq!(
+                reopened.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+                Some(MIN_READER_VERSION.to_string())
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn now_iso_returns_a_zulu_timestamp() {
         let catalog = Catalog::open_in_memory().expect("open");
         let ts = catalog.now_iso().expect("now");

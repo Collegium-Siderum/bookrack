@@ -2321,6 +2321,75 @@ mod tests {
     }
 
     #[test]
+    fn list_ocr_pending_surfaces_the_latest_extract_skip_reason() {
+        let mut cat = catalog();
+        let anchor = register_book(&mut cat, "pdf-why", "pdf", IntakeStatus::NeedsOcr);
+
+        // Two rejection reasons for the same source; both land in the
+        // same second, so the audit_id tiebreaker picks the later one.
+        for reason in ["watermark text layer", "garbled text layer"] {
+            let mut skip = crate::NewItemPipelineAudit::new(
+                "extract",
+                "quality_gate",
+                "skipped",
+                "run-ocr",
+                crate::ActorKind::Pipeline,
+            );
+            skip.source_sha256 = Some("pdf-why".to_string());
+            skip.error_message = Some(reason.to_string());
+            cat.record_pipeline_audit(&skip).expect("skip row");
+        }
+        // Newer rows that must NOT be picked: an extract row that did
+        // not skip, and a skip on a different stage. Both carry decoy
+        // messages, so a wrong stage or outcome literal in the subquery
+        // surfaces as the wrong reason.
+        let mut ok_row = crate::NewItemPipelineAudit::new(
+            "extract",
+            "parse",
+            "ok",
+            "run-ocr",
+            crate::ActorKind::Pipeline,
+        );
+        ok_row.source_sha256 = Some("pdf-why".to_string());
+        ok_row.error_message = Some("not a rejection".to_string());
+        cat.record_pipeline_audit(&ok_row).expect("ok row");
+        let mut other_stage = crate::NewItemPipelineAudit::new(
+            "embed",
+            "quality_gate",
+            "skipped",
+            "run-ocr",
+            crate::ActorKind::Pipeline,
+        );
+        other_stage.source_sha256 = Some("pdf-why".to_string());
+        other_stage.error_message = Some("wrong stage".to_string());
+        cat.record_pipeline_audit(&other_stage)
+            .expect("other stage");
+
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intake.intake_id, anchor);
+        assert_eq!(pending[0].reason.as_deref(), Some("garbled text layer"));
+    }
+
+    #[test]
+    fn intake_status_database_strings_are_pinned() {
+        // These literals are the on-disk format and are matched verbatim
+        // inside OCR_PENDING_WHERE; renaming one would strand existing
+        // rows. Pinned here so a change is a deliberate act, not a typo.
+        let expected = [
+            (IntakeStatus::Pending, "pending"),
+            (IntakeStatus::Extracted, "extracted"),
+            (IntakeStatus::DedupHold, "dedup_hold"),
+            (IntakeStatus::Embedded, "embedded"),
+            (IntakeStatus::Aborted, "aborted"),
+            (IntakeStatus::NeedsOcr, "needs_ocr"),
+        ];
+        for (status, s) in expected {
+            assert_eq!(status.as_str(), s);
+        }
+    }
+
+    #[test]
     fn list_ocr_pending_keeps_an_anchor_whose_product_only_aborted() {
         let mut cat = catalog();
         let anchor = register_book(&mut cat, "pdf-retry", "pdf", IntakeStatus::NeedsOcr);

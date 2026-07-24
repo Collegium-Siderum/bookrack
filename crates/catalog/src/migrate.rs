@@ -891,6 +891,88 @@ mod tests {
     }
 
     #[test]
+    fn migration_m10_adds_the_node_paper_audit_projection() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[10] to prove the table is this migration's
+        // work and not part of an earlier revision.
+        migrations()
+            .to_version(&mut conn, 10)
+            .expect("apply M[0..9]");
+        assert!(
+            columns_of(&conn, "node_paper_audit").is_empty(),
+            "node_paper_audit must not exist before M[10]"
+        );
+
+        migrations().to_latest(&mut conn).expect("apply M[10]");
+
+        let cols = columns_of(&conn, "node_paper_audit");
+        for grade in [
+            "grade_title",
+            "grade_year",
+            "grade_doi",
+            "grade_arxiv",
+            "grade_issn",
+            "grade_container",
+            "grade_abstract",
+            "grade_author",
+            "grade_language",
+        ] {
+            assert!(
+                cols.iter().any(|c| c == grade),
+                "expected {grade}, got {cols:?}"
+            );
+        }
+        assert_eq!(
+            cols.iter().filter(|c| c.starts_with("flag_")).count(),
+            24,
+            "one flag_* column per PaperFlag token"
+        );
+        assert!(index_exists(&conn, "idx_node_paper_audit_profile"));
+        assert!(index_exists(
+            &conn,
+            "idx_node_paper_audit_verdict_confidence"
+        ));
+    }
+
+    #[test]
+    fn migration_m13_adds_derived_from_sha256_as_a_nullable_column() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // Stop one short of M[13] and seed a pre-migration row so the
+        // post-migration NULL backfill can be asserted explicitly.
+        migrations()
+            .to_version(&mut conn, 13)
+            .expect("apply M[0..12]");
+        conn.execute(
+            "INSERT INTO intake (source_sha256, intake_at, status) \
+             VALUES ('sha-pre13', '2026-06-05T00:00:00Z', 'needs_ocr')",
+            [],
+        )
+        .expect("seed pre-M[13] row");
+
+        migrations().to_latest(&mut conn).expect("apply M[13]");
+
+        let cols = columns_of(&conn, "intake");
+        assert!(
+            cols.iter().any(|c| c == "derived_from_sha256"),
+            "expected derived_from_sha256 column, got {cols:?}"
+        );
+        assert_eq!(column_type(&conn, "intake", "derived_from_sha256"), "TEXT");
+
+        // Pre-migration row reads back NULL on the new column, until a
+        // repair pass backfills it.
+        let legacy: Option<String> = conn
+            .query_row(
+                "SELECT derived_from_sha256 FROM intake \
+                 WHERE source_sha256 = 'sha-pre13'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read legacy row");
+        assert_eq!(legacy, None);
+        assert!(index_exists(&conn, "idx_intake_derived_status"));
+    }
+
+    #[test]
     fn migration_m3_adds_pub_place_and_original_year_to_publication_attrs() {
         let mut conn = Connection::open_in_memory().expect("open");
         migrations().to_latest(&mut conn).expect("apply");
