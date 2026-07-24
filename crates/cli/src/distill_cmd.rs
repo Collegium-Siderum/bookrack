@@ -69,7 +69,7 @@ pub async fn run(
     let paths = DistillPaths::resolve(selection)?;
     match action {
         DistillAction::Build(args) => build(&paths, args),
-        DistillAction::Verify(args) => verify(&paths, args),
+        DistillAction::Verify(args) => verify(&paths, args).map(|_| ()),
         DistillAction::Lint(args) => lint(args),
         DistillAction::List(args) => list(&paths, args),
     }
@@ -748,7 +748,7 @@ fn draft_to_new_entry(draft: &EntryDraft) -> NewEntry {
 // verify
 // ---------------------------------------------------------------------------
 
-fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<()> {
+fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<Vec<BookDiff>> {
     let books = resolve_paths(&args.paths, args.recursive)?;
 
     // Guard the `reference.db` location at the entry point rather than
@@ -775,6 +775,7 @@ fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<()> {
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
 
     let distill_run_id = chrono::Utc::now().to_rfc3339();
+    let mut diffs = Vec::with_capacity(books.len());
     for book in &books {
         let pipeline = load_pipeline(&book.book_toml)?;
         let source = read_source(&book.source)?;
@@ -787,10 +788,10 @@ fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<()> {
             .collect();
         let live = read_live_entries(&prod_refs, &book.slug)?;
 
-        diff_and_report(&book.slug, &proposed, &live);
+        diffs.push(diff_and_report(&book.slug, &proposed, &live));
     }
 
-    Ok(())
+    Ok(diffs)
 }
 
 /// One row of `reference_entries` flattened for diff purposes.
@@ -824,23 +825,42 @@ fn read_live_entries(refs: &Refs, slug: &str) -> Result<BTreeMap<String, LiveEnt
     Ok(out)
 }
 
+/// The diff for one book between the freshly drafted pipeline output
+/// and the live `reference_entries` rows: entry keys present only in
+/// the drafts (`added`), only in the database (`removed`), or in both
+/// with a differing headword or payload (`changed`). Each list is in
+/// sorted key order.
+#[derive(Debug, PartialEq, Eq)]
+struct BookDiff {
+    slug: String,
+    added: Vec<String>,
+    removed: Vec<String>,
+    changed: Vec<String>,
+}
+
 fn diff_and_report(
     slug: &str,
     proposed: &BTreeMap<String, EntryDraft>,
     live: &BTreeMap<String, LiveEntry>,
-) {
+) -> BookDiff {
     let proposed_keys: BTreeSet<&str> = proposed.keys().map(String::as_str).collect();
     let live_keys: BTreeSet<&str> = live.keys().map(String::as_str).collect();
 
-    let added: Vec<&str> = proposed_keys.difference(&live_keys).copied().collect();
-    let removed: Vec<&str> = live_keys.difference(&proposed_keys).copied().collect();
-    let mut changed: Vec<&str> = Vec::new();
+    let added: Vec<String> = proposed_keys
+        .difference(&live_keys)
+        .map(|k| k.to_string())
+        .collect();
+    let removed: Vec<String> = live_keys
+        .difference(&proposed_keys)
+        .map(|k| k.to_string())
+        .collect();
+    let mut changed: Vec<String> = Vec::new();
     for key in proposed_keys.intersection(&live_keys) {
         let new = &proposed[*key];
         let old = &live[*key];
         let new_payload = serde_json::to_string(&new.payload).unwrap_or_default();
         if new.headword != old.headword || new_payload != old.payload_json {
-            changed.push(key);
+            changed.push(key.to_string());
         }
     }
 
@@ -853,9 +873,16 @@ fn diff_and_report(
     print_list("added", &added);
     print_list("removed", &removed);
     print_list("changed", &changed);
+
+    BookDiff {
+        slug: slug.to_string(),
+        added,
+        removed,
+        changed,
+    }
 }
 
-fn print_list(label: &str, keys: &[&str]) {
+fn print_list(label: &str, keys: &[String]) {
     for k in keys {
         println!("  {label}: {k}");
     }
@@ -879,29 +906,7 @@ fn list(paths: &DistillPaths, _args: DistillListArgs) -> Result<()> {
     }
     let refs = Refs::open(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
-    let conn = refs.connection();
-
-    let mut stmt = conn.prepare(
-        "SELECT b.book_slug, b.title_zh, b.authority_rank, b.built_at, \
-                COUNT(e.entry_id) AS entry_count \
-           FROM reference_books b \
-      LEFT JOIN reference_entries e ON e.book_slug = b.book_slug \
-       GROUP BY b.book_slug \
-       ORDER BY b.authority_rank DESC, b.built_at ASC",
-    )?;
-    let row_iter = stmt.query_map([], |row| {
-        Ok(ListRow {
-            slug: row.get::<_, String>(0)?,
-            title: row.get::<_, String>(1)?,
-            authority_rank: row.get::<_, i64>(2)?,
-            built_at: row.get::<_, String>(3)?,
-            entry_count: row.get::<_, i64>(4)?,
-        })
-    })?;
-    let mut rows: Vec<ListRow> = Vec::new();
-    for row in row_iter {
-        rows.push(row?);
-    }
+    let rows = read_list_rows(&refs)?;
 
     if ctx().is_quiet() {
         return Ok(());
@@ -928,6 +933,35 @@ fn list(paths: &DistillPaths, _args: DistillListArgs) -> Result<()> {
     }
     println!("{}", table.render());
     Ok(())
+}
+
+/// Read the per-book listing rows: one row per registered book with
+/// its live entry count, ordered by authority rank (descending) then
+/// build time.
+fn read_list_rows(refs: &Refs) -> Result<Vec<ListRow>> {
+    let conn = refs.connection();
+    let mut stmt = conn.prepare(
+        "SELECT b.book_slug, b.title_zh, b.authority_rank, b.built_at, \
+                COUNT(e.entry_id) AS entry_count \
+           FROM reference_books b \
+      LEFT JOIN reference_entries e ON e.book_slug = b.book_slug \
+       GROUP BY b.book_slug \
+       ORDER BY b.authority_rank DESC, b.built_at ASC",
+    )?;
+    let row_iter = stmt.query_map([], |row| {
+        Ok(ListRow {
+            slug: row.get::<_, String>(0)?,
+            title: row.get::<_, String>(1)?,
+            authority_rank: row.get::<_, i64>(2)?,
+            built_at: row.get::<_, String>(3)?,
+            entry_count: row.get::<_, i64>(4)?,
+        })
+    })?;
+    let mut rows: Vec<ListRow> = Vec::new();
+    for row in row_iter {
+        rows.push(row?);
+    }
+    Ok(rows)
 }
 
 #[derive(Debug)]
@@ -1251,7 +1285,12 @@ stages = [
         let paths = make_paths(tmp.path());
         build(&paths, build_args(vec![book_dir.clone()], false, false)).expect("build");
 
-        verify(&paths, verify_args(vec![book_dir])).expect("verify");
+        let diffs = verify(&paths, verify_args(vec![book_dir])).expect("verify");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].slug, "tiny");
+        assert!(diffs[0].added.is_empty());
+        assert!(diffs[0].removed.is_empty());
+        assert!(diffs[0].changed.is_empty());
         let refs = Refs::open(&paths.refs_path).expect("open after verify");
         let _ = refs
             .lookup_resolved(None, "smith")
@@ -1275,34 +1314,12 @@ stages = [
             .expect("manual update");
         drop(refs);
 
-        let live = {
-            let refs = Refs::open(&paths.refs_path).expect("re-open");
-            read_live_entries(&refs, "tiny").expect("live")
-        };
-        let book_toml_path = book_dir.join("book.toml");
-        let pipeline = load_pipeline(&book_toml_path).expect("pipeline");
-        let source = read_source(&book_dir.join("source.md")).expect("source");
-        let extras = compose_extras("tiny", "2026-06-25T00:00:00Z");
-        let (drafts, _) = pipeline.run_with_extras(source, extras).expect("run");
-        let proposed: BTreeMap<String, EntryDraft> = drafts
-            .into_iter()
-            .map(|d| (d.entry_key.clone(), d))
-            .collect();
-
-        let mut found_change = false;
-        for key in proposed.keys() {
-            if let Some(live_row) = live.get(key) {
-                let new_payload = serde_json::to_string(&proposed[key].payload).unwrap_or_default();
-                if new_payload != live_row.payload_json {
-                    found_change = true;
-                    break;
-                }
-            }
-        }
-        assert!(
-            found_change,
-            "verify must catch the manual payload mutation"
-        );
+        let diffs = verify(&paths, verify_args(vec![book_dir])).expect("verify");
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].slug, "tiny");
+        assert_eq!(diffs[0].changed, vec!["smith".to_string()]);
+        assert!(diffs[0].added.is_empty());
+        assert!(diffs[0].removed.is_empty());
     }
 
     /// `verify` against a path that does not exist must surface a
@@ -1360,13 +1377,21 @@ stages = [
     }
 
     #[test]
-    fn list_prints_each_registered_book_with_its_entry_count() {
+    fn list_rows_carry_each_registered_book_with_its_entry_count() {
         let tmp = TempDir::new().expect("tmp");
         let book_dir = seed_book_dir(tmp.path(), "tiny");
         let paths = make_paths(tmp.path());
         build(&paths, build_args(vec![book_dir], false, false)).expect("build");
 
+        // The rendered command must succeed, and the rows behind it
+        // must carry the registered book with its live entry count
+        // (the tiny fixture drafts two headwords).
         list(&paths, DistillListArgs::default()).expect("list");
+        let refs = Refs::open(&paths.refs_path).expect("open");
+        let rows = read_list_rows(&refs).expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].slug, "tiny");
+        assert_eq!(rows[0].entry_count, 2);
     }
 
     #[test]
