@@ -9,9 +9,16 @@
 //! [`PaperFlag`]. The aggregate verdict and the row-level confidence
 //! are computed once all per-field grades are settled.
 //!
-//! Every weakening signal is gated by a corresponding toggle in
-//! [`PaperAuditProfile`]. A signal whose toggle is off neither
-//! weakens the grade nor appends its flag.
+//! Most weakening signals are gated by a corresponding toggle in
+//! [`PaperAuditProfile`]: a signal whose toggle is off neither weakens
+//! the grade nor appends its flag. Two structural signals are the
+//! exception and fire unconditionally, because they report an objective
+//! extraction defect rather than a guess about a plausible value:
+//! `SourceWatermark` (the title carries a known watermark token) and
+//! `DoubtfulTextLayer` (the extractor itself flagged the text layer as
+//! doubtful). No toggle gates these; only [`PaperAuditProfile::audit_enabled`]
+//! `= false`, which short-circuits [`audit_paper`] before any signal
+//! runs, suppresses them.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -129,7 +136,7 @@ fn grade_title(
     {
         report.weaken_to(PaperFieldGrade::Weak, PaperFlag::EqualsFilename);
     }
-    apply_watermark(&mut report, val, data, profile);
+    apply_watermark(&mut report, val, data);
     fields.insert("title", report);
 }
 
@@ -380,12 +387,7 @@ fn start_field(_name: &'static str, value: Option<&str>) -> PaperFieldReport {
     }
 }
 
-fn apply_watermark(
-    report: &mut PaperFieldReport,
-    value: &str,
-    data: &PaperAuditData,
-    _profile: &PaperAuditProfile,
-) {
+fn apply_watermark(report: &mut PaperFieldReport, value: &str, data: &PaperAuditData) {
     let lower = value.to_ascii_lowercase();
     if data
         .watermark_tokens
@@ -791,6 +793,101 @@ mod tests {
         assert_eq!(report.verdict, PaperVerdict::NeedsWork, "{report:?}");
         let publisher = report.fields.get("publisher").expect("publisher graded");
         assert_eq!(publisher.grade, PaperFieldGrade::Missing);
+    }
+
+    /// Effective attrs carrying just a title, for the watermark pin.
+    fn effective_with_title(title: &str) -> EffectiveAttrs {
+        use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
+        use bookrack_core::ItemKind;
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("cafef00d".to_string()).format("pdf".to_string()),
+            )
+            .expect("register");
+        let mut attrs = NewPublicationAttrs::new(intake.intake().intake_id, ItemKind::Paper);
+        attrs.title = Some(title.to_string());
+        catalog.upsert_publication_attrs(&attrs).expect("upsert");
+        catalog
+            .effective_publication_attrs(intake.intake().intake_id, ItemKind::Paper)
+            .expect("effective")
+    }
+
+    #[test]
+    fn ungated_structural_signals_fire_with_every_toggle_off() {
+        // The module doc calls out `SourceWatermark` and
+        // `DoubtfulTextLayer` as the two signals no toggle gates. Pin
+        // that: start from the default profile, silence every gated
+        // signal that could touch the title or author field, and assert
+        // these two still fire. Only `audit_enabled = false` can
+        // suppress them — and that path is covered separately.
+        let mut profile = PaperAuditProfile::default_profile();
+        // Silence every gated title signal, so the only thing that can
+        // flag the title is the ungated watermark.
+        profile.title.empty_check = false;
+        profile.title.placeholder_check = false;
+        profile.title.echoes_arxiv_banner_check = false;
+        profile.title.equals_filename_check = false;
+        // Silence the gated author-field neighbour (source prior) and
+        // the other author checks, so the only thing that can flag the
+        // author is the ungated doubtful-layer signal.
+        profile.source_prior.enabled = false;
+        profile.author.required = false;
+        profile.author.sentinel_check = false;
+        profile.author.single_word_check = false;
+
+        let mut data = PaperAuditData::empty();
+        data.watermark_tokens = vec!["synthwatermark".to_string()];
+
+        let mut biblio = empty_biblio();
+        biblio.contributors = vec![Contributor {
+            name: "Alex Sample".to_string(),
+            role: bookrack_extract::ContributorRole::Author,
+            family: None,
+            given: None,
+            orcid: None,
+        }];
+        let mut provenance = empty_provenance();
+        // `txt` is the adapter the source prior weakens — with the
+        // toggle off it must stay silent, unlike the doubtful layer.
+        provenance.adapter = "txt".to_string();
+        provenance.text_layer_quality = TextLayerQuality::Doubtful;
+
+        let effective = effective_with_title("Study synthwatermark");
+        let input = PaperAuditInput {
+            biblio: &biblio,
+            provenance: &provenance,
+            effective: &effective,
+            body_sample: "",
+            source_stem: None,
+        };
+        let report = audit_paper(&input, &profile, &data);
+
+        let title = report.fields.get("title").expect("title graded");
+        assert!(
+            title.flags.contains(&PaperFlag::SourceWatermark),
+            "SourceWatermark has no toggle and must fire: {title:?}"
+        );
+        assert_ne!(
+            title.grade,
+            PaperFieldGrade::Strong,
+            "the watermark must still weaken the title: {title:?}"
+        );
+
+        let author = report.fields.get("author").expect("author graded");
+        assert!(
+            author.flags.contains(&PaperFlag::DoubtfulTextLayer),
+            "DoubtfulTextLayer has no toggle and must fire: {author:?}"
+        );
+        // Counterpart: the gated neighbour really is suppressed, proving
+        // the firings above are not an artefact of a half-applied
+        // profile — a txt adapter raises SourcePriorWeak only while
+        // source_prior is enabled.
+        assert!(
+            !author.flags.contains(&PaperFlag::SourcePriorWeak),
+            "the gated source prior must stay silent: {author:?}"
+        );
     }
 
     fn empty_biblio() -> Biblio {
