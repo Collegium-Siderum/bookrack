@@ -507,9 +507,11 @@ impl AuditProfile {
         }
     }
 
-    /// The `strict` profile: built on `default`, raises a few signals
-    /// the team has chosen to treat as harder errors. The exact set is
-    /// stable across patches.
+    /// The `strict` profile: currently the `default` toggle set under a
+    /// distinct name, reserved for future upgrades that promote selected
+    /// signals to higher severities. Until such an upgrade lands its
+    /// effective fingerprint equals `default_profile`; only `name`
+    /// differs.
     pub fn strict() -> Self {
         let mut profile = Self::default_profile();
         profile.name = PROFILE_STRICT.to_string();
@@ -761,6 +763,26 @@ mod tests {
         assert!(AuditProfile::from_named(PROFILE_TRUST_SOURCE).is_some());
         assert!(AuditProfile::from_named(PROFILE_STRICT).is_some());
         assert!(AuditProfile::from_named("unknown-profile").is_none());
+    }
+
+    #[test]
+    fn strict_currently_matches_the_default_toggle_set() {
+        let strict = AuditProfile::strict();
+        let default = AuditProfile::default_profile();
+        // The name is the only difference the two carry.
+        assert_eq!(strict.name, PROFILE_STRICT);
+        assert_eq!(default.name, PROFILE_DEFAULT);
+        assert_eq!(
+            profile_fingerprint(&strict).expect("strict fingerprint"),
+            profile_fingerprint(&default).expect("default fingerprint"),
+            "strict must equal default until an upgrade promotes signals",
+        );
+        // The pin is not vacuous: a profile that genuinely differs in its
+        // toggles produces a different fingerprint.
+        assert_ne!(
+            profile_fingerprint(&strict).expect("strict fingerprint"),
+            profile_fingerprint(&AuditProfile::trust_source()).expect("trust-source fingerprint"),
+        );
     }
 
     #[test]
