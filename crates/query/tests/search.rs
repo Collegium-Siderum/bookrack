@@ -8,14 +8,14 @@ use std::future::Future;
 use std::path::Path;
 
 use bookrack_catalog::Catalog;
-use bookrack_core::{ItemKind, NodeType};
+use bookrack_core::{ItemKind, NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{
     Biblio, Block, BlockKind, Extraction, Provenance, TextLayerQuality, Toc, TocEntry,
 };
 use bookrack_ingest::{StructureParams, current_index_stamps, ingest_structure};
-use bookrack_query::Library;
+use bookrack_query::{Library, SearchOptions};
 use bookrack_vectors::{ChunkRow, ChunkStore};
 
 /// Bring `catalog.db` into existence at the current schema so the
@@ -155,42 +155,59 @@ async fn search_returns_a_cited_passage_through_the_facade() {
     assert_eq!(hits[0].breadcrumb, "A Test Book \u{203a} Chapter One");
 }
 
-/// Append a single stamped chunk under `corpus_db` / `lancedb_dir`, built
-/// with `MODEL` at `DIM`. Shared setup for the gate tests below.
-async fn build_stamped_index(corpus_db: &std::path::Path, lancedb_dir: &std::path::Path) {
+/// Ingest one book per entry of `intake_ids` under `corpus_db` and append
+/// a stamped chunk for each to the store under `lancedb_dir`, built with
+/// `MODEL` at `DIM`. Each intake owns its own id partition, so the
+/// intake ids double as the partition indices a search can exclude.
+///
+/// The chunk hashes are made distinct per intake: they are the
+/// near-duplicate fold key, and every book here carries the same
+/// fixture text.
+async fn build_stamped_books(
+    corpus_db: &std::path::Path,
+    lancedb_dir: &std::path::Path,
+    intake_ids: &[i64],
+) {
     let mut corpus = Corpus::open(corpus_db).expect("open corpus");
-    let report = ingest_structure(
-        &mut corpus,
-        1,
-        NodeType::Work,
-        &extraction(),
-        &StructureParams::default(),
-    )
-    .expect("structure");
-    corpus
-        .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
-        .expect("stamp");
-    let leaf = corpus
-        .book_nodes(report.book_root_id)
-        .expect("nodes")
-        .into_iter()
-        .find(|n| n.node_type.is_prose_leaf())
-        .expect("a prose leaf");
-    let store = ChunkStore::open(lancedb_dir, DIM)
-        .await
-        .expect("open store");
-    store
-        .append(&[ChunkRow {
+    let mut rows = Vec::new();
+    for &intake_id in intake_ids {
+        let report = ingest_structure(
+            &mut corpus,
+            intake_id,
+            NodeType::Work,
+            &extraction(),
+            &StructureParams::default(),
+        )
+        .expect("structure");
+        let leaf = corpus
+            .book_nodes(report.book_root_id)
+            .expect("nodes")
+            .into_iter()
+            .find(|n| n.node_type.is_prose_leaf())
+            .expect("a prose leaf");
+        rows.push(ChunkRow {
             vector: vec![1.0, 0.0, 0.0, 0.0],
             text: leaf.text_content.clone().expect("leaf text"),
             start_node_id: leaf.node_id,
             start_char_offset: 0,
             end_node_id: leaf.node_id,
             end_char_offset: 100,
-            norm_chunk_sha256: "sha".to_string(),
-        }])
+            norm_chunk_sha256: format!("sha-{intake_id}"),
+        });
+    }
+    corpus
+        .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+        .expect("stamp");
+    let store = ChunkStore::open(lancedb_dir, DIM)
         .await
-        .expect("append");
+        .expect("open store");
+    store.append(&rows).await.expect("append");
+}
+
+/// Append a single stamped chunk under `corpus_db` / `lancedb_dir`, built
+/// with `MODEL` at `DIM`. Shared setup for the gate tests below.
+async fn build_stamped_index(corpus_db: &std::path::Path, lancedb_dir: &std::path::Path) {
+    build_stamped_books(corpus_db, lancedb_dir, &[1]).await;
 }
 
 #[tokio::test]
@@ -234,6 +251,122 @@ async fn search_in_an_unknown_intake_returns_empty_not_an_error() {
         .await
         .expect("search unknown paper intake");
     assert!(hits.is_empty());
+}
+
+/// A library over two ingested books, intakes 1 and 2, one chunk each in
+/// its own id partition. The `TempDir` is returned so the caller keeps
+/// the library's backing files alive.
+async fn two_book_library() -> (tempfile::TempDir, Library<Fixed>) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let corpus_db = dir.path().join("corpus.db");
+    let catalog_db = dir.path().join("catalog.db");
+    let lancedb_dir = dir.path().join("lancedb");
+    seed_catalog(&catalog_db);
+    build_stamped_books(&corpus_db, &lancedb_dir, &[1, 2]).await;
+
+    let library = Library::open(
+        corpus_db,
+        catalog_db,
+        &lancedb_dir,
+        Fixed,
+        MODEL.to_string(),
+        5,
+        bookrack_ingest::CHUNK_VERSION,
+    )
+    .await
+    .expect("open library");
+    (dir, library)
+}
+
+/// The partition indices the citations were drawn from, in hit order.
+fn partitions_of(citations: &[bookrack_query::Citation]) -> Vec<PartitionIdx> {
+    citations
+        .iter()
+        .map(|c| c.start_node_id.partition())
+        .collect()
+}
+
+#[tokio::test]
+async fn excluding_a_book_removes_its_hits_from_whole_library_search() {
+    let (_dir, library) = two_book_library().await;
+
+    // Both books answer the unfiltered query, so the exclusion below has
+    // something to remove.
+    let baseline = library.search("anything", None).await.expect("search");
+    let baseline_partitions = partitions_of(&baseline);
+    assert!(baseline_partitions.contains(&PartitionIdx::new(1)));
+    assert!(baseline_partitions.contains(&PartitionIdx::new(2)));
+
+    let filtered = library
+        .search_with(
+            "anything",
+            SearchOptions {
+                exclude_partitions: vec![PartitionIdx::new(1)],
+                ..SearchOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("search with exclusion");
+    let filtered_partitions = partitions_of(&filtered);
+
+    // The excluded book is gone, and the other one keeps every hit it
+    // had — an exclusion narrows one book, it does not shrink the rest.
+    assert!(!filtered_partitions.contains(&PartitionIdx::new(1)));
+    assert_eq!(
+        filtered_partitions
+            .iter()
+            .filter(|p| **p == PartitionIdx::new(2))
+            .count(),
+        baseline_partitions
+            .iter()
+            .filter(|p| **p == PartitionIdx::new(2))
+            .count(),
+    );
+}
+
+#[tokio::test]
+async fn search_in_book_ignores_exclusions() {
+    let (_dir, library) = two_book_library().await;
+
+    // Excluding the very book the search is confined to changes nothing:
+    // the single-book path does not read the exclusion list.
+    let hits = library
+        .search_in_book_with(
+            1,
+            "anything",
+            SearchOptions {
+                exclude_partitions: vec![PartitionIdx::new(1), PartitionIdx::new(2)],
+                ..SearchOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("search in book with exclusion");
+    assert_eq!(partitions_of(&hits), vec![PartitionIdx::new(1)]);
+}
+
+#[tokio::test]
+async fn an_empty_exclusion_list_leaves_the_whole_library_searchable() {
+    let (_dir, library) = two_book_library().await;
+
+    let hits = library
+        .search_with(
+            "anything",
+            SearchOptions {
+                exclude_partitions: Vec::new(),
+                ..SearchOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("search with an empty exclusion");
+
+    // Both books still answer: an empty list must reach the store as "no
+    // predicate", not as a predicate that matches nothing.
+    let partitions = partitions_of(&hits);
+    assert!(partitions.contains(&PartitionIdx::new(1)));
+    assert!(partitions.contains(&PartitionIdx::new(2)));
 }
 
 #[tokio::test]
