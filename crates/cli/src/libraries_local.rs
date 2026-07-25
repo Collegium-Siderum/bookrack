@@ -21,7 +21,7 @@ use eyre::{Report, Result};
 use serde::Serialize;
 
 use crate::error::BookrackCliError;
-use crate::render::confirm::{ConfirmMode, confirm_destructive};
+use crate::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
 use crate::render::ctx;
 
 /// Descent depth for a `scan <parent>`: probe the parent's immediate
@@ -209,7 +209,8 @@ pub fn add(
             "Write this manifest and register the library?",
             ConfirmMode::Soft,
             yes,
-        )
+        )?
+        .into_io_result()
     };
     let outcome = add_library(
         &registry_path,
@@ -290,7 +291,11 @@ fn resolve_uuid_clash(
         ConfirmMode::Hard { token: "move" },
         false,
     )
-    .map_err(|e| eyre::eyre!("read clash resolution: {e}"))?;
+    .map_err(|e| eyre::eyre!("read clash resolution: {e}"))?
+    .agreed_or_refuse(
+        "libraries add",
+        "re-run with --new-uuid to register a copy under a new identity",
+    )?;
     if move_it {
         repoint_library(registry_path, existing_key, path).map_err(config_error)?;
         if !ctx().is_quiet() {
@@ -353,6 +358,10 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
         );
         if !confirm_destructive(&prompt, ConfirmMode::Hard { token: &name }, yes)
             .map_err(|e| eyre::eyre!("read purge confirmation: {e}"))?
+            .agreed_or_refuse(
+                &format!("libraries remove '{name}' --purge"),
+                "re-run with --yes to purge without a prompt",
+            )?
         {
             eprintln!("aborted; nothing removed");
             return Ok(());
@@ -708,6 +717,20 @@ fn registry_path() -> Result<PathBuf> {
 /// generic (internal-error) path.
 fn op_error(err: LibraryOpError) -> Report {
     match &err {
+        // The manifest confirmation crosses `add_library`'s
+        // `io::Result<bool>` bound, so an unanswerable prompt arrives
+        // here encoded as an I/O error kind. Recover it rather than
+        // letting it fall into the generic internal-error path.
+        LibraryOpError::Confirm(io)
+            if let Some(no_answer) = Confirmation::no_answer_from_io(io) =>
+        {
+            Report::new(BookrackCliError::ConfirmationUnanswerable {
+                action: "libraries add".to_string(),
+                reason: no_answer.reason().to_string(),
+                hint: "re-run with --yes to write the identity manifest without a prompt"
+                    .to_string(),
+            })
+        }
         LibraryOpError::BadTarget(_)
         | LibraryOpError::UnreadableTarget { .. }
         | LibraryOpError::Registry(ConfigError::UnknownLibrary { .. }) => {

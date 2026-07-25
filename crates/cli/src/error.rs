@@ -117,6 +117,19 @@ pub enum BookrackCliError {
     #[error("{message}")]
     LocalUserError { message: String },
 
+    /// A destructive action needed a confirmation and stdin could not
+    /// carry one — the stream ended before any byte arrived. Distinct
+    /// from a decline, which is an answer and exits 0: nothing was
+    /// decided here, so the caller must not read the run as either a
+    /// completed action or a considered refusal. Shares the exit-2
+    /// user-error bucket.
+    #[error("{action}: {reason}. {hint}")]
+    ConfirmationUnanswerable {
+        action: String,
+        reason: String,
+        hint: String,
+    },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -141,6 +154,7 @@ impl BookrackCliError {
             Self::IngestPartialFailure { .. } => 5,
             Self::ExecParamsInvalid { .. } => 2,
             Self::LocalUserError { .. } => 2,
+            Self::ConfirmationUnanswerable { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -240,6 +254,46 @@ mod tests {
             }
             .exit_code(),
             2
+        );
+        assert_eq!(
+            BookrackCliError::LocalUserError {
+                message: "x".into()
+            }
+            .exit_code(),
+            2
+        );
+    }
+
+    /// A confirmation that could not be asked is a user error, not a
+    /// decline: it must exit 2 and it must tell the operator how to
+    /// proceed without a terminal, because the callers that hit it are
+    /// scripts whose only signal is the exit code.
+    #[test]
+    fn confirmation_unanswerable_is_exit_two_and_names_the_escape_hatch() {
+        let err = BookrackCliError::ConfirmationUnanswerable {
+            action: "libraries remove --purge".into(),
+            reason: crate::render::confirm::NoAnswer::EndOfStream
+                .reason()
+                .into(),
+            hint: "re-run with --yes to confirm".into(),
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            !err.is_self_reported(),
+            "the reporter must print this one; no call site renders it"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("libraries remove --purge"),
+            "the message must name the action: {rendered}"
+        );
+        assert!(
+            rendered.contains("end of file"),
+            "the message must say why no answer arrived: {rendered}"
+        );
+        assert!(
+            rendered.contains("--yes"),
+            "the message must name the escape hatch: {rendered}"
         );
     }
 

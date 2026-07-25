@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::libraries_local::root_config_exists;
-use bookrack_cli::render::confirm::{ConfirmMode, confirm_destructive};
+use bookrack_cli::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
 use bookrack_config::{
     LibraryEntryFields, LibrarySelection, ManifestIdentitySeed, load_manifest,
     registry_target_path, set_manifest_index_profile, set_root_config_values, upsert_library_entry,
@@ -215,7 +215,7 @@ fn confirm_plan_with<F>(
     confirm: F,
 ) -> Result<bool>
 where
-    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<bool>,
+    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<Confirmation>,
 {
     let mode = match strength {
         ConfirmStrength::None => None,
@@ -251,7 +251,12 @@ where
         }
         .into());
     }
-    confirm(&prompt, mode).context("read index-profile apply confirmation")
+    Ok(confirm(&prompt, mode)
+        .context("read index-profile apply confirmation")?
+        .agreed_or_refuse(
+            "index-profile apply",
+            "re-run with --yes, or rehearse on a fork first (`bookrack libraries fork`)",
+        )?)
 }
 
 /// Write the target declaration before any action runs, so every handler
@@ -555,7 +560,7 @@ mod tests {
         assert!(
             !confirm_plan_with("shelf", ConfirmStrength::Hard, false, true, |text, mode| {
                 *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
-                Ok(false)
+                Ok(Confirmation::Declined)
             })
             .expect("a declined plan is not an error"),
         );
@@ -574,7 +579,7 @@ mod tests {
         assert!(
             confirm_plan_with("shelf", ConfirmStrength::Soft, false, true, |text, mode| {
                 *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
-                Ok(true)
+                Ok(Confirmation::Agreed)
             })
             .expect("a confirmed plan"),
         );

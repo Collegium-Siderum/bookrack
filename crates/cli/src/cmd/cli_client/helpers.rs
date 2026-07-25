@@ -22,7 +22,7 @@ const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_AWAIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 use bookrack_cli::error::BookrackCliError;
-use bookrack_cli::render::confirm::ConfirmMode;
+use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
 use bookrack_control_client::{ControlClient, ControlError, Event};
@@ -370,8 +370,10 @@ pub fn print_value(value: &Value) {
 ///
 /// When `user_yes` is `false` the helper prompts via
 /// [`bookrack_cli::render::confirm::confirm_destructive`] in `Soft`
-/// mode; an empty / declined answer aborts before the execute leg
-/// runs.
+/// mode; a declined answer aborts before the execute leg runs. A stdin
+/// that carries no answer at all is a user error rather than a
+/// decline, so a caller whose stdin is closed cannot read exit 0 out
+/// of a run that changed nothing.
 pub async fn run_pinned_destructive(
     client: std::sync::Arc<ControlClient>,
     method: &str,
@@ -396,7 +398,8 @@ pub async fn run_pinned_destructive(
 /// [`run_pinned_destructive`] with the confirmation step supplied by
 /// the caller, so the two-leg protocol can be driven without a
 /// terminal. `confirm` receives the prompt text and answers for the
-/// operator; returning `false` must leave the execute leg unsent.
+/// operator; anything but [`Confirmation::Agreed`] must leave the
+/// execute leg unsent.
 async fn run_pinned_destructive_with<F>(
     client: std::sync::Arc<ControlClient>,
     method: &str,
@@ -406,7 +409,7 @@ async fn run_pinned_destructive_with<F>(
     confirm: F,
 ) -> Result<()>
 where
-    F: FnOnce(&str) -> std::io::Result<bool>,
+    F: FnOnce(&str) -> std::io::Result<Confirmation>,
 {
     selectors["dry_run"] = Value::Bool(true);
     let plan = call_with_progress_value(client.clone(), method, selectors).await?;
@@ -424,9 +427,11 @@ where
             eyre::eyre!("{method}: daemon dry-run response did not include a plan_id")
         })?;
 
-    let confirmed = confirm(confirm_prompt).context("read destructive-action confirmation")?;
+    let confirmed = confirm(confirm_prompt)
+        .context("read destructive-action confirmation")?
+        .agreed_or_refuse(method, "re-run with --yes to confirm without a prompt")?;
     if !confirmed {
-        println!("aborted; no changes written");
+        eprintln!("aborted; no changes written");
         return Ok(());
     }
 
@@ -528,8 +533,9 @@ pub struct DestructivePrompt<'a> {
 ///   fires immediately with `yes: true`.
 /// * Otherwise the helper writes `prompt.text` to stderr through
 ///   [`bookrack_cli::render::confirm::confirm_destructive`] in
-///   `prompt.mode`; a rejected or empty answer prints `aborted; no
-///   changes written` and returns `Ok(())` without firing the RPC.
+///   `prompt.mode`; a rejected answer prints `aborted; no changes
+///   written` and returns `Ok(())` without firing the RPC, while a
+///   stdin that carries no answer at all is a user error.
 /// * When stdin is not a TTY, prompting is impossible. The helper
 ///   bails with `prompt.non_tty_hint` so the operator sees a directed
 ///   message instead of a hang on `read_line`.
@@ -574,7 +580,7 @@ async fn run_destructive_with<F>(
     confirm: F,
 ) -> Result<()>
 where
-    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<bool>,
+    F: FnOnce(&str, ConfirmMode<'_>) -> std::io::Result<Confirmation>,
 {
     assert!(
         params.is_object(),
@@ -586,9 +592,10 @@ where
         DestructiveGate::RefuseNonTty => eyre::bail!("{}", prompt.non_tty_hint),
         DestructiveGate::Prompt => {
             let confirmed = confirm(prompt.text, prompt.mode)
-                .with_context(|| format!("read {method} confirmation"))?;
+                .with_context(|| format!("read {method} confirmation"))?
+                .agreed_or_refuse(method, prompt.non_tty_hint)?;
             if !confirmed {
-                println!("aborted; no changes written");
+                eprintln!("aborted; no changes written");
                 return Ok(());
             }
         }
@@ -877,7 +884,7 @@ mod destructive_wire_tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use bookrack_cli::render::confirm::ConfirmMode;
+    use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
     use bookrack_control_client::{ControlClient, ControlSocket};
     use serde_json::{Value, json};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -990,7 +997,7 @@ mod destructive_wire_tests {
             false,
             prompt(),
             true,
-            |_, _| Ok(false),
+            |_, _| Ok(Confirmation::Declined),
         )
         .await
         .expect("a declined confirmation is not an error");
@@ -1012,7 +1019,7 @@ mod destructive_wire_tests {
             false,
             prompt(),
             true,
-            |_, _| Ok(true),
+            |_, _| Ok(Confirmation::Agreed),
         )
         .await
         .expect("a confirmed reset dispatches");
@@ -1087,7 +1094,7 @@ mod destructive_wire_tests {
             json!({"stale_only": true}),
             false,
             "Type 'yes' to continue:",
-            |_| Ok(false),
+            |_| Ok(Confirmation::Declined),
         )
         .await
         .expect("a declined confirmation is not an error");
@@ -1101,6 +1108,48 @@ mod destructive_wire_tests {
         );
     }
 
+    /// A stdin that carries no answer leaves the execute leg unsent —
+    /// same as a decline — but the run is a user error, not a clean
+    /// abort. The confirmation sits behind the dry-run RPC, so this is
+    /// the only place the mapping can be asserted through the real
+    /// two-leg entry point.
+    #[tokio::test]
+    async fn pinned_unanswerable_sends_the_dry_run_leg_only_and_is_a_user_error() {
+        use bookrack_cli::render::confirm::NoAnswer;
+
+        let stub = StubDaemon::start(json!({"plan_id": "plan-7", "books": 3}));
+        let client = stub.client().await;
+        let err = run_pinned_destructive_with(
+            Arc::clone(&client),
+            "corpus.rebuild",
+            json!({"stale_only": true}),
+            false,
+            "Type 'yes' to continue:",
+            |_| Ok(Confirmation::Unanswerable(NoAnswer::EndOfStream)),
+        )
+        .await
+        .expect_err("an unanswerable confirmation is a user error");
+        let cli = bookrack_cli::error::classify_eyre(&err)
+            .expect("the typed CLI error must survive the context wrappers");
+        assert!(
+            matches!(
+                cli.as_cli(),
+                bookrack_cli::error::BookrackCliError::ConfirmationUnanswerable { .. }
+            ),
+            "unexpected variant: {:?}",
+            cli.as_cli()
+        );
+        assert_eq!(cli.as_cli().exit_code(), 2);
+        assert_eq!(
+            stub.drain(&client).await,
+            vec![(
+                "corpus.rebuild".to_string(),
+                json!({"stale_only": true, "dry_run": true})
+            )],
+            "an unanswered confirmation must leave the execute leg unsent"
+        );
+    }
+
     #[tokio::test]
     async fn pinned_confirmed_executes_against_the_plan_id_the_dry_run_returned() {
         let stub = StubDaemon::start(json!({"plan_id": "plan-7", "books": 3}));
@@ -1111,7 +1160,7 @@ mod destructive_wire_tests {
             json!({"stale_only": true}),
             false,
             "Type 'yes' to continue:",
-            |_| Ok(true),
+            |_| Ok(Confirmation::Agreed),
         )
         .await
         .expect("a confirmed rebuild executes");

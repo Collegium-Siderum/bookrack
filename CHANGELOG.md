@@ -10,6 +10,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: a confirmation that could not be asked is a user error, not a
+  decline.** Every destructive prompt read an end-of-file stdin as
+  "the operator said no", printed `aborted`, and returned exit `0`.
+  On a caller whose stdin is `/dev/null` — cron, systemd, most CI
+  runners — that made `bookrack corpus rebuild`, `vectors reembed`,
+  `remove`, their three `papers` peers, `libraries remove --purge`,
+  `libraries add`/`register`, and `libraries fork` report success for
+  a run that changed nothing. `docs/UPGRADE.md` names `corpus rebuild`
+  as the refresh command after a corpus schema bump, so a scripted
+  upgrade could carry on against a tree it never rebuilt.
+  Confirmations now settle on three outcomes rather than two: an
+  answer that agrees, an answer that declines (still exit `0`, still
+  `aborted; no changes written`), and a stream that carries no answer
+  at all, which is the new `ConfirmationUnanswerable` error — exit `2`
+  with a message naming the action, the reason, and `--yes`. An empty
+  *line* is still a decline; only an empty *stream* is unanswerable.
+  The abort notice moves from stdout to stderr on the two shared
+  helpers, so `--json` output is no longer interleaved with it.
+
 - **extract: a fullwidth References heading terminates the paper
   metadata-scan window.** `extract_paper_metadata_text` documented its
   References-heading match as running against the fullwidth-folded

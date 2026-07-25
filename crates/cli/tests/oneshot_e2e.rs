@@ -975,6 +975,49 @@ async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
     Ok(())
 }
 
+/// `libraries add` on a root with no identity manifest asks before it
+/// writes one. With stdin closed the question cannot be answered, so
+/// the run is a user error (exit 2) and leaves the target and the
+/// registry untouched — a caller that reads exit 0 would believe a
+/// library was registered when none was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_add_on_a_closed_stdin_is_a_user_error() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    let root = tempfile::tempdir()?;
+    let output = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "add", "fresh"])
+        .arg(root.path())
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unanswerable manifest confirmation is a user error; stderr={stderr:?}",
+    );
+    assert!(
+        stderr.contains("--yes"),
+        "the refusal must name the way to opt in: {stderr}",
+    );
+    assert!(
+        !root.path().join("bookrack-library.toml").exists(),
+        "no manifest may be written when the confirmation went unanswered",
+    );
+    assert!(
+        !registry_path.exists(),
+        "no registry entry may be written when the confirmation went unanswered",
+    );
+    Ok(())
+}
+
 /// `libraries remove --purge` refuses to delete a target that no longer
 /// detects as a data root, so an entry pointing at the wrong directory
 /// cannot destroy it.
@@ -1051,10 +1094,19 @@ async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
     Ok(())
 }
 
+/// What a `libraries remove --purge` run left behind.
+struct PurgeRun {
+    code: Option<i32>,
+    root_survives: bool,
+    entry_survives: bool,
+    stderr: String,
+}
+
 /// Drive `libraries remove --purge` without `--yes`, answering the
-/// retype prompt with `typed`. Returns the exit code and whether the
-/// data root and its registry entry survived.
-async fn purge_answering(typed: &str) -> Result<(Option<i32>, bool, bool)> {
+/// retype prompt with `typed`. Writing `typed` and dropping the handle
+/// closes the pipe, so `""` is a stdin that reaches end of file before
+/// any byte arrives.
+async fn purge_answering(typed: &str) -> Result<PurgeRun> {
     use tokio::io::AsyncWriteExt;
 
     let runtime_dir = tempfile::tempdir()?;
@@ -1085,31 +1137,70 @@ async fn purge_answering(typed: &str) -> Result<(Option<i32>, bool, bool)> {
         .await?;
     let output = child.wait_with_output().await?;
     let entry_survives = std::fs::read_to_string(&registry_path)?.contains("shelf");
-    Ok((output.status.code(), root.exists(), entry_survives))
+    Ok(PurgeRun {
+        code: output.status.code(),
+        root_survives: root.exists(),
+        entry_survives,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 /// The Hard retype gate, end to end: an answer that is not the library
 /// name leaves the data root and the registry entry exactly where they
 /// were. The `--yes` cases above skip this path entirely, so this is
 /// the one that proves the typed token is compared at all.
+///
+/// The bare newline is the load-bearing member of the list: an empty
+/// *line* is an answer, and answering declines. An empty *stream* is
+/// not an answer at all and is covered by the test below.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_remove_purge_keeps_the_data_when_the_retype_misses() -> Result<()> {
-    for typed in ["yes\n", "y\n", "SHELF\n", "shel\n", "\n", ""] {
-        let (code, root_survives, entry_survives) = purge_answering(typed).await?;
+    for typed in ["yes\n", "y\n", "SHELF\n", "shel\n", "\n"] {
+        let run = purge_answering(typed).await?;
         assert_eq!(
-            code,
+            run.code,
             Some(0),
             "a declined purge is a clean abort, not a failure; answer={typed:?}",
         );
         assert!(
-            root_survives,
+            run.root_survives,
             "a mistyped confirmation must leave the data root on disk; answer={typed:?}",
         );
         assert!(
-            entry_survives,
+            run.entry_survives,
             "a mistyped confirmation must leave the registry entry; answer={typed:?}",
         );
     }
+    Ok(())
+}
+
+/// A stdin that ends before any byte arrives cannot carry a
+/// confirmation, so the purge is a user error (exit 2) rather than the
+/// clean abort a typed-in decline earns. Anything else lets a cron or
+/// systemd caller — whose stdin is `/dev/null` — read success out of a
+/// run that deleted nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_on_a_closed_stdin_is_a_user_error() -> Result<()> {
+    let run = purge_answering("").await?;
+    assert_eq!(
+        run.code,
+        Some(2),
+        "an unanswerable confirmation is a user error, not a clean abort; stderr={:?}",
+        run.stderr,
+    );
+    assert!(
+        run.root_survives,
+        "an unanswerable confirmation must leave the data root on disk",
+    );
+    assert!(
+        run.entry_survives,
+        "an unanswerable confirmation must leave the registry entry",
+    );
+    assert!(
+        run.stderr.contains("shelf") && run.stderr.contains("--yes"),
+        "the refusal must name the library and the way to opt in: {:?}",
+        run.stderr,
+    );
     Ok(())
 }
 
@@ -1118,10 +1209,16 @@ async fn libraries_remove_purge_keeps_the_data_when_the_retype_misses() -> Resul
 /// path that never deletes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_remove_purge_deletes_when_the_name_is_retyped() -> Result<()> {
-    let (code, root_survives, entry_survives) = purge_answering("shelf\n").await?;
-    assert_eq!(code, Some(0), "an accepted purge exits 0");
-    assert!(!root_survives, "the retyped name must purge the data root");
-    assert!(!entry_survives, "the retyped name must forget the entry");
+    let run = purge_answering("shelf\n").await?;
+    assert_eq!(run.code, Some(0), "an accepted purge exits 0");
+    assert!(
+        !run.root_survives,
+        "the retyped name must purge the data root"
+    );
+    assert!(
+        !run.entry_survives,
+        "the retyped name must forget the entry"
+    );
     Ok(())
 }
 
