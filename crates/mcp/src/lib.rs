@@ -67,6 +67,20 @@ pub struct SearchArgs {
     /// or `"all"` (both stores, merged by ascending distance).
     #[serde(default)]
     pub kind: Option<String>,
+    /// Catalog intake ids of books whose passages must not be returned.
+    /// Omit or pass an empty list to filter nothing. Applies to `kind`
+    /// `"book"` and `"all"`; passing it with `kind="paper"` is an
+    /// error, since the two id name spaces are unrelated. Ids that name
+    /// no book simply exclude nothing. `library.search_in_book` takes
+    /// no exclusions — recall is already confined to one book there.
+    #[serde(default)]
+    pub exclude_book_intake_ids: Vec<i64>,
+    /// Catalog intake ids of papers whose passages must not be
+    /// returned. The paper-side mirror of `exclude_book_intake_ids`:
+    /// applies to `kind` `"paper"` and `"all"`, and passing it with
+    /// `kind="book"` is an error.
+    #[serde(default)]
+    pub exclude_paper_intake_ids: Vec<i64>,
 }
 
 /// Arguments for the `library.search_in_book` tool.
@@ -94,14 +108,30 @@ pub struct SearchInBookArgs {
 }
 
 impl SearchArgs {
+    /// The side of the library to dispatch to, with the exclusion lists
+    /// checked against it: naming the other side's ids is refused as
+    /// invalid params rather than silently ignored. An unrecognized
+    /// kind passes through here and is rejected by the dispatch itself.
+    fn checked_kind(&self) -> Result<&str, ErrorData> {
+        let kind = self.kind.as_deref().unwrap_or("book");
+        reads::search::validate_exclusions(
+            kind,
+            &self.exclude_book_intake_ids,
+            &self.exclude_paper_intake_ids,
+        )
+        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        Ok(kind)
+    }
+
     /// Project the override fields onto the underlying [`SearchOptions`]
-    /// struct the ops layer consumes.
-    fn overrides(&self) -> SearchOptions {
+    /// struct the ops layer consumes, excluding the books named by
+    /// `exclude` — the ids of whichever side this call dispatches to.
+    fn overrides_excluding(&self, exclude: &[i64]) -> SearchOptions {
         SearchOptions {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
-            exclude_partitions: Vec::new(),
+            exclude_partitions: reads::search::exclusions_to_partitions(exclude),
         }
     }
 }
@@ -114,6 +144,8 @@ impl SearchInBookArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            // A search already confined to one book has nothing to
+            // exclude, so this tool carries no exclusion fields.
             exclude_partitions: Vec::new(),
         }
     }
@@ -738,29 +770,37 @@ impl BookrackServer {
                        breadcrumb trail and source location. `kind` selects which \
                        side: `\"book\"` (the default; existing behaviour), `\"paper\"` \
                        (only the paper-side store), or `\"all\"` (both stores, merged \
-                       by ascending distance)."
+                       by ascending distance). To suppress books you have already \
+                       read or judged irrelevant, pass their intake ids in \
+                       `exclude_book_intake_ids` (or `exclude_paper_intake_ids` for \
+                       papers); the ids must match the `kind` being searched."
     )]
     async fn library_search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let overrides = args.overrides();
-        let kind = args.kind.as_deref().unwrap_or("book");
+        let kind = args.checked_kind()?;
+        let book_overrides = args.overrides_excluding(&args.exclude_book_intake_ids);
+        let paper_overrides = args.overrides_excluding(&args.exclude_paper_intake_ids);
         let hits = match kind {
-            "book" => reads::search::search(handle.ops(), &args.query, overrides, args.top_k)
+            "book" => reads::search::search(handle.ops(), &args.query, book_overrides, args.top_k)
                 .await
                 .map_err(ops_error_to_internal)?,
             "paper" => {
-                reads::search::search_paper(handle.ops(), &args.query, overrides, args.top_k)
+                reads::search::search_paper(handle.ops(), &args.query, paper_overrides, args.top_k)
                     .await
                     .map_err(ops_error_to_internal)?
             }
-            "all" => {
-                reads::search::search_unified(handle.ops(), &args.query, overrides, args.top_k)
-                    .await
-                    .map_err(ops_error_to_internal)?
-            }
+            "all" => reads::search::search_unified(
+                handle.ops(),
+                &args.query,
+                book_overrides,
+                paper_overrides,
+                args.top_k,
+            )
+            .await
+            .map_err(ops_error_to_internal)?,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!(
@@ -2230,6 +2270,88 @@ mod tests {
         assert_eq!(value["toc_lo"], 0);
         assert_eq!(value["next_offset"], 17);
         assert_eq!(value["truncated"], true);
+    }
+
+    #[test]
+    fn search_args_default_to_no_exclusions() {
+        let args: super::SearchArgs =
+            serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
+        assert!(args.exclude_book_intake_ids.is_empty());
+        assert!(args.exclude_paper_intake_ids.is_empty());
+        assert!(
+            args.overrides_excluding(&args.exclude_book_intake_ids)
+                .exclude_partitions
+                .is_empty(),
+            "an omitted list must reach the store as no filter at all",
+        );
+    }
+
+    #[test]
+    fn search_args_project_each_sides_exclusions_separately() {
+        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "hello",
+            "kind": "all",
+            "exclude_book_intake_ids": [2, 5],
+            "exclude_paper_intake_ids": [9],
+        }))
+        .expect("parse");
+        use bookrack_core::PartitionIdx;
+        assert_eq!(
+            args.overrides_excluding(&args.exclude_book_intake_ids)
+                .exclude_partitions,
+            vec![PartitionIdx::new(2), PartitionIdx::new(5)],
+        );
+        assert_eq!(
+            args.overrides_excluding(&args.exclude_paper_intake_ids)
+                .exclude_partitions,
+            vec![PartitionIdx::new(9)],
+        );
+    }
+
+    #[test]
+    fn search_args_reject_the_other_sides_exclusion_list() {
+        for (kind, field) in [
+            ("book", "exclude_paper_intake_ids"),
+            ("paper", "exclude_book_intake_ids"),
+        ] {
+            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+                "query": "hello",
+                "kind": kind,
+                field: [9],
+            }))
+            .expect("parse");
+            let err = args
+                .checked_kind()
+                .expect_err("the mismatched list is refused");
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(
+                err.message.contains(field) && err.message.contains(kind),
+                "the message must name the field and the kind: {}",
+                err.message
+            );
+        }
+        // Each kind admits the list that belongs to it.
+        for (kind, field) in [
+            ("book", "exclude_book_intake_ids"),
+            ("paper", "exclude_paper_intake_ids"),
+        ] {
+            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+                "query": "hello",
+                "kind": kind,
+                field: [9],
+            }))
+            .expect("parse");
+            assert_eq!(args.checked_kind().expect("admissible"), kind);
+        }
+        // `all` searches both sides, so both lists apply at once.
+        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "hello",
+            "kind": "all",
+            "exclude_book_intake_ids": [2],
+            "exclude_paper_intake_ids": [9],
+        }))
+        .expect("parse");
+        assert_eq!(args.checked_kind().expect("admissible"), "all");
     }
 
     #[test]

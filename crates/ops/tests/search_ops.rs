@@ -149,6 +149,83 @@ async fn seed_store(root: &Path, name: &str, chunks: &[(&str, Vec<f32>)]) -> Sto
     }
 }
 
+/// Like [`seed_store`] but spreads the chunks over several books: each
+/// entry names the intake id that owns its chunk, so the store ends up
+/// with one id partition per distinct intake. Intake ids must be given
+/// in ascending order from 1, matching the catalog's own numbering.
+async fn seed_multi_book_store(
+    root: &Path,
+    name: &str,
+    chunks: &[(i64, &str, Vec<f32>)],
+) -> StorePaths {
+    let corpus_db = root.join(format!("{name}-corpus.db"));
+    let catalog_db = root.join(format!("{name}-catalog.db"));
+    let lancedb_dir = root.join(format!("{name}-lancedb"));
+
+    let mut intake_ids: Vec<i64> = chunks.iter().map(|(id, _, _)| *id).collect();
+    intake_ids.dedup();
+
+    let mut catalog = Catalog::open(&catalog_db).expect("seed catalog");
+    let mut corpus = Corpus::open(&corpus_db).expect("seed corpus");
+    let mut leaves = std::collections::HashMap::new();
+    for &intake_id in &intake_ids {
+        let registered = catalog
+            .register_intake(
+                ItemKind::Book,
+                &NewIntake::new(format!("sha-{name}-{intake_id}")),
+            )
+            .expect("register intake");
+        assert_eq!(
+            registered.intake().intake_id,
+            intake_id,
+            "the catalog numbers intakes from 1; the fixture must follow it",
+        );
+        let report = ingest_structure(
+            &mut corpus,
+            intake_id,
+            NodeType::Work,
+            &extraction("The passage body."),
+            &StructureParams::default(),
+        )
+        .expect("structure");
+        let leaf = corpus
+            .book_nodes(report.book_root_id)
+            .expect("nodes")
+            .into_iter()
+            .find(|n| n.node_type.is_prose_leaf())
+            .expect("a prose leaf");
+        leaves.insert(intake_id, leaf.node_id);
+    }
+    corpus
+        .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+        .expect("stamp");
+
+    let store = ChunkStore::open(&lancedb_dir, DIM).await.expect("store");
+    let rows: Vec<ChunkRow> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, (intake_id, text, vector))| {
+            let node_id = leaves[intake_id];
+            ChunkRow {
+                vector: vector.clone(),
+                text: text.to_string(),
+                start_node_id: node_id,
+                start_char_offset: 0,
+                end_node_id: node_id,
+                end_char_offset: text.len() as i32,
+                norm_chunk_sha256: format!("sha-{name}-{i}"),
+            }
+        })
+        .collect();
+    store.append(&rows).await.expect("append chunks");
+
+    StorePaths {
+        corpus_db,
+        catalog_db,
+        lancedb_dir,
+    }
+}
+
 async fn open_library(paths: &StorePaths, embedder: Fixed) -> Library<Fixed> {
     Library::open(
         paths.corpus_db.clone(),
@@ -297,9 +374,15 @@ async fn catalog_only_search_ops_report_their_missing_backend() {
         matches!(err, OpsError::PapersBackendNotConfigured),
         "{err:?}"
     );
-    let err = search_unified(&ops, "q", SearchOptions::default(), None)
-        .await
-        .expect_err("no warm library");
+    let err = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .expect_err("no warm library");
     assert!(matches!(err, OpsError::SearchUnavailable), "{err:?}");
 }
 
@@ -404,9 +487,15 @@ async fn search_unified_orders_across_stores_and_truncates_to_top_k() {
         paper_library,
     );
 
-    let citations = search_unified(&ops, "q", SearchOptions::default(), Some(2))
-        .await
-        .expect("unified search");
+    let citations = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions::default(),
+        Some(2),
+    )
+    .await
+    .expect("unified search");
     assert_eq!(citations.len(), 2, "four candidates cut to top_k");
     assert_eq!(citations[0].kind, ItemKind::Book);
     assert_eq!(citations[0].text, "book near");
@@ -418,6 +507,89 @@ async fn search_unified_orders_across_stores_and_truncates_to_top_k() {
         citations[0].distance,
         citations[1].distance
     );
+}
+
+#[tokio::test]
+async fn search_unified_excludes_each_side_with_its_own_list() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Two books on the book side, one paper on the paper side. The
+    // paper carries intake id 1 too, so a list applied to the wrong
+    // side would visibly take the paper out.
+    let book_paths = seed_multi_book_store(
+        tmp.path(),
+        "books",
+        &[
+            (1, "book one", vec![0.0, 1.0, 0.0, 0.0]),
+            (2, "book two", vec![0.1, 0.9, 0.0, 0.0]),
+        ],
+    )
+    .await;
+    let paper_paths = seed_multi_book_store(
+        tmp.path(),
+        "papers",
+        &[(1, "paper one", vec![0.2, 0.8, 0.0, 0.0])],
+    )
+    .await;
+    let embedder = Fixed {
+        vector: vec![0.0, 1.0, 0.0, 0.0],
+    };
+    let book_library = open_library(&book_paths, embedder.clone()).await;
+    let paper_library = open_library(&paper_paths, embedder)
+        .await
+        .with_kind(ItemKind::Paper);
+    let ops = attach_papers(
+        ops_over(&tmp, &book_paths, book_library),
+        &tmp,
+        &paper_paths,
+        paper_library,
+    );
+
+    // All three candidates answer the unfiltered query.
+    let baseline = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions::default(),
+        Some(10),
+    )
+    .await
+    .expect("unified search");
+    let baseline_texts: Vec<&str> = baseline.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(baseline_texts, ["book one", "book two", "paper one"]);
+
+    // Excluding book intake 1 takes that book out and leaves both the
+    // other book and the paper — which shares the id — untouched.
+    let filtered = search_unified(
+        &ops,
+        "q",
+        SearchOptions {
+            exclude_partitions: bookrack_ops::reads::search::exclusions_to_partitions(&[1]),
+            ..SearchOptions::default()
+        },
+        SearchOptions::default(),
+        Some(10),
+    )
+    .await
+    .expect("unified search with a book-side exclusion");
+    let filtered_texts: Vec<&str> = filtered.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(filtered_texts, ["book two", "paper one"]);
+
+    // The mirror image: a paper-side exclusion leaves the book side
+    // whole, including the book that shares the excluded id.
+    let filtered = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions {
+            exclude_partitions: bookrack_ops::reads::search::exclusions_to_partitions(&[1]),
+            ..SearchOptions::default()
+        },
+        Some(10),
+    )
+    .await
+    .expect("unified search with a paper-side exclusion");
+    let filtered_texts: Vec<&str> = filtered.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(filtered_texts, ["book one", "book two"]);
 }
 
 #[tokio::test]
