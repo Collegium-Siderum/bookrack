@@ -957,6 +957,17 @@ fn drift_issue(entry_name: &str, effective: &str, drift: &[ProfileRefDrift]) -> 
 /// registry that cannot be read leaves a row saying the check was
 /// skipped, so an absent section is never read as a clean one.
 fn push_index_profile_coherence_rows(rows: &mut Vec<Row>, probe: &RegistryProbe) {
+    push_index_profile_coherence_rows_in(rows, probe, index_profile_dir().as_deref());
+}
+
+/// [`push_index_profile_coherence_rows`] with the user profile
+/// directory supplied, so a test resolves references against a seeded
+/// directory instead of the per-user one.
+fn push_index_profile_coherence_rows_in(
+    rows: &mut Vec<Row>,
+    probe: &RegistryProbe,
+    profile_dir: Option<&Path>,
+) {
     let entries = match probe {
         RegistryProbe::Absent => return,
         RegistryProbe::Unreadable { .. } => {
@@ -982,11 +993,14 @@ fn push_index_profile_coherence_rows(rows: &mut Vec<Row>, probe: &RegistryProbe)
     if referencing.is_empty() {
         return;
     }
-    let dir = index_profile_dir();
+    // The summary counts what the loop below checks — the effective
+    // reference, manifest first — not the registry's cached copy, which
+    // a manifest-only declaration leaves empty.
+    let referenced = referencing.len();
     let mut clean = true;
     for (entry, profile_name, drift) in referencing {
         let profile_name = profile_name.as_str();
-        let resolved = match &dir {
+        let resolved = match profile_dir {
             Some(dir) => match resolve(dir, profile_name) {
                 Ok(Some(profile)) => Ok(Some((
                     profile.embed.model.clone(),
@@ -1019,10 +1033,7 @@ fn push_index_profile_coherence_rows(rows: &mut Vec<Row>, probe: &RegistryProbe)
     if clean {
         rows.push(Row {
             label: "index-profile".to_string(),
-            value: format!(
-                "{} referenced",
-                entries.iter().filter(|e| e.index_profile.is_some()).count()
-            ),
+            value: format!("{referenced} referenced"),
             status: Status::Ok {
                 note: Some("coherent with their built indexes".to_string()),
             },
@@ -1535,6 +1546,46 @@ mod tests {
             unreachable!()
         };
         assert!(note.contains("could not be read"), "{note}");
+    }
+
+    #[test]
+    fn the_coherence_summary_counts_the_libraries_it_actually_checked() {
+        // The manifest outranks the registry's cached copy, so a library
+        // that declares its profile only in the manifest is checked by
+        // the loop above. The summary must count the same set, or a
+        // library it inspected goes unmentioned in the total.
+        let root = tempfile::tempdir().expect("tempdir");
+        bookrack_config::set_manifest_index_profile(
+            root.path(),
+            Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
+            bookrack_config::ManifestIdentitySeed {
+                name: "declared",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("seed a manifest declaring a profile");
+
+        let mut entry = entry("declared", None);
+        entry.data_dir = root.path().to_path_buf();
+        assert!(
+            entry.index_profile.is_none(),
+            "the registry cache is deliberately empty",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        // No corpus.db, so the stamp comparison is skipped and the
+        // section lands on its clean summary.
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(matches!(rows[0].status, Status::Ok { .. }), "{rows:?}");
+        assert_eq!(rows[0].value, "1 referenced");
     }
 
     #[test]

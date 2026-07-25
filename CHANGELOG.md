@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **doctor: the index-profile summary counts the libraries it
+  checked.** The coherence pass selects libraries by their effective
+  profile reference — the manifest first, the registry's cached copy
+  second — while its clean summary counted only entries whose registry
+  cache was populated. A library that declares its profile in the
+  manifest alone was inspected and then left out of the total, so the
+  row could read `0 referenced` after checking one. The summary now
+  counts the set the pass actually walked.
+
 - **doctor: a registry that cannot be read is reported instead of
   passing for no registry at all.** Both registry-backed sections
   resolved the library registry with a pattern that folded a read or
