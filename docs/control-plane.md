@@ -423,7 +423,20 @@ catalog and corpus handles the daemon already holds.
   mutex.
 - `library.search` / `library.search_in_book` / `library.search_in_paper`
   — cited passage search across the library, a single book, or a
-  single paper.
+  single paper. `library.search` takes two exclusion lists,
+  `exclude_book_intake_ids` and `exclude_paper_intake_ids`, that drop
+  the named items' passages from recall. The two id name spaces are
+  unrelated, so each list applies only to its own side: the book list
+  needs `kind` `"book"` (the default) or `"all"`, the paper list needs
+  `"paper"` or `"all"`, and naming the side the call does not search is
+  rejected with `INVALID_PARAMS` rather than ignored. Omitting a list —
+  or passing it empty — filters nothing, and ids that name no stored
+  item simply exclude nothing. Two constraints run against the obvious
+  expectation: `library.search_in_book` and `library.search_in_paper`
+  take **no** exclusion fields, since recall there is already confined
+  to one item; and `reference.lookup`'s `exclude_books` (a list of book
+  slugs, not intake ids) applies only with `book="*"`, the scope that
+  spans more than one reference book.
 - `library.vectors_status` — vector-store snapshot for the library.
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product

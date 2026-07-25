@@ -8,6 +8,31 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **search: recall can exclude named books and papers.** `library.search`
+  accepts `exclude_book_intake_ids` and `exclude_paper_intake_ids` on
+  both the MCP and control-plane surfaces, dropping the named items'
+  passages server-side instead of leaving the caller to filter a result
+  set it has already paid for. The exclusion is a predicate on the ANN
+  query, so a caller that has read a dominant book can push it out of
+  the way and see what the rest of the library says. The two id name
+  spaces are unrelated, so each list applies only to its own side and
+  naming the side the call does not search is rejected rather than
+  ignored; an omitted or empty list filters nothing. `kind="all"`
+  carries both lists at once and applies each to its own store.
+  `library.search_in_book` and `library.search_in_paper` take no
+  exclusions — recall there is already confined to one item. The
+  recorder logs a non-empty exclusion set alongside the ANN knobs.
+
+- **reference: wildcard lookup can exclude books.** `reference.lookup`
+  accepts `exclude_books`, a list of book slugs dropped from the
+  result when `book="*"` spans every registered reference book. The
+  exclusion holds across the whole resolution chain, including the
+  latin-key fallback retry and the redirect hop, so an excluded book
+  cannot re-enter as a redirect target. Passing the list with a
+  single-book scope is an error rather than a silent no-op.
+
 ### Fixed
 
 - **doctor: the index-profile summary counts the libraries it
