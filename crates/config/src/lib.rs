@@ -3213,12 +3213,13 @@ mod tests {
     }
 
     #[test]
-    fn embed_config_env_overrides_the_batching_knobs_only() {
+    fn embed_config_reads_each_env_knob_from_its_own_variable() {
         let cfg = EmbedConfig::resolve_from(
             |key| match key {
                 EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
                 EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
                 EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
+                EMBED_PROGRESS_INTERVAL_ENV => Some("11".to_string()),
                 _ => None,
             },
             Some("profile-model"),
@@ -3227,11 +3228,39 @@ mod tests {
         assert_eq!(cfg.batch_char_budget, 4_000);
         assert_eq!(cfg.batch_max_chunks, 32);
         assert_eq!(cfg.batch_min_char_budget, 250);
+        assert_eq!(cfg.progress_interval, Duration::from_secs(11));
         // Untouched fields keep their calibrated defaults.
         let d = EmbedConfig::default();
         assert_eq!(cfg.request_timeout, d.request_timeout);
         assert_eq!(cfg.max_retries, d.max_retries);
         assert_eq!(cfg.channel_capacity, d.channel_capacity);
+    }
+
+    #[test]
+    fn no_embed_field_outside_the_four_env_knobs_answers_to_the_environment() {
+        // The reader answers *every* variable, so a field wired to the
+        // environment moves off its default whatever key it reads. The
+        // untouched assertions below are therefore falsifiable: they
+        // fail the moment a fifth knob is added, which is what keeps
+        // the content-identity fields (and the retry posture) frozen.
+        let d = EmbedConfig::default();
+        let cfg = EmbedConfig::resolve_from(|_| Some("7".to_string()), Some("profile-model"));
+
+        assert_eq!(
+            cfg.model, "profile-model",
+            "the model comes from the profile"
+        );
+        assert_eq!(cfg.request_timeout, d.request_timeout);
+        assert_eq!(cfg.max_retries, d.max_retries);
+        assert_eq!(cfg.backoff_base, d.backoff_base);
+        assert_eq!(cfg.channel_capacity, d.channel_capacity);
+
+        // The four that do read the environment took the answer, so the
+        // reader above is proven to have been consulted at all.
+        assert_eq!(cfg.batch_char_budget, 7);
+        assert_eq!(cfg.batch_max_chunks, 7);
+        assert_eq!(cfg.batch_min_char_budget, 7);
+        assert_eq!(cfg.progress_interval, Duration::from_secs(7));
     }
 
     #[test]
@@ -4170,18 +4199,32 @@ mod tests {
 
     #[test]
     fn root_config_env_override_maps_each_key() {
-        assert_eq!(root_config_env_override("ollama_url"), Some(OLLAMA_URL_ENV));
-        assert_eq!(root_config_env_override("mcp_addr"), Some(MCP_ADDR_ENV));
-        assert_eq!(root_config_env_override("log_directive"), Some(LOG_ENV));
+        // Every writable key carries an explicit decision here, so a key
+        // added to ROOT_CONFIG_KEYS without one fails this test rather
+        // than defaulting to "no env counterpart" — which would silently
+        // drop the shadowing warning the CLI prints after a write.
+        let expected: &[(&str, Option<&str>)] = &[
+            ("ollama_url", Some(OLLAMA_URL_ENV)),
+            ("mcp_addr", Some(MCP_ADDR_ENV)),
+            ("log_directive", Some(LOG_ENV)),
+            ("search.top_k", Some(SEARCH_TOP_K_ENV)),
+            ("search.weak_threshold", Some(SEARCH_WEAK_THRESHOLD_ENV)),
+            ("reranker.url", Some(RERANKER_URL_ENV)),
+            // The supervised-server knobs are file-only by design.
+            ("reranker.ctx", None),
+            ("reranker.threads", None),
+        ];
+        let covered: Vec<&str> = expected.iter().map(|(key, _)| *key).collect();
         assert_eq!(
-            root_config_env_override("search.top_k"),
-            Some(SEARCH_TOP_K_ENV)
+            covered.as_slice(),
+            ROOT_CONFIG_KEYS,
+            "every writable key needs an env-counterpart decision, in list order",
         );
-        assert_eq!(
-            root_config_env_override("search.weak_threshold"),
-            Some(SEARCH_WEAK_THRESHOLD_ENV)
-        );
-        // The profile reference has no env counterpart by design.
+        for (key, env) in expected {
+            assert_eq!(root_config_env_override(key), *env, "key '{key}'");
+        }
+        // The profile reference is retired from the writable set and has
+        // no env counterpart; an unknown key resolves the same way.
         assert_eq!(root_config_env_override("index_profile"), None);
         assert_eq!(root_config_env_override("nope"), None);
     }
