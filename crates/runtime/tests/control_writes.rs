@@ -5,8 +5,8 @@
 //! Boots a [`DaemonRuntime`] in the headless profile, drives one
 //! client through the `ingest.submit` → `queue.tick` event path while
 //! a second client observes the broadcast over `events.subscribe`,
-//! then has a third client race a `vectors.drop` against itself to
-//! exercise the `-32001 busy` error code.
+//! then exercises the `-32001 busy` error code by holding the
+//! runtime's write mutex across a `vectors.drop` and releasing it.
 //!
 //! The embedder probe daemon bring-up performs is answered by the
 //! loopback stub in `common`, so no Ollama daemon is required.
@@ -104,7 +104,7 @@ async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn second_write_returns_busy_error() -> Result<()> {
+async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> {
     init_test_env();
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
@@ -115,44 +115,62 @@ async fn second_write_returns_busy_error() -> Result<()> {
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
+    // Stand in for a write already in flight by holding the very mutex
+    // `run_write` acquires. Racing two RPC writes against each other
+    // cannot guarantee they overlap; holding the lock makes the overlap
+    // a fact of the test rather than a matter of scheduling.
+    let held = runtime.write_guard.clone().lock_owned().await;
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
-        let (mut fr_reader, mut fr_w) = connect(&sock).await?;
-        let (mut sr_reader, mut sr_w) = connect(&sock).await?;
+        let (mut reader, mut writer) = connect(&sock).await?;
 
-        // Kick off two writes back-to-back. `vectors.drop` is the
-        // simplest write command in the surface — it opens the corpus
-        // and drops the ANN index. Whichever lands first holds the
-        // write mutex; the other must see `-32001 busy`.
+        // `vectors.drop` is the simplest write command in the surface.
+        // With the mutex held it must come back refused — and it must
+        // come back at all: the contract is to refuse a concurrent
+        // writer, not to queue it behind the holder.
         send(
-            &mut fr_w,
+            &mut writer,
             r#"{"jsonrpc":"2.0","id":10,"method":"vectors.drop","params":{"yes":true}}"#,
         )
         .await?;
+        let refused = recv(&mut reader).await?;
+        assert_eq!(
+            refused["error"]["code"].as_i64(),
+            Some(-32001_i64),
+            "a write while the mutex is held must be refused as busy: {refused}"
+        );
+
+        // Releasing the mutex lets the same call reach the handler
+        // body, so the refusal above is about the mutex rather than
+        // about the command. On a library with no chunks the body then
+        // refuses on its own terms — a different code, raised from
+        // inside `run_write` rather than at its gate.
+        drop(held);
         send(
-            &mut sr_w,
+            &mut writer,
             r#"{"jsonrpc":"2.0","id":11,"method":"vectors.drop","params":{"yes":true}}"#,
         )
         .await?;
-        let resp_a = recv(&mut fr_reader).await?;
-        let resp_b = recv(&mut sr_reader).await?;
-
-        let codes: Vec<Option<i64>> = [&resp_a, &resp_b]
-            .iter()
-            .map(|r| r["error"]["code"].as_i64())
-            .collect();
+        let admitted = recv(&mut reader).await?;
+        assert_ne!(
+            admitted["error"]["code"].as_i64(),
+            Some(-32001_i64),
+            "releasing the mutex must stop the refusal: {admitted}"
+        );
         assert!(
-            codes.contains(&Some(-32001_i64)),
-            "expected one response with code -32001, got {codes:?} payloads {resp_a} / {resp_b}"
+            admitted["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("nothing to drop")),
+            "the write reached the handler body: {admitted}"
         );
 
         send(
-            &mut fr_w,
+            &mut writer,
             r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
         )
         .await?;
-        let _ = recv(&mut fr_reader).await?;
+        let _ = recv(&mut reader).await?;
         Ok::<(), eyre::Report>(())
     });
 
