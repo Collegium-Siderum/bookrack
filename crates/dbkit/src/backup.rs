@@ -87,6 +87,59 @@ mod tests {
     }
 
     #[test]
+    fn backup_database_snapshots_the_committed_state_mid_transaction() {
+        // The "even while being written" half of the contract: a writer
+        // holding an open transaction must neither block the snapshot
+        // nor leak its uncommitted rows into it.
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("live.db");
+        let during = dir.path().join("during.db");
+        let after = dir.path().join("after.db");
+
+        let writer = Connection::open(&src).unwrap();
+        writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT NOT NULL);\
+                 INSERT INTO t (v) VALUES ('a'), ('b');",
+            )
+            .unwrap();
+
+        // Open a write transaction and leave it open across the backup.
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute("INSERT INTO t (v) VALUES ('c')", [])
+            .unwrap();
+
+        backup_database(&src, &during).expect("a live writer must not block the snapshot");
+
+        let copy = Connection::open(&during).unwrap();
+        let rows: Vec<String> = copy
+            .prepare("SELECT v FROM t ORDER BY v")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["a".to_string(), "b".to_string()],
+            "the snapshot carries the committed state, without the open transaction's row",
+        );
+
+        // Once the transaction commits, the next snapshot carries it —
+        // so the assertion above is about isolation, not about the row
+        // being unwritable.
+        writer.execute_batch("COMMIT").unwrap();
+        backup_database(&src, &after).unwrap();
+        let n: i64 = Connection::open(&after)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 3);
+    }
+
+    #[test]
     fn backup_database_refuses_existing_destination() {
         let dir = tempdir().unwrap();
         let src = dir.path().join("src.db");
