@@ -574,6 +574,21 @@ fn render_paper_list(response: &Value) {
 }
 
 fn render_paper_detail(response: &Value) {
+    println!("{}", format_paper_detail(response));
+}
+
+/// Keys the detail card renders as their own row, from the top-level
+/// response fields that carry the same values. The `effective_biblio`
+/// section skips them: the title would repeat verbatim, and the
+/// abstract body would land in the card unbounded next to the
+/// one-line `abstract` row. Both stay in the `--json` payload.
+const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
+
+/// Renders one `library.show_paper` response as a key-value card:
+/// the intake identity, the audit verdict and the profile that
+/// produced it, the effective biblio section, contributor and
+/// override counts, and the first line of the abstract.
+fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
         t.push("intake_id", id.to_string());
@@ -602,6 +617,9 @@ fn render_paper_detail(response: &Value) {
     }
     if let Some(biblio) = response.get("effective_biblio").and_then(Value::as_object) {
         for (k, v) in biblio {
+            if BIBLIO_KEYS_ROWED_SEPARATELY.contains(&k.as_str()) {
+                continue;
+            }
             let s = v
                 .as_str()
                 .map(String::from)
@@ -619,7 +637,7 @@ fn render_paper_detail(response: &Value) {
         let first_line = abs.lines().next().unwrap_or("");
         t.push("abstract", truncate_to(first_line, 80));
     }
-    println!("{}", t.render());
+    t.render()
 }
 
 async fn toc(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -650,4 +668,76 @@ async fn source(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
         json!({ "intake_id": intake_id }),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ABSTRACT: &str = "We revisit the sampler and show that the bound is tight for every \
+                            admissible input, then extend the argument to the streaming case.";
+
+    fn detail_response() -> Value {
+        json!({
+            "intake_id": 7,
+            "title": "On Tight Bounds",
+            "status": "Ready",
+            "format": "pdf",
+            "effective_biblio": {
+                "title": "On Tight Bounds",
+                "year": "2020",
+                "container_title": "Proceedings of Nothing",
+                "abstract_text": ABSTRACT,
+            },
+            "contributors": [{ "name": "Rivera" }],
+            "overrides": [],
+            "abstract_text": ABSTRACT,
+        })
+    }
+
+    #[test]
+    fn detail_card_carries_the_abstract_once_and_truncated() {
+        let card = format_paper_detail(&detail_response());
+        assert!(
+            !card.contains(ABSTRACT),
+            "the abstract body reached the card verbatim:\n{card}"
+        );
+        assert!(
+            !card.contains("biblio.abstract_text"),
+            "the abstract has its own row already:\n{card}"
+        );
+        assert!(
+            card.contains(
+                "We revisit the sampler and show that the bound is tight for every admissible in…"
+            ),
+            "missing the truncated abstract row:\n{card}"
+        );
+    }
+
+    #[test]
+    fn detail_card_names_the_title_once() {
+        let card = format_paper_detail(&detail_response());
+        assert!(
+            !card.contains("biblio.title"),
+            "the title has its own row already:\n{card}"
+        );
+        assert_eq!(
+            card.matches("On Tight Bounds").count(),
+            1,
+            "the title is rendered more than once:\n{card}"
+        );
+    }
+
+    #[test]
+    fn detail_card_keeps_the_remaining_biblio_fields() {
+        let card = format_paper_detail(&detail_response());
+        for needle in [
+            "biblio.year",
+            "2020",
+            "biblio.container_title",
+            "Proceedings of Nothing",
+        ] {
+            assert!(card.contains(needle), "missing {needle:?} in:\n{card}");
+        }
+    }
 }

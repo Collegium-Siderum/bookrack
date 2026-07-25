@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: `papers show` no longer prints the abstract body inside its
+  key-value card.** The card renders the effective biblio section
+  key by key, and `effective_biblio` carries `title` and
+  `abstract_text` alongside every other field — both of which the
+  card already rows separately. The title therefore appeared twice,
+  and the abstract appeared once truncated to its first 80 characters
+  and once in full: on a piped stdout, where the table has no
+  terminal width to wrap against, a 2000-character abstract rendered
+  as a single 2000-column line. The biblio section now skips the two
+  keys it duplicates. The `--json` payload is unchanged — both fields
+  stay in `effective_biblio` for scripted consumers.
+
 - **cli: a confirmation that could not be asked is a user error, not a
   decline.** Every destructive prompt read an end-of-file stdin as
   "the operator said no", printed `aborted`, and returned exit `0`.
