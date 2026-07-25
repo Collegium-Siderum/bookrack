@@ -101,6 +101,7 @@ impl SearchArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -113,6 +114,7 @@ impl SearchInBookArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -315,6 +317,7 @@ impl SearchInPaperArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }

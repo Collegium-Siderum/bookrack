@@ -125,6 +125,7 @@ impl SearchParams {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -187,6 +188,7 @@ impl SearchInPaperParams {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -197,6 +199,7 @@ impl SearchInBookParams {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }

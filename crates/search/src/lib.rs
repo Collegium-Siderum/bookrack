@@ -293,18 +293,22 @@ fn env_overrides_from(get: impl Fn(&str) -> Option<String>) -> SearchOptions {
         nprobes,
         refine_factor,
         bypass_index,
+        exclude_partitions: Vec::new(),
     }
 }
 
 /// Layer per-call overrides over the persisted meta defaults:
 /// `nprobes` / `refine_factor` win when the override sets them and
 /// fall back to the meta value otherwise, while `bypass_index = true`
-/// from either side is sticky.
+/// from either side is sticky. `exclude_partitions` is taken from the
+/// override side alone — the persisted meta describes the index, and
+/// never carries an exclusion set to fall back to.
 fn merge_options(overrides: SearchOptions, base: SearchOptions) -> SearchOptions {
     SearchOptions {
         nprobes: overrides.nprobes.or(base.nprobes),
         refine_factor: overrides.refine_factor.or(base.refine_factor),
         bypass_index: overrides.bypass_index || base.bypass_index,
+        exclude_partitions: overrides.exclude_partitions,
     }
 }
 
@@ -322,6 +326,7 @@ fn options_from_meta(store: &ChunkStore, lancedb_dir: &Path) -> Result<SearchOpt
         nprobes: Some(cfg.nprobes as usize),
         refine_factor: cfg.refine_factor,
         bypass_index: false,
+        exclude_partitions: Vec::new(),
     })
 }
 
@@ -1175,6 +1180,7 @@ mod tests {
             nprobes: Some(8),
             refine_factor: Some(2),
             bypass_index: false,
+            exclude_partitions: Vec::new(),
         };
         // An override that sets a knob wins over the meta default.
         let merged = merge_options(
@@ -1182,6 +1188,7 @@ mod tests {
                 nprobes: Some(32),
                 refine_factor: None,
                 bypass_index: false,
+                exclude_partitions: vec![PartitionIdx::new(4), PartitionIdx::new(9)],
             },
             base.clone(),
         );
@@ -1189,6 +1196,12 @@ mod tests {
         // A knob the override leaves unset falls back to meta.
         assert_eq!(merged.refine_factor, Some(2));
         assert!(!merged.bypass_index);
+        // The exclusion set has no meta counterpart and passes through
+        // from the override side verbatim, order included.
+        assert_eq!(
+            merged.exclude_partitions,
+            vec![PartitionIdx::new(4), PartitionIdx::new(9)]
+        );
     }
 
     #[test]
@@ -1197,6 +1210,7 @@ mod tests {
             nprobes: None,
             refine_factor: None,
             bypass_index: true,
+            exclude_partitions: Vec::new(),
         };
         let plain = SearchOptions::default();
         assert!(merge_options(bypassing.clone(), plain.clone()).bypass_index);
