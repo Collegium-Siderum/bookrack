@@ -62,12 +62,20 @@ async fn library_info_round_trips_through_running_daemon() {
             .status()
             .await;
     }
-    let (status, _stdout, _stderr) = daemon
+    let (status, _stdout, stderr) = daemon
         .wait_with_output(Duration::from_secs(5))
         .await
         .expect("daemon must exit within 5 s of SIGTERM");
-    assert!(
-        status.code().is_some() || status.success(),
-        "daemon exited abnormally: {status:?}",
+    // A signalled shutdown unwinds the session and leaves through
+    // `std::process::exit(0)`, so the only acceptable status is a clean
+    // zero: dying from the signal itself, or unwinding into an error
+    // code, both mean the graceful path did not run. The session lock
+    // file is left on disk on purpose — it carries an advisory flock
+    // the OS releases at exit — so its presence afterwards is not a
+    // leak and is deliberately not asserted here.
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "SIGTERM must produce a clean exit: status={status:?} stderr={stderr}",
     );
 }
