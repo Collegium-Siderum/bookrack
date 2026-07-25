@@ -573,8 +573,11 @@ Two properties the tool set deliberately does *not* have:
   `bookrack_runtime::doctor::run`; when a daemon is running it
   calls `doctor.gather` and renders the same report.
   Daemon-not-running exits with code 2 from every one-shot
-  client, matching the REPL client's contract; `bookrack doctor`
-  and `bookrack quit` are the documented exceptions. The MCP
+  client that routes through the control plane, matching the REPL
+  client's contract. The exceptions are the clients that can answer
+  without a daemon: `bookrack doctor` falls back to the local probe,
+  `bookrack status` and `bookrack exec info` report the absence and
+  exit 0, and `bookrack quit` has nothing to stop. The MCP
   tool set, the session-lock schema, the on-disk queue schema,
   and the REPL client are unchanged.
 - **Phase 5** — second-launch semantics and `bookrack-mcp`

@@ -2,13 +2,13 @@
 
 //! Phase 4 end-to-end coverage for the one-shot CLI subcommands.
 //!
-//! Asserts the daemon-not-running invariant: every one-shot
-//! subcommand that needs a daemon exits with the documented
-//! "not running" code (2), while the two documented exceptions —
-//! `bookrack quit` and `bookrack doctor` — bail out gracefully with
-//! their own contracts (quit reports "no daemon" and exits 0; doctor
-//! falls back to the local probe and exits whatever its checks
-//! produce).
+//! Asserts the daemon-not-running invariant: a one-shot subcommand
+//! that routes through the control plane exits with the documented
+//! "not running" code (2) and names `bookrack run` on stderr, whether
+//! it reads or writes. The exceptions are the clients that can answer
+//! without a daemon — `bookrack doctor` falls back to the local probe,
+//! `bookrack status` and `bookrack exec info` report the absence and
+//! exit 0 — plus `bookrack quit`, which has nothing to stop.
 //!
 //! The daemon-running path needs an Ollama-backed library bootstrap
 //! and lives behind `#[ignore]` in `control_writes`; Phase 4 adds
@@ -49,7 +49,28 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         ),
         (&["verify"], CaseExpect::NotRunning),
         (&["diagnose"], CaseExpect::NotRunning),
+        // Read-shaped clients route through the same connect helper as
+        // the write verbs above, so the rule is about reaching the
+        // daemon rather than about mutating anything.
+        (&["queue", "list"], CaseExpect::NotRunning),
+        (&["logs"], CaseExpect::NotRunning),
+        (&["papers", "list"], CaseExpect::NotRunning),
+        (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
+        (&["exec", "library.info", "{}"], CaseExpect::NotRunning),
+        (&["exec", "tools"], CaseExpect::NotRunning),
+        // `index-profile apply` refuses twice over — once here, and
+        // once at its confirmation gate, which also exits 2. The tip
+        // assertion below is what tells the two apart, so this row
+        // cannot pass for the wrong reason.
+        (
+            &["index-profile", "apply", "qwen3-0.6b-default"],
+            CaseExpect::NotRunning,
+        ),
+        // The exceptions. `bookrack status` has the same shape as
+        // `exec info` and is pinned separately by
+        // `status_without_daemon_prints_a_short_card_and_exits_zero`.
         (&["quit"], CaseExpect::Quit),
+        (&["exec", "info"], CaseExpect::LocalFallback),
     ];
     for (argv, expect) in cases {
         let output = tokio::process::Command::new(bookrack_bin())
@@ -93,6 +114,22 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
                     "{:?} stderr missing nothing-to-stop tip: {}",
                     argv,
                     stderr,
+                );
+            }
+            CaseExpect::LocalFallback => {
+                assert_eq!(
+                    output.status.code(),
+                    Some(0),
+                    "{:?} expected exit 0 from a client that answers offline, stderr={:?}",
+                    argv,
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(
+                    stdout.contains("no running daemon"),
+                    "{:?} stdout missing the absence it reports: {}",
+                    argv,
+                    stdout,
                 );
             }
         }
@@ -1667,6 +1704,12 @@ fn toml_escape(path: &std::path::Path) -> String {
 }
 
 enum CaseExpect {
+    /// Routes through the control plane: exit 2 and the tip naming
+    /// `bookrack run`.
     NotRunning,
+    /// `bookrack quit` has nothing to stop: exit 0, said on stderr.
     Quit,
+    /// A client with an offline answer — it reports the absence and
+    /// exits 0, on stdout, because the absence *is* the answer.
+    LocalFallback,
 }
