@@ -272,9 +272,7 @@ mod tests {
     fn confirmation_unanswerable_is_exit_two_and_names_the_escape_hatch() {
         let err = BookrackCliError::ConfirmationUnanswerable {
             action: "libraries remove --purge".into(),
-            reason: crate::render::confirm::NoAnswer::EndOfStream
-                .reason()
-                .into(),
+            reason: crate::render::confirm::NoAnswer::EndOfStream.reason(),
             hint: "re-run with --yes to confirm".into(),
         };
         assert_eq!(err.exit_code(), 2);

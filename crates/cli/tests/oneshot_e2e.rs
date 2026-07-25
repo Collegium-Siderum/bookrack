@@ -1102,13 +1102,17 @@ struct PurgeRun {
     stderr: String,
 }
 
-/// Drive `libraries remove --purge` without `--yes`, answering the
-/// retype prompt with `typed`. Writing `typed` and dropping the handle
-/// closes the pipe, so `""` is a stdin that reaches end of file before
-/// any byte arrives.
-async fn purge_answering(typed: &str) -> Result<PurgeRun> {
-    use tokio::io::AsyncWriteExt;
+/// A registry holding one purgeable library named `shelf`. The
+/// tempdirs are returned so the caller keeps them alive.
+struct PurgeFixture {
+    runtime_dir: tempfile::TempDir,
+    _registry_dir: tempfile::TempDir,
+    registry_path: std::path::PathBuf,
+    _holder: tempfile::TempDir,
+    root: std::path::PathBuf,
+}
 
+fn purge_fixture() -> Result<PurgeFixture> {
     let runtime_dir = tempfile::tempdir()?;
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -1120,15 +1124,56 @@ async fn purge_answering(typed: &str) -> Result<PurgeRun> {
         &registry_path,
         format!("[libraries]\nshelf = \"{}\"\n", root.display()),
     )?;
-    let mut child = tokio::process::Command::new(bookrack_bin())
+    Ok(PurgeFixture {
+        runtime_dir,
+        _registry_dir: registry_dir,
+        registry_path,
+        _holder: holder,
+        root,
+    })
+}
+
+/// Spawn `libraries remove shelf --purge` against `fixture` with stdin
+/// on a pipe the caller drives. `timeout_secs` sets
+/// `BOOKRACK_CONFIRM_TIMEOUT_SECS` when present.
+fn spawn_purge(
+    fixture: &PurgeFixture,
+    timeout_secs: Option<&str>,
+) -> Result<tokio::process::Child> {
+    let mut command = tokio::process::Command::new(bookrack_bin());
+    command
         .args(["libraries", "remove", "shelf", "--purge"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env("BOOKRACK_RUNTIME_DIR", fixture.runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &fixture.registry_path)
         .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(secs) = timeout_secs {
+        command.env("BOOKRACK_CONFIRM_TIMEOUT_SECS", secs);
+    }
+    Ok(command.spawn()?)
+}
+
+fn purge_outcome(fixture: &PurgeFixture, output: std::process::Output) -> Result<PurgeRun> {
+    let entry_survives = std::fs::read_to_string(&fixture.registry_path)?.contains("shelf");
+    Ok(PurgeRun {
+        code: output.status.code(),
+        root_survives: fixture.root.exists(),
+        entry_survives,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// Drive `libraries remove --purge` without `--yes`, answering the
+/// retype prompt with `typed`. Writing `typed` and dropping the handle
+/// closes the pipe, so `""` is a stdin that reaches end of file before
+/// any byte arrives.
+async fn purge_answering(typed: &str) -> Result<PurgeRun> {
+    use tokio::io::AsyncWriteExt;
+
+    let fixture = purge_fixture()?;
+    let mut child = spawn_purge(&fixture, None)?;
     child
         .stdin
         .take()
@@ -1136,13 +1181,7 @@ async fn purge_answering(typed: &str) -> Result<PurgeRun> {
         .write_all(typed.as_bytes())
         .await?;
     let output = child.wait_with_output().await?;
-    let entry_survives = std::fs::read_to_string(&registry_path)?.contains("shelf");
-    Ok(PurgeRun {
-        code: output.status.code(),
-        root_survives: root.exists(),
-        entry_survives,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    purge_outcome(&fixture, output)
 }
 
 /// The Hard retype gate, end to end: an answer that is not the library
@@ -1200,6 +1239,81 @@ async fn libraries_remove_purge_on_a_closed_stdin_is_a_user_error() -> Result<()
         run.stderr.contains("shelf") && run.stderr.contains("--yes"),
         "the refusal must name the library and the way to opt in: {:?}",
         run.stderr,
+    );
+    Ok(())
+}
+
+/// A pipe that stays open but never carries an answer used to block
+/// `read_line` forever — and `--purge` takes the data root's exclusive
+/// lock *before* it prompts, so a stuck run locked the library out of
+/// the daemon until someone killed it. On a non-terminal stdin the read
+/// is bounded: the window expires, the run is a user error, and the
+/// lock is released on the way out.
+///
+/// The wait is wrapped so a regression fails the test instead of
+/// hanging the suite; "seen red" must not degenerate into "seen hung".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_gives_up_on_a_silent_stdin() -> Result<()> {
+    let fixture = purge_fixture()?;
+    let mut child = spawn_purge(&fixture, Some("1"))?;
+    // Hold the write end open for the whole run: the child sees a pipe
+    // with a live writer that never sends a byte, which is what a
+    // supervisor spawning with an inherited-but-idle stdin produces.
+    let held_stdin = child.stdin.take().expect("piped stdin");
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("the CLI must give up on a silent stdin rather than block forever")?;
+    drop(held_stdin);
+
+    let run = purge_outcome(&fixture, output)?;
+    assert_eq!(
+        run.code,
+        Some(2),
+        "a confirmation nobody answered is a user error; stderr={:?}",
+        run.stderr,
+    );
+    assert!(run.root_survives, "an expired window must not purge");
+    assert!(
+        run.entry_survives,
+        "an expired window must leave the registry entry"
+    );
+    assert!(
+        !bookrack_session::RootLock::acquire(&fixture.root, std::process::id(), "test")
+            .is_err_and(|e| bookrack_session::is_root_lock_conflict(&e)),
+        "the data root lock must be released when the run gives up",
+    );
+    Ok(())
+}
+
+/// The other side of the bound: an answer that arrives late over a
+/// pipe is still honoured. A caller is not required to have a terminal
+/// to confirm — `ssh host …` without `-t` and `docker exec` without
+/// `-t` both put a human behind a pipe — so the window must expire on
+/// silence, never on the mere absence of a TTY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn libraries_remove_purge_honours_an_answer_that_arrives_late_over_a_pipe() -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let fixture = purge_fixture()?;
+    let mut child = spawn_purge(&fixture, Some("10"))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    stdin.write_all(b"shelf\n").await?;
+    drop(stdin);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("a late answer must still be read")?;
+
+    let run = purge_outcome(&fixture, output)?;
+    assert_eq!(
+        run.code,
+        Some(0),
+        "an answer that arrives inside the window purges; stderr={:?}",
+        run.stderr,
+    );
+    assert!(
+        !run.root_survives,
+        "the retyped name must purge even when it arrives a second late"
     );
     Ok(())
 }

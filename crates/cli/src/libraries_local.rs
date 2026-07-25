@@ -722,11 +722,11 @@ fn op_error(err: LibraryOpError) -> Report {
         // here encoded as an I/O error kind. Recover it rather than
         // letting it fall into the generic internal-error path.
         LibraryOpError::Confirm(io)
-            if let Some(no_answer) = Confirmation::no_answer_from_io(io) =>
+            if let Some(reason) = Confirmation::no_answer_reason_from_io(io) =>
         {
             Report::new(BookrackCliError::ConfirmationUnanswerable {
                 action: "libraries add".to_string(),
-                reason: no_answer.reason().to_string(),
+                reason,
                 hint: "re-run with --yes to write the identity manifest without a prompt"
                     .to_string(),
             })

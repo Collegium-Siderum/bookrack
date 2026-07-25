@@ -29,6 +29,20 @@ release workflow extracts the matching section verbatim from this file.
   The abort notice moves from stdout to stderr on the two shared
   helpers, so `--json` output is no longer interleaved with it.
 
+- **cli: a confirmation read on a non-terminal stdin is bounded.** A
+  pipe that stayed open but never carried an answer parked
+  `read_line` forever. `libraries remove --purge` takes the data
+  root's exclusive lock *before* it prompts, so a stuck run held the
+  library against the daemon until someone killed the process. A
+  terminal is still waited on indefinitely — there is a human reading
+  the prompt — but any other stdin now gets an answer window, after
+  which the run is a user error and the lock is released.
+  `BOOKRACK_CONFIRM_TIMEOUT_SECS` sets the window (default `120`, `0`
+  to wait indefinitely). The bound keys on silence, never on the
+  absence of a TTY, so `echo shelf | bookrack …`, `ssh host …`
+  without `-t`, and Git Bash on Windows — where `is_terminal` is
+  false with a human at the keyboard — can all still answer.
+
 - **extract: a fullwidth References heading terminates the paper
   metadata-scan window.** `extract_paper_metadata_text` documented its
   References-heading match as running against the fullwidth-folded
