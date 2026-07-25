@@ -124,3 +124,61 @@ fn render_library_info(response: &Value) {
     flatten_into_kv(&mut table, "", response);
     println!("{}", table.render());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_cli::error::BookrackCliError;
+    use bookrack_cli::render::confirm::NoAnswer;
+
+    fn target() -> PathBuf {
+        PathBuf::from("/data/copy")
+    }
+
+    #[test]
+    fn yes_forks_without_asking() {
+        let agreed = confirm_fork("copy", &target(), true, |_, _| {
+            panic!("--yes must not prompt")
+        })
+        .expect("--yes confirms");
+        assert!(agreed);
+    }
+
+    /// The prompt has to name what it is about to create, because the
+    /// operator is agreeing to a second copy of a library, not to a
+    /// generic action.
+    #[test]
+    fn the_prompt_names_the_fork_target() {
+        let seen = std::cell::RefCell::new(None);
+        let agreed = confirm_fork("copy", &target(), false, |text, mode| {
+            *seen.borrow_mut() = Some(text.to_string());
+            assert!(matches!(mode, ConfirmMode::Soft), "a fork takes a soft yes");
+            Ok(Confirmation::Agreed)
+        })
+        .expect("an answered fork is not an error");
+        assert!(agreed);
+        let text = seen.into_inner().expect("the prompt ran");
+        assert!(text.contains("copy"), "names the new library: {text}");
+        assert!(text.contains("/data/copy"), "names the target: {text}");
+    }
+
+    #[test]
+    fn a_declined_fork_is_a_clean_abort() {
+        let agreed = confirm_fork("copy", &target(), false, |_, _| Ok(Confirmation::Declined))
+            .expect("a declined fork is not an error");
+        assert!(!agreed);
+    }
+
+    #[test]
+    fn an_unanswered_fork_is_a_user_error() {
+        let err = confirm_fork("copy", &target(), false, |_, _| {
+            Ok(Confirmation::Unanswerable(NoAnswer::EndOfStream))
+        })
+        .expect_err("an unanswered fork is refused");
+        let cli = err
+            .downcast_ref::<BookrackCliError>()
+            .expect("the refusal is a typed CLI error");
+        assert_eq!(cli.exit_code(), 2);
+        assert!(cli.to_string().contains("--yes"), "{cli}");
+    }
+}
