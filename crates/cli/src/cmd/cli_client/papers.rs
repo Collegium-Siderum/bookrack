@@ -554,13 +554,19 @@ fn emit_paper_list(response: &Value) {
 }
 
 fn render_paper_list(response: &Value) {
+    println!("{}", format_paper_list(response));
+}
+
+/// Renders one `library.list_papers` / `library.find_papers` page as
+/// a table of `id`, `title`, `author`, `year`, and `container`, each
+/// cell cut to a fixed width. A page that covers less than the whole
+/// result set carries a trailing count line; an empty page is one
+/// sentence and no table.
+fn format_paper_list(response: &Value) -> String {
     let papers = response.get("papers").and_then(Value::as_array);
     let rows = match papers {
         Some(arr) if !arr.is_empty() => arr,
-        _ => {
-            println!("no papers match");
-            return;
-        }
+        _ => return "no papers match".to_string(),
     };
     let mut table = RowTable::new(["id", "title", "author", "year", "container"]);
     for row in rows {
@@ -591,20 +597,24 @@ fn render_paper_list(response: &Value) {
             .unwrap_or_else(|| "-".to_string());
         table.push_row([id, title, author, year, container]);
     }
-    println!("{}", table.render());
-    let total = response.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let mut out = table.render();
     let truncated = response
         .get("truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if truncated {
-        println!(
-            "(showing {} of {total}; pass --limit to see more)",
-            rows.len()
-        );
-    } else if total as usize != rows.len() {
-        println!("({} of {total})", rows.len());
+    // A response that carries no total says nothing about the size of
+    // the result set, so neither does the footer.
+    if let Some(total) = response.get("total").and_then(Value::as_u64) {
+        if truncated {
+            out.push_str(&format!(
+                "\n(showing {} of {total}; pass --limit to see more)",
+                rows.len()
+            ));
+        } else if total as usize != rows.len() {
+            out.push_str(&format!("\n({} of {total})", rows.len()));
+        }
     }
+    out
 }
 
 fn render_paper_detail(response: &Value) {
@@ -761,6 +771,151 @@ mod tests {
             metadata_outcome_line(OutputMode::Human, &write_response(), SENTENCE.to_string()),
             Some(SENTENCE.to_string())
         );
+    }
+
+    fn list_response(papers: Value, total: Option<u64>, truncated: bool) -> Value {
+        let mut response = json!({ "papers": papers, "truncated": truncated });
+        if let Some(total) = total {
+            response["total"] = json!(total);
+        }
+        response
+    }
+
+    fn one_paper() -> Value {
+        json!([{
+            "intake_id": 12,
+            "title": "Title Title Title Title Title Title Title Title Title Title ",
+            "top_contributor": "Contributor Name Goes Here",
+            "year": "1999",
+            "container_title": "Journal of Long Container Names",
+        }])
+    }
+
+    #[test]
+    fn list_table_carries_the_five_documented_columns_in_order() {
+        let table = format_paper_list(&list_response(one_paper(), Some(1), false));
+        let header = table.lines().nth(1).expect("a header row");
+        let mut at = 0;
+        for column in ["id", "title", "author", "year", "container"] {
+            let found = header[at..]
+                .find(column)
+                .unwrap_or_else(|| panic!("column {column:?} out of order in:\n{table}"));
+            at += found + column.len();
+        }
+    }
+
+    #[test]
+    fn list_cells_are_cut_to_their_column_width() {
+        let table = format_paper_list(&list_response(one_paper(), Some(1), false));
+        for needle in [
+            "Title Title Title Title Title Title Title Title…",
+            "Contributor Name Goes H…",
+            "Journal of Long Contain…",
+        ] {
+            assert!(table.contains(needle), "missing {needle:?} in:\n{table}");
+        }
+    }
+
+    #[test]
+    fn list_cells_fall_back_to_a_dash_when_a_field_is_absent() {
+        let table = format_paper_list(&list_response(json!([{}]), Some(1), false));
+        // Borders are drawn with box-drawing characters, so the only
+        // ASCII hyphens in the render are the fallback cells.
+        let row = table
+            .lines()
+            .find(|line| line.contains('-'))
+            .expect("one body row");
+        assert_eq!(
+            row.matches('-').count(),
+            5,
+            "every absent field should read as a dash in:\n{table}"
+        );
+    }
+
+    #[test]
+    fn an_empty_page_is_one_sentence_and_no_table() {
+        for papers in [json!([]), Value::Null] {
+            let out = format_paper_list(&list_response(papers, Some(0), false));
+            assert_eq!(out, "no papers match");
+        }
+    }
+
+    #[test]
+    fn a_truncated_page_names_the_full_total() {
+        let out = format_paper_list(&list_response(one_paper(), Some(9), true));
+        assert!(
+            out.ends_with("\n(showing 1 of 9; pass --limit to see more)"),
+            "missing the truncation hint in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_partial_page_reports_its_share_of_the_total() {
+        let out = format_paper_list(&list_response(one_paper(), Some(9), false));
+        assert!(
+            out.ends_with("\n(1 of 9)"),
+            "missing the share line in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_page_that_covers_the_result_set_has_no_count_line() {
+        let out = format_paper_list(&list_response(one_paper(), Some(1), false));
+        assert!(!out.contains('('), "unexpected count line in:\n{out}");
+    }
+
+    #[test]
+    fn a_page_without_a_total_has_no_count_line() {
+        for truncated in [false, true] {
+            let out = format_paper_list(&list_response(one_paper(), None, truncated));
+            assert!(
+                !out.contains('('),
+                "a missing total should print no count line, got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_card_pairs_the_verdict_with_the_confidence_and_the_profile() {
+        let mut response = detail_response();
+        response["audit"] = json!({
+            "verdict": "needs_work",
+            "confidence": "low",
+            "profile_name": "default",
+            "profile_fingerprint": "9f2c1a",
+        });
+        let card = format_paper_detail(&response);
+        assert!(card.contains("needs_work (low)"), "in:\n{card}");
+        assert!(card.contains("default @ 9f2c1a"), "in:\n{card}");
+    }
+
+    #[test]
+    fn detail_card_names_the_profile_alone_without_a_fingerprint() {
+        let mut response = detail_response();
+        response["audit"] = json!({
+            "verdict": "clean",
+            "confidence": "high",
+            "profile_name": "trust-source",
+        });
+        let card = format_paper_detail(&response);
+        assert!(card.contains("clean (high)"), "in:\n{card}");
+        assert!(card.contains("trust-source"), "in:\n{card}");
+        assert!(!card.contains(" @ "), "in:\n{card}");
+    }
+
+    #[test]
+    fn detail_card_counts_contributors_and_overrides() {
+        let mut response = detail_response();
+        response["contributors"] = json!([{ "name": "Rivera" }, { "name": "Okonkwo" }]);
+        response["overrides"] = json!([{ "field": "year" }]);
+        let card = format_paper_detail(&response);
+        for (key, count) in [("contributors", '2'), ("overrides", '1')] {
+            let row = card
+                .lines()
+                .find(|line| line.contains(key))
+                .unwrap_or_else(|| panic!("no {key} row in:\n{card}"));
+            assert!(row.contains(count), "{key} row reads {row:?} in:\n{card}");
+        }
     }
 
     #[test]

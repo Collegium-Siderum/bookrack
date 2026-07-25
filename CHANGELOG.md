@@ -10,6 +10,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: the `papers list` / `papers find` footer keeps quiet about a
+  total it was not given.** A response without a `total` was read as
+  a total of zero, so a page of three rows footed itself `(3 of 0)`.
+  The count line is now printed only when the response carries the
+  size of the result set.
+
 - **cli: the `papers metadata` writes honour `--json` and `--quiet`.**
   All ten verbs — `reaudit`, `set`, `clear`, `void`, `ack`,
   `approve`, `reject`, `reopen`, `contributor_add`,
