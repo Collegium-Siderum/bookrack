@@ -663,14 +663,55 @@ mod tests {
 
     #[test]
     fn trust_source_disables_every_toggle() {
-        let p = PaperAuditProfile::trust_source();
-        assert_eq!(p.name, PROFILE_TRUST_SOURCE);
-        assert!(!p.audit_enabled);
-        assert!(!p.identifier.require_any);
-        assert!(!p.title.required);
-        assert!(!p.year.required);
-        assert!(!p.venue.whitelist_check);
-        assert!(!p.source_prior.enabled);
+        // Walked off the serialized profile rather than listed by hand,
+        // so a toggle added to any section is covered the day it lands.
+        // The six the hand-written list named were a fraction of the
+        // schema's booleans.
+        let profile = PaperAuditProfile::trust_source();
+        assert_eq!(profile.name, PROFILE_TRUST_SOURCE);
+
+        // Read through the same summary the profile fingerprint is
+        // built from, so nothing here names a toggle or re-implements
+        // the walk over the schema.
+        let summary =
+            bookrack_audit_profile::profile_toggle_summary(&profile).expect("a profile summarizes");
+        assert_eq!(
+            summary.matches("\"name\":").count(),
+            TOGGLE_COUNT,
+            "every boolean in the profile is enumerated; a schema change belongs in this \
+             count: {summary}",
+        );
+        let still_on = toggles_left_on(&summary);
+        assert!(
+            still_on.is_empty(),
+            "trust-source leaves these toggles on: {still_on:?}",
+        );
+
+        // Non-empty anchor: the default profile turns most of the same
+        // switches on, so an all-off reading is a property of
+        // trust-source rather than of the enumeration.
+        let default_summary =
+            bookrack_audit_profile::profile_toggle_summary(&PaperAuditProfile::default_profile())
+                .expect("a profile summarizes");
+        assert!(
+            default_summary.matches("\"enabled\":true").count() > TOGGLE_COUNT / 2,
+            "the default profile should leave most toggles on: {default_summary}",
+        );
+    }
+
+    /// Number of boolean toggles the paper profile schema carries.
+    /// Pinned so an enumeration that silently stops finding them fails
+    /// instead of passing vacuously.
+    const TOGGLE_COUNT: usize = 23;
+
+    /// Names the toggle summary reports as on, so a failure points at
+    /// the offending switch rather than dumping the whole summary.
+    fn toggles_left_on(summary: &str) -> Vec<&str> {
+        summary
+            .split("{\"enabled\":true,\"name\":\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect()
     }
 
     #[test]

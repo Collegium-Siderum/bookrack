@@ -731,30 +731,69 @@ mod tests {
 
     #[test]
     fn trust_source_profile_disables_every_toggle() {
+        // Walked off the serialized profile rather than listed by hand,
+        // so a toggle added to any section is covered the day it lands.
+        // The hand-written list this replaces had already drifted past
+        // `publisher.whitelist_normalize_abbreviations`.
         let profile = AuditProfile::trust_source();
         assert_eq!(profile.name, PROFILE_TRUST_SOURCE);
-        assert!(!profile.audit_enabled);
-        assert!(!profile.year.range_check);
-        assert!(!profile.year.pdf_likely_file_date);
-        assert!(!profile.year.timestamp_form);
-        assert!(!profile.year.cross_field_filename_override);
-        assert!(!profile.title.placeholder_check);
-        assert!(!profile.title.purely_numeric);
-        assert!(!profile.title.any_bracketed_enabled());
-        assert!(!profile.language.bcp47_check);
-        assert!(!profile.language.body_script_match);
-        assert!(!profile.publisher.url_watermark);
-        assert!(!profile.publisher.drop_10digit_isbn_to_filename);
-        assert!(!profile.toc_shape.suspicious_flat);
-        assert!(!profile.toc_shape.heading_block_skew);
-        assert!(!profile.toc_shape.empty_large_body);
-        assert!(!profile.source_prior.enabled);
-        assert!(!profile.copyright_blocks.enabled);
-        assert!(!profile.filename_parser.enabled);
-        assert!(!profile.extract.epub_year_range_check);
-        assert!(!profile.extract.epub_isbn_recognition);
-        assert!(!profile.extract.marc_role_mapping);
-        assert!(!profile.extract.txt_toc_enabled);
+
+        let toggles = toggle_states(&profile);
+        assert_eq!(
+            toggles.len(),
+            TOGGLE_COUNT,
+            "every boolean in the profile is enumerated; a schema change belongs in this count: {:?}",
+            toggles.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        );
+        let still_on: Vec<&str> = toggles
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            still_on.is_empty(),
+            "trust-source leaves these toggles on: {still_on:?}",
+        );
+
+        // Non-empty anchor: the default profile turns most of the same
+        // switches on, so an all-off reading is a property of
+        // trust-source rather than of the enumeration.
+        let default_on = toggle_states(&AuditProfile::default_profile())
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .count();
+        assert!(
+            default_on > toggles.len() / 2,
+            "the default profile should leave most toggles on, got {default_on}",
+        );
+    }
+
+    /// Number of boolean toggles the profile schema carries. Pinned so
+    /// an enumeration that silently stops finding them fails instead of
+    /// passing vacuously.
+    const TOGGLE_COUNT: usize = 26;
+
+    /// Every toggle and its state, read through the same summary the
+    /// fingerprint and the operator-facing report are built from, so
+    /// nothing here names a toggle or re-implements the walk.
+    fn toggle_states(profile: &AuditProfile) -> Vec<(String, bool)> {
+        let summary = profile_toggle_summary(profile).expect("a profile summarizes");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&summary).expect("the summary is a JSON array");
+        entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry["name"]
+                        .as_str()
+                        .expect("each entry names a toggle")
+                        .to_string(),
+                    entry["enabled"]
+                        .as_bool()
+                        .expect("each entry carries state"),
+                )
+            })
+            .collect()
     }
 
     #[test]
