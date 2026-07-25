@@ -232,25 +232,39 @@ impl Refs {
     /// Raw view-side lookup: rows from `reference_entries_resolved`
     /// joined to `reference_books` and ordered by `authority_rank DESC,
     /// built_at ASC`. `book_slug = None` searches every book; `Some`
-    /// restricts to one. Redirects are not followed; use [`Self::lookup`]
-    /// for the disambiguation-shaped reply.
+    /// restricts to one. `exclude` drops the named books from the
+    /// result whatever the scope; an empty slice filters nothing.
+    /// Redirects are not followed; use [`Self::lookup`] for the
+    /// disambiguation-shaped reply.
     pub fn lookup_resolved(
         &self,
         book_slug: Option<&str>,
         entry_key: &str,
+        exclude: &[String],
     ) -> RefsResult<Vec<ResolvedEntry>> {
-        let mut stmt = self.conn.prepare(
+        // The exclusion is variadic, so the tail of the WHERE clause is
+        // built to match; the parameters stay bound, never interpolated.
+        let exclusion_clause = if exclude.is_empty() {
+            String::new()
+        } else {
+            let placeholders: Vec<String> =
+                (0..exclude.len()).map(|i| format!("?{}", i + 3)).collect();
+            format!(" AND r.book_slug NOT IN ({})", placeholders.join(", "))
+        };
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT r.book_slug, r.entry_key, r.headword, r.aliases_json, \
                     r.payload_json, r.source_json, r.quality_flags, \
                     r.edit_reason, r.edited_at, r.has_overlay \
                FROM reference_entries_resolved r \
                JOIN reference_books b USING (book_slug) \
               WHERE r.entry_key = ?1 \
-                AND (?2 IS NULL OR r.book_slug = ?2) \
+                AND (?2 IS NULL OR r.book_slug = ?2){exclusion_clause} \
               ORDER BY b.authority_rank DESC, b.built_at ASC",
-        )?;
+        ))?;
+        let mut bindings: Vec<&dyn rusqlite::ToSql> = vec![&entry_key, &book_slug];
+        bindings.extend(exclude.iter().map(|slug| slug as &dyn rusqlite::ToSql));
         let rows = stmt
-            .query_map(params![entry_key, book_slug], row_to_resolved)?
+            .query_map(rusqlite::params_from_iter(bindings), row_to_resolved)?
             .collect::<Result<Vec<_>, _>>()?;
 
         rows.into_iter().map(parse_resolved).collect()
@@ -286,8 +300,18 @@ impl Refs {
     ///   rules above, so `redirect_followed` then names the normalized
     ///   key and the two fields together record the full resolution
     ///   chain.
-    pub fn lookup(&self, book_slug: Option<&str>, entry_key: &str) -> RefsResult<LookupResult> {
-        let direct = self.lookup_at(book_slug, entry_key)?;
+    ///
+    /// `exclude` names books whose entries must not appear. It applies
+    /// to every pass — the direct lookup, the fallback retry, and the
+    /// redirect target — so an excluded book cannot re-enter the result
+    /// by being the destination of a redirect.
+    pub fn lookup(
+        &self,
+        book_slug: Option<&str>,
+        entry_key: &str,
+        exclude: &[String],
+    ) -> RefsResult<LookupResult> {
+        let direct = self.lookup_at(book_slug, entry_key, exclude)?;
         if !direct.hits.is_empty() {
             return Ok(direct);
         }
@@ -295,20 +319,25 @@ impl Refs {
         if fallback == entry_key || fallback.is_empty() {
             return Ok(direct);
         }
-        let mut retried = self.lookup_at(book_slug, &fallback)?;
+        let mut retried = self.lookup_at(book_slug, &fallback, exclude)?;
         retried.entry_key = entry_key.to_string();
         Ok(retried)
     }
 
     /// One lookup pass at a literal key: resolved-view hits plus the
     /// redirect hop, without the latin-key fallback retry.
-    fn lookup_at(&self, book_slug: Option<&str>, entry_key: &str) -> RefsResult<LookupResult> {
-        let hits = self.lookup_resolved(book_slug, entry_key)?;
+    fn lookup_at(
+        &self,
+        book_slug: Option<&str>,
+        entry_key: &str,
+        exclude: &[String],
+    ) -> RefsResult<LookupResult> {
+        let hits = self.lookup_resolved(book_slug, entry_key, exclude)?;
 
         if hits.len() == 1
             && let Some(target) = redirect_target(&hits[0])
         {
-            let target_hits = self.lookup_resolved(book_slug, &target)?;
+            let target_hits = self.lookup_resolved(book_slug, &target, exclude)?;
 
             let loops_back = target_hits
                 .iter()
@@ -713,7 +742,7 @@ mod refs_tests {
         .expect("upsert smith in book_high");
 
         let hits = refs
-            .lookup_resolved(None, "smith")
+            .lookup_resolved(None, "smith", &[])
             .expect("lookup smith cross-book");
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].book_slug, "book_low");
@@ -721,10 +750,138 @@ mod refs_tests {
 
         // Restricting to one book returns just that book's hit.
         let one = refs
-            .lookup_resolved(Some("book_high"), "smith")
+            .lookup_resolved(Some("book_high"), "smith", &[])
             .expect("lookup smith in book_high");
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].book_slug, "book_high");
+    }
+
+    #[test]
+    fn lookup_resolved_drops_the_excluded_books_and_keeps_the_rest_in_order() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_low", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_low");
+        refs.upsert_book(&sample_book("book_mid", 5, "2026-06-24T12:00:00Z"))
+            .expect("upsert book_mid");
+        refs.upsert_book(&sample_book("book_high", 1, "2026-06-24T00:00:00Z"))
+            .expect("upsert book_high");
+        for slug in ["book_low", "book_mid", "book_high"] {
+            refs.upsert_entry(&sample_entry(
+                slug,
+                "smith",
+                "Smith",
+                json!({"country": "USA"}),
+            ))
+            .expect("upsert smith");
+        }
+
+        // Two exclusions at once, so the variadic tail of the WHERE
+        // clause is exercised rather than a single-placeholder case.
+        let hits = refs
+            .lookup_resolved(
+                None,
+                "smith",
+                &["book_low".to_string(), "book_high".to_string()],
+            )
+            .expect("lookup smith excluding two books");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].book_slug, "book_mid");
+
+        // Excluding just the top-ranked book leaves the remaining two in
+        // their authority order.
+        let hits = refs
+            .lookup_resolved(None, "smith", &["book_low".to_string()])
+            .expect("lookup smith excluding the top book");
+        let slugs: Vec<&str> = hits.iter().map(|h| h.book_slug.as_str()).collect();
+        assert_eq!(slugs, ["book_mid", "book_high"]);
+
+        // A slug that names no registered book excludes nothing.
+        let hits = refs
+            .lookup_resolved(None, "smith", &["no_such_book".to_string()])
+            .expect("lookup smith excluding an unknown book");
+        assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn an_excluded_book_does_not_re_enter_as_a_redirect_target() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_book(&sample_book("book_b", 5, "2026-06-25T00:01:00Z"))
+            .expect("upsert book_b");
+        // The only hit for the key redirects, and the target lives in
+        // the book being excluded.
+        refs.upsert_entry(&sample_entry(
+            "book_a",
+            "redirect_source",
+            "Redirect Source",
+            json!({"redirect_to": "target"}),
+        ))
+        .expect("upsert redirect_source");
+        refs.upsert_entry(&sample_entry(
+            "book_b",
+            "target",
+            "Target",
+            json!({"country": "USA"}),
+        ))
+        .expect("upsert target in book_b");
+
+        // Without the exclusion the redirect resolves into book_b.
+        let followed = refs
+            .lookup(None, "redirect_source", &[])
+            .expect("lookup redirect_source");
+        assert_eq!(
+            followed.redirect_followed.as_deref(),
+            Some("redirect_source")
+        );
+        assert_eq!(followed.hits[0].book_slug, "book_b");
+
+        // With book_b excluded the target is unreachable, so the
+        // redirect is not reported as followed and book_b contributes
+        // nothing to the hits.
+        let result = refs
+            .lookup(None, "redirect_source", &["book_b".to_string()])
+            .expect("lookup redirect_source excluding book_b");
+        assert_eq!(result.redirect_followed, None);
+        assert!(
+            result.hits.iter().all(|h| h.book_slug != "book_b"),
+            "the excluded book must not re-enter through the redirect: {:?}",
+            result.hits.iter().map(|h| &h.book_slug).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_latin_fallback_retry_carries_the_exclusion() {
+        let refs = fresh_refs();
+        refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book_a");
+        refs.upsert_book(&sample_book("book_b", 5, "2026-06-25T00:01:00Z"))
+            .expect("upsert book_b");
+        // Both books store the compact key; the query differs from it
+        // only by spacing, so only the fallback pass can find them.
+        for slug in ["book_a", "book_b"] {
+            refs.upsert_entry(&sample_entry(
+                slug,
+                "objeta",
+                "Objet a",
+                json!({"country": "FR"}),
+            ))
+            .expect("upsert objeta");
+        }
+
+        let result = refs
+            .lookup(None, "Objet a", &["book_a".to_string()])
+            .expect("fallback lookup excluding book_a");
+        assert_eq!(
+            result.entry_key, "Objet a",
+            "the original query echoes back"
+        );
+        let slugs: Vec<&str> = result.hits.iter().map(|h| h.book_slug.as_str()).collect();
+        assert_eq!(
+            slugs,
+            ["book_b"],
+            "the exclusion must survive into the fallback retry",
+        );
     }
 
     #[test]
@@ -748,7 +905,7 @@ mod refs_tests {
         .expect("upsert target");
 
         let result = refs
-            .lookup(Some("book_a"), "redirect_source")
+            .lookup(Some("book_a"), "redirect_source", &[])
             .expect("lookup redirect_source");
         assert_eq!(result.entry_key, "redirect_source");
         assert_eq!(result.redirect_followed.as_deref(), Some("redirect_source"));
@@ -778,7 +935,9 @@ mod refs_tests {
         ))
         .expect("upsert beta");
 
-        let result = refs.lookup(Some("book_a"), "alpha").expect("lookup alpha");
+        let result = refs
+            .lookup(Some("book_a"), "alpha", &[])
+            .expect("lookup alpha");
         assert_eq!(result.entry_key, "alpha");
         assert_eq!(result.redirect_followed, None);
         assert_eq!(result.hits.len(), 1);
@@ -806,7 +965,7 @@ mod refs_tests {
         ))
         .expect("upsert objeta");
 
-        let result = refs.lookup(Some("book_a"), "objeta").expect("lookup");
+        let result = refs.lookup(Some("book_a"), "objeta", &[]).expect("lookup");
         assert_eq!(result.entry_key, "objeta");
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].entry_key, "objeta");
@@ -826,7 +985,7 @@ mod refs_tests {
         ))
         .expect("upsert objeta");
 
-        let result = refs.lookup(Some("book_a"), "Objet a").expect("lookup");
+        let result = refs.lookup(Some("book_a"), "Objet a", &[]).expect("lookup");
         assert_eq!(result.entry_key, "Objet a");
         assert_eq!(result.primary_by_authority, Some(0));
         assert_eq!(result.hits.len(), 1);
@@ -839,7 +998,9 @@ mod refs_tests {
         refs.upsert_book(&sample_book("book_a", 10, "2026-06-25T00:00:00Z"))
             .expect("upsert book_a");
 
-        let result = refs.lookup(Some("book_a"), "No Such Key").expect("lookup");
+        let result = refs
+            .lookup(Some("book_a"), "No Such Key", &[])
+            .expect("lookup");
         assert_eq!(result.entry_key, "No Such Key");
         assert!(result.hits.is_empty());
         assert_eq!(result.primary_by_authority, None);
@@ -866,7 +1027,7 @@ mod refs_tests {
         ))
         .expect("upsert target");
 
-        let result = refs.lookup(Some("book_a"), "Objet a").expect("lookup");
+        let result = refs.lookup(Some("book_a"), "Objet a", &[]).expect("lookup");
         assert_eq!(result.entry_key, "Objet a");
         assert_eq!(result.redirect_followed.as_deref(), Some("objeta"));
         assert_eq!(result.hits.len(), 1);
@@ -899,7 +1060,7 @@ mod refs_tests {
             .expect("upsert target entry");
         }
 
-        let result = refs.lookup(None, "shared").expect("global lookup");
+        let result = refs.lookup(None, "shared", &[]).expect("global lookup");
         assert_eq!(result.hits.len(), 2, "both books answer");
         assert_eq!(result.redirect_followed, None, "no follow on multi-hit");
         assert!(
@@ -940,7 +1101,7 @@ mod refs_tests {
         // The spaced form misses exactly, projects onto the compact
         // key, and the retry hits — same treatment as a latin key.
         let result = refs
-            .lookup(Some("book_a"), "\u{6C49} \u{5B57}")
+            .lookup(Some("book_a"), "\u{6C49} \u{5B57}", &[])
             .expect("lookup spaced CJK");
         assert_eq!(result.entry_key, "\u{6C49} \u{5B57}");
         assert_eq!(result.hits.len(), 1);
@@ -954,7 +1115,7 @@ mod refs_tests {
             .expect("upsert book_a");
 
         for query in ["", "  ", "!!!"] {
-            let result = refs.lookup(Some("book_a"), query).expect("lookup");
+            let result = refs.lookup(Some("book_a"), query, &[]).expect("lookup");
             assert_eq!(result.entry_key, query);
             assert!(result.hits.is_empty(), "query {query:?} must stay empty");
         }

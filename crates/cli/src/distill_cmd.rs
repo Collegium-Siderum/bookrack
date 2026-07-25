@@ -1293,7 +1293,7 @@ stages = [
         assert!(diffs[0].changed.is_empty());
         let refs = Refs::open(&paths.refs_path).expect("open after verify");
         let _ = refs
-            .lookup_resolved(None, "smith")
+            .lookup_resolved(None, "smith", &[])
             .expect("lookup post-verify");
     }
 
