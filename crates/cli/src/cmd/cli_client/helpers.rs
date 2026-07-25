@@ -471,33 +471,6 @@ pub fn destructive_confirmation_decision(
     }
 }
 
-/// What [`run_destructive`] does before the RPC leaves the process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestructiveGate {
-    /// Dispatch straight away — the caller already consented.
-    Proceed,
-    /// Read a confirmation from the operator first.
-    Prompt,
-    /// Refuse: confirmation is required but stdin cannot carry it.
-    RefuseNonTty,
-}
-
-/// Pure form of the whole pre-RPC gate: folds
-/// [`destructive_confirmation_decision`] together with whether stdin
-/// can actually carry an answer. Taking TTY-ness as an argument keeps
-/// the eight-case matrix unit-testable without a terminal.
-pub fn destructive_gate(
-    user_yes: bool,
-    confirmation_exempt: bool,
-    stdin_is_tty: bool,
-) -> DestructiveGate {
-    match destructive_confirmation_decision(user_yes, confirmation_exempt) {
-        DestructiveConfirmation::Skip => DestructiveGate::Proceed,
-        DestructiveConfirmation::Prompt if stdin_is_tty => DestructiveGate::Prompt,
-        DestructiveConfirmation::Prompt => DestructiveGate::RefuseNonTty,
-    }
-}
-
 /// Bundle of prompt-shaped strings for [`run_destructive`]. Groups
 /// the three knobs that describe "how does the operator see this
 /// confirmation" so the function signature stays readable.
@@ -509,10 +482,9 @@ pub struct DestructivePrompt<'a> {
     /// confirmation. The final line should be the actual prompt
     /// (e.g. `Type 'yes' to continue:`).
     pub text: &'a str,
-    /// Error message returned when stdin is not a TTY and the caller
-    /// did not pass `--yes`. Should explain what the command does and
-    /// how to opt in.
-    pub non_tty_hint: &'a str,
+    /// Remedy offered when stdin carried no answer. Should explain
+    /// what the command does and how to opt in without a prompt.
+    pub unanswered_hint: &'a str,
 }
 
 /// One-shot destructive RPC wrapper for methods that do not need a
@@ -535,10 +507,12 @@ pub struct DestructivePrompt<'a> {
 ///   [`bookrack_cli::render::confirm::confirm_destructive`] in
 ///   `prompt.mode`; a rejected answer prints `aborted; no changes
 ///   written` and returns `Ok(())` without firing the RPC, while a
-///   stdin that carries no answer at all is a user error.
-/// * When stdin is not a TTY, prompting is impossible. The helper
-///   bails with `prompt.non_tty_hint` so the operator sees a directed
-///   message instead of a hang on `read_line`.
+///   stdin that carries no answer at all is a user error carrying
+///   `prompt.unanswered_hint`.
+///
+/// A caller without a terminal is asked like any other. Bounding the
+/// read so an idle pipe cannot park the command is
+/// `render::confirm`'s job, not this one.
 pub async fn run_destructive(
     client: Arc<ControlClient>,
     method: &str,
@@ -547,8 +521,6 @@ pub async fn run_destructive(
     confirmation_exempt: bool,
     prompt: DestructivePrompt<'_>,
 ) -> Result<()> {
-    use std::io::IsTerminal;
-
     use bookrack_cli::render::confirm::confirm_destructive;
 
     run_destructive_with(
@@ -558,17 +530,14 @@ pub async fn run_destructive(
         user_yes,
         confirmation_exempt,
         prompt,
-        std::io::stdin().is_terminal(),
         |text, mode| confirm_destructive(text, mode, false),
     )
     .await
 }
 
-/// [`run_destructive`] with stdin's TTY-ness and the confirmation step
-/// supplied by the caller, so every arm of [`destructive_gate`] can be
-/// driven — and the RPC it does or does not emit observed — without a
-/// terminal.
-#[allow(clippy::too_many_arguments)]
+/// [`run_destructive`] with the confirmation step supplied by the
+/// caller, so each outcome — and the RPC it does or does not emit —
+/// is observable without a terminal.
 async fn run_destructive_with<F>(
     client: Arc<ControlClient>,
     method: &str,
@@ -576,7 +545,6 @@ async fn run_destructive_with<F>(
     user_yes: bool,
     confirmation_exempt: bool,
     prompt: DestructivePrompt<'_>,
-    stdin_is_tty: bool,
     confirm: F,
 ) -> Result<()>
 where
@@ -587,13 +555,12 @@ where
         "run_destructive: params must be a JSON object; got {params:?}"
     );
 
-    match destructive_gate(user_yes, confirmation_exempt, stdin_is_tty) {
-        DestructiveGate::Proceed => {}
-        DestructiveGate::RefuseNonTty => eyre::bail!("{}", prompt.non_tty_hint),
-        DestructiveGate::Prompt => {
+    match destructive_confirmation_decision(user_yes, confirmation_exempt) {
+        DestructiveConfirmation::Skip => {}
+        DestructiveConfirmation::Prompt => {
             let confirmed = confirm(prompt.text, prompt.mode)
                 .with_context(|| format!("read {method} confirmation"))?
-                .agreed_or_refuse(method, prompt.non_tty_hint)?;
+                .agreed_or_refuse(method, prompt.unanswered_hint)?;
             if !confirmed {
                 eprintln!("aborted; no changes written");
                 return Ok(());
@@ -767,21 +734,6 @@ mod tests {
         assert_eq!(destructive_confirmation_decision(true, true), Skip);
     }
 
-    /// The full gate, including the stdin axis: consent from either
-    /// flag dispatches regardless of stdin, and a still-needed
-    /// confirmation is refused rather than read off a non-TTY.
-    #[test]
-    fn destructive_gate_matrix() {
-        use DestructiveGate::{Proceed, Prompt, RefuseNonTty};
-        for stdin_is_tty in [true, false] {
-            assert_eq!(destructive_gate(true, false, stdin_is_tty), Proceed);
-            assert_eq!(destructive_gate(false, true, stdin_is_tty), Proceed);
-            assert_eq!(destructive_gate(true, true, stdin_is_tty), Proceed);
-        }
-        assert_eq!(destructive_gate(false, false, true), Prompt);
-        assert_eq!(destructive_gate(false, false, false), RefuseNonTty);
-    }
-
     fn rec(id: &str, state: JobOutcomeState) -> JobOutcomeRecord {
         JobOutcomeRecord {
             job_id: id.into(),
@@ -878,7 +830,7 @@ mod tests {
 ///
 /// Unix-only because the stub speaks the Unix-domain half of the
 /// transport; the platform-independent decision logic is covered by
-/// [`tests::destructive_gate_matrix`] above.
+/// [`tests::destructive_decision_matrix`] above.
 #[cfg(all(test, unix))]
 mod destructive_wire_tests {
     use std::path::PathBuf;
@@ -981,7 +933,7 @@ mod destructive_wire_tests {
         DestructivePrompt {
             mode: ConfirmMode::Hard { token: "RESET" },
             text: "Type RESET to continue:",
-            non_tty_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
+            unanswered_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
         }
     }
 
@@ -996,7 +948,6 @@ mod destructive_wire_tests {
             false,
             false,
             prompt(),
-            true,
             |_, _| Ok(Confirmation::Declined),
         )
         .await
@@ -1018,7 +969,6 @@ mod destructive_wire_tests {
             false,
             false,
             prompt(),
-            true,
             |_, _| Ok(Confirmation::Agreed),
         )
         .await
@@ -1034,8 +984,44 @@ mod destructive_wire_tests {
         );
     }
 
+    /// A caller without a terminal is asked, not refused. The window
+    /// that keeps an idle pipe from parking the command lives in
+    /// `render::confirm`; the helper's job is only to put the question
+    /// and act on the answer, so an answer that arrives over a pipe
+    /// dispatches exactly as one typed at a terminal would.
     #[tokio::test]
-    async fn run_destructive_refuses_a_non_tty_before_dispatching() {
+    async fn run_destructive_prompts_a_non_tty_rather_than_refusing_it() {
+        let stub = StubDaemon::start(json!({"ok": true}));
+        let client = stub.client().await;
+        let asked = std::cell::Cell::new(false);
+        run_destructive_with(
+            Arc::clone(&client),
+            "vectors.reset",
+            json!({}),
+            false,
+            false,
+            prompt(),
+            |_, _| {
+                asked.set(true);
+                Ok(Confirmation::Agreed)
+            },
+        )
+        .await
+        .expect("an answered prompt dispatches");
+        assert!(asked.get(), "the operator must be asked, not refused");
+        assert_eq!(
+            stub.drain(&client).await,
+            vec![("vectors.reset".to_string(), json!({"yes": true}))],
+            "an answer that agrees dispatches regardless of where it came from"
+        );
+    }
+
+    /// When the answer cannot be obtained at all, the caller's hint is
+    /// what reaches the operator and nothing reaches the daemon.
+    #[tokio::test]
+    async fn run_destructive_unanswerable_sends_nothing_and_is_a_user_error() {
+        use bookrack_cli::render::confirm::NoAnswer;
+
         let stub = StubDaemon::start(json!({"ok": true}));
         let client = stub.client().await;
         let err = run_destructive_with(
@@ -1045,18 +1031,19 @@ mod destructive_wire_tests {
             false,
             false,
             prompt(),
-            false,
-            |_, _| panic!("a non-TTY caller must never be prompted"),
+            |_, _| Ok(Confirmation::Unanswerable(NoAnswer::EndOfStream)),
         )
         .await
-        .expect_err("a non-TTY caller without --yes is refused");
+        .expect_err("a confirmation nobody answered is a user error");
+        let cli = bookrack_cli::error::classify_eyre(&err).expect("the typed error must survive");
+        assert_eq!(cli.as_cli().exit_code(), 2);
         assert!(
             err.to_string().contains("pass --yes to confirm"),
             "the refusal must carry the caller's directed hint: {err:#}"
         );
         assert!(
             stub.drain(&client).await.is_empty(),
-            "a refused non-TTY call must not reach the daemon"
+            "an unanswered call must not reach the daemon"
         );
     }
 
@@ -1072,11 +1059,10 @@ mod destructive_wire_tests {
                 user_yes,
                 confirmation_exempt,
                 prompt(),
-                false,
                 |_, _| panic!("consent already given; the prompt must not run"),
             )
             .await
-            .expect("consent dispatches even on a non-TTY");
+            .expect("consent dispatches without a prompt");
             assert_eq!(
                 stub.drain(&client).await,
                 vec![("vectors.reset".to_string(), json!({"yes": true}))],

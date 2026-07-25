@@ -189,29 +189,23 @@ fn confirm_strength(has_destructive: bool, needs_soft: bool) -> ConfirmStrength 
 }
 
 /// Confirm the plan at [`confirm_strength`]. `--yes` skips every
-/// prompt; without it a non-interactive stdin is refused rather than
-/// left hanging on a read.
+/// prompt; without it the operator is asked, whatever stdin is.
 fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
-    use std::io::IsTerminal;
-
     confirm_plan_with(
         &plan.entry.name,
         confirm_strength(plan.has_destructive(), plan.needs_soft_confirm()),
         yes,
-        std::io::stdin().is_terminal(),
         |prompt, mode| confirm_destructive(prompt, mode, false),
     )
 }
 
-/// [`confirm_plan`] over the plan facts it actually reads, with
-/// stdin's TTY-ness and the prompt itself supplied by the caller, so
-/// the refusal and both prompt strengths are reachable without a
-/// terminal.
+/// [`confirm_plan`] over the plan facts it actually reads, with the
+/// prompt itself supplied by the caller, so both prompt strengths and
+/// the unanswered case are reachable without a terminal.
 fn confirm_plan_with<F>(
     library: &str,
     strength: ConfirmStrength,
     yes: bool,
-    stdin_is_tty: bool,
     confirm: F,
 ) -> Result<bool>
 where
@@ -241,20 +235,10 @@ where
     if yes {
         return Ok(true);
     }
-    if !stdin_is_tty {
-        return Err(BookrackCliError::LocalUserError {
-            message: format!(
-                "index-profile apply needs confirmation for this plan and stdin is not a \
-                 TTY; re-run with --yes, or rehearse on a fork first \
-                 (`bookrack libraries fork`); library: '{library}'"
-            ),
-        }
-        .into());
-    }
     Ok(confirm(&prompt, mode)
         .context("read index-profile apply confirmation")?
         .agreed_or_refuse(
-            "index-profile apply",
+            &format!("index-profile apply on '{library}'"),
             "re-run with --yes, or rehearse on a fork first (`bookrack libraries fork`)",
         )?)
 }
@@ -488,25 +472,18 @@ mod tests {
     use super::*;
 
     /// A plan with nothing destructive and nothing soft runs
-    /// unprompted, whatever stdin is.
+    /// unprompted.
     #[test]
     fn a_noop_plan_is_confirmed_without_a_prompt() {
-        for stdin_is_tty in [true, false] {
-            assert!(
-                confirm_plan_with(
-                    "shelf",
-                    ConfirmStrength::None,
-                    false,
-                    stdin_is_tty,
-                    |_, _| panic!("a plan with no destructive or soft action must not prompt"),
-                )
-                .expect("an unprompted plan confirms"),
-            );
-        }
+        assert!(
+            confirm_plan_with("shelf", ConfirmStrength::None, false, |_, _| panic!(
+                "a plan with no destructive or soft action must not prompt"
+            ))
+            .expect("an unprompted plan confirms"),
+        );
     }
 
-    /// `--yes` stands in for the answer at both strengths, including
-    /// on a non-TTY, and never reaches the refusal.
+    /// `--yes` stands in for the answer at every strength.
     #[test]
     fn yes_confirms_every_strength_without_a_prompt() {
         for strength in [
@@ -515,7 +492,7 @@ mod tests {
             ConfirmStrength::None,
         ] {
             assert!(
-                confirm_plan_with("shelf", strength, true, false, |_, _| panic!(
+                confirm_plan_with("shelf", strength, true, |_, _| panic!(
                     "--yes must not prompt"
                 ))
                 .expect("--yes confirms"),
@@ -523,23 +500,44 @@ mod tests {
         }
     }
 
-    /// Without `--yes`, a plan that needs an answer stdin cannot carry
-    /// is a user error (exit 2), not a read that blocks.
+    /// Without `--yes`, a plan whose confirmation went unanswered is a
+    /// user error (exit 2), not a read that blocks and not a silent
+    /// no-op. The message has to carry both ways forward, because the
+    /// caller that hits this has no terminal to read a longer one on.
     #[test]
-    fn a_non_tty_is_refused_rather_than_prompted() {
+    fn an_unanswered_plan_is_a_user_error() {
+        use bookrack_cli::render::confirm::NoAnswer;
+
         for strength in [ConfirmStrength::Hard, ConfirmStrength::Soft] {
-            let err = confirm_plan_with("shelf", strength, false, false, |_, _| {
-                panic!("a non-TTY caller must never be prompted")
+            let err = confirm_plan_with("shelf", strength, false, |_, _| {
+                Ok(Confirmation::Unanswerable(NoAnswer::EndOfStream))
             })
-            .expect_err("a non-TTY caller without --yes is refused");
+            .expect_err("an unanswered plan is refused");
             let cli = err
                 .downcast_ref::<BookrackCliError>()
                 .expect("the refusal is a typed CLI error");
             assert_eq!(cli.exit_code(), 2);
-            assert!(
-                cli.to_string().contains("stdin is not a TTY"),
-                "unexpected message: {cli}"
-            );
+            let rendered = cli.to_string();
+            assert!(rendered.contains("shelf"), "names the library: {rendered}");
+            assert!(rendered.contains("--yes"), "{rendered}");
+            assert!(rendered.contains("libraries fork"), "{rendered}");
+        }
+    }
+
+    /// A caller without a terminal is asked like any other: the answer
+    /// it pipes in is honoured. Bounding the read so an idle pipe
+    /// cannot park the command belongs to `render::confirm`, not here.
+    #[test]
+    fn an_answer_is_honoured_whatever_stdin_is() {
+        for strength in [ConfirmStrength::Hard, ConfirmStrength::Soft] {
+            let asked = std::cell::Cell::new(false);
+            let agreed = confirm_plan_with("shelf", strength, false, |_, _| {
+                asked.set(true);
+                Ok(Confirmation::Agreed)
+            })
+            .expect("an answered plan is not an error");
+            assert!(asked.get(), "the operator must be asked");
+            assert!(agreed, "an answer that agrees confirms the plan");
         }
     }
 
@@ -558,7 +556,7 @@ mod tests {
 
         let seen = std::cell::RefCell::new(None);
         assert!(
-            !confirm_plan_with("shelf", ConfirmStrength::Hard, false, true, |text, mode| {
+            !confirm_plan_with("shelf", ConfirmStrength::Hard, false, |text, mode| {
                 *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
                 Ok(Confirmation::Declined)
             })
@@ -577,7 +575,7 @@ mod tests {
 
         let seen = std::cell::RefCell::new(None);
         assert!(
-            confirm_plan_with("shelf", ConfirmStrength::Soft, false, true, |text, mode| {
+            confirm_plan_with("shelf", ConfirmStrength::Soft, false, |text, mode| {
                 *seen.borrow_mut() = Some((text.to_string(), describe(mode)));
                 Ok(Confirmation::Agreed)
             })

@@ -43,6 +43,26 @@ release workflow extracts the matching section verbatim from this file.
   without `-t`, and Git Bash on Windows — where `is_terminal` is
   false with a human at the keyboard — can all still answer.
 
+### Changed
+
+- **cli: a caller without a terminal is asked to confirm, not
+  refused.** `vectors drop`, `vectors reset`, their two `papers`
+  peers, `index-profile apply`, and the `libraries add` uuid-clash
+  resolution refused outright when stdin was not a TTY. That predicate
+  answers "is a human at a terminal", not "can an answer arrive", and
+  the two differ often enough to matter: this repository's own
+  end-to-end tests drive the strongest gate in the product — retyping
+  a library name before `libraries remove --purge` — over a pipe, and
+  `ssh host …` without `-t`, `docker exec` without `-t`, and Git Bash
+  on Windows all put a human behind one. Refusing them pushed
+  operators to `--yes`, which skips the retype entirely. All three now
+  prompt like every other destructive verb, under the answer window
+  above. A caller that supplies no answer still fails with the same
+  directed message and the same exit `2`; what changed is that a
+  caller that does supply one is now heard. `DestructiveGate` is gone:
+  its stdin axis moved to `render::confirm`'s `answer_window`, and
+  keeping it would have been a second copy of one rule.
+
 - **extract: a fullwidth References heading terminates the paper
   metadata-scan window.** `extract_paper_metadata_text` documented its
   References-heading match as running against the fullwidth-folded

@@ -327,7 +327,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                     text: "About to drop the ANN index over the paper vector store.\n\
                            Search falls back to a full scan until the next\n\
                            `papers vectors rebuild`. Type 'yes' to continue:",
-                    non_tty_hint:
+                    unanswered_hint:
                         "papers vectors drop removes the paper ANN index; pass --yes to confirm",
                 },
             )
@@ -368,7 +368,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                     text: "This drops the paper chunks table and re-embeds every paper abstract from the corpus tree.\n\
                            The old vectors are unrecoverable.\n\
                            Type RESET (exact, uppercase) to continue:",
-                    non_tty_hint:
+                    unanswered_hint:
                         "papers vectors reset drops the existing paper vectors; pass --yes to confirm",
                 },
             )

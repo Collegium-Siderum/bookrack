@@ -43,7 +43,7 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
                     mode: ConfirmMode::Soft,
                     text: "About to drop the ANN index. Search falls back to a full\n\
                            scan until the next `vectors rebuild`. Type 'yes' to continue:",
-                    non_tty_hint: "vectors drop removes the ANN index; pass --yes to confirm",
+                    unanswered_hint: "vectors drop removes the ANN index; pass --yes to confirm",
                 },
             )
             .await
@@ -82,7 +82,7 @@ pub async fn run(action: WriteVectorsAction, runtime_dir: Option<PathBuf>) -> Re
                 text: "This drops the chunks table and re-embeds every book from the corpus tree.\n\
                            The old vectors are unrecoverable.\n\
                            Type RESET (exact, uppercase) to continue:",
-                non_tty_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
+                unanswered_hint: "vectors reset drops the existing vectors; pass --yes to confirm",
             },
         )
         .await,

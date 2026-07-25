@@ -257,29 +257,19 @@ pub fn add(
     }
 }
 
-/// Break a uuid clash. Interactively, offer to move the existing entry to
-/// the new path; otherwise refuse and print the two exact commands so a
-/// scripted caller can pick a resolution deliberately.
+/// Break a uuid clash: offer to move the existing entry to the new
+/// path. `--yes` is no answer here — the two resolutions are not more
+/// and less cautious versions of one action, they register different
+/// things — so the operator is always asked, and a stdin that carries
+/// no answer names both commands instead of picking one.
 fn resolve_uuid_clash(
     registry_path: &Path,
     path: &Path,
     uuid: &str,
     existing_key: &str,
     existing_path: &Path,
-    yes: bool,
+    _yes: bool,
 ) -> Result<()> {
-    use std::io::IsTerminal;
-    let interactive = !yes && std::io::stdin().is_terminal();
-    if !interactive {
-        return Err(Report::new(BookrackCliError::LocalUserError {
-            message: format!(
-                "uuid {uuid} is already registered as '{existing_key}'.\n\
-                 to move it (same library, new path): bookrack libraries add {existing_key} {}\n\
-                 to register a copy (new identity):   re-run with --new-uuid",
-                path.display()
-            ),
-        }));
-    }
     eprintln!(
         "uuid {uuid} is already registered as '{existing_key}' at {}.",
         existing_path.display()
@@ -293,8 +283,12 @@ fn resolve_uuid_clash(
     )
     .map_err(|e| eyre::eyre!("read clash resolution: {e}"))?
     .agreed_or_refuse(
-        "libraries add",
-        "re-run with --new-uuid to register a copy under a new identity",
+        &format!("libraries add: uuid {uuid} is already registered as '{existing_key}'"),
+        &format!(
+            "to move it (same library, new path): bookrack libraries add {existing_key} {}; \
+             to register a copy (new identity): re-run with --new-uuid",
+            path.display()
+        ),
     )?;
     if move_it {
         repoint_library(registry_path, existing_key, path).map_err(config_error)?;
