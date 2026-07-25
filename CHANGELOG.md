@@ -10,6 +10,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **cli: the `papers metadata` writes honour `--json` and `--quiet`.**
+  All ten verbs — `reaudit`, `set`, `clear`, `void`, `ack`,
+  `approve`, `reject`, `reopen`, `contributor_add`,
+  `contributor_remove` — printed their one-line summary
+  unconditionally, so `--json` produced an English sentence instead
+  of a payload and `--quiet` produced one instead of silence. They
+  now settle like the book-side peers: nothing under `--quiet`, the
+  server's response object under `--json`, the same summary line in
+  human mode.
+
 - **cli: `papers show` no longer prints the abstract body inside its
   key-value card.** The card renders the effective biblio section
   key by key, and `effective_biblio` carries `title` and

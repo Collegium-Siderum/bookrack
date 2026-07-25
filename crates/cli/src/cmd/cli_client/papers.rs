@@ -9,9 +9,9 @@
 use std::path::PathBuf;
 
 use bookrack_cli::render::confirm::ConfirmMode;
-use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::{KvTable, RowTable};
+use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
@@ -62,29 +62,30 @@ async fn metadata(
             if let Some(name) = audit_profile.or(default_audit_profile) {
                 params["audit_profile"] = Value::String(name);
             }
-            let value =
+            let response =
                 helpers::call_with_progress_value(client, "papers.metadata.reaudit", params)
                     .await?;
-            let verdict = value
+            let verdict = response
                 .get("verdict")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let confidence = value
+            let confidence = response
                 .get("confidence")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let previous_verdict = value
+            let previous_verdict = response
                 .get("previous_verdict")
                 .and_then(Value::as_str)
                 .unwrap_or("unset");
-            let previous_confidence = value
+            let previous_confidence = response
                 .get("previous_confidence")
                 .and_then(Value::as_str)
                 .unwrap_or("unset");
-            println!(
+            let sentence = format!(
                 "Reaudited paper {intake_id}: verdict {verdict} (was {previous_verdict}), \
                  confidence {confidence} (was {previous_confidence})."
             );
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::Set {
@@ -99,29 +100,35 @@ async fn metadata(
                 "value": value,
                 "confirmed": confirmed,
             });
-            helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
-            println!("Set {field} on paper {intake_id} to {value:?}.");
+            let response =
+                helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
+            emit_metadata_outcome(
+                &response,
+                format!("Set {field} on paper {intake_id} to {value:?}."),
+            );
             Ok(())
         }
         PapersMetadataAction::Clear { intake_id, field } => {
             let params = json!({ "intake_id": intake_id, "field": field });
-            let value =
+            let response =
                 helpers::call_with_progress_value(client, "papers.metadata.clear", params).await?;
-            let removed = value
+            let removed = response
                 .get("removed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if removed {
-                println!("Cleared override on {field} for paper {intake_id}.");
+            let sentence = if removed {
+                format!("Cleared override on {field} for paper {intake_id}.")
             } else {
-                println!("No override on {field} for paper {intake_id} to clear.");
-            }
+                format!("No override on {field} for paper {intake_id} to clear.")
+            };
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::Void { intake_id, field } => {
             let params = json!({ "intake_id": intake_id, "field": field });
-            helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
-            println!("Voided {field} on paper {intake_id}.");
+            let response =
+                helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
+            emit_metadata_outcome(&response, format!("Voided {field} on paper {intake_id}."));
             Ok(())
         }
         PapersMetadataAction::Ack { intake_id, notes } => {
@@ -186,36 +193,38 @@ async fn metadata(
             if let Some(orcid) = orcid {
                 params["orcid"] = Value::String(orcid);
             }
-            let value = helpers::call_with_progress_value(
+            let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_add",
                 params,
             )
             .await?;
-            let id = value.get("contributor_id").and_then(Value::as_i64);
-            println!(
+            let id = response.get("contributor_id").and_then(Value::as_i64);
+            let sentence = format!(
                 "Added contributor to paper {intake_id} (contributor_id={}).",
                 id.map_or("unknown".to_string(), |i| i.to_string()),
             );
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::ContributorRemove { contributor_id } => {
             let params = json!({ "contributor_id": contributor_id });
-            let value = helpers::call_with_progress_value(
+            let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_remove",
                 params,
             )
             .await?;
-            let removed = value
+            let removed = response
                 .get("removed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if removed {
-                println!("Removed contributor {contributor_id}.");
+            let sentence = if removed {
+                format!("Removed contributor {contributor_id}.")
             } else {
-                println!("No contributor {contributor_id} to remove.");
-            }
+                format!("No contributor {contributor_id} to remove.")
+            };
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
     }
@@ -232,9 +241,34 @@ async fn review_status_call(
     if let Some(notes) = notes {
         params["notes"] = Value::String(notes);
     }
-    helpers::call_with_progress_value(client, method, params).await?;
-    println!("Paper {intake_id} review status is now {pretty_status}.");
+    let response = helpers::call_with_progress_value(client, method, params).await?;
+    emit_metadata_outcome(
+        &response,
+        format!("Paper {intake_id} review status is now {pretty_status}."),
+    );
     Ok(())
+}
+
+/// Prints the outcome of one `papers metadata` write in the mode the
+/// operator asked for.
+fn emit_metadata_outcome(response: &Value, sentence: String) {
+    if let Some(text) = metadata_outcome_line(ctx().output(), response, sentence) {
+        println!("{text}");
+    }
+}
+
+/// Output-mode gate shared by every `papers metadata` write: `Quiet`
+/// prints nothing and lets the exit code answer, `Json` prints the
+/// server's response payload so a script parses one object, `Human`
+/// prints the one-line summary.
+fn metadata_outcome_line(mode: OutputMode, response: &Value, sentence: String) -> Option<String> {
+    match mode {
+        OutputMode::Quiet => None,
+        OutputMode::Json => {
+            Some(serde_json::to_string_pretty(response).unwrap_or_else(|_| response.to_string()))
+        }
+        OutputMode::Human => Some(sentence),
+    }
 }
 
 async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -693,6 +727,40 @@ mod tests {
             "overrides": [],
             "abstract_text": ABSTRACT,
         })
+    }
+
+    const SENTENCE: &str = "Cleared override on title for paper 7.";
+
+    fn write_response() -> Value {
+        json!({ "removed": true, "field": "title", "intake_id": 7 })
+    }
+
+    #[test]
+    fn a_metadata_write_prints_nothing_in_quiet_mode() {
+        assert_eq!(
+            metadata_outcome_line(OutputMode::Quiet, &write_response(), SENTENCE.to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_metadata_write_prints_the_server_payload_in_json_mode() {
+        let line = metadata_outcome_line(OutputMode::Json, &write_response(), SENTENCE.to_string())
+            .expect("json mode prints the payload");
+        assert!(
+            !line.contains(SENTENCE),
+            "the human sentence reached a --json stream:\n{line}"
+        );
+        let parsed: Value = serde_json::from_str(&line).expect("json mode prints one JSON object");
+        assert_eq!(parsed, write_response());
+    }
+
+    #[test]
+    fn a_metadata_write_prints_the_summary_in_human_mode() {
+        assert_eq!(
+            metadata_outcome_line(OutputMode::Human, &write_response(), SENTENCE.to_string()),
+            Some(SENTENCE.to_string())
+        );
     }
 
     #[test]
