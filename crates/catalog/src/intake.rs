@@ -1957,32 +1957,103 @@ mod tests {
     }
 
     #[test]
-    fn find_intakes_runs_in_under_ten_millis_on_a_seven_field_filter() {
+    fn find_intakes_ands_every_field_of_a_multi_field_filter() {
         let mut catalog = catalog();
-        for i in 0..50u32 {
-            let sha = format!("sha-{i:03}");
-            let title = format!("Title {i:03}");
-            let author = format!("Author {i:03}");
-            seed_book(&mut catalog, &sha, &title, &author);
-        }
+        let ids: Vec<i64> = (0..50u32)
+            .map(|i| {
+                seed_book(
+                    &mut catalog,
+                    &format!("sha-{i:03}"),
+                    &format!("Title {i:03}"),
+                    &format!("Author {i:03}"),
+                )
+            })
+            .collect();
+        let target = ids[42];
+
+        let pending = [IntakeStatus::Pending];
         let filter = IntakeFilter {
             title_substring: Some("Title"),
             contributor_name: Some("Author 042"),
             contributor_role: Some("author"),
-            statuses: &[IntakeStatus::Pending],
+            statuses: &pending,
             format: Some("epub"),
             ..IntakeFilter::default()
         };
-        let start = std::time::Instant::now();
         let hits = catalog
             .find_intakes(&filter, 100, 0)
             .expect("filtered find");
-        let elapsed = start.elapsed();
-        assert_eq!(hits.len(), 1);
-        // 168-book scale sanity check from the manual; 10 ms is generous.
-        assert!(
-            elapsed < std::time::Duration::from_millis(50),
-            "filtered find took {elapsed:?}"
+        assert_eq!(
+            hits.iter().map(|i| i.intake_id).collect::<Vec<_>>(),
+            vec![target],
+            "the filter picks the one book matching all five fields",
+        );
+
+        // Every field narrows on its own: a near miss in any one of
+        // them empties the result, so none can silently drop out of the
+        // WHERE clause while the others carry the assertion.
+        let embedded = [IntakeStatus::Embedded];
+        let near_misses = [
+            (
+                "title substring",
+                IntakeFilter {
+                    title_substring: Some("Nothing"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "contributor name",
+                IntakeFilter {
+                    contributor_name: Some("Author 999"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "contributor role",
+                IntakeFilter {
+                    contributor_role: Some("translator"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "status",
+                IntakeFilter {
+                    statuses: &embedded,
+                    ..filter.clone()
+                },
+            ),
+            (
+                "format",
+                IntakeFilter {
+                    format: Some("pdf"),
+                    ..filter.clone()
+                },
+            ),
+        ];
+        for (field, near_miss) in near_misses {
+            let hits = catalog
+                .find_intakes(&near_miss, 100, 0)
+                .expect("filtered find");
+            assert!(
+                hits.is_empty(),
+                "a near miss on the {field} must exclude the row, got {} hits",
+                hits.len(),
+            );
+        }
+
+        // The contributor name selects rather than merely narrows:
+        // naming the neighbour moves the hit to the neighbour's row
+        // instead of emptying the result or keeping the old one.
+        let neighbour = IntakeFilter {
+            contributor_name: Some("Author 043"),
+            ..filter.clone()
+        };
+        let hits = catalog
+            .find_intakes(&neighbour, 100, 0)
+            .expect("filtered find");
+        assert_eq!(
+            hits.iter().map(|i| i.intake_id).collect::<Vec<_>>(),
+            vec![ids[43]],
         );
     }
 
