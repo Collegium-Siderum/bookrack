@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **doctor: a registry that cannot be read is reported instead of
+  passing for no registry at all.** Both registry-backed sections
+  resolved the library registry with a pattern that folded a read or
+  parse failure into the "no registry is configured" case, so a corrupt
+  `registry.toml` produced exactly the output of a machine that never
+  had one: the registry-consistency and index-profile-coherence
+  sections disappeared without a word, and the report a user pasted
+  into a bug looked healthy. The two sections now share one resolution
+  of the registry. A registry that exists but cannot be read raises a
+  `registry` WARN row naming the file and the reason, and the
+  index-profile section states that its check was skipped rather than
+  leaving an absent section to be read as a clean one. A registry path
+  that does not exist yet stays silent as before — the write verbs
+  create the file on first use.
+
 - **cli: the `papers list` / `papers find` footer keeps quiet about a
   total it was not given.** A response without a `total` was read as
   a total of zero, so a page of three rows footed itself `(3 of 0)`.

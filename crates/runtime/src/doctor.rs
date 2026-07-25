@@ -147,8 +147,11 @@ pub async fn gather_with(
         push_catalog_row(&mut rows, cfg);
         push_corpus_row(&mut rows, cfg);
     }
-    push_registry_consistency_rows(&mut rows);
-    push_index_profile_coherence_rows(&mut rows);
+    // One resolution feeds both registry-backed sections, so they can
+    // never disagree about what the registry says.
+    let registry = probe_registry(list_libraries());
+    push_registry_consistency_rows(&mut rows, &registry);
+    push_index_profile_coherence_rows(&mut rows, &registry);
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
@@ -737,18 +740,96 @@ fn manifest_error_reason(error: &ManifestError) -> String {
     }
 }
 
+/// What resolving the library registry found. Kept as a value so the
+/// two registry-backed sections classify one observation rather than
+/// reading the registry once each, and so a test drives them without
+/// touching the process environment.
+#[derive(Debug, Clone)]
+enum RegistryProbe {
+    /// No registry is configured, or the file it names does not exist.
+    /// Both sections stay silent: the registry is optional and the write
+    /// verbs create it on first use, so its absence is a fresh install
+    /// rather than a fault.
+    Absent,
+    /// The registry resolved; the entries it lists, sorted by name.
+    Entries(Vec<LibraryEntry>),
+    /// The registry file is present but could not be read: its path and
+    /// the compact reason.
+    Unreadable { path: String, reason: String },
+}
+
+/// Map a [`list_libraries`] outcome to a [`RegistryProbe`], keeping
+/// "there is no registry" and "the registry cannot be read" apart. A
+/// file that does not exist joins [`RegistryProbe::Absent`] whether the
+/// environment named it or it resolved as the platform default, so the
+/// two states the config layer distinguishes reach the report intact.
+fn probe_registry(listed: Result<Option<Vec<LibraryEntry>>, ConfigError>) -> RegistryProbe {
+    match listed {
+        Ok(Some(entries)) => RegistryProbe::Entries(entries),
+        Ok(None) => RegistryProbe::Absent,
+        Err(ConfigError::RegistryUnreadable { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            RegistryProbe::Absent
+        }
+        Err(error) => RegistryProbe::Unreadable {
+            path: registry_error_path(&error),
+            reason: registry_error_reason(&error),
+        },
+    }
+}
+
+/// The registry path a read failure names, for the row's value column.
+/// Falls back to the platform default so the row still points at a
+/// file when the error carries no path of its own.
+fn registry_error_path(error: &ConfigError) -> String {
+    match error {
+        ConfigError::RegistryUnreadable { path, .. }
+        | ConfigError::RegistryMalformed { path, .. } => path.display().to_string(),
+        _ => default_registry_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".to_string()),
+    }
+}
+
+/// A compact reason for a registry read failure, in the shape
+/// [`manifest_error_reason`] uses for an identity manifest.
+fn registry_error_reason(error: &ConfigError) -> String {
+    match error {
+        ConfigError::RegistryUnreadable { source, .. } => format!("cannot be read: {source}"),
+        ConfigError::RegistryMalformed { .. } => "does not parse".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Emit the registry–manifest consistency check. One WARN row per
 /// drifted entry, or a single OK summary when every entry agrees with its
-/// manifest. Skipped entirely when there is no registry or it is empty.
-fn push_registry_consistency_rows(rows: &mut Vec<Row>) {
-    let Ok(Some(entries)) = list_libraries() else {
-        return;
+/// manifest. Skipped entirely when there is no registry or it is empty;
+/// a registry that exists but cannot be read is reported as its own WARN
+/// row instead of joining that silence.
+fn push_registry_consistency_rows(rows: &mut Vec<Row>, probe: &RegistryProbe) {
+    let entries = match probe {
+        RegistryProbe::Absent => return,
+        RegistryProbe::Unreadable { path, reason } => {
+            rows.push(Row {
+                label: "registry".to_string(),
+                value: path.clone(),
+                status: Status::Warn {
+                    note: format!(
+                        "the registry {reason}; library names cannot be resolved until it is \
+                         fixed or rebuilt with `bookrack libraries scan --register`"
+                    ),
+                },
+            });
+            return;
+        }
+        RegistryProbe::Entries(entries) => entries,
     };
     if entries.is_empty() {
         return;
     }
     let mut clean = true;
-    for entry in &entries {
+    for entry in entries {
         let probe = probe_manifest(&entry.data_dir);
         if let Some(note) = registry_entry_issue(entry, &probe) {
             clean = false;
@@ -872,10 +953,24 @@ fn drift_issue(entry_name: &str, effective: &str, drift: &[ProfileRefDrift]) -> 
 /// compare it against the library's built index stamps, and report any
 /// lower-priority source still naming a different profile. One WARN row
 /// per problem, or a single OK summary when every referenced profile is
-/// coherent. Skipped entirely when no library references a profile.
-fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
-    let Ok(Some(entries)) = list_libraries() else {
-        return;
+/// coherent. Skipped entirely when no library references a profile; a
+/// registry that cannot be read leaves a row saying the check was
+/// skipped, so an absent section is never read as a clean one.
+fn push_index_profile_coherence_rows(rows: &mut Vec<Row>, probe: &RegistryProbe) {
+    let entries = match probe {
+        RegistryProbe::Absent => return,
+        RegistryProbe::Unreadable { .. } => {
+            rows.push(Row {
+                label: "index-profile".to_string(),
+                value: "(skipped)".to_string(),
+                status: Status::Warn {
+                    note: "the registry could not be read, so profile coherence was not checked"
+                        .to_string(),
+                },
+            });
+            return;
+        }
+        RegistryProbe::Entries(entries) => entries,
     };
     let referencing: Vec<(&LibraryEntry, String, Vec<ProfileRefDrift>)> = entries
         .iter()
@@ -1402,6 +1497,71 @@ mod tests {
         assert!(
             registry_entry_issue(&entry("cached", Some("u")), &ManifestProbe::NoManifest).is_some()
         );
+    }
+
+    #[test]
+    fn an_unreadable_registry_is_reported_by_both_registry_sections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("registry.toml");
+        std::fs::write(&path, "this is not = valid = toml").expect("seed a malformed registry");
+        let error = bookrack_config::list_libraries_at(&path)
+            .expect_err("a malformed registry must not parse");
+
+        let probe = probe_registry(Err(error));
+        let RegistryProbe::Unreadable {
+            path: shown,
+            reason,
+        } = &probe
+        else {
+            panic!("a registry that exists but cannot be read must not probe as absent: {probe:?}");
+        };
+        assert_eq!(shown, &path.display().to_string());
+        assert!(reason.contains("does not parse"), "{reason}");
+
+        let mut rows = Vec::new();
+        push_registry_consistency_rows(&mut rows, &probe);
+        push_index_profile_coherence_rows(&mut rows, &probe);
+
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["registry", "index-profile"], "{rows:?}");
+        for row in &rows {
+            assert!(
+                matches!(row.status, Status::Warn { .. }),
+                "an unreadable registry is a warning, not a pass: {row:?}"
+            );
+        }
+        assert!(rows[0].value.contains("registry.toml"), "{:?}", rows[0]);
+        let Status::Warn { note } = &rows[1].status else {
+            unreachable!()
+        };
+        assert!(note.contains("could not be read"), "{note}");
+    }
+
+    #[test]
+    fn a_registry_that_is_absent_or_uncreated_leaves_both_sections_silent() {
+        // `Ok(None)` is "no registry is configured"; a `NotFound` read
+        // failure is a configured path the write verbs have not created
+        // yet. Neither is a fault, so neither may produce a row — the
+        // reporting above must not be bought by warning on fresh
+        // installs.
+        let listed: [Result<Option<Vec<LibraryEntry>>, ConfigError>; 2] = [
+            Ok(None),
+            Err(ConfigError::RegistryUnreadable {
+                path: std::path::PathBuf::from("/roots/registry.toml"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+        ];
+        for outcome in listed {
+            let probe = probe_registry(outcome);
+            assert!(
+                matches!(probe, RegistryProbe::Absent),
+                "expected an absent registry, got {probe:?}"
+            );
+            let mut rows = Vec::new();
+            push_registry_consistency_rows(&mut rows, &probe);
+            push_index_profile_coherence_rows(&mut rows, &probe);
+            assert!(rows.is_empty(), "{rows:?}");
+        }
     }
 
     #[test]
