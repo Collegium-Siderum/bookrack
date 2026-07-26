@@ -79,9 +79,7 @@ index profile's fact, and nothing overrides it. The file accepts these
 keys:
 
 ```toml
-ollama_url    = "http://localhost:11434"
-mcp_addr      = "127.0.0.1:8765"
-log_directive = "info,lance=warn"
+ollama_url = "http://localhost:11434"
 
 [search]
 top_k          = 5      # passages a query returns
@@ -105,14 +103,26 @@ library's manifest rather than to this file, because it is a property of
 the library rather than of this machine. See [Retrieval
 profiles](#retrieval-profiles-index-profile).
 
-Two keys are **retired**: `embed_model` and `index_profile` as *file*
-fields. The embed model is declared by the library's index profile, and
-the profile reference lives in the manifest. A file still carrying
-either is refused by name — every command fails until the line goes,
-rather than the field being silently ignored — and `libraries config
-<name> --unset <key>` deletes it. See [Declaring the embed model through
-an index
-profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile).
+Four keys are **retired**. Two of them belong to the library rather than
+to this machine: `embed_model` is declared by the library's index
+profile, and `index_profile` as a *file* field is superseded by the
+manifest. The other two belong to the process rather than to a library:
+`mcp_addr` and `log_directive` are resolved before any data root is
+known — the log subscriber is installed and the listen address is chosen
+by the binary that then goes looking for a library, so a value sitting
+inside a library could never have been read. Their homes are
+`BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) and `BOOKRACK_LOG` /
+`BOOKRACK_LOG_CONSOLE`; both variables are alive and unchanged.
+
+A file still carrying any of the four is refused by name — every command
+that resolves a data root fails until the line goes, rather than the
+field being silently ignored — and `libraries config <name> --unset
+<key>` deletes it. Printing the file with `libraries config <name>`
+still works and annotates each retired line. See [Declaring the embed
+model through an index
+profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile)
+and [Retiring the process-level keys from
+`config.toml`](UPGRADE.md#retiring-the-process-level-keys-from-configtoml).
 
 ## Environment knobs
 

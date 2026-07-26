@@ -1486,11 +1486,11 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     // A hand-written comment the edit must not clobber.
     std::fs::write(
         root.path().join("config.toml"),
-        "# operator note: leave this here\nlog_directive = \"old-directive\"\n",
+        "# operator note: leave this here\nollama_url = \"http://old:11434\"\n",
     )?;
 
     let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "log_directive=new-directive"])
+        .args(["libraries", "config", "prod", "ollama_url=http://new:11434"])
         .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
         .env("BOOKRACK_REGISTRY", &registry_path)
         .env_remove("BOOKRACK_DATA_DIR")
@@ -1516,7 +1516,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         "the hand-written comment was clobbered: {written}",
     );
     assert!(
-        written.contains("new-directive") && !written.contains("old-directive"),
+        written.contains("http://new:11434") && !written.contains("http://old:11434"),
         "the key was not updated: {written}",
     );
 
@@ -1534,7 +1534,8 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     assert_eq!(dump.status.code(), Some(0));
     let dump_out = String::from_utf8_lossy(&dump.stdout);
     assert!(
-        dump_out.contains("# operator note: leave this here") && dump_out.contains("new-directive"),
+        dump_out.contains("# operator note: leave this here")
+            && dump_out.contains("http://new:11434"),
         "the dump should print the whole file: {dump_out}",
     );
     Ok(())
@@ -1689,6 +1690,129 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
         Some(2),
         "a retired key is not a settable key (exit 2); stderr={:?}",
         String::from_utf8_lossy(&reset.stderr),
+    );
+    Ok(())
+}
+
+/// The two process-level keys are refused the same way: a `config.toml`
+/// carrying `mcp_addr` or `log_directive` fails every command that
+/// resolves the root, and the verbatim dump — the one read surface a
+/// retired line survives, because it never parses the document — says so
+/// instead of handing back a line that resolves to nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Result<()> {
+    let runtime_dir = tempfile::tempdir()?;
+    let registry_dir = tempfile::tempdir()?;
+    let root = tempfile::tempdir()?;
+    let registry_path = registry_dir.path().join("registry.toml");
+    std::fs::write(
+        &registry_path,
+        format!(
+            "[libraries.prod]\ndata_dir = {}\n",
+            toml_escape(root.path()),
+        ),
+    )?;
+    std::fs::write(
+        root.path().join("config.toml"),
+        "ollama_url = \"http://127.0.0.1:11434\"\nmcp_addr = \"127.0.0.1:9999\"\n\
+         log_directive = \"debug\"\n",
+    )?;
+
+    let doctor = tokio::process::Command::new(bookrack_bin())
+        .args(["--library", "prod", "doctor"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        doctor.status.code(),
+        Some(1),
+        "an unusable root config is a self-reported unhealthy doctor (exit 1)",
+    );
+    let report = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        report.contains("mcp_addr") && report.contains("BOOKRACK_MCP_ADDR"),
+        "the refusal must name the key and its real home: {report}",
+    );
+
+    // The verbatim dump still prints the file -- an operator has to see
+    // what to delete -- and annotates each retired line on stderr.
+    let dump = tokio::process::Command::new(bookrack_bin())
+        .args(["libraries", "config", "prod"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(dump.status.code(), Some(0));
+    let dumped = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        dumped.contains("mcp_addr") && dumped.contains("log_directive"),
+        "the dump prints the file verbatim: {dumped}",
+    );
+    let notes = String::from_utf8_lossy(&dump.stderr);
+    assert!(
+        notes.contains("`mcp_addr` is retired") && notes.contains("BOOKRACK_MCP_ADDR"),
+        "the dump must annotate a retired line: {notes}",
+    );
+    assert!(
+        notes.contains("`log_directive` is retired") && notes.contains("BOOKRACK_LOG"),
+        "both retired lines are annotated: {notes}",
+    );
+
+    // Both lines go in one invocation, and the root resolves again.
+    let unset = tokio::process::Command::new(bookrack_bin())
+        .args([
+            "libraries",
+            "config",
+            "prod",
+            "--unset",
+            "mcp_addr",
+            "--unset",
+            "log_directive",
+        ])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert_eq!(
+        unset.status.code(),
+        Some(0),
+        "unsetting retired keys must succeed; stderr={:?}",
+        String::from_utf8_lossy(&unset.stderr),
+    );
+    let written = std::fs::read_to_string(root.path().join("config.toml"))?;
+    assert!(!written.contains("mcp_addr"), "{written}");
+    assert!(!written.contains("log_directive"), "{written}");
+    assert!(
+        written.contains("ollama_url"),
+        "the rest of the file survives: {written}"
+    );
+
+    let cured = tokio::process::Command::new(bookrack_bin())
+        .args(["--library", "prod", "doctor"])
+        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
+        .env("BOOKRACK_REGISTRY", &registry_path)
+        .env_remove("BOOKRACK_DATA_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    assert!(
+        !String::from_utf8_lossy(&cured.stdout).contains("retired key"),
+        "the refusal must be gone once the lines are",
     );
     Ok(())
 }

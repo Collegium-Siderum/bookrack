@@ -269,6 +269,39 @@ Two consequences worth knowing:
   registry cache for every root it finds, which is also the repair for a
   registry that drifted or was lost.
 
+## Retiring the process-level keys from `config.toml`
+
+`mcp_addr` and `log_directive` are no longer `config.toml` keys. Neither
+ever resolved: both are read before a data root is known — the log
+subscriber is installed by the binary that then goes looking for a
+library, and the MCP listen address is chosen by the same process — so a
+value written inside a library was accepted, stored, and never consulted.
+Writing one succeeded, restarting the daemon changed nothing, and nothing
+said so.
+
+They are now refused by name. **A library whose `config.toml` still
+carries either line fails on every command that resolves a data root**
+until the line goes. That is the point: a hard error naming the key beats
+the silent ignore it replaces, and the error carries both the real home
+and the command that deletes the line.
+
+One offline verb — it reads the registry directly rather than resolving a
+root, so the cure is not blocked by the disease — clears them:
+
+```
+bookrack libraries config <name> --unset mcp_addr --unset log_directive
+```
+
+`bookrack libraries config <name>` with no arguments still prints the
+file, and annotates each retired line it finds.
+
+The knobs themselves are unchanged. Declare the listen address with
+`BOOKRACK_MCP_ADDR` or `bookrack run --mcp-addr`, and verbosity with
+`BOOKRACK_LOG` (plus `BOOKRACK_LOG_CONSOLE` for the stderr layer);
+[`.env.example`](../.env.example) documents both with their defaults.
+Nothing about the resolved values changes — only where they may be
+written.
+
 ## What never refreshes automatically
 
 bookrack never decides, on its own, that derived content is stale and

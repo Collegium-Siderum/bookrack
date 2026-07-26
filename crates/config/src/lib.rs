@@ -605,11 +605,14 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 /// Per-data-root configuration loaded from `<data_root>/config.toml`.
 ///
 /// Carries runtime knobs that vary by library: the Ollama endpoint, the
-/// embed model, the MCP listen address, the log filter directive, the
-/// index-profile reference, and the search knobs. Each field is `None`
+/// search knobs, and the reranker deployment knobs. Each field is `None`
 /// when the file does not set it; the matching env var (where one
 /// exists) overrides this layer, and the hardcoded default wins when
 /// both are absent. Written by `bookrack init`; safe to edit by hand.
+///
+/// The retired fields carry nothing: they exist so a document written
+/// by an older release still parses far enough for
+/// [`load_root_config`] to refuse the key by name.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RootConfig {
@@ -622,10 +625,12 @@ pub struct RootConfig {
     /// in [`ConfigError::RootConfigRetiredKey`]; nothing reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
-    /// Address the MCP server binds.
+    /// Retired: the MCP listen address is resolved before any data root
+    /// is known. Kept for the same reason as [`RootConfig::embed_model`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_addr: Option<String>,
-    /// `EnvFilter` directive for tracing verbosity.
+    /// Retired: log verbosity is resolved before any data root is known.
+    /// Kept for the same reason as [`RootConfig::embed_model`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_directive: Option<String>,
     /// Retired: a library's profile reference lives in its manifest.
@@ -693,13 +698,44 @@ const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
          `bookrack libraries config <name> index_profile=<profile>`, then drop the line \
          (`bookrack libraries config <name> --unset index_profile`)",
     ),
+    (
+        "mcp_addr",
+        "the MCP listen address is a process-level knob, resolved before any data root is \
+         known -- set BOOKRACK_MCP_ADDR (or pass `bookrack run --mcp-addr`), then drop the line \
+         (`bookrack libraries config <name> --unset mcp_addr`)",
+    ),
+    (
+        "log_directive",
+        "log verbosity is a process-level knob, resolved before any data root is known -- \
+         set BOOKRACK_LOG (and BOOKRACK_LOG_CONSOLE for the stderr layer), then drop the \
+         line (`bookrack libraries config <name> --unset log_directive`)",
+    ),
 ];
+
+/// The way out of `key`, if `key` is retired. Lets a surface that prints
+/// a `config.toml` verbatim — where a retired line is text, not a parse
+/// failure — say what the line means without keeping a second copy of
+/// [`RETIRED_ROOT_CONFIG_KEYS`].
+pub fn retired_root_config_key_help(key: &str) -> Option<&'static str> {
+    RETIRED_ROOT_CONFIG_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, help)| *help)
+}
+
+/// Every retired key, in the order they are listed. Lets a caller walk
+/// the set without owning it.
+pub fn retired_root_config_keys() -> impl Iterator<Item = &'static str> {
+    RETIRED_ROOT_CONFIG_KEYS.iter().map(|(key, _)| *key)
+}
 
 /// Which retired key `cfg` sets, if any, in the order they are listed.
 fn retired_root_config_key(cfg: &RootConfig) -> Option<(&'static str, &'static str)> {
     let set = |key: &str| match key {
         "embed_model" => cfg.embed_model.is_some(),
         "index_profile" => cfg.index_profile.is_some(),
+        "mcp_addr" => cfg.mcp_addr.is_some(),
+        "log_directive" => cfg.log_directive.is_some(),
         _ => false,
     };
     RETIRED_ROOT_CONFIG_KEYS
@@ -764,8 +800,6 @@ pub fn render_root_config_toml(ollama_url: &str) -> String {
 /// nested table (`search.top_k` edits `top_k` under `[search]`).
 pub const ROOT_CONFIG_KEYS: &[&str] = &[
     "ollama_url",
-    "mcp_addr",
-    "log_directive",
     "search.top_k",
     "search.weak_threshold",
     "reranker.url",
@@ -780,8 +814,6 @@ pub const ROOT_CONFIG_KEYS: &[&str] = &[
 pub fn root_config_env_override(key: &str) -> Option<&'static str> {
     match key {
         "ollama_url" => Some(OLLAMA_URL_ENV),
-        "mcp_addr" => Some(MCP_ADDR_ENV),
-        "log_directive" => Some(LOG_ENV),
         "search.top_k" => Some(SEARCH_TOP_K_ENV),
         "search.weak_threshold" => Some(SEARCH_WEAK_THRESHOLD_ENV),
         "reranker.url" => Some(RERANKER_URL_ENV),
@@ -947,12 +979,10 @@ fn validate_root_config_unset_key(key: &str) -> Result<(), RootConfigSetError> {
     validate_root_config_key(key)
 }
 
-/// Light per-key value check: `ollama_url` must carry a scheme and an
-/// authority, `mcp_addr` must have a `host:port` shape with a numeric
-/// port, `search.top_k` must be a positive integer, and
-/// `search.weak_threshold` a finite number. `log_directive` is
-/// free-form — a tracing directive is validated by the runtime that
-/// consumes it.
+/// Light per-key value check: `ollama_url` and `reranker.url` must carry
+/// a scheme and an authority, `search.top_k`, `reranker.ctx`, and
+/// `reranker.threads` must be positive integers, and
+/// `search.weak_threshold` a finite number.
 fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
     let invalid = |reason: &str| {
         Err(RootConfigSetError::InvalidValue {
@@ -967,15 +997,6 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
             };
             if scheme.is_empty() || rest.is_empty() {
                 return invalid("expected a URL like 'http://host:port'");
-            }
-            Ok(())
-        }
-        "mcp_addr" => {
-            let Some((host, port)) = value.rsplit_once(':') else {
-                return invalid("expected a 'host:port' address");
-            };
-            if host.is_empty() || port.parse::<u16>().is_err() {
-                return invalid("expected a 'host:port' address with a numeric port");
             }
             Ok(())
         }
@@ -3362,6 +3383,80 @@ mod tests {
     }
 
     #[test]
+    fn a_root_config_setting_mcp_addr_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ROOT_CONFIG_NAME),
+            "mcp_addr = \"127.0.0.1:9999\"\n",
+        )
+        .expect("write config");
+
+        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
+        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
+            panic!("expected RootConfigRetiredKey, got {err:?}");
+        };
+        assert_eq!(*key, "mcp_addr");
+        // The way out names the knob's actual home and the command that
+        // deletes the dead line.
+        assert!(help.contains(MCP_ADDR_ENV), "{help}");
+        assert!(help.contains("--unset mcp_addr"), "{help}");
+    }
+
+    #[test]
+    fn a_root_config_setting_log_directive_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ROOT_CONFIG_NAME),
+            "log_directive = \"debug\"\n",
+        )
+        .expect("write config");
+
+        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
+        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
+            panic!("expected RootConfigRetiredKey, got {err:?}");
+        };
+        assert_eq!(*key, "log_directive");
+        assert!(help.contains(LOG_ENV), "{help}");
+        assert!(help.contains("--unset log_directive"), "{help}");
+    }
+
+    #[test]
+    fn the_retired_process_level_keys_cannot_be_set_but_can_be_unset() {
+        for (key, value) in [("mcp_addr", "127.0.0.1:1"), ("log_directive", "debug")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+
+            // A process-level knob has no per-library file to write to.
+            let err =
+                set_root_config_values(dir.path(), &[(key.to_string(), value.to_string())], &[])
+                    .expect_err("a retired key cannot be set");
+            assert!(
+                matches!(err, RootConfigSetError::UnknownKey { .. }),
+                "{err:?}"
+            );
+
+            // Deleting the line is the cure the load error prescribes, so
+            // it stays available against a file that still carries it.
+            std::fs::write(
+                dir.path().join(ROOT_CONFIG_NAME),
+                format!(
+                    "# operator note: keep me\nollama_url = \"http://127.0.0.1:11434\"\n\
+                     {key} = \"{value}\"\n"
+                ),
+            )
+            .expect("write config");
+            set_root_config_values(dir.path(), &[], &[key.to_string()])
+                .expect("a retired key can be unset");
+
+            let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
+            assert!(!text.contains(key), "{text}");
+            assert!(text.contains("operator note"), "{text}");
+            assert!(text.contains("ollama_url"), "{text}");
+            let cfg = load_root_config(dir.path()).expect("load after unset");
+            assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+        }
+    }
+
+    #[test]
     fn search_config_file_layer_sits_between_env_and_default() {
         let file = RootConfig {
             search: Some(RootSearchConfig {
@@ -3937,7 +4032,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nlog_directive = \"info\"\n",
+            "# hand-written note\nollama_url = \"http://127.0.0.1:11434\"\n",
         )
         .expect("seed config");
         set_root_config_values(
@@ -3980,7 +4075,7 @@ mod tests {
         assert!(cfg.search.is_none());
         // A scalar key sitting beside the table is untouched by the
         // table's removal.
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
     }
 
     #[test]
@@ -4018,13 +4113,17 @@ mod tests {
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
             "ollama_url = \"http://elsewhere:1234\"\n\
-             log_directive = \"debug\"\n",
+             \n[search]\ntop_k = 9\n",
         )
         .expect("write root config");
         let cfg = load_root_config(tmp.path()).expect("root config parses");
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
-        assert_eq!(cfg.log_directive.as_deref(), Some("debug"));
-        assert!(cfg.mcp_addr.is_none());
+        let search = cfg.search.expect("search table present");
+        assert_eq!(search.top_k, Some(9));
+        // A key the file leaves out stays `None` rather than picking up
+        // a default at this layer.
+        assert!(search.weak_threshold.is_none());
+        assert!(cfg.reranker.is_none());
     }
 
     #[test]
@@ -4090,19 +4189,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nlog_directive = \"old-directive\"\n",
+            "# hand-written note\nollama_url = \"http://old:11434\"\n",
         )
         .expect("seed config");
         set_root_config_values(
             tmp.path(),
-            &[("log_directive".to_string(), "new-directive".to_string())],
+            &[("ollama_url".to_string(), "http://new:11434".to_string())],
             &[],
         )
         .expect("set applies");
         let text = read_root_config_text(tmp.path()).expect("read back");
         assert!(text.contains("# hand-written note"));
-        assert!(text.contains("new-directive"));
-        assert!(!text.contains("old-directive"));
+        assert!(text.contains("http://new:11434"));
+        assert!(!text.contains("http://old:11434"));
     }
 
     #[test]
@@ -4133,17 +4232,17 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("mcp_addr".to_string(), "host-without-port".to_string())],
+                &[("reranker.url".to_string(), "not-a-url".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::InvalidValue { .. })
         ));
-        // A well-formed URL and address pass.
+        // Well-formed URLs pass.
         set_root_config_values(
             tmp.path(),
             &[
                 ("ollama_url".to_string(), "http://host:11434".to_string()),
-                ("mcp_addr".to_string(), "127.0.0.1:8765".to_string()),
+                ("reranker.url".to_string(), "http://host:8080".to_string()),
             ],
             &[],
         )
@@ -4155,12 +4254,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_root_config_values(
             tmp.path(),
-            &[("log_directive".to_string(), "info".to_string())],
+            &[("ollama_url".to_string(), "http://host:11434".to_string())],
             &[],
         )
         .expect("write from empty");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
     }
 
     #[test]
@@ -4168,18 +4267,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "log_directive = \"info\"\n",
+            "ollama_url = \"http://host:11434\"\n",
         )
         .expect("seed config");
         // Unsetting a key the file never set is a no-op, not an error.
-        set_root_config_values(tmp.path(), &[], &["mcp_addr".to_string()]).expect("unset absent");
+        set_root_config_values(tmp.path(), &[], &["reranker.url".to_string()])
+            .expect("unset absent");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
         // Unsetting a key that is present removes it.
-        set_root_config_values(tmp.path(), &[], &["log_directive".to_string()])
+        set_root_config_values(tmp.path(), &[], &["ollama_url".to_string()])
             .expect("unset present");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert!(cfg.log_directive.is_none());
+        assert!(cfg.ollama_url.is_none());
     }
 
     #[test]
@@ -4190,7 +4290,7 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("log_directive".to_string(), "info".to_string())],
+                &[("ollama_url".to_string(), "http://host:11434".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::Malformed { .. })
@@ -4205,8 +4305,6 @@ mod tests {
         // drop the shadowing warning the CLI prints after a write.
         let expected: &[(&str, Option<&str>)] = &[
             ("ollama_url", Some(OLLAMA_URL_ENV)),
-            ("mcp_addr", Some(MCP_ADDR_ENV)),
-            ("log_directive", Some(LOG_ENV)),
             ("search.top_k", Some(SEARCH_TOP_K_ENV)),
             ("search.weak_threshold", Some(SEARCH_WEAK_THRESHOLD_ENV)),
             ("reranker.url", Some(RERANKER_URL_ENV)),

@@ -13,8 +13,9 @@ use bookrack_config::{
     LibraryKind, LibraryManifest, LibraryOpError, ManifestIdentitySeed, ROOT_CONFIG_NAME,
     RootConfigSetError, ScanOutcome, Signal, add_library, detect_library, find_library,
     load_root_config, mounted_volumes, read_root_config_text, registry_target_path, remove_library,
-    render_manifest_toml, repoint_library, root_config_env_override, scan_for_libraries,
-    set_manifest_index_profile, set_root_config_values, upsert_library_entry,
+    render_manifest_toml, repoint_library, retired_root_config_key_help, retired_root_config_keys,
+    root_config_env_override, scan_for_libraries, set_manifest_index_profile,
+    set_root_config_values, upsert_library_entry,
 };
 use bookrack_session::{RootLock, is_root_lock_conflict};
 use eyre::{Report, Result};
@@ -520,8 +521,38 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
         );
     } else {
         print!("{text}");
+        // The verbatim dump is the one read surface a retired line
+        // survives: `load_root_config` refuses the file, so every other
+        // command names the key already. Say so here too, rather than
+        // handing back a line that resolves to nothing.
+        for note in retired_key_notes(&text) {
+            eprintln!("{note}");
+        }
     }
     Ok(())
+}
+
+/// One `note:` line per retired key the raw `config.toml` text declares,
+/// in the order the retirement table lists them.
+///
+/// Matches on a line's leading key name rather than parsing the
+/// document: a file carrying a retired key may carry other faults too,
+/// and a dump that cannot be parsed still deserves the annotation.
+fn retired_key_notes(text: &str) -> Vec<String> {
+    let declares = |key: &str| {
+        text.lines().any(|line| {
+            let line = line.trim_start();
+            line.strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+    };
+    retired_root_config_keys()
+        .filter(|key| declares(key))
+        .map(|key| {
+            let help = retired_root_config_key_help(key).unwrap_or_default();
+            format!("note: `{key}` is retired and resolves to nothing; {help}")
+        })
+        .collect()
 }
 
 /// Report a successful edit: the keys set and unset, plus the advisory
@@ -847,5 +878,28 @@ mod tests {
         std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
 
         gate_purge_target(dir.path()).expect("a real store behind the name authorises");
+    }
+
+    #[test]
+    fn retired_key_notes_annotate_only_the_lines_that_declare_one() {
+        let notes = retired_key_notes(
+            "ollama_url = \"http://127.0.0.1:11434\"\n  mcp_addr = \"127.0.0.1:9999\"\n",
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("`mcp_addr` is retired"), "{notes:?}");
+        // The way out travels with the note.
+        assert!(notes[0].contains("BOOKRACK_MCP_ADDR"), "{notes:?}");
+
+        // A file with no retired key gets no note, and neither a
+        // commented-out line nor a longer key that merely starts with a
+        // retired name counts as a declaration.
+        assert!(retired_key_notes("ollama_url = \"http://x:1\"\n").is_empty());
+        assert!(retired_key_notes("# mcp_addr = \"127.0.0.1:9999\"\n").is_empty());
+        assert!(retired_key_notes("mcp_addr_extra = \"x\"\n").is_empty());
+
+        // Two retired lines in one file are both named, so a single dump
+        // tells the operator everything to delete.
+        let both = retired_key_notes("mcp_addr = \"127.0.0.1:1\"\nlog_directive = \"debug\"\n");
+        assert_eq!(both.len(), 2, "{both:?}");
     }
 }

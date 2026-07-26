@@ -33,6 +33,26 @@ release workflow extracts the matching section verbatim from this file.
   cannot re-enter as a redirect target. Passing the list with a
   single-book scope is an error rather than a silent no-op.
 
+### Changed
+
+- **config: `mcp_addr` and `log_directive` are retired `config.toml`
+  keys.** Neither ever resolved. Both are process-level knobs, read
+  before any data root is known — the log subscriber is installed and
+  the MCP listen address is chosen by the binary that then goes looking
+  for a library — so a value written into a library's `config.toml` was
+  accepted, stored, and never consulted: the write succeeded, a daemon
+  restart changed nothing, and no surface said so. The two keys now join
+  `embed_model` and `index_profile` as retired: a file carrying either is
+  refused by name on every command that resolves a data root, and the
+  error gives the knob's real home (`BOOKRACK_MCP_ADDR` or `bookrack run
+  --mcp-addr`; `BOOKRACK_LOG` and `BOOKRACK_LOG_CONSOLE`) alongside the
+  `libraries config <name> --unset <key>` that deletes the line. Both
+  environment variables are unchanged. `libraries config <name>` also
+  annotates a retired line when it prints a file verbatim — the one read
+  surface such a line used to pass through unremarked. Upgrading a
+  library that still carries either line requires the unset; see
+  [`docs/UPGRADE.md`](docs/UPGRADE.md).
+
 ### Fixed
 
 - **index-profile: `current` and `apply` select their library through

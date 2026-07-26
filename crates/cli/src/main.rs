@@ -562,9 +562,8 @@ pub(crate) enum LibrariesAction {
         /// Registry name whose config is read or edited.
         name: String,
         /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
-        /// `mcp_addr`, `log_directive`, `index_profile`,
-        /// `search.top_k`, `search.weak_threshold`, `reranker.url`,
-        /// `reranker.ctx`, `reranker.threads`.
+        /// `index_profile`, `search.top_k`, `search.weak_threshold`,
+        /// `reranker.url`, `reranker.ctx`, `reranker.threads`.
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
         sets: Vec<(String, String)>,
         /// Key to remove from the file; accepts the same keys.
@@ -1363,12 +1362,12 @@ mod tests {
             "libraries",
             "config",
             "prod",
-            "log_directive=debug",
+            "search.top_k=7",
             "ollama_url=http://host:11434",
             "--unset",
-            "mcp_addr",
+            "reranker.url",
             "--unset",
-            "log_directive",
+            "search.weak_threshold",
         ])
         .expect("`libraries config` parses");
         match cli.command {
@@ -1379,13 +1378,16 @@ mod tests {
                 assert_eq!(
                     sets,
                     vec![
-                        ("log_directive".to_string(), "debug".to_string()),
+                        ("search.top_k".to_string(), "7".to_string()),
                         ("ollama_url".to_string(), "http://host:11434".to_string()),
                     ]
                 );
                 assert_eq!(
                     unset,
-                    vec!["mcp_addr".to_string(), "log_directive".to_string()]
+                    vec![
+                        "reranker.url".to_string(),
+                        "search.weak_threshold".to_string()
+                    ]
                 );
             }
             _ => panic!("expected `libraries config`"),
@@ -1411,9 +1413,9 @@ mod tests {
     #[test]
     fn libraries_config_rejects_a_pair_without_equals() {
         for argv in [
-            vec!["bookrack", "libraries", "config", "prod", "log_directive"],
+            vec!["bookrack", "libraries", "config", "prod", "ollama_url"],
             vec!["bookrack", "libraries", "config", "prod", "=value"],
-            vec!["bookrack", "libraries", "config", "prod", "log_directive="],
+            vec!["bookrack", "libraries", "config", "prod", "ollama_url="],
         ] {
             let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
                 panic!("a malformed pair must error: {argv:?}");
