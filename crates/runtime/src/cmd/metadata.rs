@@ -259,9 +259,10 @@ fn contributor_add(
             Err(eyre::Report::from(e)
                 .wrap_err(format!("no intake registered for book {intake_id}")))
         }
-        Err(e @ bookrack_ops::OpsError::UnknownContributorRole { .. }) => {
-            eyre::bail!("{e}");
-        }
+        // Returned by value rather than formatted: the control plane
+        // classifies by downcasting the error chain, and this variant's
+        // own Display is already the operator-facing wording.
+        Err(e @ bookrack_ops::OpsError::UnknownContributorRole { .. }) => Err(e.into()),
         Err(e) => Err(eyre::Report::from(e).wrap_err("add contributor via ops")),
     }
 }
@@ -289,9 +290,10 @@ fn contributor_remove(
             Err(eyre::Report::from(e)
                 .wrap_err(format!("no intake registered for book {intake_id}")))
         }
-        Err(e @ bookrack_ops::OpsError::ContributorNotFound { .. }) => {
-            eyre::bail!("{e}");
-        }
+        // Returned by value rather than formatted: the control plane
+        // classifies by downcasting the error chain, and this variant's
+        // own Display is already the operator-facing wording.
+        Err(e @ bookrack_ops::OpsError::ContributorNotFound { .. }) => Err(e.into()),
         Err(e) => Err(eyre::Report::from(e).wrap_err("remove contributor via ops")),
     }
 }
@@ -417,4 +419,95 @@ async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<
         report.chunks_written, report.batches
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::error_map::write_err;
+    use crate::control::jsonrpc::INVALID_PARAMS;
+    use bookrack_catalog::NewIntake;
+    use bookrack_core::ItemKind;
+    use bookrack_ops::Caller;
+    use std::path::Path;
+
+    /// A catalog-only `Ops` over a scratch root, matching what
+    /// [`catalog_only_ops`] builds from a `Config`.
+    fn ops_over(root: &Path) -> Ops<OllamaEmbedClient> {
+        Ops::catalog_only(
+            root.join("corpus.db"),
+            root.join("catalog.db"),
+            &root.join("lancedb"),
+            root.join("books"),
+            root.join("backup"),
+            Caller::cli(),
+        )
+    }
+
+    fn seed_intake(root: &Path, sha: &str) -> i64 {
+        Catalog::open(&root.join("catalog.db"))
+            .expect("open catalog")
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register intake")
+            .into_intake()
+            .intake_id
+    }
+
+    // The two tests below assert through `write_err`, the same
+    // classifier the control plane dispatches through, because the
+    // defect they pin lives between two layers that were each already
+    // covered: the ops layer raises the typed variant, and the mapper
+    // maps it, but a wrapper here can format the type out of the chain
+    // and leave both ends green.
+
+    #[test]
+    fn an_unknown_contributor_role_reaches_the_control_plane_as_invalid_params() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ops = ops_over(tmp.path());
+        let book = seed_intake(tmp.path(), "sha-contributor-role");
+
+        let err = contributor_add(
+            &ops,
+            book,
+            "narrator".to_string(),
+            "Somebody".to_string(),
+            None,
+            None,
+        )
+        .expect_err("an unknown contributor role must be refused");
+
+        let rpc = write_err("metadata.contributor_add", err);
+        assert_eq!(
+            rpc.code, INVALID_PARAMS,
+            "a mistyped role is caller input, not a handler fault; \
+             formatting the typed error into the message drops it out of \
+             the chain the mapper downcasts"
+        );
+        assert!(
+            rpc.message.contains("narrator"),
+            "the offending role survives into the message: {}",
+            rpc.message
+        );
+    }
+
+    #[test]
+    fn a_missing_contributor_row_reaches_the_control_plane_as_invalid_params() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ops = ops_over(tmp.path());
+        let book = seed_intake(tmp.path(), "sha-contributor-row");
+
+        let err = contributor_remove(&ops, book, 4242, None)
+            .expect_err("an unknown contributor id must be refused");
+
+        let rpc = write_err("metadata.contributor_remove", err);
+        assert_eq!(
+            rpc.code, INVALID_PARAMS,
+            "a contributor id that names no row is caller input"
+        );
+        assert!(
+            rpc.message.contains("4242"),
+            "the offending contributor id survives into the message: {}",
+            rpc.message
+        );
+    }
 }
