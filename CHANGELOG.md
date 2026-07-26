@@ -10,6 +10,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **retrieval: `show` flags a recall set that is entirely weak.**
+  `bookrack retrieval show <call-id>` now closes its hit table with one
+  advisory line when every recorded hit of the call sits at or above the
+  weak-match distance threshold, naming the threshold that made the
+  verdict so the line can be checked against the library's
+  configuration. The verdict is over the whole set — a single strong hit
+  vetoes it, and a call with no hits draws no line, because an absence is
+  not a weak result. This is the first consumer of
+  `search.weak_threshold` / `BOOKRACK_SEARCH_WEAK_THRESHOLD`: the knob
+  resolved through the full precedence chain but nothing read the
+  resolved value. The threshold comes from the library `retrieval show`
+  was pointed at, under the usual environment override. Nothing grades
+  an individual hit, and the search responses are unchanged.
+
 - **search: recall can exclude named books and papers.** `library.search`
   accepts `exclude_book_intake_ids` and `exclude_paper_intake_ids` on
   both the MCP and control-plane surfaces, dropping the named items'

@@ -1216,10 +1216,12 @@ impl EmbedConfig {
 pub struct SearchConfig {
     /// How many nearest passages a query returns.
     pub top_k: usize,
-    /// Cosine-distance threshold at or above which a hit is treated as
-    /// a weak match. When every top-`top_k` hit lands at or above this
-    /// value, the CLI prints an advisory line so the operator knows
-    /// the recall set is probably noise.
+    /// Cosine-distance threshold at or above which a hit counts as a
+    /// weak match. Nothing grades an individual hit: when every
+    /// recorded hit of a call lands at or above this value,
+    /// `bookrack retrieval show` prints an advisory line naming the
+    /// threshold, so the operator knows the recall set is probably
+    /// noise. A call with no hits draws no line.
     pub weak_distance_threshold: f32,
 }
 

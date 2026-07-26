@@ -7,7 +7,9 @@
 //!   recent retrieval calls joined with their `mcp_tool_calls` log
 //!   rows and prints a compact table.
 //! * `retrieval show <call-id>` reads one call and prints its metadata
-//!   followed by the hits in rank order.
+//!   followed by the hits in rank order, plus an advisory line when
+//!   every hit of the call sits at or above the library's weak-match
+//!   distance threshold.
 //!
 //! Every sidecar row lands in the book-side `catalog.db` — the
 //! recorder logs paper-side searches there too — so both commands open
@@ -60,7 +62,12 @@ pub fn run(selection: &bookrack_config::LibrarySelection, action: RetrievalActio
             let hits = catalog
                 .retrieval_hits(call_id)
                 .context("read retrieval hits")?;
-            println!("{}", render_retrieval_show(&call, &hits));
+            // The threshold is the target library's own: `cfg` already
+            // resolved `<data_root>/config.toml` under the env layer, so
+            // the advisory reports the same value a query would use.
+            let weak =
+                bookrack_config::SearchConfig::resolve(cfg.root_config()).weak_distance_threshold;
+            println!("{}", render_retrieval_show(&call, &hits, weak));
         }
     }
     Ok(())
@@ -101,10 +108,17 @@ pub(crate) fn render_retrieval_list(rows: &[RetrievalCallListing]) -> String {
 }
 
 /// Build the `retrieval show <call-id>` text block: call metadata on
-/// top, the hits in rank order below.
+/// top, the hits in rank order below, and — when every recorded hit sits
+/// at or above `weak_distance_threshold` — one advisory line naming the
+/// threshold that made the verdict.
+///
+/// The verdict is over the whole recall set, not per hit: a single
+/// strong hit makes the set worth reading, and a set with no hits at all
+/// is an absence rather than a weak result, so neither draws the line.
 pub(crate) fn render_retrieval_show(
     call: &RetrievalCallListing,
     hits: &[RetrievalCallHit],
+    weak_distance_threshold: f32,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!("call_id:      {}\n", call.call_id));
@@ -130,6 +144,20 @@ pub(crate) fn render_retrieval_show(
             ord = hit.ord,
             passage_id = hit.passage_id,
             distance = hit.distance,
+        ));
+    }
+    // Widen the `f32` threshold rather than narrowing the stored `f64`
+    // distance, so a hit sitting exactly at the threshold compares equal
+    // instead of being pushed across it by a truncating cast.
+    let threshold = f64::from(weak_distance_threshold);
+    if hits.iter().all(|hit| hit.distance >= threshold) {
+        let subject = match hits.len() {
+            1 => "the only hit sits".to_string(),
+            n => format!("all {n} hits sit"),
+        };
+        out.push_str(&format!(
+            "\nweak recall: {subject} at or above the weak-match distance threshold \
+             ({weak_distance_threshold:.4}); this recall set is probably noise.\n",
         ));
     }
     out.trim_end().to_string()
@@ -194,7 +222,7 @@ mod tests {
             .expect("read")
             .expect("present");
         let hits = catalog.retrieval_hits(call_id).expect("read hits");
-        let out = render_retrieval_show(&call, &hits);
+        let out = render_retrieval_show(&call, &hits, 1.0);
 
         assert!(out.contains(&format!("call_id:      {call_id}")));
         assert!(out.contains("query:        what is a monad"));
@@ -219,9 +247,70 @@ mod tests {
             .retrieval_call_listing(call_id)
             .expect("read")
             .expect("present");
-        let out = render_retrieval_show(&call, &[]);
+        let out = render_retrieval_show(&call, &[], 0.5);
         assert!(out.contains("n_hits:       0"));
         assert!(out.contains("no hits recorded for this call."));
         assert!(!out.contains("passage_id"));
+    }
+
+    /// Render one call whose hits sit at `distances`, judged against
+    /// `threshold`. Goes through the catalog so the rendered distances
+    /// are the ones a real sidecar row carries, not test-local floats.
+    fn render_show_with(distances: &[f32], threshold: f32) -> String {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let hits: Vec<(String, f32)> = distances
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (format!("p-{i}"), *d))
+            .collect();
+        let borrowed: Vec<(&str, f32)> = hits.iter().map(|(id, d)| (id.as_str(), *d)).collect();
+        let call_id = seed_call(&catalog, "what is a monad", &borrowed);
+        let call = catalog
+            .retrieval_call_listing(call_id)
+            .expect("read")
+            .expect("present");
+        let recorded = catalog.retrieval_hits(call_id).expect("read hits");
+        render_retrieval_show(&call, &recorded, threshold)
+    }
+
+    #[test]
+    fn retrieval_show_flags_a_recall_set_that_is_entirely_weak() {
+        let out = render_show_with(&[0.62, 0.71, 0.83], 0.5);
+        assert!(out.contains("weak recall:"), "{out}");
+        // The threshold that made the verdict is printed, so the line
+        // can be checked against the library's configuration.
+        assert!(out.contains("0.5000"), "{out}");
+        // The count is the recorded hits, not the requested top_k.
+        assert!(out.contains("all 3 hits"), "{out}");
+    }
+
+    #[test]
+    fn retrieval_show_stays_silent_when_one_hit_is_strong() {
+        let out = render_show_with(&[0.12, 0.71, 0.83], 0.5);
+        assert!(
+            !out.contains("weak recall:"),
+            "one strong hit vetoes the verdict: {out}"
+        );
+    }
+
+    #[test]
+    fn retrieval_show_treats_the_weak_threshold_as_inclusive() {
+        let out = render_show_with(&[0.5], 0.5);
+        assert!(
+            out.contains("weak recall:"),
+            "a hit exactly at the threshold is weak: {out}"
+        );
+        // A one-hit set reads as one hit.
+        assert!(out.contains("the only hit sits at or above"), "{out}");
+    }
+
+    #[test]
+    fn retrieval_show_does_not_flag_a_call_with_no_hits() {
+        let out = render_show_with(&[], 0.5);
+        assert!(out.contains("no hits recorded for this call."), "{out}");
+        assert!(
+            !out.contains("weak recall:"),
+            "zero hits is an absence, not a weak result: {out}"
+        );
     }
 }

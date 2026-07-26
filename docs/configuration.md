@@ -83,7 +83,9 @@ ollama_url = "http://localhost:11434"
 
 [search]
 top_k          = 5      # passages a query returns
-weak_threshold = 0.5    # cosine distance at or above which a hit is weak
+weak_threshold = 0.5    # cosine distance at or above which a hit is
+                        # weak; `retrieval show` flags a call whose every
+                        # recorded hit sits there
 
 [reranker]
 url     = "http://localhost:8080"  # probe an operator-run server instead
