@@ -178,6 +178,63 @@ release workflow extracts the matching section verbatim from this file.
   without `-t`, and Git Bash on Windows — where `is_terminal` is
   false with a human at the keyboard — can all still answer.
 
+- **runtime: a queue tick is published only once the state it describes
+  is on disk.** Every `queue.tick` promises values derivable from the
+  on-disk queue document, but the worker loop published its
+  crash-recovery, pull, and outcome ticks even when the atomic save
+  failed — so a subscriber could act on state a crash recovery would
+  never replay. All three publishes are now gated on the persist
+  result; a failed save logs the error, and the next successful save
+  carries the full state forward.
+
+- **runtime: `daemon.shutdown` no longer swallows the `stopping`
+  transition.** The dispatcher published `daemon.state = stopping`
+  only after the connection tasks had already exited on the shutdown
+  broadcast, so an attached `events.subscribe` client never saw the
+  notification the channel documents — the daemon simply went quiet.
+  The transition is now published before the broadcast fires, and a
+  connection task flushes the events queued on its subscription on the
+  way out, so a client watching a daemon stop is told that it is
+  stopping.
+
+- **runtime: the book-side `metadata.*` methods report a bad id, field,
+  role, or contributor row as invalid params again.** Rewording the
+  operator-facing failures with a bare bail formatted the typed
+  `OpsError` into a string, dropping it out of the error chain that
+  the control plane classifies by downcasting. Unknown intake, unknown
+  metadata field, unknown contributor role, and unknown contributor row
+  therefore all answered `-32603 internal error` instead of `-32602
+  invalid params` — telling a caller that had merely mistyped an id to
+  escalate rather than to fix the request. All fourteen affected arms
+  across the nine verbs now keep the typed error in the chain, under
+  the operator-facing context line where one applies. The `papers.*`
+  peers were never affected.
+
+- **audit-profile: an out-of-range page-count overlay is refused
+  instead of silently clamped.** `chars_per_page_ocr` and
+  `chars_per_page_doubt` in an `audit-rules/` overlay went through a
+  bare cast, so a negative or non-finite count became `0` and an
+  oversized one became `u32::MAX` — a mistyped threshold quietly became
+  a different threshold. Non-finite, negative, and out-of-range values
+  are now rejected at load time by name; fractional counts still
+  truncate as before.
+
+- **corpus: a read-only open checks the schema-version stamp.** The
+  stamp is documented as checked on every subsequent open, but
+  `open_read_only` ran only the table-spec conformance check, so a
+  corpus a different revision built opened read-only as long as its
+  table shapes still conformed. The read-only path now reads and
+  classifies the stamp, refusing a differing revision; a missing stamp
+  is still accepted without writing one. This matters more than it used
+  to: this release moves most read paths onto the read-only door.
+
+- **config: a blank `BOOKRACK_REGISTRY` falls through to the platform
+  default on the write side too.** The write verbs read the variable
+  raw, so `BOOKRACK_REGISTRY=` — an empty export, common in scripts and
+  CI — resolved to an empty path rather than to no value. The read side
+  and `libraries list` already trimmed it and treated blank as unset;
+  the write side now agrees.
+
 ### Changed
 
 - **cli: a caller without a terminal is asked to confirm, not
