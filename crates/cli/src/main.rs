@@ -59,11 +59,11 @@ Prerequisites:
 struct Cli {
     /// Select the library at this data root, overriding the
     /// environment. On local commands (`run`, `init`, `doctor`,
-    /// `audit-profile`, `distill`, `runs`) this switches the data
-    /// root for the invocation. On commands that route through a
-    /// running daemon, the daemon must already be serving this root;
-    /// a mismatch aborts the command without acting. Mutually
-    /// exclusive with `--library`.
+    /// `audit-profile`, `index-profile`, `distill`, `runs`) this
+    /// switches the data root for the invocation. On commands that
+    /// route through a running daemon, the daemon must already be
+    /// serving this root; a mismatch aborts the command without
+    /// acting. Mutually exclusive with `--library`.
     #[arg(
         long,
         global = true,
@@ -793,10 +793,11 @@ async fn run() -> Result<()> {
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
-    // root locally (`run`, `init`, `audit-profile`, the `index-profile`
-    // verbs other than an executing `apply`, `distill`, `runs`,
-    // `retrieval`, and the offline `libraries` verbs): the flag is a real
-    // switch there, not an assertion. `doctor` is not exempt — it
+    // root locally through `Config::resolve` (`run`, `init`,
+    // `audit-profile`, the `index-profile` verbs other than an executing
+    // `apply`, `distill`, `runs`, `retrieval`, and the offline
+    // `libraries` verbs): the flag is a real switch there, not an
+    // assertion. `doctor` is not exempt — it
     // resolves on its own below, but only after this check keeps a
     // running daemon from being diagnosed under the wrong library.
     // Silent when no daemon is running, when no
@@ -945,43 +946,28 @@ async fn run() -> Result<()> {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
             match &mut action {
-                IndexProfileAction::Current { library, json } => {
-                    // The global `--library` selects the same library the
-                    // subcommand-local flag does; the local one wins when
-                    // both are given.
-                    if library.is_none() {
-                        *library = selection.library.clone();
-                    }
-                    *json = *json || json_global;
-                }
+                IndexProfileAction::Current { json } => *json = *json || json_global,
                 IndexProfileAction::Diff { json, .. } => *json = *json || json_global,
-                IndexProfileAction::Apply { library, .. } if library.is_none() => {
-                    *library = selection.library.clone();
-                }
                 _ => {}
             }
+            // Both library-selecting verbs resolve the data root through
+            // the shared resolver, so the global selection reaches them
+            // whole — no per-field bridging.
+            //
             // `apply` orchestrates control-plane calls (planning offline
             // under `--dry-run`), so it dispatches to the daemon client;
             // every other verb resolves locally.
             if let IndexProfileAction::Apply {
                 name,
-                library,
                 pipeline,
                 dry_run,
                 yes,
             } = action
             {
-                cmd::cli_client::index_profile::run(
-                    &name,
-                    library.as_deref(),
-                    pipeline,
-                    dry_run,
-                    yes,
-                    None,
-                )
-                .await
+                cmd::cli_client::index_profile::run(&name, &selection, pipeline, dry_run, yes, None)
+                    .await
             } else {
-                bookrack_runtime::cmd::index_profile::run(action)
+                bookrack_runtime::cmd::index_profile::run(action, &selection)
             }
         }
         Command::Verify => cmd::cli_client::verify::run(None).await,
@@ -1475,22 +1461,78 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    /// The library selectors on the two library-selecting verbs are the
+    /// global flags, accepted after the subcommand as well as before it,
+    /// and they reach the verb as a [`LibrarySelection`] rather than as a
+    /// subcommand-local field. The bare form is legal too: resolution
+    /// then falls through to the data-root variable and the registry
+    /// default.
     #[test]
-    fn index_profile_current_parses_with_and_without_library() {
-        // Without --library the handler falls back to the registry
-        // default; the grammar must accept the bare form.
+    fn index_profile_selection_comes_from_the_global_flags() {
         for argv in [
             vec!["bookrack", "index-profile", "current"],
             vec!["bookrack", "index-profile", "current", "--json"],
-            vec!["bookrack", "index-profile", "current", "--library", "x"],
         ] {
             let cli = Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert!(cli.data_dir.is_none() && cli.library.is_none());
             let Command::IndexProfile { action } = cli.command else {
                 panic!("must parse as index-profile");
             };
             assert!(matches!(action, IndexProfileAction::Current { .. }));
         }
+
+        // Either selector, on either verb, on either side of the
+        // subcommand, lands in the same selection.
+        for argv in [
+            vec!["bookrack", "index-profile", "current", "--library", "x"],
+            vec!["bookrack", "--library", "x", "index-profile", "current"],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert_eq!(cli.selection().library.as_deref(), Some("x"));
+            assert!(cli.selection().data_dir.is_none());
+        }
+        for argv in [
+            vec![
+                "bookrack",
+                "index-profile",
+                "apply",
+                "p",
+                "--data-dir",
+                "/roots/x",
+            ],
+            vec![
+                "bookrack",
+                "--data-dir",
+                "/roots/x",
+                "index-profile",
+                "apply",
+                "p",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert_eq!(
+                cli.selection().data_dir.as_deref(),
+                Some(std::path::Path::new("/roots/x"))
+            );
+            assert!(cli.selection().library.is_none());
+        }
+
+        // The two selectors stay mutually exclusive here as everywhere.
+        let Err(err) = Cli::try_parse_from([
+            "bookrack",
+            "index-profile",
+            "current",
+            "--library",
+            "x",
+            "--data-dir",
+            "/roots/x",
+        ]) else {
+            panic!("--library and --data-dir must conflict");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -1531,7 +1573,6 @@ mod tests {
             action:
                 IndexProfileAction::Apply {
                     name,
-                    library,
                     pipeline,
                     dry_run,
                     yes,
@@ -1541,12 +1582,11 @@ mod tests {
             panic!("must parse as apply");
         };
         assert_eq!(name, "some-profile");
-        assert!(library.is_none());
         assert_eq!(pipeline, PipelineFilter::All);
         assert!(!dry_run);
         assert!(!yes);
 
-        // Full form with every flag set.
+        // Full form with every flag set, the library selector included.
         let cli = Cli::try_parse_from([
             "bookrack",
             "index-profile",
@@ -1560,10 +1600,10 @@ mod tests {
             "--yes",
         ])
         .expect("full apply parses");
+        assert_eq!(cli.selection().library.as_deref(), Some("x"));
         let Command::IndexProfile {
             action:
                 IndexProfileAction::Apply {
-                    library,
                     pipeline,
                     dry_run,
                     yes,
@@ -1573,7 +1613,6 @@ mod tests {
         else {
             panic!("must parse as apply");
         };
-        assert_eq!(library.as_deref(), Some("x"));
         assert_eq!(pipeline, PipelineFilter::Papers);
         assert!(dry_run);
         assert!(yes);

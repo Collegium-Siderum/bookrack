@@ -58,14 +58,11 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
         (&["exec", "library.info", "{}"], CaseExpect::NotRunning),
         (&["exec", "tools"], CaseExpect::NotRunning),
-        // `index-profile apply` refuses twice over — once here, and
-        // once at its confirmation gate, which also exits 2. The tip
-        // assertion below is what tells the two apart, so this row
-        // cannot pass for the wrong reason.
-        (
-            &["index-profile", "apply", "qwen3-0.6b-default"],
-            CaseExpect::NotRunning,
-        ),
+        // `index-profile apply` is deliberately absent: against a data
+        // root with nothing built its plan is empty, and an empty plan
+        // is declared offline without the daemon being reached at all.
+        // `index_profile_resolution.rs` pins that path.
+        //
         // The exceptions. `bookrack status` has the same shape as
         // `exec info` and is pinned separately by
         // `status_without_daemon_prints_a_short_card_and_exits_zero`.

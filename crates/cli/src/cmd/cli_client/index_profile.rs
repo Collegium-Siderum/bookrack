@@ -18,11 +18,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bookrack_cli::error::BookrackCliError;
-use bookrack_cli::libraries_local::root_config_exists;
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
 use bookrack_config::{
     LibraryEntryFields, LibrarySelection, ManifestIdentitySeed, load_manifest,
-    registry_target_path, set_manifest_index_profile, set_root_config_values, upsert_library_entry,
+    registry_target_path, set_manifest_index_profile, upsert_library_entry,
 };
 use bookrack_control_client::ControlClient;
 use bookrack_runtime::cmd::index_profile::{
@@ -36,7 +35,7 @@ use super::helpers;
 
 pub async fn run(
     name: &str,
-    library: Option<&str>,
+    selection: &LibrarySelection,
     pipeline: PipelineFilter,
     dry_run: bool,
     yes: bool,
@@ -44,7 +43,7 @@ pub async fn run(
 ) -> Result<()> {
     // Plan derivation is offline and read-only; refusals that are the
     // operator's to fix map to the user-error exit code.
-    let plan = plan_apply(name, library, pipeline)
+    let plan = plan_apply(name, selection, pipeline)
         .await
         .map_err(as_user_error)?;
 
@@ -56,7 +55,7 @@ pub async fn run(
                  (apply would still declare the reference)"
             );
         } else if plan.has_destructive() {
-            print_destructive_paths(&plan.entry.name);
+            print_destructive_paths(plan.target.label());
         }
         return Ok(());
     }
@@ -79,11 +78,22 @@ pub async fn run(
 
     // Executing routes through the daemon that owns the library; refuse
     // up front when a running daemon serves a different one than the
-    // plan targets, instead of resetting the wrong store.
+    // plan targets, instead of resetting the wrong store. The comparison
+    // is against the *resolved* root rather than the selection, so a plan
+    // derived from a registry default — which the top-level pre-flight
+    // stays silent about, there being no explicit selection to compare —
+    // is checked too. Both axes are asserted: a lock that records only
+    // one of the two is silent about the other.
     crate::preflight::enforce_selection_mismatch(&LibrarySelection {
-        data_dir: None,
-        library: Some(plan.entry.name.clone()),
+        data_dir: Some(plan.target.data_dir().to_path_buf()),
+        library: None,
     })?;
+    if let Some(entry) = &plan.target.entry {
+        crate::preflight::enforce_selection_mismatch(&LibrarySelection {
+            data_dir: None,
+            library: Some(entry.name.clone()),
+        })?;
+    }
 
     let client = helpers::connect(runtime_dir).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
@@ -109,7 +119,7 @@ pub async fn run(
     if !confirm_plan(&plan, yes)? {
         println!("aborted; no changes written");
         if plan.has_destructive() {
-            print_destructive_paths(&plan.entry.name);
+            print_destructive_paths(plan.target.label());
         }
         return Ok(());
     }
@@ -120,12 +130,12 @@ pub async fn run(
     // Self-check: re-derive against the on-disk state the actions left
     // behind. Anything but a no-op plan means the apply did not
     // converge and the operator should look before re-running.
-    let verify = plan_apply(name, library, pipeline).await?;
+    let verify = plan_apply(name, selection, pipeline).await?;
     if !verify.is_noop() {
         eyre::bail!(
             "every action completed but the library still diverges from '{name}'; \
-             `bookrack index-profile current --library {}` shows the remaining findings",
-            plan.entry.name
+             `bookrack index-profile current` on {} shows the remaining findings",
+            plan.target.data_dir().display()
         );
     }
     println!("profile applied and verified");
@@ -192,7 +202,7 @@ fn confirm_strength(has_destructive: bool, needs_soft: bool) -> ConfirmStrength 
 /// prompt; without it the operator is asked, whatever stdin is.
 fn confirm_plan(plan: &ApplyPlan, yes: bool) -> Result<bool> {
     confirm_plan_with(
-        &plan.entry.name,
+        plan.target.label(),
         confirm_strength(plan.has_destructive(), plan.needs_soft_confirm()),
         yes,
         |prompt, mode| confirm_destructive(prompt, mode, false),
@@ -246,79 +256,70 @@ where
 /// Write the target declaration before any action runs, so every handler
 /// resolves the new profile at execution time.
 ///
-/// The manifest write is the declaration; the two steps after it are
-/// cache maintenance. Their failure modes are correspondingly mild: a
-/// crash before the registry refresh leaves a stale cache that `doctor`
-/// reports and `libraries scan` repairs, and one before the `config.toml`
-/// sweep leaves a value identical to the one just declared. Neither can
-/// split the truth, because there is only one copy of it.
+/// The manifest write is the declaration; the registry refresh after it
+/// is cache maintenance. Its failure mode is correspondingly mild: a
+/// crash in between leaves a stale cache that `doctor` reports and
+/// `libraries scan` repairs. It cannot split the truth, because there is
+/// only one copy of it.
+///
+/// A data root the registry does not carry has no cache to refresh, so
+/// the declaration stops at the manifest and says so: minting a registry
+/// entry for a root the operator never registered would be a second
+/// decision the command was not asked to make.
 fn declare_target(plan: &ApplyPlan, name: &str) -> Result<()> {
-    let had_manifest = matches!(load_manifest(&plan.entry.data_dir), Ok(Some(_)));
+    let data_dir = plan.target.data_dir();
+    let had_manifest = matches!(load_manifest(data_dir), Ok(Some(_)));
     set_manifest_index_profile(
-        &plan.entry.data_dir,
+        data_dir,
         Some(name),
         ManifestIdentitySeed {
-            name: &plan.entry.name,
-            kind: plan.entry.kind,
-            description: plan.entry.description.as_deref(),
+            name: plan.target.label(),
+            kind: plan.target.kind(),
+            description: plan.target.description(),
         },
     )
     .with_context(|| {
         format!(
             "declare index_profile in {}/{}",
-            plan.entry.data_dir.display(),
+            data_dir.display(),
             bookrack_config::MANIFEST_FILENAME,
         )
     })?;
 
-    let registry_path = registry_target_path().ok_or_else(|| {
-        eyre::eyre!(
-            "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform \
-             config directory is available"
-        )
-    })?;
-    let fields = LibraryEntryFields {
-        data_dir: plan.entry.data_dir.clone(),
-        kind: plan.entry.kind,
-        description: plan.entry.description.clone(),
-        index_profile: Some(name.to_string()),
-        created_at: plan.entry.created_at.clone(),
-        uuid: plan.entry.uuid.clone(),
-    };
-    upsert_library_entry(&registry_path, &plan.entry.name, &fields).with_context(|| {
-        format!(
-            "record index_profile on '{}' in {}",
-            plan.entry.name,
-            registry_path.display()
-        )
-    })?;
-
-    // Sweep a `config.toml` declaration left by an older write path: it
-    // sits above the registry cache in the resolution chain, so leaving
-    // it would shadow the cache forever and keep the drift report
-    // permanently non-empty.
-    sweep_stale_config_declaration(&plan.entry.data_dir)?;
+    match &plan.target.entry {
+        Some(entry) => {
+            let registry_path = registry_target_path().ok_or_else(|| {
+                eyre::eyre!(
+                    "no registry location: set BOOKRACK_REGISTRY=<path> or ensure the platform \
+                     config directory is available"
+                )
+            })?;
+            let fields = LibraryEntryFields {
+                data_dir: data_dir.to_path_buf(),
+                kind: entry.kind,
+                description: entry.description.clone(),
+                index_profile: Some(name.to_string()),
+                created_at: entry.created_at.clone(),
+                uuid: entry.uuid.clone(),
+            };
+            upsert_library_entry(&registry_path, &entry.name, &fields).with_context(|| {
+                format!(
+                    "record index_profile on '{}' in {}",
+                    entry.name,
+                    registry_path.display()
+                )
+            })?;
+        }
+        None => println!(
+            "note: the registry does not carry this data root, so there is no cached copy \
+             to refresh; `bookrack libraries add` registers it"
+        ),
+    }
 
     println!("declared: index_profile = '{name}' (library manifest)");
     if !had_manifest {
         println!("  wrote a library manifest for this root (it had none)");
     }
-    Ok(())
-}
-
-/// Clear an `index_profile` from a root's `config.toml`. Skipped on a
-/// root with no such file, which an unset would otherwise materialise;
-/// unsetting a key an existing file does not carry is a no-op.
-fn sweep_stale_config_declaration(data_dir: &Path) -> Result<()> {
-    if !root_config_exists(data_dir) {
-        return Ok(());
-    }
-    set_root_config_values(data_dir, &[], &["index_profile".to_string()]).with_context(|| {
-        format!(
-            "clear the superseded index_profile from {}/config.toml",
-            data_dir.display()
-        )
-    })?;
     Ok(())
 }
 

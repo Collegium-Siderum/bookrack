@@ -35,6 +35,30 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **index-profile: `current` and `apply` select their library through
+  the shared resolver.** Both verbs read the registry alone: they
+  honoured `--library`, ignored `--data-dir` after accepting it, never
+  looked at `BOOKRACK_DATA_DIR`, and could not name a data root the
+  registry did not carry. A `--data-dir` or data-root-variable
+  invocation therefore reported on — or derived a plan for — whatever
+  library the registry's `default` pointed at, silently, and on a
+  machine with no registry both verbs failed outright even with the
+  data root set in the environment. They now resolve through
+  `Config::resolve`, so the whole precedence ladder applies
+  (`--data-dir`, `--library`, the data-root variable, the portable
+  layout, then a registry `default`), and a path-class root claims its
+  registry name by manifest uuid or by path the way every other command
+  does. Two consequences: an unregistered root is a valid target —
+  `apply` writes the declaration the manifest owns and reports that
+  there is no registry entry to refresh, instead of minting one — and
+  the executing `apply` asserts the running daemon against the resolved
+  root, not against a registry name derived separately from it. The
+  subcommand-local `--library` flags are gone; the global flag of the
+  same name, accepted on either side of the subcommand, replaces them.
+  `current --json` gains a `registered` field, and its `library` field
+  now carries the registry name, else the manifest's birth name, else
+  the root's directory basename.
+
 - **doctor: the index-profile summary counts the libraries it
   checked.** The coherence pass selects libraries by their effective
   profile reference — the manifest first, the registry's cached copy

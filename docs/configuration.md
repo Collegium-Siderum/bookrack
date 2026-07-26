@@ -142,7 +142,10 @@ cache from the manifests. Declare one offline with:
 bookrack libraries config <name> index_profile=<profile>
 ```
 
-Five read-only verbs resolve locally with no daemon:
+Five read-only verbs resolve locally with no daemon. `current` needs a
+library and takes it from the ordinary selection — `--data-dir`,
+`--library`, `BOOKRACK_DATA_DIR`, then the registry default — so it
+reports on the same root every other command would use:
 
 ```
 bookrack index-profile list                 # built-ins + user profiles
@@ -167,10 +170,17 @@ bookrack index-profile apply <profile> [--library <name>] [--dry-run]
 `apply` reconciles a library *to* a profile — re-embedding, rebuilding
 the ANN index, reconciling stamps — so it derives an action plan and needs
 a daemon already serving that library. It prints the plan and asks before
-running it; `--dry-run` prints and exits, offline. It is the preferred
+running it; `--dry-run` prints and exits, offline. It selects its library
+the same way `current` does, `--data-dir` included. It is the preferred
 front door for switching the embedding model or the ANN shape; use
 `libraries config` above when you only mean to declare a profile the
 library already matches.
+
+A data root the registry does not carry is a valid target for both
+verbs: the manifest owns the profile reference, so `current` reports it
+and `apply` declares it. There is simply no registry entry to refresh,
+and `apply` says so instead of minting one — `libraries add` registers
+a root.
 
 ## The metadata audit profile
 

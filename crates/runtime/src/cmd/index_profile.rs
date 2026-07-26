@@ -7,12 +7,18 @@
 //! `apply` additionally reads the library's on-disk stamps to derive a
 //! reconciliation plan; the planning here stays offline and read-only,
 //! while executing the plan is the CLI orchestrator's job.
+//!
+//! The two verbs that need a library — `current` and `apply` — take it
+//! from a [`LibrarySelection`] handed down whole and resolved by
+//! [`Config::resolve`], so they sit on the same precedence ladder as
+//! every other command. Neither carries a selector of its own: a verb
+//! that re-declared one field of the selection would silently drop the
+//! rest.
 
 use std::path::{Path, PathBuf};
 
 use bookrack_config::{
-    EmbedConfig, LibraryEntry, effective_profile_reference, list_libraries, load_manifest,
-    profile_reference_drift,
+    Config, EmbedConfig, LibraryEntry, LibraryKind, LibrarySelection, list_libraries, load_manifest,
 };
 use bookrack_index_profile::{
     Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, USER_PROFILE_DIR_NAME,
@@ -55,10 +61,11 @@ pub enum IndexProfileAction {
     /// Print the profile a library effectively runs under — its name,
     /// where the reference was declared, the resolved combination — and
     /// compare it against the built index stamps. Offline and read-only.
+    ///
+    /// The library is the one the global selection resolves to:
+    /// `--data-dir`, `--library`, the data-root variable, the portable
+    /// layout, then the registry default.
     Current {
-        /// Library to inspect; the registry default when omitted.
-        #[arg(long)]
-        library: Option<String>,
         /// Emit machine-readable JSON instead of the plain report.
         #[arg(long)]
         json: bool,
@@ -80,12 +87,12 @@ pub enum IndexProfileAction {
     /// entry point for switching embedding models or ANN parameters; the
     /// `vectors` / `stamps` namespaces remain as low-level escape
     /// hatches.
+    ///
+    /// The library is the one the global selection resolves to, the same
+    /// as for `current`.
     Apply {
         /// Profile name to apply.
         name: String,
-        /// Library to reconcile; the registry default when omitted.
-        #[arg(long)]
-        library: Option<String>,
         /// Limit which pipeline's actions run. The profile always
         /// describes the whole library; the filter narrows execution
         /// only.
@@ -124,7 +131,7 @@ impl PipelineFilter {
     }
 }
 
-pub fn run(action: IndexProfileAction) -> Result<()> {
+pub fn run(action: IndexProfileAction, selection: &LibrarySelection) -> Result<()> {
     match action {
         IndexProfileAction::List { json } => list(json),
         IndexProfileAction::Show { name } => show(&name),
@@ -132,7 +139,7 @@ pub fn run(action: IndexProfileAction) -> Result<()> {
             name,
             allow_unknown_model,
         } => validate_cmd(&name, allow_unknown_model),
-        IndexProfileAction::Current { library, json } => current(library, json),
+        IndexProfileAction::Current { json } => current(selection, json),
         IndexProfileAction::Diff { a, b, json } => diff(&a, &b, json),
         // Apply connects to the daemon and confirms interactively, so
         // the CLI dispatches it to its control-plane client before this
@@ -244,29 +251,12 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
 /// findings in the report, not errors, because reconciling them is
 /// `index-profile apply`'s job (a stale registry copy is also what
 /// `libraries scan` refreshes).
-fn current(library: Option<String>, json: bool) -> Result<()> {
-    let entry = registry_entry(library.as_deref())?;
-    let manifest_ref = load_manifest(&entry.data_dir)
-        .ok()
-        .flatten()
-        .and_then(|m| m.index_profile);
-    let reference =
-        effective_profile_reference(manifest_ref.as_deref(), entry.index_profile.as_deref());
-    let drift = profile_reference_drift(manifest_ref.as_deref(), entry.index_profile.as_deref());
+fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
+    let target = resolve_target(selection)?;
+    let effective = crate::profile::effective_index_profile(target.config())?;
+    let resolved = effective.as_ref().map(|e| (&e.profile, e.origin));
+    let drift = effective.as_ref().map_or(&[][..], |e| e.drift.as_slice());
 
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let resolved = match &reference {
-        Some((name, origin)) => {
-            let profile = resolve(&dir, name)?.ok_or_else(|| {
-                eyre::eyre!(
-                    "index profile '{name}' is not defined; \
-                     `bookrack index-profile list` shows the available names"
-                )
-            })?;
-            Some((profile, *origin))
-        }
-        None => None,
-    };
     let profile_model = resolved.as_ref().map(|(p, _)| p.embed.model.as_str());
     let effective_model = EmbedConfig::resolve(profile_model).model;
     // An unstamped corpus reports as "no built index", same as a
@@ -274,22 +264,27 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
     // unreadable corpus is reported alongside instead, this being a
     // best-effort status surface rather than a hard failure.
     let (built, built_error) =
-        match crate::profile::built_stamps(&Pipeline::Books.corpus_db(&entry.data_dir)) {
+        match crate::profile::built_stamps(&Pipeline::Books.corpus_db(target.data_dir())) {
             Ok(stamps) => (stamps.filter(|b| !b.is_unstamped()), None),
             Err(reason) => (None, Some(reason)),
         };
     let findings = match (&resolved, &built) {
         (Some((profile, _)), Some(stamps)) => {
-            let target = Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
-            Some(crate::profile::profile_stamp_findings(&target, stamps))
+            let stamps_target =
+                Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
+            Some(crate::profile::profile_stamp_findings(
+                &stamps_target,
+                stamps,
+            ))
         }
         _ => None,
     };
 
     if json {
         let value = serde_json::json!({
-            "library": entry.name,
-            "data_dir": entry.data_dir.display().to_string(),
+            "library": target.label(),
+            "registered": target.entry.is_some(),
+            "data_dir": target.data_dir().display().to_string(),
             "profile": resolved.as_ref().map(|(p, origin)| serde_json::json!({
                 "name": p.name,
                 "origin": origin,
@@ -310,7 +305,17 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("library: {} ({})", entry.name, entry.data_dir.display());
+    println!(
+        "library: {} ({})",
+        target.label(),
+        target.data_dir().display()
+    );
+    if target.entry.is_none() {
+        println!(
+            "note: this data root is not in the registry; \
+             `bookrack libraries add` registers it"
+        );
+    }
     match &resolved {
         Some((profile, origin)) => {
             println!("profile: {} (source: {})", profile.name, origin.as_str());
@@ -335,7 +340,7 @@ fn current(library: Option<String>, json: bool) -> Result<()> {
         }
         None => println!("profile: none (built-in default embed model)"),
     }
-    for d in &drift {
+    for d in drift {
         println!(
             "drift: {} still references '{}'",
             d.source.as_str(),
@@ -388,19 +393,92 @@ fn stamp_pair(built: &crate::profile::BuiltStamps) -> String {
     )
 }
 
-/// The registry entry `--library` names, or the registry default when
-/// no name is given.
-fn registry_entry(library: Option<&str>) -> Result<LibraryEntry> {
-    let entries = list_libraries()?.unwrap_or_default();
-    match library {
-        Some(name) => entries
-            .into_iter()
-            .find(|e| e.name == name)
-            .ok_or_else(|| eyre::eyre!("no library named '{name}' in the registry")),
-        None => entries.into_iter().find(|e| e.is_default).ok_or_else(|| {
-            eyre::eyre!("the registry has no default library; pass --library <name>")
-        }),
+/// The library a profile verb operates on: the data root the shared
+/// resolver picked, plus the registry entry that root maps to when the
+/// registry carries one.
+#[derive(Debug, Clone)]
+pub struct ProfileTarget {
+    config: Config,
+    /// The registry entry the resolved root was matched to. `None` for a
+    /// root the registry does not carry: its manifest still holds the
+    /// profile reference, there is simply no cache beside it.
+    pub entry: Option<LibraryEntry>,
+    label: String,
+}
+
+impl ProfileTarget {
+    /// The resolved configuration the target was selected through.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
+
+    /// The data root every read and every declaration goes to.
+    pub fn data_dir(&self) -> &Path {
+        self.config.data_dir()
+    }
+
+    /// The name this library goes by in output and in the apply
+    /// confirmation prompt: its registry name, else its manifest birth
+    /// name, else the data root's directory basename.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The kind the registry records, or the default for a root the
+    /// registry does not carry.
+    pub fn kind(&self) -> LibraryKind {
+        match &self.entry {
+            Some(entry) => entry.kind,
+            None => LibraryKind::default(),
+        }
+    }
+
+    /// The description the registry entry carries, when it has one.
+    pub fn description(&self) -> Option<&str> {
+        self.entry.as_ref().and_then(|e| e.description.as_deref())
+    }
+}
+
+/// Resolve the library a profile verb operates on from a CLI selection.
+///
+/// The root comes from [`Config::resolve`], so these verbs sit on the
+/// same precedence ladder as every other command: `--data-dir`, then
+/// `--library`, then the data-root variable, then the portable layout,
+/// then a registry `default`. The registry entry is then looked up by
+/// the name the resolver settled on — which for a path-class root is the
+/// entry it was matched to by manifest uuid or by path — so a root the
+/// registry does not carry resolves without an entry instead of failing.
+fn resolve_target(selection: &LibrarySelection) -> Result<ProfileTarget> {
+    let config = Config::resolve(selection)?;
+    let entry = match config.library() {
+        Some(name) => list_libraries()?
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e.name == name),
+        None => None,
+    };
+    let label = match &entry {
+        Some(entry) => entry.name.clone(),
+        None => root_label(config.data_dir()),
+    };
+    Ok(ProfileTarget {
+        config,
+        entry,
+        label,
+    })
+}
+
+/// The name an unregistered data root goes by: its manifest's birth
+/// name, else the root's directory basename. Mirrors how the registry
+/// write path names a root it is asked to add without an explicit name.
+fn root_label(data_dir: &Path) -> String {
+    if let Ok(Some(manifest)) = load_manifest(data_dir) {
+        return manifest.name;
+    }
+    data_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "library".to_string())
 }
 
 /// Compare two profiles field by field.
@@ -571,8 +649,8 @@ pub struct PipelineSection {
 /// reconciles, and one section per selected pipeline.
 #[derive(Debug, Clone)]
 pub struct ApplyPlan {
-    /// The registry entry of the library being reconciled.
-    pub entry: LibraryEntry,
+    /// The library being reconciled.
+    pub target: ProfileTarget,
     /// The target profile.
     pub profile: IndexProfile,
     /// Per-pipeline sections, in [`Pipeline::ALL`] order.
@@ -620,16 +698,16 @@ impl ApplyPlan {
 }
 
 /// Derive the apply plan for profile `name` against the library
-/// `--library` selects (registry default when `None`). Offline and
-/// read-only: registry, `config.toml`, profile files, corpus stamps,
-/// and the vector-store meta — no daemon involved. Refusals that are
-/// the operator's to fix surface as [`ApplyRefusal`].
+/// `selection` resolves to. Offline and read-only: registry,
+/// `config.toml`, profile files, corpus stamps, and the vector-store
+/// meta — no daemon involved. Refusals that are the operator's to fix
+/// surface as [`ApplyRefusal`].
 pub async fn plan_apply(
     name: &str,
-    library: Option<&str>,
+    selection: &LibrarySelection,
     filter: PipelineFilter,
 ) -> Result<ApplyPlan> {
-    let entry = registry_entry(library)?;
+    let target = resolve_target(selection)?;
 
     if let Some(refusal) = crate::profile::refuse_bad_profile_reference(name) {
         return Err(ApplyRefusal(refusal).into());
@@ -643,12 +721,12 @@ pub async fn plan_apply(
         if !filter.selects(pipeline) {
             continue;
         }
-        let state = read_pipeline_state(&entry.data_dir, pipeline)?;
-        let target = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
-        let plan = derive_pipeline_plan(&profile, &target, &state);
+        let state = read_pipeline_state(target.data_dir(), pipeline)?;
+        let stamps_target = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+        let plan = derive_pipeline_plan(&profile, &stamps_target, &state);
         let reembed_chunks = match &plan {
             PipelinePlan::Run(actions) if actions.contains(&PlannedAction::Reembed) => {
-                count_chunks(&pipeline.lancedb_dir(&entry.data_dir), profile.embed.dim).await
+                count_chunks(&pipeline.lancedb_dir(target.data_dir()), profile.embed.dim).await
             }
             _ => None,
         };
@@ -660,7 +738,7 @@ pub async fn plan_apply(
     }
 
     Ok(ApplyPlan {
-        entry,
+        target,
         profile,
         sections,
     })
@@ -680,8 +758,8 @@ async fn count_chunks(lancedb_dir: &Path, dim: u32) -> Option<usize> {
 pub fn render_apply_plan(plan: &ApplyPlan, queue_busy: Option<u32>) {
     println!(
         "library: {} ({})",
-        plan.entry.name,
-        plan.entry.data_dir.display()
+        plan.target.label(),
+        plan.target.data_dir().display()
     );
     let p = &plan.profile;
     println!(
