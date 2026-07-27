@@ -7,6 +7,8 @@
 //! strips the matched substring from the source text. All operate
 //! per-entry and are order-independent within the same shape.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde_json::{Value as JsonValue, json};
 
@@ -203,6 +205,10 @@ where
 
 // --- ExtractYearSpan --------------------------------------------------------
 
+static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(?\s*(\d{3,4})\s*[-\u{2013}]\s*(\d{3,4})?\s*\)?").expect("year regex")
+});
+
 impl Stage for ExtractYearSpan {
     fn name(&self) -> &str {
         "extract_year_span"
@@ -210,8 +216,7 @@ impl Stage for ExtractYearSpan {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        let year_re =
-            Regex::new(r"\(?\s*(\d{3,4})\s*[-\u{2013}]\s*(\d{3,4})?\s*\)?").expect("year regex");
+        let year_re = &*YEAR_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
@@ -264,6 +269,12 @@ impl Stage for ExtractBracketedTag {
 
 // --- ExtractGenderTag -------------------------------------------------------
 
+/// Cheap markers seen across the v1 books: "(F)" / "(M)" /
+/// "(woman)" / CJK gender markers in parens.
+static GENDER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(\s*(F|M|f|m|woman|man|\u{5973}|\u{7537})\s*\)").expect("gender regex")
+});
+
 impl Stage for ExtractGenderTag {
     fn name(&self) -> &str {
         "extract_gender_tag"
@@ -271,10 +282,7 @@ impl Stage for ExtractGenderTag {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        // Cheap markers seen across the v1 books: "(F)" / "(M)" /
-        // "(woman)" / CJK gender markers in parens.
-        let re =
-            Regex::new(r"\(\s*(F|M|f|m|woman|man|\u{5973}|\u{7537})\s*\)").expect("gender regex");
+        let re = &*GENDER_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
@@ -328,6 +336,13 @@ impl Stage for SplitVariants {
 
 // --- ExtractQuotes ----------------------------------------------------------
 
+/// Recognizes ASCII double quotes and the CJK corner-bracket pair
+/// (U+300C / U+300D). The attribution slot is left empty in this
+/// minimal extractor; a future hop can fill it in.
+static QUOTE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex")
+});
+
 impl Stage for ExtractQuotes {
     fn name(&self) -> &str {
         "extract_quotes"
@@ -335,10 +350,7 @@ impl Stage for ExtractQuotes {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        // Recognize ASCII double quotes and the CJK corner-bracket
-        // pair (U+300C / U+300D). The attribution slot is left empty
-        // in this minimal extractor; a future hop can fill it in.
-        let re = Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex");
+        let re = &*QUOTE_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {

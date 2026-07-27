@@ -9,6 +9,8 @@
 //! schema and `crates/distill/src/extractor.rs` and `finalize.rs`
 //! for the downstream `splits → drafts` chain.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 use crate::anchors::{AnchorRule, LangAnchorRule};
@@ -85,6 +87,10 @@ struct PairBilingualEntries {
 
 // --- split_pages ----------------------------------------------------------
 
+static PAGE_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<!--\s*page\s+(\d+)\s*\(sheet\s+(\d+)\)\s*-->").expect("page marker regex")
+});
+
 impl Stage for SplitPages {
     fn name(&self) -> &str {
         "split_pages"
@@ -92,8 +98,7 @@ impl Stage for SplitPages {
 
     fn run(&self, data: StageData, ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let source = data.expect_source(self.name())?;
-        let re = Regex::new(r"<!--\s*page\s+(\d+)\s*\(sheet\s+(\d+)\)\s*-->")
-            .expect("page marker regex");
+        let re = &*PAGE_MARKER_RE;
 
         let mut pages = Vec::new();
         let mut last: Option<(u32, u32, usize)> = None; // (page, sheet, body_start)

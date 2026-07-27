@@ -68,11 +68,10 @@ pub enum ParseError {
     InvalidPageMarker { marker: String, byte_offset: usize },
 
     /// A `book.toml` `regex` pattern reference failed to compile.
-    /// Surfaced by the dispatcher at load time so the operator sees
-    /// the broken rule before the pipeline silently collapses every
-    /// match to "no match" — the historical `Regex::new(...).ok()?`
-    /// shape used at runtime would render a bad pattern as a
-    /// quiet skip.
+    /// The dispatcher compiles every pattern at load time and stores
+    /// the result in the stage, so the operator sees the broken rule
+    /// immediately and no pipeline runs against a pattern that never
+    /// matches.
     #[error("invalid regex pattern {pattern:?}: {reason}")]
     InvalidPattern { pattern: String, reason: String },
 }
