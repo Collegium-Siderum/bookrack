@@ -8,6 +8,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **query, mcp: the book reads finish reporting the source file.**
+  `library.list_books` / `library.find_books` rows carry
+  `source_filename`, the basename of the path recorded at intake, so a
+  book whose title is missing or is an export-tool placeholder can be
+  identified without a second call; the full path and the source hash
+  stay in the detail read, which a list row reaches by `intake_id`.
+  `library.show_book` adds `page_count` and `byte_size` alongside the
+  source path and identity it already carried, completing the intake
+  record it reports. Both project from the `Intake` row the reads
+  already load, so neither issues an extra query. `library.show_book`'s
+  tool description now lists the source-side fields, which it had not
+  since they landed, and the book block that
+  `library.show_metadata_audit` and `metadata show` embed widens with
+  the detail read.
+
 ## [0.10.0] - 2026-07-27
 
 ### Added

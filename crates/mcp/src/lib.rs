@@ -876,7 +876,10 @@ impl BookrackServer {
         name = "library.list_books",
         description = "List books known to the library, paginated. Returns a slice \
                        of book summaries plus the total matching count and a \
-                       truncated flag."
+                       truncated flag. Each summary carries source_filename, the \
+                       basename of the file the book was ingested from, which \
+                       identifies a book whose title is missing or is an export-tool \
+                       placeholder."
     )]
     async fn library_list_books(
         &self,
@@ -935,11 +938,14 @@ impl BookrackServer {
                        Returns effective biblio attributes, the active overrides \
                        (which fields are curated rather than extracted, by whom and \
                        when; `value: null` marks a suppressed extracted value), the \
-                       contributor list, and toc_stats (entry_count / max_depth of \
-                       the ingested TOC; null when nothing is ingested) — check \
-                       toc_stats before library.show_toc to pick a pagination or \
-                       projection strategy. Returns null when no such book is \
-                       registered."
+                       contributor list, the source-side record of the ingested file \
+                       (source_path / source_filename / source_sha256 / intake_at / \
+                       page_count / byte_size; source_path is recorded verbatim at \
+                       intake, so it may be relative or no longer exist on disk), and \
+                       toc_stats (entry_count / max_depth of the ingested TOC; null \
+                       when nothing is ingested) — check toc_stats before \
+                       library.show_toc to pick a pagination or projection strategy. \
+                       Returns null when no such book is registered."
     )]
     async fn library_show_book(
         &self,
@@ -2106,11 +2112,13 @@ mod tests {
             format: Some("epub".to_string()),
             status: "extracted".to_string(),
             top_contributor: Some("An Author".to_string()),
+            source_filename: Some("book.epub".to_string()),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value["intake_id"], 1);
         assert_eq!(value["title"], "A Title");
         assert_eq!(value["status"], "extracted");
+        assert_eq!(value["source_filename"], "book.epub");
     }
 
     #[test]
@@ -2127,6 +2135,8 @@ mod tests {
             source_filename: Some("book.pdf".to_string()),
             source_sha256: "0".repeat(64),
             intake_at: "2026-01-01T00:00:00Z".to_string(),
+            page_count: Some(612),
+            byte_size: Some(4096),
             effective_biblio: biblio,
             overrides: Vec::new(),
             contributors: vec![ContributorEntry {
@@ -2150,6 +2160,8 @@ mod tests {
         assert_eq!(value["source_filename"], "book.pdf");
         assert_eq!(value["source_path"], "library/book.pdf");
         assert_eq!(value["intake_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(value["page_count"], 612);
+        assert_eq!(value["byte_size"], 4096);
         assert!(
             value["source_sha256"]
                 .as_str()

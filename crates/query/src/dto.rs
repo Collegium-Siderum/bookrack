@@ -75,6 +75,11 @@ pub struct BookSummary {
     /// First author (or other contributor) attributed at the book
     /// root, if any.
     pub top_contributor: Option<String>,
+    /// Basename of the path recorded at intake time, which identifies
+    /// the file a row came from when [`Self::title`] is absent or is an
+    /// export-tool placeholder. The full path and the source hash are
+    /// in [`BookDetail`]: a list page carries the basename only.
+    pub source_filename: Option<String>,
 }
 
 /// One [`Catalog::show_book`] response: the full bibliographic record
@@ -99,6 +104,11 @@ pub struct BookDetail {
     pub source_sha256: String,
     /// When the file was first registered, ISO-8601 UTC.
     pub intake_at: String,
+    /// Physical sheet count for paginated sources. `None` for reflow
+    /// formats and for rows registered before the column existed.
+    pub page_count: Option<i64>,
+    /// Size of the source file in bytes, as recorded at intake.
+    pub byte_size: Option<i64>,
     /// Effective bibliographic attributes — the base layer merged with
     /// any human override. Keys are stable strings (`title`,
     /// `publisher`, `isbn`, ...).
@@ -482,6 +492,16 @@ pub struct BookFilter {
     pub categories: Vec<String>,
 }
 
+/// The basename of a path recorded at intake time. `None` when no path
+/// was recorded or the path ends in a separator.
+fn source_filename(path: Option<&str>) -> Option<String> {
+    path.and_then(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    })
+}
+
 impl BookSummary {
     /// Project a catalog [`Intake`] row into a list summary, using the
     /// `title` and `top_contributor` resolved separately (the catalog
@@ -497,6 +517,7 @@ impl BookSummary {
             format: intake.format.clone(),
             status: intake.status.as_str().to_string(),
             top_contributor,
+            source_filename: source_filename(intake.original_path.as_deref()),
         }
     }
 }
@@ -544,11 +565,7 @@ impl BookDetail {
             effective_biblio.insert(name.to_string(), value.to_string());
         }
         let title = effective_biblio.get("title").cloned();
-        let source_filename = intake.original_path.as_deref().and_then(|path| {
-            std::path::Path::new(path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
+        let source_filename = source_filename(intake.original_path.as_deref());
         BookDetail {
             intake_id: intake.intake_id,
             title,
@@ -558,6 +575,8 @@ impl BookDetail {
             source_filename,
             source_sha256: intake.source_sha256,
             intake_at: intake.intake_at,
+            page_count: intake.page_count,
+            byte_size: intake.byte_size,
             effective_biblio,
             overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
             contributors: contributors
