@@ -2045,6 +2045,11 @@ mod tests {
         ("bookrack vectors", 4),
     ];
 
+    /// Upper bound on a command summary, in characters. clap prints the
+    /// summary in the parent's `Commands` column and does not wrap that
+    /// column, so a long one runs off the terminal instead of folding.
+    const SUMMARY_LIMIT: usize = 100;
+
     /// Collects `(invocation path, direct subcommand count)` for every
     /// command in the tree that owns subcommands. clap's generated `help`
     /// pseudo-subcommand is skipped: it is inserted by `Command::build`,
@@ -2141,6 +2146,126 @@ mod tests {
             "the subcommand tree changed shape, reported as \
              (path, recorded, live): {diff:?}. Update SUBCOMMAND_COUNTS to \
              match, and record the new or removed commands in CHANGELOG.md"
+        );
+    }
+
+    /// Collects `(invocation path, summary length)` for every command whose
+    /// `about` is longer than `SUMMARY_LIMIT`, and the paths of commands
+    /// that carry no `about` at all. Length is counted in characters, not
+    /// bytes: the summaries carry em dashes.
+    fn survey_summaries(
+        cmd: &clap::Command,
+        path: &str,
+        over: &mut Vec<(String, usize)>,
+        missing: &mut Vec<String>,
+    ) {
+        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
+            let path = format!("{path} {}", sub.get_name());
+            match sub.get_about() {
+                Some(about) => {
+                    let len = about.to_string().chars().count();
+                    if len > SUMMARY_LIMIT {
+                        over.push((path.clone(), len));
+                    }
+                }
+                None => missing.push(path.clone()),
+            }
+            survey_summaries(sub, &path, over, missing);
+        }
+    }
+
+    /// A summary that overflows the `Commands` column is the first thing an
+    /// operator sees when they ask what a namespace holds. The repair is a
+    /// blank line after the first sentence of the doc comment: clap keeps
+    /// the first paragraph as the summary and moves the rest to long help.
+    /// A command with no summary at all is the same defect taken to its
+    /// limit, so the walk reports that too.
+    #[test]
+    fn every_command_carries_a_summary_within_the_limit() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        let mut over = Vec::new();
+        let mut missing = Vec::new();
+        if cli.get_about().is_none() {
+            missing.push(cli.get_name().to_string());
+        }
+        survey_summaries(&cli, cli.get_name(), &mut over, &mut missing);
+        assert!(
+            missing.is_empty(),
+            "these commands document nothing in the parent's Commands column. \
+             Give each a doc comment: {missing:?}"
+        );
+        assert!(
+            over.is_empty(),
+            "these command summaries are longer than {SUMMARY_LIMIT} characters. \
+             Put a blank line after the first sentence of the doc comment so the \
+             rest becomes long help: {over:?}"
+        );
+    }
+
+    /// Collects `(invocation path and flag, short-help length)` for every
+    /// argument that shares a name with a global one and overruns the
+    /// limit. A subcommand may declare an argument whose name matches a
+    /// global; the local one then wins on that page, so surveying only the
+    /// globals declared on the root leaves those pages unchecked.
+    fn over_long_shadowing_flags(
+        cmd: &clap::Command,
+        path: &str,
+        globals: &BTreeSet<String>,
+        out: &mut Vec<(String, usize)>,
+    ) {
+        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
+            let path = format!("{path} {}", sub.get_name());
+            for arg in sub.get_arguments() {
+                let id = arg.get_id().to_string();
+                if !globals.contains(&id) || arg.is_global_set() {
+                    continue;
+                }
+                let Some(help) = arg.get_help() else { continue };
+                let len = help.to_string().chars().count();
+                if len > SUMMARY_LIMIT {
+                    let flag = arg.get_long().unwrap_or(id.as_str());
+                    out.push((format!("{path} --{flag}"), len));
+                }
+            }
+            over_long_shadowing_flags(sub, &path, globals, out);
+        }
+    }
+
+    /// A global flag's short help is reprinted on every help page in the
+    /// tree, so it is the single most repeated text in the binary. A local
+    /// argument that shadows a global one inherits that weight on its own
+    /// page while escaping the root-level survey, so both are walked here.
+    #[test]
+    fn every_global_flag_summary_fits_the_options_column() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        let globals: BTreeSet<String> = cli
+            .get_arguments()
+            .filter(|arg| arg.is_global_set())
+            .map(|arg| arg.get_id().to_string())
+            .collect();
+        let mut over: Vec<(String, usize)> = cli
+            .get_arguments()
+            .filter(|arg| arg.is_global_set())
+            .filter_map(|arg| {
+                let len = arg.get_help()?.to_string().chars().count();
+                (len > SUMMARY_LIMIT).then(|| {
+                    let id = arg.get_id().to_string();
+                    let flag = arg.get_long().unwrap_or(id.as_str());
+                    (format!("--{flag}"), len)
+                })
+            })
+            .collect();
+        over_long_shadowing_flags(&cli, cli.get_name(), &globals, &mut over);
+        assert!(
+            over.is_empty(),
+            "these flags carry more than {SUMMARY_LIMIT} characters of short \
+             help on a page where an operator cannot avoid them — the globals on \
+             every page, and any local argument that shadows a global on its own. \
+             Put a blank line after the first sentence: {over:?}"
         );
     }
 }
