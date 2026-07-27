@@ -1201,6 +1201,8 @@ fn env_data_dir_shadows_default(env: Option<String>, default_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
     use clap::Parser;
 
@@ -1968,5 +1970,164 @@ mod tests {
                 "libraries config help does not list accepted key {key:?}: {help}",
             );
         }
+    }
+
+    /// Top-level command names the surface's own classification accounts
+    /// for: process lifecycle, configuration, a pipeline verb, a namespace,
+    /// or an observation command.
+    const TOP_LEVEL_BY_DESIGN: &[&str] = &[
+        "audit-profile",
+        "corpus",
+        "diagnose",
+        "distill",
+        "doctor",
+        "dryrun",
+        "exec",
+        "ingest",
+        "init",
+        "intake",
+        "libraries",
+        "logs",
+        "metadata",
+        "papers",
+        "queue",
+        "quit",
+        "remove",
+        "run",
+        "runs",
+        "stamps",
+        "status",
+        "vectors",
+        "verify",
+    ];
+
+    /// Top-level command names that entered the surface without a place in
+    /// that classification. Filing a name here records that the surface
+    /// grew ahead of its own shape; it is not an approval, and the bucket
+    /// is meant to shrink.
+    const TOP_LEVEL_BY_ACCRETION: &[&str] = &["index-profile", "retrieval"];
+
+    /// Every command that owns subcommands, keyed by the full invocation
+    /// path, with the number of subcommands it owns directly. A new leaf
+    /// is a new help page, and a help page is a surface commitment, so the
+    /// tree's shape is pinned here rather than left to grow silently.
+    const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
+        ("bookrack", 25),
+        ("bookrack audit-profile", 3),
+        ("bookrack corpus", 1),
+        ("bookrack distill", 4),
+        ("bookrack index-profile", 6),
+        ("bookrack intake", 2),
+        ("bookrack libraries", 10),
+        ("bookrack metadata", 10),
+        ("bookrack papers", 13),
+        ("bookrack papers corpus", 1),
+        ("bookrack papers metadata", 10),
+        ("bookrack papers stamps", 1),
+        ("bookrack papers vectors", 4),
+        ("bookrack queue", 5),
+        ("bookrack retrieval", 2),
+        ("bookrack runs", 2),
+        ("bookrack stamps", 1),
+        ("bookrack vectors", 4),
+    ];
+
+    /// Collects `(invocation path, direct subcommand count)` for every
+    /// command in the tree that owns subcommands. clap's generated `help`
+    /// pseudo-subcommand is skipped: it is inserted by `Command::build`,
+    /// so whether it is present depends on how the tree was obtained
+    /// rather than on the command surface. Hidden commands are kept —
+    /// hiding a command must not be a way past the gate.
+    fn subcommand_counts(cmd: &clap::Command, path: &str, out: &mut Vec<(String, usize)>) {
+        let children: Vec<&clap::Command> = cmd
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help")
+            .collect();
+        if children.is_empty() {
+            return;
+        }
+        out.push((path.to_string(), children.len()));
+        for child in children {
+            subcommand_counts(child, &format!("{path} {}", child.get_name()), out);
+        }
+    }
+
+    /// The top-level command names are a compatibility surface: adding one
+    /// widens what an operator is offered, and every name has to be
+    /// answerable for.
+    #[test]
+    fn the_top_level_command_set_is_exactly_the_two_recorded_buckets() {
+        use clap::CommandFactory;
+
+        let by_design: BTreeSet<&str> = TOP_LEVEL_BY_DESIGN.iter().copied().collect();
+        let by_accretion: BTreeSet<&str> = TOP_LEVEL_BY_ACCRETION.iter().copied().collect();
+        assert_eq!(
+            by_design.len(),
+            TOP_LEVEL_BY_DESIGN.len(),
+            "TOP_LEVEL_BY_DESIGN holds a duplicate name"
+        );
+        assert_eq!(
+            by_accretion.len(),
+            TOP_LEVEL_BY_ACCRETION.len(),
+            "TOP_LEVEL_BY_ACCRETION holds a duplicate name"
+        );
+        let both: Vec<&&str> = by_design.intersection(&by_accretion).collect();
+        assert!(
+            both.is_empty(),
+            "a command is filed in both buckets: {both:?}"
+        );
+
+        let expected: BTreeSet<&str> = by_design.union(&by_accretion).copied().collect();
+        let cli = Cli::command();
+        let actual: BTreeSet<&str> = cli
+            .get_subcommands()
+            .map(|sub| sub.get_name())
+            .filter(|name| *name != "help")
+            .collect();
+        let added: Vec<&&str> = actual.difference(&expected).collect();
+        let removed: Vec<&&str> = expected.difference(&actual).collect();
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "the top-level command set changed — this is a minor version bump, \
+             and a top-level name is a surface decision rather than an \
+             implementation detail. File each new name into TOP_LEVEL_BY_DESIGN \
+             when the surface's existing classification has a place for it, or \
+             into TOP_LEVEL_BY_ACCRETION when it does not, and record the change \
+             in CHANGELOG.md. Added: {added:?}; no longer present: {removed:?}"
+        );
+    }
+
+    /// A new subcommand is a new help page, and every help page carries the
+    /// same obligations as the ones already there.
+    #[test]
+    fn every_namespace_owns_the_recorded_number_of_subcommands() {
+        use clap::CommandFactory;
+
+        let recorded: BTreeMap<&str, usize> = SUBCOMMAND_COUNTS.iter().copied().collect();
+        assert_eq!(
+            recorded.len(),
+            SUBCOMMAND_COUNTS.len(),
+            "SUBCOMMAND_COUNTS holds a duplicate path"
+        );
+
+        let cli = Cli::command();
+        let mut walked = Vec::new();
+        subcommand_counts(&cli, cli.get_name(), &mut walked);
+        let live: BTreeMap<&str, usize> = walked.iter().map(|(p, n)| (p.as_str(), *n)).collect();
+
+        let diff: Vec<(&str, Option<usize>, Option<usize>)> = recorded
+            .keys()
+            .chain(live.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| (*path, recorded.get(path).copied(), live.get(path).copied()))
+            .filter(|(_, want, got)| want != got)
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "the subcommand tree changed shape, reported as \
+             (path, recorded, live): {diff:?}. Update SUBCOMMAND_COUNTS to \
+             match, and record the new or removed commands in CHANGELOG.md"
+        );
     }
 }
