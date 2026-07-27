@@ -197,9 +197,11 @@ pub enum DistillAction {
     Build(DistillBuildArgs),
     /// Re-run distill in memory and diff against the live database.
     Verify(DistillVerifyArgs),
-    /// Statically validate each `book.toml` against the catalogs and
-    /// run a per-stage retention report against a truncated source
-    /// sample, without touching the database.
+    /// Validate each `book.toml` against the catalogs statically and
+    /// sample-run the pipeline.
+    ///
+    /// The sample run produces a per-stage retention report over a
+    /// truncated source sample, and nothing touches the database.
     Lint(DistillLintArgs),
     /// List the registered reference books and their entry counts.
     List(DistillListArgs),
@@ -296,8 +298,10 @@ pub enum RunsAction {
         #[arg(long, value_name = "NAME")]
         command: Option<String>,
     },
-    /// Show one run by id, with its summary verdict / flag / coverage
-    /// distributions rendered as horizontal histograms.
+    /// Show one run by id.
+    ///
+    /// The summary's verdict, flag, and coverage distributions render
+    /// as horizontal histograms.
     Show {
         /// The `pipeline_runs.pipeline_run_id` to show. The composite
         /// form is `<command>-<ISO8601>-<sha8>`.
@@ -658,20 +662,20 @@ pub enum PapersAction {
         #[command(subcommand)]
         action: PapersCorpusAction,
     },
-    /// Paper-side vector-store write commands. Peer of the top-level
-    /// `vectors` subcommand for the book pipeline.
+    /// Write to the paper-side vector store.
     ///
-    /// Prefer `bookrack index-profile apply`; this namespace is the
-    /// low-level escape hatch.
+    /// Peer of the top-level `vectors` subcommand for the book
+    /// pipeline. Prefer `bookrack index-profile apply`; this namespace
+    /// is the low-level escape hatch.
     Vectors {
         #[command(subcommand)]
         action: PapersVectorsAction,
     },
-    /// Paper-side index-stamp reconciliation. Peer of the top-level
-    /// `stamps` subcommand for the book pipeline.
+    /// Reconcile the paper-side index stamps.
     ///
-    /// Prefer `bookrack index-profile apply`; this namespace is the
-    /// low-level escape hatch.
+    /// Peer of the top-level `stamps` subcommand for the book
+    /// pipeline. Prefer `bookrack index-profile apply`; this namespace
+    /// is the low-level escape hatch.
     Stamps {
         #[command(subcommand)]
         action: PapersStampsAction,
@@ -683,8 +687,10 @@ pub enum PapersAction {
     /// stats. The real catalog, corpus, and vector store are not
     /// touched.
     Dryrun(PapersDryrunArgs),
-    /// Paper-side metadata curation commands. Peer of the top-level
-    /// `metadata` subcommand for the book pipeline.
+    /// Curate the paper-side metadata.
+    ///
+    /// Peer of the top-level `metadata` subcommand for the book
+    /// pipeline.
     Metadata {
         #[command(subcommand)]
         action: PapersMetadataAction,
@@ -696,9 +702,10 @@ pub enum PapersAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersMetadataAction {
     /// Re-run the paper-side metadata audit on an existing intake's
-    /// cached extraction. Writes only the `confidence` /
-    /// `audit_verdict` rollup; the base attrs, contributors, and
-    /// review status all stay as they are.
+    /// cached extraction.
+    ///
+    /// Writes only the `confidence` / `audit_verdict` rollup; the base
+    /// attrs, contributors, and review status all stay as they are.
     Reaudit {
         /// The intake id of the paper to re-audit.
         intake_id: i64,
@@ -806,8 +813,10 @@ pub enum PapersMetadataAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersCorpusAction {
     /// Rebuild `papers_corpus.db` from the v1 extraction envelopes
-    /// recorded in `papers_dir`. Intakes whose envelope is missing,
-    /// mismatched, or corrupt are reported but skipped.
+    /// recorded in `papers_dir`.
+    ///
+    /// Intakes whose envelope is missing, mismatched, or corrupt are
+    /// reported but skipped.
     Rebuild {
         /// After the corpus tree is rebuilt, also re-embed every
         /// rebuilt paper's abstract chunks. Without this flag the
@@ -870,16 +879,19 @@ pub enum PapersVectorsAction {
         refine_factor: Option<u32>,
     },
     /// Drop the ANN index over `lancedb_papers` and mark the meta as
-    /// brute-force. Peer of [`WriteVectorsAction::Drop`]; the daemon
-    /// rejects the call without `--yes`.
+    /// brute-force.
+    ///
+    /// Peer of the book-side `vectors drop`; the daemon rejects the
+    /// call without `--yes`.
     Drop {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
     },
-    /// Re-embed every (or a single) paper's chunks in place: read the
-    /// existing chunk rows back from `lancedb_papers`, drop their
-    /// vectors, and rewrite under the active embedder.
+    /// Re-embed every (or a single) paper's chunks in place.
+    ///
+    /// Reads the existing chunk rows back from `lancedb_papers`, drops
+    /// their vectors, and rewrites them under the active embedder.
     Reembed {
         /// Restrict the reembed to one paper intake id.
         #[arg(long, value_name = "INTAKE_ID")]
@@ -897,9 +909,12 @@ pub enum PapersVectorsAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Drop the papers chunks table, clear the papers_corpus index
-    /// stamps, and re-derive every paper's abstract chunk with the
-    /// env-configured embedding model.
+    /// Drop the papers chunks table and re-derive every paper's
+    /// abstract chunk.
+    ///
+    /// The `papers_corpus` index stamps are cleared in the same pass,
+    /// and the abstract chunks are re-derived with the env-configured
+    /// embedding model.
     Reset {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
@@ -918,7 +933,9 @@ pub enum PapersVectorsAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersStampsAction {
     /// Probe the embedder for its vector dimension and write the
-    /// resulting stamps into `papers_corpus.db`'s `index_meta`.
+    /// resulting stamps.
+    ///
+    /// The stamps land in `papers_corpus.db`'s `index_meta`.
     Reconcile,
 }
 
