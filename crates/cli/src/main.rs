@@ -58,12 +58,14 @@ Prerequisites:
 )]
 struct Cli {
     /// Select the library at this data root, overriding the
-    /// environment. On local commands (`run`, `init`, `doctor`,
-    /// `audit-profile`, `index-profile`, `distill`, `runs`) this
-    /// switches the data root for the invocation. On commands that
-    /// route through a running daemon, the daemon must already be
-    /// serving this root; a mismatch aborts the command without
-    /// acting. Mutually exclusive with `--library`.
+    /// environment.
+    ///
+    /// On local commands (`run`, `init`, `doctor`, `audit-profile`,
+    /// `index-profile`, `distill`, `runs`) this switches the data root
+    /// for the invocation. On commands that route through a running
+    /// daemon, the daemon must already be serving this root; a mismatch
+    /// aborts the command without acting. Mutually exclusive with
+    /// `--library`.
     #[arg(
         long,
         global = true,
@@ -71,15 +73,18 @@ struct Cli {
         help_heading = "Common Options"
     )]
     data_dir: Option<PathBuf>,
-    /// Select the named library from the registry — the
-    /// BOOKRACK_REGISTRY file when set, else the platform-default
-    /// registry. Behaves like `--data-dir`: a switch on
-    /// local commands, an assertion against the running daemon on
-    /// routed commands. Mutually exclusive with `--data-dir`.
+    /// Select the named library from the registry.
+    ///
+    /// The registry is the BOOKRACK_REGISTRY file when set, else the
+    /// platform-default registry. Behaves like `--data-dir`: a switch on
+    /// local commands, an assertion against the running daemon on routed
+    /// commands. Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
-    /// Select an audit profile by name. Built-in names are
-    /// `default`, `trust-source`, and `strict`. Without this flag the
+    /// Select an audit profile by name: the built-ins are `default`,
+    /// `trust-source`, and `strict`.
+    ///
+    /// Without this flag the
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
     /// bypassed and the named preset wins. Applies to `ingest`,
@@ -341,8 +346,10 @@ enum Command {
     /// finally write `<data_root>/config.toml` plus a pointer in the
     /// platform-default registry. Run after a fresh tarball install.
     Init {
-        /// Where the library's data root should live. Required in
-        /// `--non-interactive` mode; otherwise the wizard prompts.
+        /// Where the library's data root should live.
+        ///
+        /// Required in `--non-interactive` mode; otherwise the wizard
+        /// prompts.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
         /// Skip every prompt. Requires `--data-dir`.
@@ -369,14 +376,18 @@ enum Command {
         action: DistillAction,
     },
     /// Inspect `pipeline_runs` — the registry of every top-level
-    /// operator invocation, with its `pipeline_run_summary` rollup.
+    /// operator invocation.
+    ///
+    /// Each row carries its `pipeline_run_summary` rollup.
     Runs {
         #[command(subcommand)]
         action: bookrack_cli_grammar::RunsAction,
     },
-    /// Inspect `retrieval_calls` — the sidecar recording every
-    /// single-store search invocation with the corpus fingerprint that
-    /// served it and its per-hit detail.
+    /// Inspect `retrieval_calls` — the sidecar over single-store search
+    /// invocations.
+    ///
+    /// Every call is recorded with the corpus fingerprint that served it
+    /// and its per-hit detail.
     Retrieval {
         #[command(subcommand)]
         action: bookrack_cli_grammar::RetrievalAction,
@@ -507,8 +518,10 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Register an existing data root; the name is taken from its
-    /// manifest (or directory name when it has no manifest).
+    /// Register an existing data root under its own name.
+    ///
+    /// The name is taken from the root's manifest, or from the directory
+    /// name when it has no manifest.
     ///
     /// Resolves locally with no daemon. Give `--name` to register under
     /// an alias when the derived name is already taken.

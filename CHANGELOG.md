@@ -25,6 +25,20 @@ release workflow extracts the matching section verbatim from this file.
   `library.show_metadata_audit` and `metadata show` embed widens with
   the detail read.
 
+### Changed
+
+- **cli: `-h` prints a one-line summary and `--help` the full text.**
+  Nineteen command summaries and the `--data-dir` / `--library` /
+  `--audit-profile` global flags used to print their whole description
+  in the short help, where clap does not wrap the `Commands` column —
+  the longest ran to 379 characters on a single line. Each is now split
+  at a sentence boundary, so `-h` prints the summary and `--help` prints
+  the full text, unchanged and complete. `--audit-profile` keeps the
+  three built-in names — `default`, `trust-source`, `strict` — in the
+  summary, since they are what an operator needs at the prompt.
+  `bookrack init --data-dir`, which shadows the global flag on the page
+  a new install opens first, splits the same way.
+
 ## [0.10.0] - 2026-07-27
 
 ### Added
