@@ -22,8 +22,11 @@ pub enum AuditProfileAction {
         /// Built-in profile name (`default`, `trust-source`, `strict`).
         name: String,
     },
-    /// List the sub-section names that differ between two named profiles
-    /// and pretty-print each side's settings for those sections.
+    /// List the sub-section names that differ between two named
+    /// profiles.
+    ///
+    /// Each side's settings for those sections are pretty-printed below
+    /// the list.
     Diff {
         /// First profile name.
         a: String,

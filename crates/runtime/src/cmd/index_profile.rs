@@ -33,16 +33,18 @@ use crate::profile::{
 
 #[derive(clap::Subcommand, Debug)]
 pub enum IndexProfileAction {
-    /// List every profile — built-ins merged with the user directory —
-    /// marking each `[builtin]` or `[user]` and noting any that shadow a
-    /// built-in.
+    /// List every profile — built-ins merged with the user directory.
+    ///
+    /// Each entry is marked `[builtin]` or `[user]`, and a user profile
+    /// that shadows a built-in is called out.
     List {
         /// Emit machine-readable JSON instead of the plain listing.
         #[arg(long)]
         json: bool,
     },
-    /// Print a profile's source and its static validation result. A user
-    /// profile that shadows a built-in prints both.
+    /// Print a profile's source and its static validation result.
+    ///
+    /// A user profile that shadows a built-in prints both.
     Show {
         /// Profile name.
         name: String,
@@ -58,9 +60,12 @@ pub enum IndexProfileAction {
         #[arg(long)]
         allow_unknown_model: bool,
     },
-    /// Print the profile a library effectively runs under — its name,
-    /// where the reference was declared, the resolved combination — and
-    /// compare it against the built index stamps. Offline and read-only.
+    /// Print the profile a library effectively runs under and compare it
+    /// against the built stamps.
+    ///
+    /// Reports the profile's name, where the reference was declared, and
+    /// the resolved combination, and marks where the built index stamps
+    /// disagree. Offline and read-only.
     ///
     /// The library is the one the global selection resolves to:
     /// `--data-dir`, `--library`, the data-root variable, the portable
@@ -80,10 +85,12 @@ pub enum IndexProfileAction {
         #[arg(long)]
         json: bool,
     },
-    /// Reconcile a library's built index with a profile: statically
-    /// validate it, compare it against the recorded stamps and ANN
-    /// configuration, derive the action plan, and — after explicit
-    /// confirmation — execute the plan through the daemon. The preferred
+    /// Reconcile a library's built index with a profile, executing the
+    /// plan through the daemon.
+    ///
+    /// Statically validates the profile, compares it against the
+    /// recorded stamps and ANN configuration, derives the action plan,
+    /// and executes it only after explicit confirmation. The preferred
     /// entry point for switching embedding models or ANN parameters; the
     /// `vectors` / `stamps` namespaces remain as low-level escape
     /// hatches.
