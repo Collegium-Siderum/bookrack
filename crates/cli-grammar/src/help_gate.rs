@@ -55,23 +55,12 @@ pub const EXAMPLES_OWED: &[&str] = &[
     "audit-profile diff",
     "audit-profile list",
     "audit-profile show",
-    "diagnose",
-    "doctor",
-    "dryrun",
     "index-profile apply",
     "index-profile current",
     "index-profile diff",
     "index-profile list",
     "index-profile show",
     "index-profile validate",
-    "ingest",
-    "init",
-    "logs",
-    "quit",
-    "remove",
-    "run",
-    "status",
-    "verify",
 ];
 
 /// Leaves whose examples are deliberately deferred behind a rename

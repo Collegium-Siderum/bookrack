@@ -153,6 +153,10 @@ enum Command {
     /// Compare the catalog and corpus schemas against the binary's
     /// TableSpecs and tally the cross-store counts: catalog intakes,
     /// vectors-meta chunk count, and intake-file existence on disk.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "verify",
+        "verify --library demo",
+    ])]
     Verify,
     /// Inspect the library registry.
     ///
@@ -168,6 +172,10 @@ enum Command {
     /// Collects the data root's crash reports, recent logs, and a small
     /// catalog snapshot. The bundle is suitable for attaching to a bug
     /// report.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "diagnose",
+        "diagnose --days 20",
+    ])]
     Diagnose {
         /// Output path for the bundle. Defaults to
         /// `<data_dir>/diagnostics/diagnose-<unix_ms>.tar.gz`.
@@ -187,6 +195,10 @@ enum Command {
     /// and serve MCP over streamable HTTP. The foreground task idles
     /// until a shutdown signal arrives (Ctrl-C, SIGTERM, SIGHUP, or the
     /// control-plane `daemon.shutdown` RPC).
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "run",
+        "run --library demo",
+    ])]
     Run {
         /// Override the MCP listener address. Defaults to the value
         /// from `BOOKRACK_MCP_ADDR` (and falls back to the built-in
@@ -234,6 +246,10 @@ enum Command {
     /// presence, Ollama daemon reachability, and whether the configured
     /// embed model is pulled. Exits with a non-zero status when any row
     /// fails, so a script can branch on the result.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "doctor",
+        "doctor --install-pdfium",
+    ])]
     Doctor {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
@@ -275,6 +291,10 @@ enum Command {
     ///
     /// Requires a running bookrack daemon; the command exits with code
     /// 2 if no daemon is found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "ingest /path/to/book.epub",
+        "ingest /path/to/book.epub --hold-for-metadata",
+    ])]
     Ingest(IngestArgs),
     /// Drive an intake from a derived source manifestation (OCR-only).
     ///
@@ -298,7 +318,7 @@ enum Command {
         #[command(subcommand)]
         action: WriteMetadataAction,
     },
-    /// Vector-store writes: rebuild, reembed, reset, or drop.
+    /// Write to the book-side vector store: rebuild, reembed, reset, or drop.
     ///
     /// Prefer `bookrack index-profile apply`; this namespace is the
     /// low-level escape hatch.
@@ -320,8 +340,12 @@ enum Command {
         action: StampsAction,
     },
     /// Drop a book from every store.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "remove 12",
+        "remove --sha a1b2c3d4 --yes",
+    ])]
     Remove(RemoveArgs),
-    /// Paper-side surface: ingest, browse, and export papers.
+    /// Ingest, browse, and export papers on the paper-side surface.
     ///
     /// Ingest a paper file, browse the paper catalog, or export one
     /// paper's bibliographic record as CSL-JSON. The book-side
@@ -332,10 +356,18 @@ enum Command {
         action: PapersAction,
     },
     /// Simulate an ingest without writing the live stores.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "dryrun /path/to/book.epub",
+        "dryrun /path/to/book.epub --stdout",
+    ])]
     Dryrun(DryrunArgs),
     /// Ask the running bookrack daemon to shut down.
     ///
     /// Exits with code 0 whether or not a daemon was found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "quit",
+        "quit --library demo",
+    ])]
     Quit,
     /// Run the interactive install wizard.
     ///
@@ -344,6 +376,10 @@ enum Command {
     /// ingest → embed → query pipeline end-to-end in a tempdir, and
     /// finally write `<data_root>/config.toml` plus a pointer in the
     /// platform-default registry. Run after a fresh tarball install.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "init",
+        "init --data-dir /path/to/library --non-interactive",
+    ])]
     Init {
         /// Where the library's data root should live.
         ///
@@ -400,6 +436,10 @@ enum Command {
     /// semantics. Human mode renders each event as
     /// `HH:MM:SS LEVEL target | message`; `--json` emits the
     /// underlying `LogEvent` payload as newline-delimited JSON.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "logs",
+        "logs --tail 20",
+    ])]
     Logs(LogsArgs),
     /// Print a one-screen status card: daemon, served library, queue.
     ///
@@ -407,6 +447,10 @@ enum Command {
     /// it busy" in one call. Exits 0 when a daemon answers or none is
     /// running, 3 when the session lock is stale (a held lock whose
     /// daemon stopped answering).
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "status",
+        "status --json",
+    ])]
     Status,
 }
 
