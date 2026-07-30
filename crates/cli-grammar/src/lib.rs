@@ -5,6 +5,28 @@
 
 use std::path::PathBuf;
 
+#[doc(hidden)]
+pub mod help_gate;
+
+/// Renders a leaf's `Examples:` block for `#[command(after_long_help = ...)]`.
+///
+/// Each argument is one invocation with the binary name left off — the
+/// macro adds the `  $ bookrack ` prefix, so an example reads the way an
+/// operator would paste it. `concat!` folds the whole block at compile
+/// time, which is what makes it usable in an attribute; the arguments
+/// must therefore be literals, and an example must spell out its own
+/// full invocation path.
+///
+/// Exported only so `crates/cli` and `crates/runtime` can reach it from
+/// their own command definitions; it has no other consumer.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! examples {
+    ($($line:literal),+ $(,)?) => {
+        concat!("Examples:", $("\n  $ bookrack ", $line),+)
+    };
+}
+
 /// Lifecycle actions on the persistent ingest queue. Dispatch maps
 /// each variant to the matching control-plane RPC.
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
@@ -1103,6 +1125,38 @@ mod tests {
             #[command(subcommand)]
             action: IntakeAction,
         },
+        Queue {
+            #[command(subcommand)]
+            action: QueueAction,
+        },
+        Distill {
+            #[command(subcommand)]
+            action: DistillAction,
+        },
+        Runs {
+            #[command(subcommand)]
+            action: RunsAction,
+        },
+        Retrieval {
+            #[command(subcommand)]
+            action: RetrievalAction,
+        },
+        Metadata {
+            #[command(subcommand)]
+            action: WriteMetadataAction,
+        },
+        Vectors {
+            #[command(subcommand)]
+            action: WriteVectorsAction,
+        },
+        Corpus {
+            #[command(subcommand)]
+            action: CorpusAction,
+        },
+        Stamps {
+            #[command(subcommand)]
+            action: StampsAction,
+        },
     }
 
     fn parse(tokens: &[&str]) -> PapersAction {
@@ -1407,5 +1461,29 @@ mod tests {
             panic!("the two selectors must not be combined");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// The gate runs here as well as in `crates/cli` because the daily
+    /// gate narrows to the crate a commit touches: a change to this
+    /// crate's grammar does not run the binary's tests, so a leaf that
+    /// lands here without examples would only be caught in CI. The
+    /// shell mounts each enum under the name the binary gives it, so
+    /// the paths the walk builds are the paths the debt list records.
+    #[test]
+    fn this_crates_command_surface_obeys_the_help_gate() {
+        use clap::CommandFactory;
+
+        let violations =
+            help_gate::audit_tree(&TestCli::command(), help_gate::Scope::MirroredEnums);
+        assert!(
+            violations.is_empty(),
+            "the help gate rejected this crate's grammar:{}",
+            help_gate::report(&violations)
+        );
+        let defects = help_gate::policy_defects();
+        assert!(
+            defects.is_empty(),
+            "the help gate's own constants are malformed: {defects:?}"
+        );
     }
 }
