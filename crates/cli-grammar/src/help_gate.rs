@@ -51,14 +51,7 @@ pub const GLOBAL_ARG_IDS: &[&str] = &[
 /// is not on it must carry at least `MIN_EXAMPLES`, and a leaf that is
 /// on it must still carry none — filling one in without striking its
 /// line out fails the gate just as loudly as leaving it empty.
-pub const EXAMPLES_OWED: &[&str] = &[
-    "index-profile apply",
-    "index-profile current",
-    "index-profile diff",
-    "index-profile list",
-    "index-profile show",
-    "index-profile validate",
-];
+pub const EXAMPLES_OWED: &[&str] = &[];
 
 /// Leaves whose examples are deliberately deferred behind a rename
 /// that is already decided: `exec` is being folded into a typed

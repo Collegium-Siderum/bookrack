@@ -37,6 +37,10 @@ pub enum IndexProfileAction {
     ///
     /// Each entry is marked `[builtin]` or `[user]`, and a user profile
     /// that shadows a built-in is called out.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile list",
+        "index-profile list --json",
+    ])]
     List {
         /// Emit machine-readable JSON instead of the plain listing.
         #[arg(long)]
@@ -45,12 +49,20 @@ pub enum IndexProfileAction {
     /// Print a profile's source and its static validation result.
     ///
     /// A user profile that shadows a built-in prints both.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile show qwen3-0.6b-default",
+        "index-profile show qwen3-4b-quality --json",
+    ])]
     Show {
         /// Profile name.
         name: String,
     },
-    /// Statically validate a profile and exit non-zero if any finding is
+    /// Validate a profile statically and exit non-zero if any finding is
     /// an error.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile validate qwen3-0.6b-default",
+        "index-profile validate qwen3-0.6b-default --allow-unknown-model",
+    ])]
     Validate {
         /// Profile name.
         name: String,
@@ -70,12 +82,20 @@ pub enum IndexProfileAction {
     /// The library is the one the global selection resolves to:
     /// `--data-dir`, `--library`, the data-root variable, the portable
     /// layout, then the registry default.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile current",
+        "index-profile current --json",
+    ])]
     Current {
         /// Emit machine-readable JSON instead of the plain report.
         #[arg(long)]
         json: bool,
     },
     /// Compare two profiles field by field.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile diff qwen3-0.6b-default qwen3-4b-quality",
+        "index-profile diff qwen3-0.6b-default qwen3-4b-quality --json",
+    ])]
     Diff {
         /// First profile name.
         a: String,
@@ -97,6 +117,10 @@ pub enum IndexProfileAction {
     ///
     /// The library is the one the global selection resolves to, the same
     /// as for `current`.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "index-profile apply qwen3-0.6b-default",
+        "index-profile apply qwen3-0.6b-default --dry-run",
+    ])]
     Apply {
         /// Profile name to apply.
         name: String,
