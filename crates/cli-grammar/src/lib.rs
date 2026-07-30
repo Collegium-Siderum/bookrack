@@ -244,16 +244,32 @@ pub enum IntakeAction {
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum DistillAction {
     /// Build distilled entries for the books reachable from `<PATHS>`.
+    #[command(after_long_help = crate::examples![
+        "distill build /path/to/book.epub",
+        "distill build /path/to/book.epub --dry-run",
+    ])]
     Build(DistillBuildArgs),
     /// Re-run distill in memory and diff against the live database.
+    #[command(after_long_help = crate::examples![
+        "distill verify /path/to/book.epub",
+        "distill verify /path/to/book.epub --library demo",
+    ])]
     Verify(DistillVerifyArgs),
     /// Validate each `book.toml` against the catalogs statically and
     /// sample-run the pipeline.
     ///
     /// The sample run produces a per-stage retention report over a
     /// truncated source sample, and nothing touches the database.
+    #[command(after_long_help = crate::examples![
+        "distill lint /path/to/book.epub",
+        "distill lint /path/to/book.epub --sample-lines 20",
+    ])]
     Lint(DistillLintArgs),
     /// List the registered reference books and their entry counts.
+    #[command(after_long_help = crate::examples![
+        "distill list",
+        "distill list --json",
+    ])]
     List(DistillListArgs),
 }
 
