@@ -770,8 +770,9 @@ pub enum PapersAction {
         "papers remove --sha a1b2c3d4 --yes",
     ])]
     Remove(PapersRemoveArgs),
-    /// Paper-side corpus write commands. Peer of the top-level
-    /// `corpus` subcommand for the book pipeline.
+    /// Write the paper-side corpus.
+    ///
+    /// Peer of the top-level `corpus` subcommand for the book pipeline.
     Corpus {
         #[command(subcommand)]
         action: PapersCorpusAction,
@@ -975,6 +976,10 @@ pub enum PapersCorpusAction {
     ///
     /// Intakes whose envelope is missing, mismatched, or corrupt are
     /// reported but skipped.
+    #[command(after_long_help = crate::examples![
+        "papers corpus rebuild",
+        "papers corpus rebuild --paper 101 --dry-run",
+    ])]
     Rebuild {
         /// After the corpus tree is rebuilt, also re-embed every
         /// rebuilt paper's abstract chunks. Without this flag the
@@ -1008,6 +1013,10 @@ pub enum PapersCorpusAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersVectorsAction {
     /// Build or rebuild the ANN index over `lancedb_papers`.
+    #[command(after_long_help = crate::examples![
+        "papers vectors rebuild",
+        "papers vectors rebuild --library demo",
+    ])]
     Rebuild {
         /// IVF family — `ivf-flat`, `ivf-sq`, `ivf-pq`, `ivf-hnsw-flat`,
         /// `ivf-hnsw-sq`, `ivf-hnsw-pq`.
@@ -1041,6 +1050,10 @@ pub enum PapersVectorsAction {
     ///
     /// Peer of the book-side `vectors drop`; the daemon rejects the
     /// call without `--yes`.
+    #[command(after_long_help = crate::examples![
+        "papers vectors drop",
+        "papers vectors drop --yes",
+    ])]
     Drop {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
@@ -1050,6 +1063,10 @@ pub enum PapersVectorsAction {
     ///
     /// Reads the existing chunk rows back from `lancedb_papers`, drops
     /// their vectors, and rewrites them under the active embedder.
+    #[command(after_long_help = crate::examples![
+        "papers vectors reembed",
+        "papers vectors reembed --paper 101 --dry-run",
+    ])]
     Reembed {
         /// Restrict the reembed to one paper intake id.
         #[arg(long, value_name = "INTAKE_ID")]
@@ -1073,6 +1090,10 @@ pub enum PapersVectorsAction {
     /// The `papers_corpus` index stamps are cleared in the same pass,
     /// and the abstract chunks are re-derived with the env-configured
     /// embedding model.
+    #[command(after_long_help = crate::examples![
+        "papers vectors reset",
+        "papers vectors reset --yes",
+    ])]
     Reset {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
@@ -1094,6 +1115,10 @@ pub enum PapersStampsAction {
     /// resulting stamps.
     ///
     /// The stamps land in `papers_corpus.db`'s `index_meta`.
+    #[command(after_long_help = crate::examples![
+        "papers stamps reconcile",
+        "papers stamps reconcile --library demo",
+    ])]
     Reconcile,
 }
 
