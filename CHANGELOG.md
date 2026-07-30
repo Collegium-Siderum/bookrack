@@ -27,6 +27,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **cli: the root help trailer points at `doctor` for the prerequisite
+  check.** The block `bookrack --help` prints after the options used to
+  restate the Ollama setup, embed-model name included, and spelled out
+  the `exec library.<tool>` form for library reads. It now hands the
+  runtime check to `bookrack doctor`, which knows the configured model,
+  and points at `bookrack run` / `bookrack exec tools` — the two entry
+  points that stay correct as the control-plane surface evolves. The
+  environment-variable listing is unchanged.
+
 - **cli: `-h` prints a one-line summary and `--help` the full text.**
   Nineteen command summaries and the `--data-dir` / `--library` /
   `--audit-profile` global flags used to print their whole description

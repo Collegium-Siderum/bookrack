@@ -31,9 +31,9 @@ use bookrack_runtime::cmd::libraries::CopyMode;
 use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
-/// variables that select the library and the embed backend, and the
-/// runtime prerequisite a fresh install most often trips over: Ollama
-/// must be reachable for any command that embeds text.
+/// variables that select the library and the embed backend, points at
+/// the session as the way to reach library reads, and hands the
+/// runtime prerequisite check to `doctor` rather than restating it.
 const TOP_AFTER_HELP: &str = "\
 Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
@@ -41,13 +41,12 @@ Environment:
   BOOKRACK_OLLAMA_URL   Ollama endpoint (default http://localhost:11434)
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
-Library reads (search, browse, metadata, status) live behind `bookrack exec
-library.<tool>`. Run `bookrack run` to start a session, then enumerate the
-live control-plane surface with `bookrack exec tools`.
+Library reads (search, browse, metadata, status) are served by a running
+session: start one with `bookrack run`, then list the live control-plane
+surface with `bookrack exec tools`.
 
 Prerequisites:
-  Start Ollama and pull the embed model before running the session, e.g.:
-      ollama pull qwen3-embedding:0.6b";
+  Run `bookrack doctor` to check Ollama and the embed model.";
 
 #[derive(clap::Parser)]
 #[command(
