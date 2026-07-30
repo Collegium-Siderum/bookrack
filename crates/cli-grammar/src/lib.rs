@@ -824,6 +824,10 @@ pub enum PapersMetadataAction {
     ///
     /// Writes only the `confidence` / `audit_verdict` rollup; the base
     /// attrs, contributors, and review status all stay as they are.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reaudit 101",
+        "papers metadata reaudit 101 --audit-profile strict",
+    ])]
     Reaudit {
         /// The intake id of the paper to re-audit.
         intake_id: i64,
@@ -833,6 +837,10 @@ pub enum PapersMetadataAction {
         audit_profile: Option<String>,
     },
     /// Override one field on a paper's effective record.
+    #[command(after_long_help = crate::examples![
+        "papers metadata set 101 --field title --value \"Sample Title\"",
+        "papers metadata set 101 --field title --value \"Sample Title\" --confirmed",
+    ])]
     Set {
         /// Intake id of the paper.
         intake_id: i64,
@@ -849,6 +857,10 @@ pub enum PapersMetadataAction {
     },
     /// Remove an override on one field, reverting to the extracted
     /// value.
+    #[command(after_long_help = crate::examples![
+        "papers metadata clear 101 --field title",
+        "papers metadata clear 101 --field publisher --library demo",
+    ])]
     Clear {
         /// Intake id of the paper.
         intake_id: i64,
@@ -857,6 +869,10 @@ pub enum PapersMetadataAction {
         field: String,
     },
     /// Set an override that deliberately voids one field's value.
+    #[command(after_long_help = crate::examples![
+        "papers metadata void 101 --field publisher",
+        "papers metadata void 101 --field publisher --json",
+    ])]
     Void {
         /// Intake id of the paper.
         intake_id: i64,
@@ -866,6 +882,10 @@ pub enum PapersMetadataAction {
     },
     /// Acknowledge a flagged paper without changing its metadata —
     /// move the review row to `acknowledged`.
+    #[command(after_long_help = crate::examples![
+        "papers metadata ack 101",
+        "papers metadata ack 101 --library demo",
+    ])]
     Ack {
         /// Intake id of the paper.
         intake_id: i64,
@@ -874,6 +894,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Approve a paper's metadata as correct.
+    #[command(after_long_help = crate::examples![
+        "papers metadata approve 101",
+        "papers metadata approve 101 --json",
+    ])]
     Approve {
         /// Intake id of the paper.
         intake_id: i64,
@@ -882,6 +906,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Reject a paper's metadata as wrong.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reject 101",
+        "papers metadata reject 101 --library demo",
+    ])]
     Reject {
         /// Intake id of the paper.
         intake_id: i64,
@@ -891,6 +919,10 @@ pub enum PapersMetadataAction {
     },
     /// Move a previously approved / rejected paper back to
     /// `pending`.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reopen 101",
+        "papers metadata reopen 101 --json",
+    ])]
     Reopen {
         /// Intake id of the paper.
         intake_id: i64,
@@ -899,6 +931,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Add a contributor row to a paper.
+    #[command(after_long_help = crate::examples![
+        "papers metadata contributor-add 101 --role author --name \"Doe, Jane\"",
+        "papers metadata contributor-add 101 --role author --name \"Doe, Jane\" --json",
+    ])]
     ContributorAdd {
         /// Intake id of the paper.
         intake_id: i64,
@@ -920,6 +956,10 @@ pub enum PapersMetadataAction {
         orcid: Option<String>,
     },
     /// Remove a contributor row by id.
+    #[command(after_long_help = crate::examples![
+        "papers metadata contributor-remove 7",
+        "papers metadata contributor-remove 7 --library demo",
+    ])]
     ContributorRemove {
         /// Surrogate id of the contributor row to remove (listed by
         /// `papers show`).
