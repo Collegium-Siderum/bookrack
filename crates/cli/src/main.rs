@@ -415,6 +415,10 @@ pub(crate) enum LibrariesAction {
     /// List every entry in the registry.
     ///
     /// Marks the `default = "..."` fallback when one is set.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries list",
+        "libraries list --json",
+    ])]
     List {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
@@ -425,6 +429,10 @@ pub(crate) enum LibrariesAction {
     /// The card is what the daemon serves over `library.info`:
     /// configured paths, embed model, vector-store shape, and catalog
     /// counts.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries info",
+        "libraries info --name demo",
+    ])]
     Info {
         /// Library short name. When omitted, the daemon picks the
         /// registry's current default.
@@ -436,6 +444,10 @@ pub(crate) enum LibrariesAction {
     /// Writes straight to the on-disk registry, so it needs no running
     /// daemon and the change persists across restarts. Errors if the
     /// registry does not define `name`.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries default demo",
+        "libraries default demo --json",
+    ])]
     Default {
         /// Library short name to record as the registry default.
         name: String,
@@ -446,6 +458,10 @@ pub(crate) enum LibrariesAction {
     /// and registers the new library so `--library <name>` resolves it.
     /// The new library has no vector store; run `vectors reset` against
     /// it to rebuild under whatever model the env points at.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries fork demo-fork --data-dir /path/to/library",
+        "libraries fork demo-fork --data-dir /path/to/library --yes",
+    ])]
     Fork {
         /// Short name to register in the library registry.
         new_name: String,
@@ -467,6 +483,10 @@ pub(crate) enum LibrariesAction {
     /// confirmed or probable data root, 1 when it is not (or its
     /// manifest is unreadable), and 2 for a missing or non-directory
     /// path.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries detect /path/to/library",
+        "libraries detect /path/to/library --json",
+    ])]
     Detect {
         /// Path to probe.
         path: std::path::PathBuf,
@@ -477,6 +497,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon and always exits 0. Give exactly
     /// one of a parent directory or `--volumes`.
     #[command(group(clap::ArgGroup::new("scan_target").required(true).args(["parent", "volumes"])))]
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries scan /path/to/library",
+        "libraries scan --volumes",
+    ])]
     Scan {
         /// Parent directory whose immediate subdirectories are probed.
         parent: Option<std::path::PathBuf>,
@@ -497,6 +521,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon. Writes an identity manifest to
     /// the root when it has none (previewed and confirmed first, unless
     /// `--yes`), then records the registry entry.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries add demo /path/to/library",
+        "libraries add demo /path/to/library --yes",
+    ])]
     Add {
         /// Registry name to record the root under. Wins over the
         /// manifest's birth name; a mismatch is a legal alias.
@@ -524,6 +552,10 @@ pub(crate) enum LibrariesAction {
     ///
     /// Resolves locally with no daemon. Give `--name` to register under
     /// an alias when the derived name is already taken.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries register /path/to/library",
+        "libraries register /path/to/library --name demo",
+    ])]
     Register {
         /// Data root to register.
         path: std::path::PathBuf,
@@ -549,6 +581,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon. `--purge` additionally deletes
     /// the data root, gated on a confirmed/probable detect verdict and a
     /// typed confirmation.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries remove demo",
+        "libraries remove demo --yes",
+    ])]
     Remove {
         /// Registry name to forget.
         name: String,
@@ -570,6 +606,10 @@ pub(crate) enum LibrariesAction {
     /// `index_profile` is the exception: it is a data contract rather
     /// than a per-machine preference, so it is written to the library
     /// manifest and only cached in the registry entry.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries config demo",
+        "libraries config demo search.top_k=8",
+    ])]
     Config {
         /// Registry name whose config is read or edited.
         name: String,
