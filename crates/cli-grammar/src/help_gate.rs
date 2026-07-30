@@ -52,9 +52,6 @@ pub const GLOBAL_ARG_IDS: &[&str] = &[
 /// on it must still carry none — filling one in without striking its
 /// line out fails the gate just as loudly as leaving it empty.
 pub const EXAMPLES_OWED: &[&str] = &[
-    "audit-profile diff",
-    "audit-profile list",
-    "audit-profile show",
     "index-profile apply",
     "index-profile current",
     "index-profile diff",
