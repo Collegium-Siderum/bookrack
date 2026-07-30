@@ -1215,6 +1215,8 @@ fn env_data_dir_shadows_default(env: Option<String>, default_root: Option<&Path>
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use bookrack_cli_grammar::help_gate;
+
     use super::*;
     use clap::Parser;
 
@@ -2044,11 +2046,6 @@ mod tests {
         ("bookrack vectors", 4),
     ];
 
-    /// Upper bound on a command summary, in characters. clap prints the
-    /// summary in the parent's `Commands` column and does not wrap that
-    /// column, so a long one runs off the terminal instead of folding.
-    const SUMMARY_LIMIT: usize = 100;
-
     /// Collects `(invocation path, direct subcommand count)` for every
     /// command in the tree that owns subcommands. clap's generated `help`
     /// pseudo-subcommand is skipped: it is inserted by `Command::build`,
@@ -2148,123 +2145,79 @@ mod tests {
         );
     }
 
-    /// Collects `(invocation path, summary length)` for every command whose
-    /// `about` is longer than `SUMMARY_LIMIT`, and the paths of commands
-    /// that carry no `about` at all. Length is counted in characters, not
-    /// bytes: the summaries carry em dashes.
-    fn survey_summaries(
-        cmd: &clap::Command,
-        path: &str,
-        over: &mut Vec<(String, usize)>,
-        missing: &mut Vec<String>,
-    ) {
-        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
-            let path = format!("{path} {}", sub.get_name());
-            match sub.get_about() {
-                Some(about) => {
-                    let len = about.to_string().chars().count();
-                    if len > SUMMARY_LIMIT {
-                        over.push((path.clone(), len));
-                    }
-                }
-                None => missing.push(path.clone()),
-            }
-            survey_summaries(sub, &path, over, missing);
-        }
-    }
-
-    /// A summary that overflows the `Commands` column is the first thing an
-    /// operator sees when they ask what a namespace holds. The repair is a
-    /// blank line after the first sentence of the doc comment: clap keeps
-    /// the first paragraph as the summary and moves the rest to long help.
-    /// A command with no summary at all is the same defect taken to its
-    /// limit, so the walk reports that too.
+    /// The gate's rules live in `bookrack_cli_grammar::help_gate` so
+    /// that this crate, the grammar crate, and the runtime crate can
+    /// each run them under the daily narrowed gate. This entry point
+    /// is the only one that sees the whole tree: the summary and
+    /// example rules run here over every command the binary offers,
+    /// including the ones defined in this crate that no mirror mounts.
     #[test]
-    fn every_command_carries_a_summary_within_the_limit() {
+    fn the_command_surface_obeys_the_help_gate() {
         use clap::CommandFactory;
 
         let cli = Cli::command();
-        let mut over = Vec::new();
-        let mut missing = Vec::new();
-        if cli.get_about().is_none() {
-            missing.push(cli.get_name().to_string());
-        }
-        survey_summaries(&cli, cli.get_name(), &mut over, &mut missing);
+        let violations = help_gate::audit_tree(&cli, help_gate::Scope::WholeBinary);
         assert!(
-            missing.is_empty(),
-            "these commands document nothing in the parent's Commands column. \
-             Give each a doc comment: {missing:?}"
+            violations.is_empty(),
+            "the help gate rejected the command surface:{}",
+            help_gate::report(&violations)
         );
+        let defects = help_gate::policy_defects();
         assert!(
-            over.is_empty(),
-            "these command summaries are longer than {SUMMARY_LIMIT} characters. \
-             Put a blank line after the first sentence of the doc comment so the \
-             rest becomes long help: {over:?}"
+            defects.is_empty(),
+            "the help gate's own constants are malformed: {defects:?}"
+        );
+        let unclaimed = help_gate::unclaimed_debt(&cli);
+        assert!(
+            unclaimed.is_empty(),
+            "these paths are filed as owing examples but no command answers to \
+             them — a rename left the list behind: {unclaimed:?}"
+        );
+        let recorded: Vec<String> = help_gate::GLOBAL_ARG_IDS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+        assert_eq!(
+            help_gate::declared_global_ids(&cli),
+            recorded,
+            "the binary's global flags and GLOBAL_ARG_IDS have diverged. The two \
+             mirrored gate points cannot read `is_global_set()`, so they measure \
+             the shadowing rule against that constant; a global it does not name \
+             is unenforced everywhere but here"
         );
     }
 
-    /// Collects `(invocation path and flag, short-help length)` for every
-    /// argument that shares a name with a global one and overruns the
-    /// limit. A subcommand may declare an argument whose name matches a
-    /// global; the local one then wins on that page, so surveying only the
-    /// globals declared on the root leaves those pages unchecked.
-    fn over_long_shadowing_flags(
-        cmd: &clap::Command,
-        path: &str,
-        globals: &BTreeSet<String>,
-        out: &mut Vec<(String, usize)>,
-    ) {
-        for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
-            let path = format!("{path} {}", sub.get_name());
-            for arg in sub.get_arguments() {
-                let id = arg.get_id().to_string();
-                if !globals.contains(&id) || arg.is_global_set() {
-                    continue;
-                }
-                let Some(help) = arg.get_help() else { continue };
-                let len = help.to_string().chars().count();
-                if len > SUMMARY_LIMIT {
-                    let flag = arg.get_long().unwrap_or(id.as_str());
-                    out.push((format!("{path} --{flag}"), len));
-                }
-            }
-            over_long_shadowing_flags(sub, &path, globals, out);
-        }
-    }
-
-    /// A global flag's short help is reprinted on every help page in the
-    /// tree, so it is the single most repeated text in the binary. A local
-    /// argument that shadows a global one inherits that weight on its own
-    /// page while escaping the root-level survey, so both are walked here.
+    /// An example is a string until something parses it. Without this
+    /// the gate accepts `$ bookrack books search "sample"` — a command
+    /// that does not exist — and the drift it exists to prevent simply
+    /// moves into the examples. Only this crate can run the check: the
+    /// parser is the binary's own `Cli`, which the grammar crate
+    /// cannot reach. Parsing is all it proves: the example is a legal
+    /// invocation today, not one that succeeds against a library.
     #[test]
-    fn every_global_flag_summary_fits_the_options_column() {
+    fn every_example_is_a_command_the_binary_still_accepts() {
         use clap::CommandFactory;
 
         let cli = Cli::command();
-        let globals: BTreeSet<String> = cli
-            .get_arguments()
-            .filter(|arg| arg.is_global_set())
-            .map(|arg| arg.get_id().to_string())
-            .collect();
-        let mut over: Vec<(String, usize)> = cli
-            .get_arguments()
-            .filter(|arg| arg.is_global_set())
-            .filter_map(|arg| {
-                let len = arg.get_help()?.to_string().chars().count();
-                (len > SUMMARY_LIMIT).then(|| {
-                    let id = arg.get_id().to_string();
-                    let flag = arg.get_long().unwrap_or(id.as_str());
-                    (format!("--{flag}"), len)
-                })
-            })
-            .collect();
-        over_long_shadowing_flags(&cli, cli.get_name(), &globals, &mut over);
+        let mut rejected: Vec<String> = Vec::new();
+        for (path, invocation) in help_gate::examples_in_tree(&cli) {
+            if help_gate::is_parse_exempt(&path) {
+                continue;
+            }
+            let Ok(tokens) = help_gate::split_example(&invocation) else {
+                rejected.push(format!("{invocation} (unbalanced quotes)"));
+                continue;
+            };
+            let argv = std::iter::once("bookrack".to_string()).chain(tokens);
+            if let Err(err) = Cli::try_parse_from(argv) {
+                rejected.push(format!("{invocation} ({})", err.kind()));
+            }
+        }
         assert!(
-            over.is_empty(),
-            "these flags carry more than {SUMMARY_LIMIT} characters of short \
-             help on a page where an operator cannot avoid them — the globals on \
-             every page, and any local argument that shadows a global on its own. \
-             Put a blank line after the first sentence: {over:?}"
+            rejected.is_empty(),
+            "these examples no longer parse. An example that names a command or \
+             a flag the surface has dropped documents something that does not \
+             exist: {rejected:?}"
         );
     }
 }
