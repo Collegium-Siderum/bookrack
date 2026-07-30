@@ -104,11 +104,7 @@ pub const EXAMPLES_OWED: &[&str] = &[
     "papers vectors reset",
     "quit",
     "remove",
-    "retrieval list",
-    "retrieval show",
     "run",
-    "runs list",
-    "runs show",
     "status",
     "verify",
 ];

@@ -355,6 +355,10 @@ pub struct DistillListArgs {}
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum RunsAction {
     /// List recent `pipeline_runs` rows.
+    #[command(after_long_help = crate::examples![
+        "runs list",
+        "runs list --last 20",
+    ])]
     List {
         /// Cap the result to the most recent N runs. Default is no cap.
         #[arg(long, value_name = "N")]
@@ -368,6 +372,10 @@ pub enum RunsAction {
     ///
     /// The summary's verdict, flag, and coverage distributions render
     /// as horizontal histograms.
+    #[command(after_long_help = crate::examples![
+        "runs show ingest-20260101T000000Z-a1b2c3d4",
+        "runs show ingest-20260101T000000Z-a1b2c3d4 --json",
+    ])]
     Show {
         /// The `pipeline_runs.pipeline_run_id` to show. The composite
         /// form is `<command>-<ISO8601>-<sha8>`.
@@ -382,6 +390,10 @@ pub enum RunsAction {
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum RetrievalAction {
     /// List recent retrieval calls.
+    #[command(after_long_help = crate::examples![
+        "retrieval list",
+        "retrieval list --corpus-fingerprint a1b2c3d4e5f60718",
+    ])]
     List {
         /// Cap the result to the most recent N calls. Default is no cap.
         #[arg(long, value_name = "N")]
@@ -393,6 +405,10 @@ pub enum RetrievalAction {
     },
     /// Show one retrieval call by id: call metadata and its hits in
     /// rank order.
+    #[command(after_long_help = crate::examples![
+        "retrieval show 42",
+        "retrieval show 42 --json",
+    ])]
     Show {
         /// The `mcp_tool_calls.call_id` the retrieval was logged under.
         call_id: i64,
