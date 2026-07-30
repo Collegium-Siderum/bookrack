@@ -70,8 +70,6 @@ pub const EXAMPLES_OWED: &[&str] = &[
     "index-profile validate",
     "ingest",
     "init",
-    "intake list-ocr-pending",
-    "intake ocr",
     "libraries add",
     "libraries config",
     "libraries default",

@@ -167,6 +167,10 @@ pub enum IntakeAction {
     /// source hash, a best-effort page count, and why the text layer
     /// was rejected. Run OCR with any tool, then re-enter the product
     /// through `intake ocr`. `--json` emits the full manifest.
+    #[command(after_long_help = crate::examples![
+        "intake list-ocr-pending",
+        "intake list-ocr-pending --limit 20",
+    ])]
     ListOcrPending {
         /// Maximum number of sources to list. Omitted or zero uses the
         /// default page size; the value is clamped to the read cap.
@@ -186,6 +190,10 @@ pub enum IntakeAction {
     /// `/Pages`; pass `--expected-pages` to override it when PDFium
     /// cannot read the source, and `--allow-partial` to accept an OCR
     /// product whose sheets do not cover every page.
+    #[command(after_long_help = crate::examples![
+        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf",
+        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf --allow-partial",
+    ])]
     Ocr {
         /// Path to the polyocr single-file Markdown product, with
         /// page markers `<!-- page <label> (sheet <n>) -->`.
