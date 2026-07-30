@@ -701,24 +701,48 @@ pub enum PapersAction {
     ///
     /// Mirrors the book-side `ingest` command. With `--recursive`,
     /// every supported file under a directory is enqueued.
+    #[command(after_long_help = crate::examples![
+        "papers ingest /path/to/paper.pdf",
+        "papers ingest /path/to/papers-dir/ --recursive",
+    ])]
     Ingest(PapersIngestArgs),
     /// List papers in catalog order, paginated.
+    #[command(after_long_help = crate::examples![
+        "papers list",
+        "papers list --limit 20",
+    ])]
     List(PapersListArgs),
     /// Find papers by title substring, contributor, year, venue, or
     /// DOI.
+    #[command(after_long_help = crate::examples![
+        "papers find --title \"Sample Title\"",
+        "papers find --contributor \"Doe, Jane\"",
+    ])]
     Find(PapersFindArgs),
     /// Print the full bibliographic record of one paper by intake id.
+    #[command(after_long_help = crate::examples![
+        "papers show 101",
+        "papers show 101 --json",
+    ])]
     Show {
         /// The intake id of the paper.
         intake_id: i64,
     },
     /// Print the table of contents of one paper.
+    #[command(after_long_help = crate::examples![
+        "papers toc 101",
+        "papers toc 101 --json",
+    ])]
     Toc {
         /// The intake id of the paper.
         intake_id: i64,
     },
     /// Project one paper's stored bibliographic row onto CSL-JSON and
     /// print it to stdout.
+    #[command(after_long_help = crate::examples![
+        "papers export-csl 101",
+        "papers export-csl 101 --library demo",
+    ])]
     ExportCsl {
         /// The intake id of the paper.
         intake_id: i64,
@@ -728,6 +752,10 @@ pub enum PapersAction {
     /// Reports the absolute on-disk path, byte size, and SHA-256. The
     /// bytes are not streamed — open the path with the platform's own
     /// tools.
+    #[command(after_long_help = crate::examples![
+        "papers source 101",
+        "papers source 101 --json",
+    ])]
     Source {
         /// The intake id of the paper.
         intake_id: i64,
@@ -737,6 +765,10 @@ pub enum PapersAction {
     /// Removes the catalog cascade, the corpus partition, the vector
     /// partition, the envelope file, and the archived source PDF.
     /// Audit trail rows are preserved.
+    #[command(after_long_help = crate::examples![
+        "papers remove 101",
+        "papers remove --sha a1b2c3d4 --yes",
+    ])]
     Remove(PapersRemoveArgs),
     /// Paper-side corpus write commands. Peer of the top-level
     /// `corpus` subcommand for the book pipeline.
@@ -768,6 +800,10 @@ pub enum PapersAction {
     /// JSONL report of IDENTIFY hit rates and predicted STRUCTURE
     /// stats. The real catalog, corpus, and vector store are not
     /// touched.
+    #[command(after_long_help = crate::examples![
+        "papers dryrun /path/to/paper.pdf",
+        "papers dryrun /path/to/papers-dir/ --stdout",
+    ])]
     Dryrun(PapersDryrunArgs),
     /// Curate the paper-side metadata.
     ///
