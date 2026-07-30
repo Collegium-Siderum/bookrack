@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: leaf commands start carrying an `Examples:` block in `--help`.**
+  Each covered leaf's long help ends with at least two copy-pasteable
+  invocations — one minimal, one non-trivial — rendered after the
+  options. The block lives in `after_long_help`, so `-h` is unchanged: a
+  gate in `bookrack-cli-grammar`'s `help_gate` module holds every leaf
+  to the format, keeps the example values inside a fixed synthetic
+  corpus, and a companion test in the binary crate re-parses every
+  example so one that names a dropped command or flag fails the build.
+
 - **query, mcp: the book reads finish reporting the source file.**
   `library.list_books` / `library.find_books` rows carry
   `source_filename`, the basename of the path recorded at intake, so a

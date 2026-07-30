@@ -32,6 +32,10 @@ macro_rules! examples {
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
     /// List every row in the queue document, oldest first.
+    #[command(after_long_help = crate::examples![
+        "queue list",
+        "queue list --long",
+    ])]
     List {
         /// Print full UUIDv7 job ids instead of the 8-character
         /// prefix the table shows by default.
@@ -40,16 +44,32 @@ pub enum QueueAction {
     },
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
+    #[command(after_long_help = crate::examples![
+        "queue pause",
+        "queue pause --library demo",
+    ])]
     Pause,
     /// Resume the worker loop, allowing it to pull pending rows again.
+    #[command(after_long_help = crate::examples![
+        "queue resume",
+        "queue resume --library demo",
+    ])]
     Resume,
     /// Cancel every pending row in one sweep. Running jobs are left
     /// alone.
+    #[command(after_long_help = crate::examples![
+        "queue clear",
+        "queue clear --json",
+    ])]
     Clear,
     /// Cancel the unique job whose id starts with `<JOB_ID>`.
     ///
     /// Empty prefixes are rejected. An ambiguous prefix returns an
     /// error without cancelling anything.
+    #[command(after_long_help = crate::examples![
+        "queue cancel a1b2c3d4",
+        "queue cancel a1b2c3d4 --json",
+    ])]
     Cancel {
         /// Prefix of the job's UUIDv7 to cancel. The first eight
         /// characters listed by `queue list` are usually enough.
