@@ -17,6 +17,12 @@
 //! reserved for that shape, e.g. [`INVALID_LIBRARY`]). Anything that
 //! does not match a known user-input variant falls through to
 //! [`INTERNAL_ERROR`].
+//!
+//! Every message this module puts on the wire is flattened with
+//! [`bookrack_core::error_chain`]: `Display` on a wrapper variant
+//! prints only its own text, so a bare `to_string()` here would drop
+//! the root cause at the process boundary.
+//! `scripts/error-boundary-check.sh` enforces that.
 
 use bookrack_config::ConfigError;
 use bookrack_glean::GleanError;
@@ -113,8 +119,8 @@ fn from_ops(e: &OpsError) -> RpcError {
         | NodeNotFound { .. }
         | NotALeaf { .. }
         | NotOrganizing { .. }
-        | SourceNotArchived { .. } => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+        | SourceNotArchived { .. } => RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(e)),
+        _ => RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(e)),
     }
 }
 
@@ -129,8 +135,8 @@ fn from_ingest(e: &IngestError) -> RpcError {
         | IntakeNotEmbedded(_)
         | OcrSourceStatusMismatch { .. }
         | OcrPagesMissing { .. }
-        | OcrPagesExcess { .. } => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+        | OcrPagesExcess { .. } => RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(e)),
+        _ => RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(e)),
     }
 }
 
@@ -141,23 +147,27 @@ fn from_glean(e: &GleanError) -> RpcError {
         | UnknownIntake(_)
         | IntakeNotRebuildable(_)
         | MissingEnvelope(_)
-        | EnvelopeMismatch(_) => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+        | EnvelopeMismatch(_) => RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(e)),
+        _ => RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(e)),
     }
 }
 
 fn from_registry(e: &RegistryError) -> RpcError {
     match e {
-        RegistryError::LibraryUnknown { .. } => RpcError::new(INVALID_LIBRARY, e.to_string()),
-        RegistryError::Empty => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+        RegistryError::LibraryUnknown { .. } => {
+            RpcError::new(INVALID_LIBRARY, bookrack_core::error_chain(e))
+        }
+        RegistryError::Empty => RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(e)),
+        _ => RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(e)),
     }
 }
 
 fn from_config(e: &ConfigError) -> RpcError {
     match e {
-        ConfigError::UnknownLibrary { .. } => RpcError::new(INVALID_LIBRARY, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
+        ConfigError::UnknownLibrary { .. } => {
+            RpcError::new(INVALID_LIBRARY, bookrack_core::error_chain(e))
+        }
+        _ => RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(e)),
     }
 }
 
@@ -225,6 +235,29 @@ mod tests {
             available: vec!["main".into()],
         });
         assert_eq!(rpc.code, INVALID_LIBRARY);
+    }
+
+    #[test]
+    fn wrapper_error_keeps_its_root_cause_on_the_wire() {
+        let err: Report = OpsError::Query(bookrack_query::QueryError::Embed(
+            bookrack_embed::EmbedError::Unreachable("boom".into()),
+        ))
+        .into();
+        let rpc = write_err("library.search", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert!(
+            rpc.message.contains("boom"),
+            "root cause lost: {}",
+            rpc.message
+        );
+    }
+
+    #[test]
+    fn user_input_error_message_is_unchanged_by_flattening() {
+        let e = OpsError::IntakeNotFound { intake_id: 42 };
+        let expected = e.to_string(); // error-boundary-check: allow
+        let rpc = from_ops(&e);
+        assert_eq!(rpc.message, expected);
     }
 
     #[test]

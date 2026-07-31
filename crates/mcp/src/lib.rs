@@ -31,7 +31,12 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
+mod error_map;
 mod reference;
+use error_map::{
+    invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
+    respond_with,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -119,7 +124,7 @@ impl SearchArgs {
             &self.exclude_book_intake_ids,
             &self.exclude_paper_intake_ids,
         )
-        .map_err(|e| ErrorData::invalid_params(e.to_string(), None))?;
+        .map_err(|e| invalid_params_err(&e))?;
         Ok(kind)
     }
 
@@ -759,7 +764,7 @@ impl BookrackServer {
     ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
         self.registry
             .get(library)
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))
+            .map_err(|e| invalid_params_err(&e))
     }
 
     /// Search the library and return cited passages as a JSON array.
@@ -1185,9 +1190,7 @@ impl BookrackServer {
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
             }
-            Err(e @ OpsError::NotALeaf { .. }) => {
-                Err(ErrorData::invalid_params(e.to_string(), None))
-            }
+            Err(e @ OpsError::NotALeaf { .. }) => Err(invalid_params_err(&e)),
             Err(e) => Err(ops_error_to_internal(e)),
         }
     }
@@ -1216,9 +1219,7 @@ impl BookrackServer {
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)
             }
-            Err(e @ OpsError::NotOrganizing { .. }) => {
-                Err(ErrorData::invalid_params(e.to_string(), None))
-            }
+            Err(e @ OpsError::NotOrganizing { .. }) => Err(invalid_params_err(&e)),
             Err(e) => Err(ops_error_to_internal(e)),
         }
     }
@@ -1849,49 +1850,6 @@ impl ServerHandler for BookrackServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         with_caller_override(Caller::mcp(), self.tool_router.call(tcc)).await
-    }
-}
-
-/// Encode `value` to a JSON string and wrap it as the body of a successful
-/// tool response. Centralises serialization so every tool returns the same
-/// `text` content shape.
-fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
-    let json =
-        serde_json::to_string(value).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
-}
-
-/// Map a generic [`OpsError`] to an MCP internal error.
-fn ops_error_to_internal(e: OpsError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
-}
-
-/// Map an [`OpsError`] from a metadata field edit to an MCP error:
-/// a rejected field name is the caller's input problem, so it surfaces
-/// as `invalid_params` (with the editable list in the message) rather
-/// than an internal error.
-fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
-    match &e {
-        OpsError::UnknownMetadataField { .. }
-        | OpsError::UnknownContributorRole { .. }
-        | OpsError::ContributorNotFound { .. } => ErrorData::invalid_params(e.to_string(), None),
-        _ => ops_error_to_internal(e),
-    }
-}
-
-/// Map a [`reference::ReferenceError`] to an MCP error: the
-/// catalog / argument-shape variants are caller-input problems and
-/// surface as `invalid_params`, the refs-store and catalog-load
-/// variants are environmental and surface as `internal_error`.
-fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData {
-    match e {
-        reference::ReferenceError::InvalidArgument(_)
-        | reference::ReferenceError::UnknownOverlayProperty { .. } => {
-            ErrorData::invalid_params(e.to_string(), None)
-        }
-        reference::ReferenceError::Refs(_) | reference::ReferenceError::Catalog(_) => {
-            ErrorData::internal_error(e.to_string(), None)
-        }
     }
 }
 

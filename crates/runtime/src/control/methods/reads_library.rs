@@ -139,7 +139,7 @@ impl SearchParams {
             &self.exclude_book_intake_ids,
             &self.exclude_paper_intake_ids,
         )
-        .map_err(|e| RpcError::new(INVALID_PARAMS, e.to_string()))?;
+        .map_err(|e| RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(&e)))?;
         Ok(kind)
     }
 
@@ -279,17 +279,20 @@ fn resolve(
     ctx: &MethodContext,
     library: Option<&str>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
-    ctx.registry
-        .get(library)
-        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("registry: {e}")))
+    ctx.registry.get(library).map_err(|e| {
+        RpcError::new(
+            INVALID_PARAMS,
+            format!("registry: {}", bookrack_core::error_chain(&e)),
+        )
+    })
 }
 
 fn ops_internal(e: OpsError) -> RpcError {
-    RpcError::new(INTERNAL_ERROR, e.to_string())
+    RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(&e))
 }
 
 fn ops_invalid(e: OpsError) -> RpcError {
-    RpcError::new(INVALID_PARAMS, e.to_string())
+    RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(&e))
 }
 
 fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
