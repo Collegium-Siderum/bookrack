@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use bookrack_core::{ItemKind, KindedNodeId, NodeId};
+use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs};
 use bookrack_ops::registry::LibraryHandle;
@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
+use crate::control::error_map::rpc_from_problem;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 /// Mirror of the MCP-side `READ_CONTEXT_DEFAULT_RADIUS`. The
@@ -139,7 +140,7 @@ impl SearchParams {
             &self.exclude_book_intake_ids,
             &self.exclude_paper_intake_ids,
         )
-        .map_err(|e| RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(&e)))?;
+        .map_err(|e| rpc_from_problem(INVALID_PARAMS, Problem::from_error_chain(&e)))?;
         Ok(kind)
     }
 
@@ -288,11 +289,11 @@ fn resolve(
 }
 
 fn ops_internal(e: OpsError) -> RpcError {
-    RpcError::new(INTERNAL_ERROR, bookrack_core::error_chain(&e))
+    rpc_from_problem(INTERNAL_ERROR, e.explain())
 }
 
 fn ops_invalid(e: OpsError) -> RpcError {
-    RpcError::new(INVALID_PARAMS, bookrack_core::error_chain(&e))
+    rpc_from_problem(INVALID_PARAMS, e.explain())
 }
 
 fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {

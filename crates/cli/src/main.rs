@@ -839,7 +839,7 @@ async fn main() -> std::process::ExitCode {
             if let Some(cause) = bookrack_cli::error::classify_eyre(&err) {
                 let cli_err = cause.as_cli();
                 if !cli_err.is_self_reported() {
-                    eprintln!("bookrack: {cli_err}");
+                    report_cli_error(cli_err);
                 }
                 std::process::ExitCode::from(cli_err.exit_code())
             } else {
@@ -847,6 +847,44 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         }
+    }
+}
+
+/// Print a classified failure on stderr.
+///
+/// Under `--json` the whole `Problem` goes out as one object, so a
+/// scripted caller gets structured output on the failure path too.
+/// Otherwise the parts are stacked: the summary on the `bookrack:`
+/// line, the detail indented under it, and the hint last — the place
+/// a reader's eye lands, and where the next step belongs.
+///
+/// Errors that carry no `data` print exactly the single line they did
+/// before, so nothing gains a blank second line it did not need.
+fn report_cli_error(cli_err: &bookrack_cli::error::BookrackCliError) {
+    let problem = cli_err.problem_data();
+    if bookrack_cli::render::ctx().output().is_json() {
+        let rendered = bookrack_core::Problem {
+            summary: cli_err.to_string(),
+            data: problem.unwrap_or(bookrack_core::ProblemData {
+                detail: None,
+                hint: None,
+                retryable: false,
+            }),
+        };
+        match serde_json::to_string_pretty(&rendered) {
+            Ok(json) => eprintln!("{json}"),
+            Err(e) => eprintln!("bookrack: {cli_err} (error object unrenderable: {e})"),
+        }
+        return;
+    }
+
+    eprintln!("bookrack: {cli_err}");
+    let Some(problem) = problem else { return };
+    if let Some(detail) = problem.detail {
+        eprintln!("  {detail}");
+    }
+    if let Some(hint) = problem.hint {
+        eprintln!("  hint: {hint}");
     }
 }
 

@@ -115,15 +115,21 @@ impl Problem {
         self
     }
 
-    /// Fall back to a two-part problem derived from an error value:
-    /// the outermost `Display` becomes the summary, the flattened
-    /// source chain becomes the detail.
+    /// Fall back to a summary-only problem derived from an error value.
     ///
-    /// `retryable` is `false`, because an error type that has not
-    /// opted into [`Explain`] has not said whether retrying helps and
-    /// a wrong `true` sends a client into a loop no one is watching.
+    /// The summary is the *flattened* chain, not the outermost
+    /// `Display`: a wrapper variant's own text is a module name
+    /// (`"query error"`), so taking it alone would put less on the
+    /// wire than a plain [`error_chain`] boundary already does. An
+    /// error type that has not written its own wording has no basis
+    /// for splitting one part off as the headline, so `detail` stays
+    /// empty rather than repeating the summary.
+    ///
+    /// `retryable` is `false` for the same reason: such a type has not
+    /// said whether retrying helps, and a wrong `true` sends a client
+    /// into a loop no one is watching.
     pub fn from_error_chain(err: &(dyn Error + 'static)) -> Self {
-        Self::new(err.to_string()).detail(error_chain(err))
+        Self::new(error_chain(err))
     }
 }
 
@@ -167,13 +173,16 @@ mod tests {
         }
     }
 
+    /// The fallback exists so a type without wording still crosses a
+    /// boundary intact. A summary of just `"embed error"` would put
+    /// *less* there than the flat `error_chain` string it replaces.
     #[test]
-    fn from_error_chain_puts_the_flattened_chain_in_detail() {
+    fn from_error_chain_puts_the_flattened_chain_in_the_summary() {
         let p = Problem::from_error_chain(&Wrapper(Leaf));
-        assert_eq!(p.summary, "embed error");
-        assert_eq!(
-            p.data.detail.as_deref(),
-            Some("embed error: connection refused")
+        assert_eq!(p.summary, "embed error: connection refused");
+        assert!(
+            p.data.detail.is_none(),
+            "the chain is the summary; repeating it as detail says nothing new"
         );
     }
 
