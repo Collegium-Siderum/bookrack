@@ -18,4 +18,9 @@ toml_edit.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# Host isolation for the two integration binaries that drive the
+# impure `Config::resolve`. A dev-dependency cycle back onto this
+# crate, which cargo permits: the test-support crate depends on the
+# library, and only this crate's *tests* depend on it.
+bookrack-test-support.workspace = true
 serde_json.workspace = true

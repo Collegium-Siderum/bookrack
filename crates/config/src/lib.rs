@@ -45,6 +45,12 @@ pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
 
 /// Environment variable naming the library registry file (TOML). Optional;
 /// only `--library` selection needs it. See [`registry`].
+///
+/// Set it, and it names the *only* registry anything consults: the
+/// platform-default file at [`default_registry_path`] is then never
+/// read, so no library configured on this machine can annotate or win a
+/// resolution behind the caller's back. A blank value is treated as
+/// unset.
 pub const REGISTRY_ENV: &str = "BOOKRACK_REGISTRY";
 
 /// Environment variable overriding the Ollama endpoint.
@@ -139,6 +145,10 @@ pub enum ResolutionSource {
     RegistryDefault,
     /// Won by the `default` entry of the registry at the platform
     /// config-directory path. Written by `bookrack init`.
+    ///
+    /// Unreachable while [`REGISTRY_ENV`] carries a non-blank value:
+    /// that registry is then the only one loaded, and this rung has
+    /// nothing to read.
     DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
@@ -284,11 +294,25 @@ impl Config {
         Config::resolve(&LibrarySelection::default())
     }
 
+    /// Resolve the data root and everything derived from it, reading the
+    /// process environment.
+    ///
+    /// The precedence ladder lives in [`select_root`]; what this
+    /// function adds is the environment it reads and the two
+    /// annotations it attaches afterwards — the eclipsed registry
+    /// `default` and the name claimed for a path-class root.
+    ///
+    /// [`REGISTRY_ENV`], when it carries a non-blank value, names the
+    /// only registry consulted: the platform-default one is not read.
     pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
         // A missing .env is fine: the variables may be set directly.
         dotenvy::dotenv().ok();
-        let registry = load_registry(std::env::var(REGISTRY_ENV).ok())?;
-        let default_registry = load_default_registry()?;
+        let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
+        if let Some(failure) = registries.failure {
+            return Err(failure);
+        }
+        let registry = registries.env;
+        let default_registry = registries.platform_default;
         let portable = portable_data_dir();
         let resolved = select_root(
             selection,
@@ -1456,6 +1480,11 @@ struct Resolved {
 /// 4. a `bookrack-data` directory probed beside the running binary,
 /// 5. the registry's default library,
 /// 6. the platform-default registry's default library.
+///
+/// Both registries are parameters because the function is pure, not
+/// because both are ever populated at once: [`Config::resolve`] passes
+/// at most one of them, so rungs 2 and 6 fall back to the second table
+/// only in tests that construct one directly.
 fn select_root(
     selection: &LibrarySelection,
     env_data_dir: Option<String>,
@@ -2414,6 +2443,71 @@ pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<(
     Ok(())
 }
 
+/// The registries available to one resolution, plus the read failure of
+/// whichever one was attempted.
+///
+/// At most one of the two is ever `Some`, by construction: see
+/// [`load_registries`].
+struct LoadedRegistries {
+    /// The registry named by [`REGISTRY_ENV`].
+    env: Option<Registry>,
+    /// The registry at the platform config-directory path, loaded only
+    /// when [`REGISTRY_ENV`] names none.
+    platform_default: Option<Registry>,
+    /// Why the attempted registry could not be read.
+    failure: Option<ConfigError>,
+}
+
+/// Load the registries for one resolution.
+///
+/// A non-blank [`REGISTRY_ENV`] value makes that file the only registry
+/// consulted: `load_default` is never called, so the platform
+/// config-directory file is not even opened. This is not a new rule but
+/// the removal of an exception — [`list_libraries`] and
+/// [`registry_target_path_from`] have always been env-wins, and
+/// [`Config::resolve`] was the one reader that fell through to the
+/// platform default anyway. A blank value is treated as unset, matching
+/// [`env_trimmed`] and the write side.
+///
+/// `load_default` is taken as a closure for two reasons: laziness, so a
+/// pinned registry never touches the platform config directory; and
+/// testability, so a test can pass `|| panic!(...)` and let the panic
+/// message state the defect being guarded against.
+///
+/// A read failure is returned rather than raised, so the caller decides
+/// whether this resolution needed the registry at all.
+fn load_registries(
+    env: Option<String>,
+    load_default: impl FnOnce() -> Result<Option<Registry>, ConfigError>,
+) -> LoadedRegistries {
+    if env_trimmed(env.clone()).is_some() {
+        return match load_registry(env) {
+            Ok(registry) => LoadedRegistries {
+                env: registry,
+                platform_default: None,
+                failure: None,
+            },
+            Err(failure) => LoadedRegistries {
+                env: None,
+                platform_default: None,
+                failure: Some(failure),
+            },
+        };
+    }
+    match load_default() {
+        Ok(platform_default) => LoadedRegistries {
+            env: None,
+            platform_default,
+            failure: None,
+        },
+        Err(failure) => LoadedRegistries {
+            env: None,
+            platform_default: None,
+            failure: Some(failure),
+        },
+    }
+}
+
 /// Load the registry from the file named by [`REGISTRY_ENV`]. Returns
 /// `Ok(None)` when the variable is unset or blank — the registry is
 /// optional, and only `--library` selection requires it.
@@ -2507,6 +2601,9 @@ fn registry_target_path_from(env: Option<String>, default: Option<PathBuf>) -> O
 /// Load the platform-default registry, if present. A missing file is
 /// not an error: the resolver simply falls through to
 /// [`ConfigError::MissingDataDir`].
+///
+/// [`Config::resolve`] reaches this only when [`REGISTRY_ENV`] names no
+/// registry; see [`load_registries`].
 fn load_default_registry() -> Result<Option<Registry>, ConfigError> {
     let Some(path) = default_registry_path() else {
         return Ok(None);
@@ -3934,6 +4031,52 @@ mod tests {
             registry_target_path_from(Some("/custom/reg.toml".to_string()), default),
             Some(PathBuf::from("/custom/reg.toml")),
         );
+    }
+
+    /// A registry named by the environment is the only one consulted.
+    ///
+    /// The suppression is asserted as an absence: `load_default` here
+    /// panics, so a fall-through cannot pass quietly — the panic
+    /// message is the statement of the defect.
+    #[test]
+    fn registry_env_suppresses_the_platform_default_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pinned.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("write");
+
+        let loaded = load_registries(Some(path.display().to_string()), || {
+            panic!("the platform-default registry must not be consulted")
+        });
+
+        assert!(
+            loaded
+                .env
+                .is_some_and(|r| r.libraries.contains_key("alpha")),
+            "the env-named registry must be the one loaded",
+        );
+        assert!(loaded.platform_default.is_none());
+        assert!(loaded.failure.is_none());
+    }
+
+    /// Blank is unset, here as on the write side: a whitespace-only
+    /// value must not suppress anything. Kills the over-wide
+    /// `.is_some()` reading of the suppression condition.
+    #[test]
+    fn a_blank_registry_env_still_consults_the_platform_default() {
+        for blank in ["", "   ", "\t"] {
+            let loaded = load_registries(Some(blank.to_string()), || {
+                Ok(Some(
+                    parse_registry("default = \"platform\"\n").expect("parse"),
+                ))
+            });
+            assert!(
+                loaded
+                    .platform_default
+                    .is_some_and(|r| r.default.as_deref() == Some("platform")),
+                "blank env {blank:?} must fall through to the platform default",
+            );
+            assert!(loaded.env.is_none());
+        }
     }
 
     #[test]

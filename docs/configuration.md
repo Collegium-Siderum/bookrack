@@ -18,7 +18,10 @@ bookrack chooses its data root by precedence, highest first:
    portable layout)
 5. The `default` entry of the registry named by `BOOKRACK_REGISTRY`
 6. The `default` entry of the platform-default registry at
-   `<config_dir>/bookrack/registry.toml`, where `<config_dir>` is:
+   `<config_dir>/bookrack/registry.toml` — **only when
+   `BOOKRACK_REGISTRY` is unset or blank**; a variable that names a
+   registry makes that registry the only one consulted, and this rung
+   is not reached. `<config_dir>` is:
 
    | Platform | `<config_dir>` |
    | --- | --- |
