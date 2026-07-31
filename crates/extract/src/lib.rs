@@ -14,6 +14,7 @@ mod contract;
 mod detect;
 pub mod envelope;
 mod epub;
+pub mod gate;
 mod headings;
 mod html;
 mod html_parse;
