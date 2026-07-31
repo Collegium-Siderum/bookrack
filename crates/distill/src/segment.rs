@@ -398,15 +398,50 @@ impl Stage for PairBilingualEntries {
         let mut out: Vec<RawEntry> = Vec::new();
         let mut mismatches = 0usize;
 
+        let emit_solo = |out: &mut Vec<RawEntry>, mismatches: &mut usize, r: &RawEntry| {
+            *mismatches += 1;
+            let mut r = r.clone();
+            if !r.quality_flags.iter().any(|f| f == "pair_mismatch") {
+                r.quality_flags.push("pair_mismatch".to_string());
+            }
+            out.push(r);
+        };
+        let is_lang = |r: &RawEntry, lang: &str| r.lang.as_deref() == Some(lang);
+
         let mut i = 0usize;
         while i < raws.len() {
-            let a = &raws[i];
-            let a_lang = a.lang.as_deref().unwrap_or("");
-            if a_lang == self.primary_lang
-                && i + 1 < raws.len()
-                && raws[i + 1].lang.as_deref().unwrap_or("") == self.secondary_lang
-            {
-                let b = &raws[i + 1];
+            let (page, sheet) = (raws[i].page, raws[i].sheet);
+            let mut end = i;
+            while end < raws.len() && raws[end].page == page && raws[end].sheet == sheet {
+                end += 1;
+            }
+            let group = &raws[i..end];
+            i = end;
+
+            let primaries: Vec<&RawEntry> = group
+                .iter()
+                .filter(|r| is_lang(r, &self.primary_lang))
+                .collect();
+            let secondaries: Vec<&RawEntry> = group
+                .iter()
+                .filter(|r| is_lang(r, &self.secondary_lang))
+                .collect();
+
+            // Positional pairing is sound only when both sides of the
+            // sheet hold the same number of entries. An imbalance means
+            // one side lost or gained an anchor, and every pair from
+            // that index on would join an entry to its neighbour's
+            // translation. Emit the whole sheet unpaired instead, so the
+            // gap surfaces as `pair_mismatch` rather than as entries
+            // that look well-formed and are wrong.
+            if primaries.is_empty() || primaries.len() != secondaries.len() {
+                for r in group {
+                    emit_solo(&mut out, &mut mismatches, r);
+                }
+                continue;
+            }
+
+            for (a, b) in primaries.iter().zip(secondaries.iter()) {
                 let merged_body = format!(
                     "{}<<<{}_head>>>{}<<<{}_body>>>{}",
                     a.body.join(" "),
@@ -423,15 +458,12 @@ impl Stage for PairBilingualEntries {
                     lang: a.lang.clone(),
                     quality_flags: a.quality_flags.clone(),
                 });
-                i += 2;
-            } else {
-                mismatches += 1;
-                let mut solo = a.clone();
-                if !solo.quality_flags.iter().any(|f| f == "pair_mismatch") {
-                    solo.quality_flags.push("pair_mismatch".to_string());
-                }
-                out.push(solo);
-                i += 1;
+            }
+            for r in group
+                .iter()
+                .filter(|r| !is_lang(r, &self.primary_lang) && !is_lang(r, &self.secondary_lang))
+            {
+                emit_solo(&mut out, &mut mismatches, r);
             }
         }
 
@@ -764,13 +796,32 @@ mod tests {
     // ---- pair_bilingual_entries ----
 
     fn raw(anchor: &str, body: Vec<&str>, lang: &str) -> RawEntry {
+        raw_on(1, anchor, body, lang)
+    }
+
+    fn raw_on(page: u32, anchor: &str, body: Vec<&str>, lang: &str) -> RawEntry {
         RawEntry {
-            page: 1,
-            sheet: 1,
+            page,
+            sheet: page,
             anchor: anchor.to_string(),
             body: body.into_iter().map(String::from).collect(),
             lang: Some(lang.to_string()),
             quality_flags: vec![],
+        }
+    }
+
+    fn pair_stage() -> Box<dyn Stage> {
+        pair_bilingual_entries(
+            "en".to_string(),
+            "zh".to_string(),
+            "translation".to_string(),
+        )
+    }
+
+    fn raws_of(data: StageData) -> Vec<RawEntry> {
+        match data {
+            StageData::Raws(r) => r,
+            other => panic!("expected Raws, got {other:?}"),
         }
     }
 
@@ -832,6 +883,102 @@ mod tests {
                 r.quality_flags
             );
         }
+        assert_eq!(ctx.coverage.pair_mismatch, 2);
+    }
+
+    /// The upstream block splitter emits one primary-language block and
+    /// one secondary-language block per page, so the entry stream
+    /// reaching this stage is grouped, not interleaved. The Nth primary
+    /// entry of a page translates the Nth secondary entry of the same
+    /// page; pairing on list adjacency instead would join the last
+    /// primary to the first secondary and leave the rest unpaired.
+    #[test]
+    fn pair_bilingual_entries_pairs_a_block_grouped_page_by_position() {
+        let raws = vec![
+            raw("consciousness", vec!["various forms of experience"], "en"),
+            raw("consent", vec!["believing a proposition"], "en"),
+            raw(
+                "\u{610F}\u{8BC6}",
+                vec!["\u{4E3B}\u{89C2}\u{7ECF}\u{9A8C}"],
+                "zh",
+            ),
+            raw(
+                "\u{540C}\u{610F}",
+                vec!["\u{63A5}\u{53D7}\u{547D}\u{9898}"],
+                "zh",
+            ),
+        ];
+        let (out, ctx) = run_stage(pair_stage(), StageData::Raws(raws));
+        let merged = raws_of(out);
+
+        assert_eq!(merged.len(), 2, "both primaries must survive as entries");
+        assert_eq!(merged[0].anchor, "consciousness");
+        assert!(
+            merged[0].body[0].contains("\u{610F}\u{8BC6}"),
+            "first primary must carry the first secondary's head: {:?}",
+            merged[0].body[0]
+        );
+        assert_eq!(merged[1].anchor, "consent");
+        assert!(
+            merged[1].body[0].contains("\u{540C}\u{610F}"),
+            "second primary must carry the second secondary's head: {:?}",
+            merged[1].body[0]
+        );
+        assert_eq!(ctx.coverage.pair_mismatch, 0);
+    }
+
+    /// Positional pairing is only sound when both sides of a page hold
+    /// the same number of entries. One side short means an anchor was
+    /// lost or invented, and every pair from that point on would join an
+    /// entry to its neighbour's translation. A page that does not
+    /// balance is emitted unpaired rather than pairing the prefix.
+    #[test]
+    fn pair_bilingual_entries_leaves_an_unbalanced_page_unpaired() {
+        let raws = vec![
+            raw("consciousness", vec!["various forms of experience"], "en"),
+            raw("consent", vec!["believing a proposition"], "en"),
+            raw(
+                "\u{610F}\u{8BC6}",
+                vec!["\u{4E3B}\u{89C2}\u{7ECF}\u{9A8C}"],
+                "zh",
+            ),
+        ];
+        let (out, ctx) = run_stage(pair_stage(), StageData::Raws(raws));
+        let merged = raws_of(out);
+
+        assert_eq!(merged.len(), 3, "nothing may be merged on this page");
+        for r in &merged {
+            assert!(
+                r.quality_flags.iter().any(|f| f == "pair_mismatch"),
+                "{:?} must carry pair_mismatch",
+                r.anchor
+            );
+            assert!(
+                !r.body[0].contains("<<<translation_head>>>"),
+                "{:?} must not carry a merged body",
+                r.anchor
+            );
+        }
+        assert_eq!(ctx.coverage.pair_mismatch, 3);
+    }
+
+    /// Pages are paired independently. A primary entry on one page and a
+    /// secondary entry on the next are not each other's translation even
+    /// though they are adjacent in the stream.
+    #[test]
+    fn pair_bilingual_entries_does_not_pair_across_a_page_boundary() {
+        let raws = vec![
+            raw_on(1, "consciousness", vec!["various forms"], "en"),
+            raw_on(2, "\u{610F}\u{8BC6}", vec!["\u{4E3B}\u{89C2}"], "zh"),
+        ];
+        let (out, ctx) = run_stage(pair_stage(), StageData::Raws(raws));
+        let merged = raws_of(out);
+
+        assert_eq!(merged.len(), 2);
+        assert!(
+            !merged[0].body[0].contains("<<<translation_head>>>"),
+            "the primary must not absorb the next page's secondary"
+        );
         assert_eq!(ctx.coverage.pair_mismatch, 2);
     }
 }

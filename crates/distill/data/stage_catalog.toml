@@ -58,7 +58,7 @@ params = [
 [pair_bilingual_entries]
 input = "raws"
 output = "raws"
-description = "Pair adjacent bilingual raw entries by language and merge them into one packed body."
+description = "Pair each sheet's Nth primary-language entry with its Nth secondary-language entry and merge them into one packed body. A sheet whose two sides differ in entry count is emitted unpaired."
 emits_flags = ["pair_mismatch"]
 params = [
   { name = "primary_lang", type = "string", required = true },
