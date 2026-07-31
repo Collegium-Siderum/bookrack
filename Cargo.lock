@@ -879,6 +879,7 @@ dependencies = [
  "bookrack-refs",
  "bookrack-runtime",
  "bookrack-session",
+ "bookrack-test-support",
  "chrono",
  "clap",
  "color-eyre",
@@ -1298,6 +1299,16 @@ dependencies = [
  "dirs 5.0.1",
  "eyre",
  "fs2",
+ "tempfile",
+]
+
+[[package]]
+name = "bookrack-test-support"
+version = "0.11.0-dev"
+dependencies = [
+ "bookrack-config",
+ "bookrack-session",
+ "serde_json",
  "tempfile",
 ]
 
