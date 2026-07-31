@@ -101,6 +101,7 @@ pub struct Config {
     root_config: RootConfig,
     shadowed_default: Option<ShadowedDefault>,
     library_identification: Option<LibraryIdentification>,
+    unusable_registry: Option<UnusableRegistry>,
 }
 
 /// A registry `default` library that a path-class resolution silently
@@ -120,6 +121,28 @@ pub struct ShadowedDefault {
     /// The data root that name maps to — the root that would have been
     /// served had no path source pre-empted it.
     pub data_dir: PathBuf,
+}
+
+/// A registry that could not be read, on a resolution that did not need
+/// it.
+///
+/// A root fixed by the `--data-dir` flag, [`DATA_DIR_ENV`], or the
+/// portable layout consults no registry, so an unreadable one must not
+/// veto it. The resolution succeeds; what it loses is the annotation
+/// layer — [`Config::shadowed_default`] and
+/// [`Config::library_identification`] simply have no input — and the
+/// failure is recorded here for a front end to render.
+///
+/// `None` means the registry loaded, there was none to load, or the
+/// failure was fatal: a rung that consumes the registry raises it
+/// instead of recording it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableRegistry {
+    /// The file that could not be read.
+    pub path: PathBuf,
+    /// Why it could not be used. Carried as text because
+    /// [`ConfigError`] is not `Clone` and [`Config`] is.
+    pub reason: String,
 }
 
 /// How the data root in a resolved [`Config`] was selected.
@@ -308,20 +331,19 @@ impl Config {
         // A missing .env is fine: the variables may be set directly.
         dotenvy::dotenv().ok();
         let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
-        if let Some(failure) = registries.failure {
-            return Err(failure);
-        }
         let registry = registries.env;
         let default_registry = registries.platform_default;
         let portable = portable_data_dir();
-        let resolved = select_root(
+        let selected = select_root(
             selection,
             std::env::var(DATA_DIR_ENV).ok(),
             registry.as_ref(),
             portable,
             default_registry.as_ref(),
-        )?;
+        );
+        let (resolved, deferred) = raise_deferred_registry_failure(selected, registries.failure)?;
         let mut config = finish(resolved, std::env::var(OLLAMA_URL_ENV).ok())?;
+        config.unusable_registry = deferred.as_ref().and_then(unusable_registry_record);
         // A path-class resolution can leave a registry `default` set but
         // ineffective. Detecting it here — after the root is chosen —
         // enriches the Config without touching which root won.
@@ -356,6 +378,7 @@ impl Config {
             root_config: RootConfig::default(),
             shadowed_default: None,
             library_identification: None,
+            unusable_registry: None,
         }
     }
 
@@ -399,6 +422,15 @@ impl Config {
     /// visible instead of inferred.
     pub fn shadowed_default(&self) -> Option<&ShadowedDefault> {
         self.shadowed_default.as_ref()
+    }
+
+    /// The registry that could not be read on a resolution that did not
+    /// need it. `None` when the registry loaded, when there was none to
+    /// load, or when the failure was fatal — a rung that consumes the
+    /// registry raises the error rather than recording it here. See
+    /// [`UnusableRegistry`].
+    pub fn unusable_registry(&self) -> Option<&UnusableRegistry> {
+        self.unusable_registry.as_ref()
     }
 
     /// How the resolved library name was determined — `Selected` for a
@@ -1749,6 +1781,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         root_config,
         shadowed_default: None,
         library_identification: None,
+        unusable_registry: None,
     })
 }
 
@@ -2505,6 +2538,54 @@ fn load_registries(
             platform_default: None,
             failure: Some(failure),
         },
+    }
+}
+
+/// Decide what a deferred registry read failure means for the ladder's
+/// verdict.
+///
+/// [`load_registries`] fills at most one registry, so a deferred
+/// failure always means *both* are `None` — the failure belongs to the
+/// one that was attempted, and nothing else was. That narrows the
+/// verdicts [`select_root`] can reach to two:
+/// [`ConfigError::RegistryNotConfigured`], from a `--library` that had
+/// no table to look in, and [`ConfigError::MissingDataDir`], from
+/// falling off the end past rungs 5 and 6. Both are symptoms of the
+/// read failure, and both are replaced by it, so the caller is told the
+/// registry could not be read rather than that no library is
+/// configured. [`ConfigError::UnknownLibrary`] cannot occur: naming it
+/// requires a table that parsed.
+///
+/// A resolution that succeeded keeps the failure and hands it back, for
+/// the caller to record as an [`UnusableRegistry`].
+fn raise_deferred_registry_failure(
+    selected: Result<Resolved, ConfigError>,
+    deferred: Option<ConfigError>,
+) -> Result<(Resolved, Option<ConfigError>), ConfigError> {
+    match selected {
+        Ok(resolved) => Ok((resolved, deferred)),
+        Err(symptom @ (ConfigError::RegistryNotConfigured | ConfigError::MissingDataDir)) => {
+            Err(deferred.unwrap_or(symptom))
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Render a registry read failure as the record a [`Config`] carries.
+///
+/// `None` for anything that is not a registry read failure: those are
+/// raised, never recorded.
+fn unusable_registry_record(error: &ConfigError) -> Option<UnusableRegistry> {
+    match error {
+        ConfigError::RegistryUnreadable { path, source } => Some(UnusableRegistry {
+            path: path.clone(),
+            reason: format!("cannot be read: {source}"),
+        }),
+        ConfigError::RegistryMalformed { path, .. } => Some(UnusableRegistry {
+            path: path.clone(),
+            reason: "does not parse".to_string(),
+        }),
+        _ => None,
     }
 }
 
@@ -4022,6 +4103,103 @@ mod tests {
             Some(parent.join("bookrack").join(DEFAULT_REGISTRY_NAME)),
         );
         assert!(default_registry_path_from(None).is_none());
+    }
+
+    /// An unreadable registry named by the environment is carried, not
+    /// raised: the caller has not yet said whether this resolution
+    /// needed it.
+    #[test]
+    fn an_unreadable_env_registry_is_deferred_not_raised() {
+        let loaded = load_registries(Some("/does/not/exist/registry.toml".to_string()), || {
+            panic!("the platform-default registry must not be consulted")
+        });
+
+        match loaded.failure {
+            Some(ConfigError::RegistryUnreadable { source, .. }) => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected a deferred RegistryUnreadable, got {other:?}"),
+        }
+        assert!(loaded.env.is_none());
+        assert!(loaded.platform_default.is_none());
+    }
+
+    /// The four cases the replacement rule has to get right. Kills both
+    /// of the one-line implementations: "always raise the deferred
+    /// failure" fails the third row, "always swallow it" fails the
+    /// first two.
+    #[test]
+    fn a_deferred_failure_replaces_the_symptom_the_ladder_reported() {
+        let resolved = || Resolved {
+            data_dir: PathBuf::from("/roots/alpha"),
+            source: ResolutionSource::DataDirFlag,
+            library: None,
+        };
+        let deferred = || ConfigError::RegistryMalformed {
+            path: PathBuf::from("/registry.toml"),
+            source: toml::from_str::<toml::Value>("= not toml").expect_err("malformed"),
+        };
+
+        for symptom in [
+            ConfigError::RegistryNotConfigured,
+            ConfigError::MissingDataDir,
+        ] {
+            let raised = raise_deferred_registry_failure(Err(symptom), Some(deferred()))
+                .expect_err("a consuming rung must raise");
+            assert!(
+                matches!(raised, ConfigError::RegistryMalformed { .. }),
+                "the read failure must replace the symptom, got {raised:?}",
+            );
+        }
+
+        let (root, carried) = raise_deferred_registry_failure(Ok(resolved()), Some(deferred()))
+            .expect("a pinned root survives");
+        assert_eq!(root.source, ResolutionSource::DataDirFlag);
+        assert!(
+            carried.is_some(),
+            "the failure must be handed back to record"
+        );
+
+        let untouched = raise_deferred_registry_failure(
+            Err(ConfigError::UnknownLibrary {
+                name: "ghost".to_string(),
+                available: vec![],
+            }),
+            None,
+        )
+        .expect_err("an unrelated error passes through");
+        assert!(matches!(untouched, ConfigError::UnknownLibrary { .. }));
+    }
+
+    /// The record names the file and says why, in the same words
+    /// `doctor` uses for a registry it probed directly. Anything that is
+    /// not a registry read failure records nothing: those are raised.
+    #[test]
+    fn an_unusable_registry_record_names_the_file_and_the_reason() {
+        let unreadable = ConfigError::RegistryUnreadable {
+            path: PathBuf::from("/registry.toml"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let record = unusable_registry_record(&unreadable).expect("a record");
+        assert_eq!(record.path, PathBuf::from("/registry.toml"));
+        assert!(
+            record.reason.starts_with("cannot be read: "),
+            "{}",
+            record.reason,
+        );
+
+        let malformed = ConfigError::RegistryMalformed {
+            path: PathBuf::from("/registry.toml"),
+            source: toml::from_str::<toml::Value>("= not toml").expect_err("malformed"),
+        };
+        assert_eq!(
+            unusable_registry_record(&malformed)
+                .expect("a record")
+                .reason,
+            "does not parse",
+        );
+
+        assert_eq!(unusable_registry_record(&ConfigError::MissingDataDir), None);
     }
 
     #[test]

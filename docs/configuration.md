@@ -34,6 +34,16 @@ path-class source (1, 3, or 4) wins while a registry `default` is also
 set, `bookrack info` and `bookrack doctor` report the eclipse so the
 shadowed default is visible rather than silently ignored.
 
+A registry that cannot be read is fatal only to a resolution that
+needed it. A root fixed by `--data-dir`, `BOOKRACK_DATA_DIR`, or the
+portable layout never consults the registry, so an unreadable or
+malformed one does not veto it: the resolution succeeds and the
+annotations that would have come from the registry — the shadowed
+default, the library name claimed for a path-class root — are simply
+absent. A selection that does need the registry (`--library`, or
+falling through to a `default`) still fails, and it fails naming the
+registry rather than reporting that no library is configured.
+
 ## The library registry
 
 The registry maps short names to data roots and records the machine's

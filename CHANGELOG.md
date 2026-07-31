@@ -59,6 +59,36 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **config: `BOOKRACK_REGISTRY` names the only registry that is
+  consulted.** Setting it to a non-blank value now suppresses the
+  platform-default registry at `<config_dir>/bookrack/registry.toml`
+  entirely: it is not read, so its `default` cannot win the last rung
+  of the resolution ladder and its entries cannot annotate a
+  resolution that a pinned registry had already answered. This makes
+  the resolver agree with the two readers that were already env-wins,
+  `libraries list` and the registry write path. Observable where a
+  machine has both: a run that pins a registry no longer reports a
+  shadowed default, or a library name claimed, out of the other file.
+
+- **config: an unreadable registry no longer vetoes a resolution that
+  does not need one.** A data root fixed by `--data-dir`,
+  `BOOKRACK_DATA_DIR`, or the portable layout consults no registry, so
+  a missing or malformed registry file now leaves it alone: the
+  resolution succeeds and only the annotations that would have come
+  from the registry are absent. `bookrack doctor` consequently reports
+  a resolved data root — and runs the catalog, corpus, and reranker
+  checks that were being skipped behind an unresolved one — where it
+  previously failed the whole row. A selection that *does* need the
+  registry (`--library`, or falling through to a registry `default`)
+  still fails, and it now names the registry rather than reporting
+  that no library is configured.
+
+  One signal is lost with it: a `BOOKRACK_REGISTRY` pointing at a file
+  that does not exist used to be reported through that failing
+  data-root row, and nothing reports it yet in the resolved case. A
+  registry that exists but does not parse is still reported by
+  `doctor`'s own registry probe.
+
 - **errors now say what to do next, and stop losing their root
   cause.** Operator-facing failures are split three ways — a one-line
   summary of what failed, the implementation-level detail behind it,
