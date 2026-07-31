@@ -200,3 +200,43 @@ fn held_lock_does_not_refuse_exempt_retrieval() {
     );
     drop(holder);
 }
+
+/// A lock the check cannot examine at all is a different state from a
+/// lock nobody holds, and only one of them is ordinary.
+///
+/// Nobody holding the lock is what every machine without a daemon looks
+/// like, and it stays silent. A lock that cannot be opened means the
+/// comparison did not happen — the command runs anyway, because an
+/// unreadable lock is no evidence that a daemon is serving something
+/// else, but a check that silently did not run is exactly what this
+/// module exists to prevent.
+#[test]
+fn an_unreadable_lock_says_the_check_did_not_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = world();
+    let lock = sandbox.tty_lock_path();
+    std::fs::write(&lock, lock_content(&sandbox)).unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // A user who can read it despite the mode bits (running as root)
+    // never reaches the branch under test; restore and skip rather than
+    // assert a state this process cannot produce.
+    if std::fs::read(&lock).is_ok() {
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).ok();
+        eprintln!("skipping unreadable-lock test: this user can read a mode-000 file");
+        return;
+    }
+
+    let out = run_routed_command(&sandbox);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).ok();
+
+    assert!(
+        stderr.contains("could not read the session lock"),
+        "a check that could not run must say so: {stderr}"
+    );
+    assert!(
+        !stderr.contains("refusing to act"),
+        "an unreadable lock is not evidence of a mismatch: {stderr}"
+    );
+}

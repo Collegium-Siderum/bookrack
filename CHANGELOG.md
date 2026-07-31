@@ -59,6 +59,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **cli: a session lock that cannot be read is reported instead of
+  skipped.** The library pre-flight treats two very different states
+  the same way — nobody holds the lock, which is every machine without
+  a daemon, and the lock could not be examined at all, which means the
+  check did not run. The first stays silent; the second now says so on
+  stderr. The command still runs either way: a lock that cannot be
+  read is no evidence that a daemon is serving a different library.
+
 - **index-profile: a resolved profile says which file defined it.**
   `index-profile current` reports `defined by: user` or `defined by:
   built-in` alongside the reference source it already showed, and

@@ -98,12 +98,31 @@ fn resolve_intent(selection: &LibrarySelection, env_data_dir: Option<&str>) -> O
     None
 }
 
+/// Read the session lock, or `None` when there is nothing to compare
+/// against.
+///
+/// The two `None` cases are not the same thing and are no longer
+/// spelled the same way. `Ok(false)` — nobody holds the flock — is the
+/// ordinary state on a machine with no daemon, and stays silent.
+/// `Err` — the lock could not be examined at all — means the check did
+/// not run, which is the outcome this whole module exists to prevent
+/// happening quietly, so it says so on stderr before waving the command
+/// through. Waving it through is still right: a lock that cannot be
+/// read is no evidence that a daemon is serving a different library.
 fn read_lock_info() -> Option<LockInfo> {
     let runtime_dir = resolve_runtime_dir(None).ok()?;
     let lock_path = runtime_dir.join(tty_lock_name());
     match lock_is_held(&lock_path) {
         Ok(true) => peek_lock(&lock_path).ok().flatten(),
-        Ok(false) | Err(_) => None,
+        Ok(false) => None,
+        Err(e) => {
+            eprintln!(
+                "bookrack: could not read the session lock at {} ({e}); \
+                 skipping the library check",
+                lock_path.display(),
+            );
+            None
+        }
     }
 }
 

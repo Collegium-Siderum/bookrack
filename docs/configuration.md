@@ -148,6 +148,22 @@ knobs, the PDFium library directory, the log filters, and the
 per-query ANN overrides. Copy that file to `.env` and fill in what you
 need.
 
+### Process-level knobs with no `config.toml` key
+
+`BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
+`BOOKRACK_VECTORS_REFINE_FACTOR` are read from the environment and have
+no `config.toml` counterpart, on purpose. They are per-query overrides
+for tuning retrieval breadth on a daemon that cannot take a per-call
+flag on its request surface — a debugging escape hatch, not a durable
+property of a library. Giving them a key would give a temporary knob a
+permanent home, and `libraries config set` would then warn that a
+library-level value is "overridden by the environment" for a value the
+library never had.
+
+The same reasoning retired `mcp_addr` and `log_directive` from
+`config.toml`: a knob read before any data root is known does not
+belong to a data root.
+
 ### When `.env` is read
 
 `.env` is loaded by the binaries — `bookrack`, `bookrack-mcp`, and the
