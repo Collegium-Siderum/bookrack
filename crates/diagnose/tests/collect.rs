@@ -14,8 +14,7 @@
 //! paths and titles before they reach the bundle.
 
 use std::io::Read;
-use std::path::Path;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use bookrack_catalog::{
@@ -25,28 +24,18 @@ use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_diagnose::{Options, collect};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 /// A fixed unix-ms timestamp the test runs against so the bundle name
 /// and the manifest's `generated_at` are reproducible.
 const FROZEN_UNIX_MS: u64 = 1_717_573_200_000;
 
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// the collectors' daemon-side log source is controlled by the tests
-/// instead of scanning the user's real per-user data directory.
-fn isolate_daemon_state_dir() -> &'static Path {
-    DAEMON_STATE_DIR
-        .get_or_init(|| {
-            let dir = tempfile::tempdir().expect("daemon state tempdir");
-            // SAFETY: env is mutated exactly once, inside
-            // `OnceLock::get_or_init`'s single-initialization guarantee,
-            // as the first statement of every test in this binary,
-            // before any concurrent env reads.
-            unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-            dir
-        })
-        .path()
+/// Isolate this binary's view of the host so the collectors' daemon-side
+/// log source is the sandbox rather than the user's real per-user
+/// directory. `isolated` rather than `daemon`: this crate never opens a
+/// library, so it needs no embedder.
+fn isolate_daemon_state_dir() -> PathBuf {
+    process_env(ProcessEnv::isolated()).daemon_state_dir()
 }
 
 struct Fixture {
