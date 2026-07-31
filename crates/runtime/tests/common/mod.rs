@@ -6,10 +6,10 @@
 //! library, and each open probes the configured embedder over HTTP
 //! for its vector dimension. [`embed_stub_url`] starts a loopback
 //! HTTP server that answers the Ollama surface the daemon touches —
-//! `POST /api/embed` with fixed-width vectors, and an empty model
-//! list for everything else (the `/api/tags` reachability probe) —
-//! and points `BOOKRACK_OLLAMA_URL` at it, so the whole suite runs
-//! with no embedding daemon installed.
+//! `POST /api/embed` with fixed-width vectors, and a `/api/tags`
+//! model list holding the default embed model so the bring-up
+//! pre-flight passes — and points `BOOKRACK_OLLAMA_URL` at it, so the
+//! whole suite runs with no embedding daemon installed.
 //!
 //! [`isolate_daemon_state_dir`] pins the daemon state directory to a
 //! per-binary tempdir so bring-up never touches the user's real
@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use bookrack_config::DEFAULT_EMBED_MODEL;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Result, eyre};
 
@@ -119,7 +120,11 @@ fn serve_embed_requests(stream: TcpStream) -> std::io::Result<()> {
                 "embeddings": vec![vec![0.5f32; STUB_DIMENSION]; inputs],
             })
         } else {
-            serde_json::json!({ "models": [] })
+            // `/api/tags`. The pre-flight in `DaemonRuntime::start`
+            // refuses bring-up unless the configured model is listed
+            // here, so a stub that reported an empty list would fail
+            // every daemon-backed test before it began.
+            serde_json::json!({ "models": [{ "name": DEFAULT_EMBED_MODEL }] })
         };
         let payload = response.to_string();
         write!(

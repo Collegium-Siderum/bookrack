@@ -24,6 +24,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use bookrack_config::DEFAULT_EMBED_MODEL;
 use eyre::{Context, ContextCompat, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
@@ -39,8 +40,9 @@ pub const STUB_DIMENSION: usize = 8;
 static EMBED_STUB: OnceLock<String> = OnceLock::new();
 
 /// Start a loopback HTTP stub answering the Ollama surface daemon
-/// bring-up touches — `POST /api/embed` with fixed-width vectors, an
-/// empty model list for everything else — and point
+/// bring-up touches — `POST /api/embed` with fixed-width vectors, and
+/// a `/api/tags` model list holding the default embed model so the
+/// pre-flight check passes — and point
 /// `BOOKRACK_OLLAMA_URL` at it, so both in-process runtimes and
 /// spawned `bookrack` subprocesses (which inherit the environment)
 /// run with no embedding daemon installed. Call as the first
@@ -98,7 +100,11 @@ fn serve_embed_requests(stream: TcpStream) -> std::io::Result<()> {
                 "embeddings": vec![vec![0.5f32; STUB_DIMENSION]; inputs],
             })
         } else {
-            serde_json::json!({ "models": [] })
+            // `/api/tags`. The pre-flight in `DaemonRuntime::start`
+            // refuses bring-up unless the configured model is listed
+            // here, so a stub that reported an empty list would fail
+            // every daemon-backed test before it began.
+            serde_json::json!({ "models": [{ "name": DEFAULT_EMBED_MODEL }] })
         };
         let payload = response.to_string();
         write!(

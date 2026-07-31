@@ -420,6 +420,21 @@ impl DaemonRuntime {
         let embed_cfg = crate::profile::effective_embed_config(&cfg)
             .context("resolve effective embed configuration")?;
 
+        // 5a. Every mount's embed backend, before anything expensive
+        //     starts. Step 6 opens each library, and opening one
+        //     probes `/api/embed` unconditionally — so a backend that
+        //     cannot serve already fails the bring-up, just later and
+        //     with the failure buried under a wrapper chain. Refusing
+        //     here costs nothing extra and puts one readable sentence
+        //     and one command in front of the operator.
+        //
+        //     Ahead of 5b on purpose: `bring_up_reranker` may spawn a
+        //     supervised llama-server and hold it to readiness, which
+        //     is the most expensive step in the sequence. Paying for
+        //     it before a bring-up that is certain to fail is waste
+        //     the operator waits through.
+        crate::backend_probe::preflight_embed_backends(&mounts).await?;
+
         // Event stream and daemon-state flag come up before the
         // reranker so the supervisor's state observer can drive the
         // degraded source from bring-up onward. The broadcast has no

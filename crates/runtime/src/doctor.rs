@@ -31,10 +31,12 @@ use bookrack_config::{
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
-use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
+use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
 use bookrack_index_profile::{has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
+
+use crate::backend_probe::{EmbedBackendState, check_embed_backend};
 
 /// One row of the health report.
 #[derive(Debug, Clone, serde::Deserialize, Serialize)]
@@ -1207,78 +1209,66 @@ fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
     }
 }
 
+/// Lay the embed-backend judgement out as the two rows the table has
+/// always shown. The judgement itself lives in
+/// [`crate::backend_probe`]; only the layout is here, so bring-up can
+/// reach the same verdict without inheriting a table cell's phrasing.
 async fn push_ollama_rows(rows: &mut Vec<Row>, base_url: &str, embed_model: &str) {
-    let probe = probe_ollama(base_url).await;
-    match probe {
-        Ok(report) if report.reachable => {
-            push_ollama_reachable_rows(rows, base_url, embed_model, &report);
-        }
-        Ok(_) => {
-            rows.push(Row {
-                label: "Ollama daemon".to_string(),
-                value: base_url.to_string(),
-                status: Status::Fail {
-                    note: format!(
-                        "unreachable within {}s -- is Ollama running? install: https://ollama.com",
-                        DEFAULT_PROBE_TIMEOUT.as_secs(),
-                    ),
-                },
-            });
-            rows.push(Row {
-                label: "embed model".to_string(),
-                value: embed_model.to_string(),
-                status: Status::Fail {
-                    note: "skipped: Ollama unreachable".to_string(),
-                },
-            });
-        }
-        Err(e) => {
-            rows.push(Row {
-                label: "Ollama daemon".to_string(),
-                value: base_url.to_string(),
-                status: Status::Fail {
-                    note: format!("{e}"),
-                },
-            });
-            rows.push(Row {
-                label: "embed model".to_string(),
-                value: embed_model.to_string(),
-                status: Status::Fail {
-                    note: "skipped: Ollama probe failed".to_string(),
-                },
-            });
-        }
-    }
+    let state = check_embed_backend(base_url, embed_model).await;
+    rows.extend(ollama_rows(base_url, embed_model, state));
 }
 
-fn push_ollama_reachable_rows(
-    rows: &mut Vec<Row>,
-    base_url: &str,
-    embed_model: &str,
-    probe: &ProbeReport,
-) {
-    rows.push(Row {
-        label: "Ollama daemon".to_string(),
-        value: base_url.to_string(),
-        status: Status::Ok {
-            note: Some(format!("{} model(s) pulled", probe.models.len())),
-        },
-    });
-    if probe.models.iter().any(|m| m == embed_model) {
-        rows.push(Row {
-            label: "embed model".to_string(),
-            value: embed_model.to_string(),
-            status: Status::Ok { note: None },
-        });
-    } else {
-        rows.push(Row {
-            label: "embed model".to_string(),
-            value: embed_model.to_string(),
-            status: Status::Fail {
-                note: format!("not pulled -- run `ollama pull {embed_model}`"),
+/// The pure layout half of [`push_ollama_rows`], separated so the four
+/// outcomes can be pinned without a network.
+fn ollama_rows(base_url: &str, embed_model: &str, state: EmbedBackendState) -> [Row; 2] {
+    let (daemon_status, model_status) = match state {
+        EmbedBackendState::Ready { models } => (
+            Status::Ok {
+                note: Some(format!("{} model(s) pulled", models.len())),
             },
-        });
-    }
+            Status::Ok { note: None },
+        ),
+        EmbedBackendState::ModelMissing { model, available } => (
+            Status::Ok {
+                note: Some(format!("{} model(s) pulled", available.len())),
+            },
+            Status::Fail {
+                // The same fragment the bring-up hint wraps in a
+                // sentence. Sharing the whole sentence instead
+                // would force one of the two to change shape.
+                note: format!("not pulled -- run `{}`", pull_command(&model)),
+            },
+        ),
+        EmbedBackendState::Unreachable => (
+            Status::Fail {
+                note: format!(
+                    "unreachable within {}s -- is Ollama running? install: https://ollama.com",
+                    DEFAULT_PROBE_TIMEOUT.as_secs(),
+                ),
+            },
+            Status::Fail {
+                note: "skipped: Ollama unreachable".to_string(),
+            },
+        ),
+        EmbedBackendState::ProbeFailed { reason } => (
+            Status::Fail { note: reason },
+            Status::Fail {
+                note: "skipped: Ollama probe failed".to_string(),
+            },
+        ),
+    };
+    [
+        Row {
+            label: "Ollama daemon".to_string(),
+            value: base_url.to_string(),
+            status: daemon_status,
+        },
+        Row {
+            label: "embed model".to_string(),
+            value: embed_model.to_string(),
+            status: model_status,
+        },
+    ]
 }
 
 fn resolution_source_label(source: ResolutionSource) -> &'static str {
@@ -1367,7 +1357,100 @@ fn render_json(report: &Report) {
 
 #[cfg(test)]
 mod tests {
+    use bookrack_core::Explain;
+
     use super::*;
+
+    /// Every note the two Ollama rows can carry, transcribed from the
+    /// table as it stood before the judgement moved out. Pinning the
+    /// literals is the point: extracting the judgement must not shift
+    /// a single character of what an operator reads.
+    #[test]
+    fn doctor_rows_are_unchanged_by_the_extraction() {
+        let cases = [
+            (
+                EmbedBackendState::Ready {
+                    models: vec!["m".into(), "n".into()],
+                },
+                Status::Ok {
+                    note: Some("2 model(s) pulled".to_string()),
+                },
+                Status::Ok { note: None },
+            ),
+            (
+                EmbedBackendState::ModelMissing {
+                    model: "m".into(),
+                    available: vec!["n".into()],
+                },
+                Status::Ok {
+                    note: Some("1 model(s) pulled".to_string()),
+                },
+                Status::Fail {
+                    note: "not pulled -- run `ollama pull m`".to_string(),
+                },
+            ),
+            (
+                EmbedBackendState::Unreachable,
+                Status::Fail {
+                    note: "unreachable within 2s -- is Ollama running? \
+                           install: https://ollama.com"
+                        .to_string(),
+                },
+                Status::Fail {
+                    note: "skipped: Ollama unreachable".to_string(),
+                },
+            ),
+            (
+                EmbedBackendState::ProbeFailed {
+                    reason: "Ollama returned a malformed /api/tags response: eof".to_string(),
+                },
+                Status::Fail {
+                    note: "Ollama returned a malformed /api/tags response: eof".to_string(),
+                },
+                Status::Fail {
+                    note: "skipped: Ollama probe failed".to_string(),
+                },
+            ),
+        ];
+        for (state, daemon, model) in cases {
+            let label = format!("{state:?}");
+            let [daemon_row, model_row] = ollama_rows("http://host:11434", "m", state);
+            assert_eq!(daemon_row.label, "Ollama daemon", "{label}");
+            assert_eq!(daemon_row.value, "http://host:11434", "{label}");
+            assert_eq!(
+                format!("{:?}", daemon_row.status),
+                format!("{daemon:?}"),
+                "{label}"
+            );
+            assert_eq!(model_row.label, "embed model", "{label}");
+            assert_eq!(model_row.value, "m", "{label}");
+            assert_eq!(
+                format!("{:?}", model_row.status),
+                format!("{model:?}"),
+                "{label}"
+            );
+        }
+    }
+
+    /// The table cell and the bring-up hint share the repair command,
+    /// not the sentence around it. Asserting on the shared fragment is
+    /// what makes this a same-source check rather than two literals
+    /// that happen to agree today.
+    #[test]
+    fn doctor_and_preflight_share_one_pull_command() {
+        let state = EmbedBackendState::ModelMissing {
+            model: "wanted-model".to_string(),
+            available: Vec::new(),
+        };
+        let command = pull_command("wanted-model");
+        let hint = state.explain().data.hint.expect("hint");
+        let [_, model_row] = ollama_rows("http://host:11434", "wanted-model", state);
+        let Status::Fail { note } = model_row.status else {
+            panic!("a missing model is a FAIL row");
+        };
+        assert!(note.contains(&command), "{note}");
+        assert!(hint.contains(&command), "{hint}");
+    }
 
     fn row(label: &str, value: &str, status: Status) -> Row {
         Row {

@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 use bookrack_control_client::ControlError;
-use bookrack_core::ProblemData;
+use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
     JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
@@ -144,6 +144,13 @@ pub enum BookrackCliError {
         hint: String,
     },
 
+    /// The daemon refused to start because an external backend it
+    /// needs is unusable — the check runs before any library is
+    /// opened, so nothing was half-started. Operator input, not a
+    /// bug: exit 2, and the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    PreflightRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -169,6 +176,7 @@ impl BookrackCliError {
             Self::ExecParamsInvalid { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
+            Self::PreflightRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -225,6 +233,7 @@ impl BookrackCliError {
     pub fn problem_data(&self) -> Option<ProblemData> {
         let data = match self {
             Self::RpcUserError { data, .. } | Self::RpcInternal { data, .. } => data.as_ref()?,
+            Self::PreflightRefused { problem } => return Some(problem.data.clone()),
             _ => return None,
         };
         serde_json::from_value(data.clone()).ok()
