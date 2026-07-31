@@ -170,6 +170,26 @@ starts the test suite from an empty environment, and without the
 suppression cargo's package-root working directory would let dotenv
 refill it from the repository's own file.
 
+### Running the test suite against nothing
+
+```sh
+./scripts/test-clean.sh                 # the whole workspace
+./scripts/test-clean.sh -p bookrack-cli # or a narrowed run
+```
+
+`cargo nextest run --workspace` inherits the machine it runs on: its
+home directory, its registry, whatever `BOOKRACK_*` variables the shell
+exports, and the `.env` above the package root. That is the right loop
+for development. `scripts/test-clean.sh` is the contract underneath it:
+it starts from an empty environment and lets through only what cargo
+itself needs, plus `CI` and the two PDFium variables — those, because
+dropping them would turn the PDF tests from a loud failure into a
+silent skip, which is the outcome the script exists to prevent.
+
+Both are worth running. A difference between them is a test reading the
+machine rather than its fixtures. CI runs the scrubbed form as its own
+job.
+
 ## Retrieval profiles: `index-profile`
 
 An index profile couples the three retrieval knobs — the embedding
