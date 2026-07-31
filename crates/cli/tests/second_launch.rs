@@ -5,42 +5,22 @@
 //! and exits zero; a lock pointing at a dead daemon exits with status
 //! three so the operator removes it by hand.
 //!
-//! The embedder probe daemon bring-up performs — in-process and in
-//! spawned `bookrack` subprocesses, which inherit the environment —
-//! is answered by the loopback stub in `common`, so no Ollama daemon
+//! The daemon comes up in this process and again as a spawned
+//! `bookrack` subprocess, so both halves are isolated: `process_env`
+//! redirects this binary's own view of the host, and the same sandbox
+//! is handed to `bookrack_cmd!` for the children. The embedder probe
+//! bring-up performs is answered by [`EmbedStub`], so no Ollama daemon
 //! is required.
 
 #![cfg(unix)]
 
-mod common;
-
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_test_support::{EmbedStub, ProcessEnv, bookrack_cmd, process_env};
 use eyre::Result;
-
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up (in-process and in spawned `bookrack` subprocesses, which
-/// inherit the environment) never touches the user's real per-user
-/// data directory, and answer the embedder probe from the loopback
-/// stub.
-fn isolate_daemon_state_dir() {
-    common::embed_stub_url();
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
 
 fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
     let mut opts = RuntimeOpts::headless(Some(data_dir), None);
@@ -55,7 +35,7 @@ fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
-    isolate_daemon_state_dir();
+    let sandbox = process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
@@ -75,12 +55,16 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
     let data_dir_for_subprocess = data_root.path().to_path_buf();
     let subprocess = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
-            .args(["run", "--no-mcp"])
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir_for_subprocess)
-            .env("BOOKRACK_DATA_DIR", data_dir_for_subprocess)
-            .output()
-            .await
+        tokio::process::Command::from(
+            bookrack_cmd!(sandbox)
+                .runtime_dir(runtime_dir_for_subprocess)
+                .data_dir(data_dir_for_subprocess)
+                .ollama_url(EmbedStub::url())
+                .build(),
+        )
+        .args(["run", "--no-mcp"])
+        .output()
+        .await
     });
 
     let out = subprocess.await??;
@@ -100,7 +84,7 @@ async fn cli_second_launch_prints_addr_and_exits_zero() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
-    isolate_daemon_state_dir();
+    let sandbox = process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = DaemonRuntime::start(build_opts(
@@ -115,12 +99,16 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
     let data_dir_for_subprocess = data_root.path().to_path_buf();
     let subprocess = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
-            .args(["status"])
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir_for_subprocess)
-            .env("BOOKRACK_DATA_DIR", data_dir_for_subprocess)
-            .output()
-            .await
+        tokio::process::Command::from(
+            bookrack_cmd!(sandbox)
+                .runtime_dir(runtime_dir_for_subprocess)
+                .data_dir(data_dir_for_subprocess)
+                .ollama_url(EmbedStub::url())
+                .build(),
+        )
+        .args(["status"])
+        .output()
+        .await
     });
 
     let out = subprocess.await??;
@@ -145,7 +133,7 @@ async fn status_against_a_live_daemon_prints_the_card() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_lock_exits_three() -> Result<()> {
-    isolate_daemon_state_dir();
+    let sandbox = process_env(ProcessEnv::daemon());
     use std::io::Write;
 
     use fs2::FileExt;
@@ -177,12 +165,16 @@ async fn stale_lock_exits_three() -> Result<()> {
     // A pinned data dir keeps the run from depending on the host's
     // configured library; the stale-lock check must be what terminates
     // the process, not library resolution.
-    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_bookrack"))
-        .args(["run", "--no-mcp"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_root.path())
-        .env("BOOKRACK_DATA_DIR", data_root.path())
-        .output()
-        .await?;
+    let out = tokio::process::Command::from(
+        bookrack_cmd!(sandbox)
+            .runtime_dir(runtime_root.path())
+            .data_dir(data_root.path())
+            .ollama_url(EmbedStub::url())
+            .build(),
+    )
+    .args(["run", "--no-mcp"])
+    .output()
+    .await?;
     assert_eq!(
         out.status.code(),
         Some(3),
@@ -195,7 +187,7 @@ async fn stale_lock_exits_three() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_shutdown_rpc_exits_cleanly() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     // Covers one representative leg of the five shutdown paths that
     // share `shutdown_tx.send(())`: the control-plane `daemon.shutdown`
     // RPC. The other four (SIGINT, REPL disconnect, MCP

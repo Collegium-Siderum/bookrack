@@ -6,20 +6,19 @@
 //! `-32002 queue worker disabled in headless mode` JSON-RPC error
 //! when invoked without `--with-queue-worker`.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! [`bookrack_test_support::EmbedStub`], so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
-mod common;
-
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_config::LibrarySelection;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_test_support::{ProcessEnv, process_env};
 use eyre::Result;
 use serde_json::Value;
 
@@ -55,27 +54,9 @@ async fn collect_method_names(sock: &std::path::Path) -> Result<BTreeSet<String>
     Ok(names)
 }
 
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory,
-/// and answer the embedder probe from the loopback stub.
-fn isolate_daemon_state_dir() {
-    common::embed_stub_url();
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bookrack_run_and_bookrack_mcp_share_method_set() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root_a = tempfile::tempdir()?;
     let runtime_root_a = tempfile::tempdir()?;
     let data_root_b = tempfile::tempdir()?;
