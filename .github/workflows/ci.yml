@@ -113,13 +113,11 @@ jobs:
 
   test-clean:
     runs-on: ubuntu-latest
-    # Allowed to fail for one iteration while the difference against the
-    # `test` job above is observed: this is the first mechanism that can
-    # surface an *unknown* host-coupling channel, so what it finds on
-    # first contact is not knowable in advance. Once the difference is
-    # zero, drop this line — after which a reappearing difference is a
+    # Required, like every other job here. It ran once tolerated, to see
+    # what a first contact with an unknown host-coupling channel would
+    # turn up; it reported exactly what the `test` job did, so there was
+    # nothing to tolerate. A difference appearing from here on is a
     # channel to close, not a reason to soften the gate again.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - name: Free runner disk space
