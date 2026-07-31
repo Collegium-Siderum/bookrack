@@ -59,6 +59,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`.env` is loaded by the binaries, not by the configuration
+  library.** `bookrack`, `bookrack-mcp`, and the desktop shell each
+  load it as their first statement; `Config::resolve` no longer does.
+  Two things change. Every variable a process reads is now read against
+  one environment — previously anything that ran before the first
+  `Config::resolve`, including the log-filter setup, the PDFium lookup,
+  and the runtime-directory resolution, saw a world the file had not
+  been applied to, so one variable could hold two values in one
+  process. And a caller that embeds a bookrack crate as a library no
+  longer gets a `.env` out of its own working directory: taking a file
+  from there is a program's decision to make about itself.
+
+  `BOOKRACK_NO_DOTENV` turns the load off. Non-blank is on, with `0`,
+  `false`, `no`, and `off` turning it back off, matching
+  `BOOKRACK_REQUIRE_PDFIUM`. It has to be set in the real environment,
+  since a value inside `.env` is only read once the file has been
+  loaded.
+
 - **config: `BOOKRACK_REGISTRY` names the only registry that is
   consulted.** Setting it to a non-blank value now suppresses the
   platform-default registry at `<config_dir>/bookrack/registry.toml`

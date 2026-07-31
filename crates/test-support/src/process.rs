@@ -12,12 +12,14 @@
 //! directory: in-process tests locate their fixtures relative to
 //! `CARGO_MANIFEST_DIR`, and a process-wide `chdir` is an action at a
 //! distance. The `.env` that a stable working directory would have shut
-//! out is handled by a pre-flight assertion instead.
+//! out is closed off by [`bookrack_config::NO_DOTENV_ENV`] instead.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use bookrack_config::{DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
+use bookrack_config::{
+    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
+};
 use bookrack_session::RUNTIME_DIR_ENV;
 
 use crate::embed_stub::EmbedStub;
@@ -99,7 +101,6 @@ impl ProcessEnv {
 /// [`ProcessEnv`]: initialisation happens once, so the second request
 /// would otherwise be discarded in silence.
 pub fn process_env(spec: ProcessEnv) -> &'static Sandbox {
-    assert_no_hostile_dotenv();
     let (stored, sandbox) = ENV.get_or_init(|| {
         let sandbox = Sandbox::new();
         apply(&spec, &sandbox);
@@ -132,6 +133,7 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
     }
 
     let mut installed: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
+    installed.push(NO_DOTENV_ENV);
     installed.extend(PASSTHROUGH_ENV);
     if spec.embedder {
         installed.push(OLLAMA_URL_ENV);
@@ -160,78 +162,19 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
         if spec.embedder {
             std::env::set_var(OLLAMA_URL_ENV, EmbedStub::url());
         }
+        // Cargo runs a test binary from its package root, so dotenv's
+        // upward search reaches the repository's own `.env` — and,
+        // because dotenv does not overwrite what is already set, it
+        // would refill precisely the variables this function just
+        // removed. There is no working directory to move here, so the
+        // load is switched off instead.
+        std::env::set_var(NO_DOTENV_ENV, "1");
     }
-}
-
-/// Fail loudly when a `.env` reachable from this process's working
-/// directory defines a bookrack variable.
-///
-/// `dotenvy` searches upward from the working directory, and cargo runs
-/// a test binary from its package root, so such a file silently re-sets
-/// whatever this module just removed — and, because `dotenvy` does not
-/// overwrite variables that are already set, it does so only for the
-/// ones a test took care to remove. Naming the file and the key turns
-/// an invisible leak into a failure with a fix in it.
-fn assert_no_hostile_dotenv() {
-    let Ok(start) = std::env::current_dir() else {
-        return;
-    };
-    for dir in start.ancestors() {
-        let candidate = dir.join(".env");
-        if !candidate.is_file() {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&candidate) else {
-            return;
-        };
-        let offenders: Vec<&str> = text
-            .lines()
-            .filter_map(dotenv_key)
-            .filter(|key| key.starts_with(BOOKRACK_PREFIX) && !PASSTHROUGH_ENV.contains(key))
-            .collect();
-        assert!(
-            offenders.is_empty(),
-            "{} defines {:?}, which reaches this test through dotenv's \
-             upward search and overrides the isolated environment",
-            candidate.display(),
-            offenders,
-        );
-        return;
-    }
-}
-
-/// The variable name one `.env` line assigns, if it assigns one. Values
-/// are deliberately not read: the check is about which names can reach
-/// the process, and a value may be a secret.
-fn dotenv_key(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let line = line.strip_prefix("export ").unwrap_or(line);
-    let (key, _) = line.split_once('=')?;
-    Some(key.trim())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_dotenv_key_is_read_without_its_value() {
-        assert_eq!(
-            dotenv_key("BOOKRACK_DATA_DIR=/secret"),
-            Some("BOOKRACK_DATA_DIR")
-        );
-        assert_eq!(
-            dotenv_key("export BOOKRACK_LOG=debug"),
-            Some("BOOKRACK_LOG")
-        );
-        assert_eq!(dotenv_key("  KEY = value "), Some("KEY"));
-        assert_eq!(dotenv_key("# BOOKRACK_DATA_DIR=/x"), None);
-        assert_eq!(dotenv_key(""), None);
-        assert_eq!(dotenv_key("no-assignment"), None);
-    }
 
     /// The presets differ in exactly one bit, and the deviations are
     /// distinguishable — the equality the `OnceLock` guard compares has

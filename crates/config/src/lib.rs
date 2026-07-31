@@ -89,6 +89,46 @@ pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
 /// [`daemon_state_dir`].
 pub const DAEMON_STATE_DIR_ENV: &str = "BOOKRACK_DAEMON_STATE_DIR";
 
+/// Environment variable that suppresses loading `.env`.
+///
+/// A non-blank value turns loading off, except `0`, `false`, `no`, and
+/// `off`, which turn it back on; blank is treated as unset. The same
+/// rule `BOOKRACK_REQUIRE_PDFIUM` follows.
+///
+/// It has to come from the real environment: a value written inside
+/// `.env` is only read once the file has been loaded, which is the
+/// decision this variable makes.
+pub const NO_DOTENV_ENV: &str = "BOOKRACK_NO_DOTENV";
+
+/// Load `.env`, searching upward from the current working directory,
+/// unless [`NO_DOTENV_ENV`] suppresses it. A missing file is normal and
+/// not an error.
+///
+/// Call it from a binary's entry point, as that entry point's first
+/// statement. Two properties depend on that placement. Anything read
+/// before it sees an environment the file has not been applied to, so
+/// one process could otherwise observe two different values for one
+/// variable depending on which code path asked. And taking a file out
+/// of the caller's working directory is a decision only a program can
+/// make on its own behalf — a library that did it would hand its
+/// embedder a configuration source the embedder never asked for.
+pub fn load_dotenv() {
+    if should_load_dotenv(|key| std::env::var(key).ok()) {
+        dotenvy::dotenv().ok();
+    }
+}
+
+/// The pure core of [`load_dotenv`]: whether the file should be read.
+fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
+    match env_trimmed(get(NO_DOTENV_ENV)) {
+        Some(value) => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
 /// Resolved configuration. Construct with [`Config::load`] (from the
 /// environment) or [`Config::new`] (from an explicit data root, e.g. a
 /// CLI override).
@@ -327,9 +367,12 @@ impl Config {
     ///
     /// [`REGISTRY_ENV`], when it carries a non-blank value, names the
     /// only registry consulted: the platform-default one is not read.
+    ///
+    /// Only the process environment is read. `.env` is loaded by the
+    /// binaries, at their entry points — see [`load_dotenv`] — so a
+    /// caller that embeds this crate as a library gets exactly the
+    /// environment it set.
     pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
-        // A missing .env is fine: the variables may be set directly.
-        dotenvy::dotenv().ok();
         let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
         let registry = registries.env;
         let default_registry = registries.platform_default;
@@ -4200,6 +4243,42 @@ mod tests {
         );
 
         assert_eq!(unusable_registry_record(&ConfigError::MissingDataDir), None);
+    }
+
+    /// Any value that is not one of the four falsy words turns the
+    /// load off. Closure-injected, so the rule is tested without this
+    /// process's own environment taking part.
+    #[test]
+    fn no_dotenv_suppresses_loading_on_any_truthy_value() {
+        for value in ["1", "true", "yes", "on", "please", "0.0"] {
+            assert!(
+                !should_load_dotenv(|_| Some(value.to_string())),
+                "{value:?} should suppress the load",
+            );
+        }
+    }
+
+    /// The four falsy words turn it back on, case- and
+    /// whitespace-insensitively — the same set `BOOKRACK_REQUIRE_PDFIUM`
+    /// accepts, so an operator does not have to remember two spellings.
+    #[test]
+    fn no_dotenv_falsy_words_keep_loading() {
+        for value in ["0", "false", "no", "off", "FALSE", "  Off  "] {
+            assert!(
+                should_load_dotenv(|_| Some(value.to_string())),
+                "{value:?} should keep the load on",
+            );
+        }
+    }
+
+    /// Blank is unset, matching the registry and pdfium knobs: an
+    /// exported-but-empty variable must not silently disable the file.
+    #[test]
+    fn a_blank_no_dotenv_is_treated_as_unset() {
+        for value in ["", "   ", "\t"] {
+            assert!(should_load_dotenv(|_| Some(value.to_string())));
+        }
+        assert!(should_load_dotenv(|_| None));
     }
 
     #[test]

@@ -148,6 +148,28 @@ knobs, the PDFium library directory, the log filters, and the
 per-query ANN overrides. Copy that file to `.env` and fill in what you
 need.
 
+### When `.env` is read
+
+`.env` is loaded by the binaries — `bookrack`, `bookrack-mcp`, and the
+desktop shell — as the first thing each of them does, before anything
+reads a variable. The search runs upward from the working directory,
+so which file is found depends on where the command was started.
+
+Two consequences follow. A process that reads a variable does so after
+the file has been applied, whichever variable it is: there is no
+ordering in which one part of a command sees the file and another part
+does not. And embedding a bookrack crate as a *library* gets no `.env`
+at all — loading a file out of the caller's working directory is a
+binary's decision, not a library's, so an embedder configures itself
+through the real environment.
+
+`BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
+environment, since a value written inside `.env` is only read if the
+file is loaded. `scripts/test-clean.sh` is why it exists: that script
+starts the test suite from an empty environment, and without the
+suppression cargo's package-root working directory would let dotenv
+refill it from the repository's own file.
+
 ## Retrieval profiles: `index-profile`
 
 An index profile couples the three retrieval knobs — the embedding
