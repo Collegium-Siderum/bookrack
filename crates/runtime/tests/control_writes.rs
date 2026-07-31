@@ -8,8 +8,9 @@
 //! then exercises the `-32001 busy` error code by holding the
 //! runtime's write mutex across a `vectors.drop` and releasing it.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -20,13 +21,12 @@ use std::time::Duration;
 use eyre::{Context, Result};
 use serde_json::Value;
 
-use crate::common::{
-    await_channel, build_opts, connect, init_test_env, join_with_deadline, recv, send,
-};
+use crate::common::{await_channel, build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
@@ -105,7 +105,7 @@ async fn ingest_submit_broadcasts_queue_tick_to_subscribers() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

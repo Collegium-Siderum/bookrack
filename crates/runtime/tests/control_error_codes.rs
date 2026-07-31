@@ -8,8 +8,9 @@
 //! sequence of intentionally-bad write RPCs through a single
 //! connection and asserts on `error.code` for each.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -19,7 +20,8 @@ use eyre::{Result, eyre};
 use serde_json::Value;
 
 use crate::common::{Reader, Writer};
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 const INVALID_PARAMS: i64 = -32602;
 const INVALID_LIBRARY: i64 = -32010;
@@ -49,7 +51,7 @@ async fn rpc_code(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

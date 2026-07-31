@@ -9,8 +9,9 @@
 //! paths that do not require a populated library to validate the
 //! parameter shapes and the queue-bound write gate.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -21,11 +22,12 @@ use std::collections::BTreeSet;
 use eyre::{Result, eyre};
 use serde_json::json;
 
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

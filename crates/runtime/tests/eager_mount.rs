@@ -6,8 +6,8 @@
 //! the control-plane `library.list` method.
 //!
 //! The embedder probe daemon bring-up performs — once per mounted
-//! library here — is answered by the loopback stub in `common`, so no
-//! Ollama daemon is required.
+//! library here — is answered by `bookrack_test_support::EmbedStub`,
+//! so no Ollama daemon is required.
 
 #![cfg(unix)]
 
@@ -17,60 +17,32 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 use eyre::{Result, eyre};
 
-use crate::common::{connect, embed_stub_url, join_with_deadline, recv, send};
+use crate::common::{connect, join_with_deadline, recv, send};
 
-struct Env {
-    _state: tempfile::TempDir,
-    _roots: tempfile::TempDir,
-}
-
-static ENV: OnceLock<Env> = OnceLock::new();
-
-/// Pin the daemon state directory and a two-library registry into
-/// per-binary tempdirs: `alpha` (the registry default) and `beta`,
-/// each with its own data root.
-fn isolate_env() {
-    embed_stub_url();
-    ENV.get_or_init(|| {
-        let state = tempfile::tempdir().expect("daemon state tempdir");
-        let roots = tempfile::tempdir().expect("library roots tempdir");
-        let alpha = roots.path().join("alpha-root");
-        let beta = roots.path().join("beta-root");
-        std::fs::create_dir_all(&alpha).expect("alpha root");
-        std::fs::create_dir_all(&beta).expect("beta root");
-        let registry = roots.path().join("registry.toml");
-        std::fs::write(
-            &registry,
-            format!(
-                "default = \"alpha\"\n\n\
-                 [libraries.alpha]\ndata_dir = {alpha:?}\n\n\
-                 [libraries.beta]\ndata_dir = {beta:?}\n",
-                alpha = alpha.display().to_string(),
-                beta = beta.display().to_string(),
-            ),
-        )
-        .expect("write registry");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe {
-            std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", state.path());
-            std::env::set_var("BOOKRACK_REGISTRY", &registry);
-            std::env::remove_var("BOOKRACK_DATA_DIR");
-        }
-        Env {
-            _state: state,
-            _roots: roots,
-        }
+/// Isolate the process and seed a two-library registry: `alpha` (the
+/// registry default) and `beta`, each with its own data root under the
+/// sandbox. Seeding is guarded so a second test in this binary reuses
+/// the file rather than rewriting it.
+fn world() -> &'static Sandbox {
+    static SEEDED: OnceLock<()> = OnceLock::new();
+    let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
+    SEEDED.get_or_init(|| {
+        let alpha = sandbox.data_root("alpha-root");
+        let beta = sandbox.data_root("beta-root");
+        sandbox.write_registry_entries(
+            Some("alpha"),
+            &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+        );
     });
+    sandbox
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn registry_selection_mounts_every_registered_library() -> Result<()> {
-    isolate_env();
+    world();
     let runtime_root = tempfile::tempdir()?;
 
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
@@ -120,7 +92,7 @@ async fn registry_selection_mounts_every_registered_library() -> Result<()> {
 async fn every_served_root_is_locked_while_the_daemon_runs() -> Result<()> {
     use bookrack_session::{RootLock, is_root_lock_conflict};
 
-    isolate_env();
+    world();
     let runtime_root = tempfile::tempdir()?;
     let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
     opts.no_mcp = true;

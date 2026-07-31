@@ -5,8 +5,9 @@
 //! `ingest.cancel` and the rest of the `queue.*` lifecycle methods
 //! treat the same way as book jobs.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -15,11 +16,12 @@ mod common;
 use eyre::{ContextCompat, Result};
 use serde_json::Value;
 
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn glean_submit_enqueues_paper_jobs_and_ingest_cancel_covers_them() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

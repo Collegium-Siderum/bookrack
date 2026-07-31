@@ -13,8 +13,9 @@
 //! excludes every other writer from its root until shutdown, and a root
 //! already locked by someone else refuses bring-up.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 mod common;
 
@@ -22,11 +23,12 @@ use bookrack_runtime::DaemonRuntime;
 use bookrack_session::{RootLock, TtyLock, is_root_lock_conflict, tty_lock_name};
 use eyre::Result;
 
-use crate::common::{build_opts, init_test_env};
+use crate::common::build_opts;
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
@@ -64,7 +66,7 @@ async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
@@ -98,7 +100,7 @@ async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bring_up_refuses_a_root_locked_by_another_writer() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();

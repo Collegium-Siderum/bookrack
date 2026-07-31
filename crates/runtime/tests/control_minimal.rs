@@ -13,8 +13,9 @@
 //! 3. `doctor.gather` returns a structured report.
 //! 4. `daemon.shutdown` triggers a `daemon.state = stopping` notification.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -23,7 +24,8 @@ mod common;
 use eyre::Result;
 use serde_json::Value;
 
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 /// The documented `events.subscribe` snapshot bundle, in broadcast
 /// order. Pinned literally so a channel added to or removed from the
@@ -41,7 +43,7 @@ const SNAPSHOT_CONTRACT: [&str; 7] = [
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn full_loop_subscribe_doctor_shutdown() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

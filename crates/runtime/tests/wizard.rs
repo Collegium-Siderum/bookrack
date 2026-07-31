@@ -8,7 +8,7 @@
 //! accepts either outcome, keeping the tests deterministic offline.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bookrack_config::ROOT_CONFIG_NAME;
@@ -16,29 +16,8 @@ use bookrack_runtime::wizard::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
     SmokeOutcome, Wizard, WizardDriver, WizardOpts,
 };
+use bookrack_test_support::{ProcessEnv, process_env};
 use eyre::Result;
-
-static HOME_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Point the platform config-directory lookup at a tempdir, so the
-/// finalize step's registry merge never touches the developer's real
-/// registry. `dirs::config_dir()` resolves through `HOME` on macOS and
-/// `XDG_CONFIG_HOME` on Linux; both are redirected before any test
-/// body reads the environment.
-fn isolate_home() {
-    HOME_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("home tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg-config"));
-        }
-        dir
-    });
-}
 
 #[derive(Default)]
 struct MockDriver {
@@ -76,7 +55,7 @@ impl WizardDriver for MockDriver {
 
 #[tokio::test]
 async fn five_steps_in_fixed_order_no_smoke() {
-    isolate_home();
+    process_env(ProcessEnv::isolated());
     let dir = tempfile::tempdir().unwrap();
     let driver = MockDriver {
         data_root: dir.path().to_path_buf(),
@@ -98,7 +77,7 @@ async fn five_steps_in_fixed_order_no_smoke() {
 
 #[tokio::test]
 async fn finalize_writes_config_and_skeleton() {
-    isolate_home();
+    process_env(ProcessEnv::isolated());
     let dir = tempfile::tempdir().unwrap();
     let driver = MockDriver {
         data_root: dir.path().to_path_buf(),

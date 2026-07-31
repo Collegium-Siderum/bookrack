@@ -5,8 +5,9 @@
 //! not_ready` before their handler runs, while reads and non-queue
 //! writes still dispatch normally.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -15,14 +16,15 @@ mod common;
 use eyre::Result;
 use serde_json::json;
 
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 const QUEUE_WORKER_DISABLED: i64 = -32002;
 const INVALID_LIBRARY: i64 = -32010;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_bound_writes_short_circuit_without_a_worker() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

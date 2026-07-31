@@ -10,8 +10,9 @@
 //! count of `Pending` rows after `clear`, and that every mutation
 //! emits a `queue.tick`.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -22,13 +23,12 @@ use std::time::Duration;
 use eyre::{Context, Result};
 use serde_json::Value;
 
-use crate::common::{
-    await_channel, build_opts, connect, init_test_env, join_with_deadline, recv, send,
-};
+use crate::common::{await_channel, build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(

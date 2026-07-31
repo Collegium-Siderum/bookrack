@@ -19,7 +19,8 @@ use std::time::Duration;
 use eyre::{ContextCompat, Result, eyre};
 use serde_json::{Value, json};
 
-use crate::common::{Reader, build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{Reader, build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 /// A synthetic text long enough for the ingest pipeline to extract
 /// prose, plan chunks, and embed them against the stub.
@@ -92,7 +93,7 @@ async fn collect_progress_until_done(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_successful_ingest_emits_extract_then_embed_progress() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let book_dir = tempfile::tempdir()?;

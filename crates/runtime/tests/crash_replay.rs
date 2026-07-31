@@ -19,8 +19,9 @@
 //!   restarted worker must reset it to `Pending`, persist the reset,
 //!   and serve it over `events.snapshot`.
 //!
-//! The embedder probe daemon bring-up performs is answered by the
-//! loopback stub in `common`, so no Ollama daemon is required.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
@@ -33,11 +34,12 @@ use bookrack_core::queue::{JobState, Priority, QUEUE_SCHEMA_VERSION, QueueJob, Q
 use eyre::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::common::{build_opts, connect, init_test_env, join_with_deadline, recv, send};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replay_after_restart_matches_disk_state() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let state_dir = std::path::PathBuf::from(std::env::var("BOOKRACK_DAEMON_STATE_DIR")?);
     let data_root = tempfile::tempdir()?;
     let runtime_root_a = tempfile::tempdir()?;
@@ -126,7 +128,7 @@ async fn replay_after_restart_matches_disk_state() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn abrupt_termination_preserves_submitted_jobs_for_replay() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let state_dir = std::path::PathBuf::from(std::env::var("BOOKRACK_DAEMON_STATE_DIR")?);
     let data_root = tempfile::tempdir()?;
     let runtime_root_a = tempfile::tempdir()?;
@@ -208,7 +210,7 @@ async fn abrupt_termination_preserves_submitted_jobs_for_replay() -> Result<()> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn crash_recovery_resets_a_running_job_to_pending_on_restart() -> Result<()> {
-    init_test_env();
+    process_env(ProcessEnv::daemon());
     let state_dir = std::path::PathBuf::from(std::env::var("BOOKRACK_DAEMON_STATE_DIR")?);
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
