@@ -19,6 +19,29 @@ release workflow extracts the matching section verbatim from this file.
   corpus, and a companion test in the binary crate re-parses every
   example so one that names a dropped command or flag fails the build.
 
+- **runtime: `bookrack run` refuses to start when the embed backend
+  cannot serve.** Before any library is opened — and before the
+  reranker backend is started, which is the most expensive step in
+  bring-up — every mounted library's `(Ollama URL, embed model)` pair
+  is checked against the daemon's model list. An unusable backend
+  ends the run with one sentence, one command to fix it, and exit 2,
+  instead of failing several seconds later inside library warm-up.
+  The check runs per mount, so a registry whose libraries name
+  different models or different Ollama hosts is covered for all of
+  them. `bookrack doctor` and the refusal now share one judgement, so
+  the two can no longer disagree about whether the backend is usable.
+  The desktop shell goes through the same bring-up and gains the same
+  refusal.
+
+- **embed: `EmbedError::ModelNotFound`.** A 404 carrying Ollama's
+  error envelope is now its own variant, naming the model this
+  process is configured with, rather than a generic `BadRequest`
+  holding a raw response body. The judgement is the status code plus
+  the envelope shape — Ollama's wording for this case differs between
+  its own call sites, so matching on the text was never sound, and
+  requiring the envelope keeps an unrelated service's 404 page from
+  being reported as a missing model.
+
 - **query, mcp: the book reads finish reporting the source file.**
   `library.list_books` / `library.find_books` rows carry
   `source_filename`, the basename of the path recorded at intake, so a
@@ -35,6 +58,26 @@ release workflow extracts the matching section verbatim from this file.
   the detail read.
 
 ### Changed
+
+- **errors now say what to do next, and stop losing their root
+  cause.** Operator-facing failures are split three ways — a one-line
+  summary of what failed, the implementation-level detail behind it,
+  and a suggested next step — following PostgreSQL's message style.
+  The CLI stacks the three on stderr, with the suggestion last;
+  `--json` gains a structured failure path, so a scripted caller no
+  longer has to parse JSON on success and prose on failure; the
+  control plane and the MCP server carry the parts in the `data` slot
+  their error envelopes always had and never filled, alongside a
+  `retryable` flag an agent can branch on without reading the
+  wording. `data` is additive: a client that ignores it sees what it
+  saw before.
+
+  Separately, every error crossing those two wire boundaries is now
+  flattened first. A wrapper error's own text is its module's name, so
+  a failure that used to arrive as `"query error"` — root cause gone —
+  now arrives naming the thing that actually broke. A repository gate
+  (`scripts/error-boundary-check.sh`, run in CI) holds the boundary
+  files to it.
 
 - **cli: the root help trailer points at `doctor` for the prerequisite
   check.** The block `bookrack --help` prints after the options used to

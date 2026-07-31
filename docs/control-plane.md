@@ -121,6 +121,47 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32015` plan library mismatch (bookrack-specific; the `plan_id`
   resolves to a plan minted against a different library)
 
+#### Error data
+
+Every error the control plane raises through its typed mapping layer
+fills the JSON-RPC `error.data` slot with a three-part diagnostic,
+modelled on PostgreSQL's primary / detail / hint split:
+
+```json
+{ "code": -32603,
+  "message": "cannot embed: the model \"…\" is not available on the Ollama daemon",
+  "data": { "detail": "Ollama answered HTTP 404: …",
+            "hint": "Pull it first: ollama pull ….",
+            "retryable": false } }
+```
+
+- **`message`** is the diagnostic's summary line: one line stating what
+  failed, with no module, function, or variant name in it. Present
+  tense (`cannot`) marks a permanent failure, past tense (`could not`)
+  one that may clear on its own.
+- **`data.detail`** carries the implementation-level evidence — HTTP
+  status and body, a path, a syscall. Optional; omitted when there is
+  none.
+- **`data.hint`** says what to do next. Optional, and *allowed to be
+  wrong*: being its own field is what lets it hold a likely cause
+  without weakening the summary's factual claim.
+- **`data.retryable`** is always present. It means: **the same call,
+  resent unchanged, may succeed without anyone intervening.**
+
+`retryable` exists so a client never has to infer intent from wording.
+Note that it is deliberately *not* the same question as
+`EmbedError::is_transient()`, which asks whether the client should
+transparently resend the identical batch: an overloaded server is
+`retryable: true` here (its state is momentary) and `is_transient()`
+`false` there (resending the same batch is what overloaded it). The
+two are expected to disagree.
+
+`message` is guaranteed self-sufficient: a client that reads only that
+field learns what failed. An error type that has not written its own
+wording falls back to a flattened cause chain as the summary and sends
+`data` with `retryable` alone. `data` is additive — a client that
+ignores it sees exactly what it saw before the slot was filled.
+
 #### Write-class error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
@@ -163,7 +204,7 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32015` plan-id mismatches; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0` |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32015` plan-id mismatches; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
