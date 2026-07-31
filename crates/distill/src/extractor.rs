@@ -459,17 +459,29 @@ impl Stage for UnpackPairedBody {
                 let body_text = body[body_start + self.body_marker.len()..]
                     .trim()
                     .to_string();
-                s.payload
-                    .insert(self.original_to.clone(), JsonValue::String(original));
+                s.payload.insert(
+                    self.original_to.clone(),
+                    JsonValue::String(original.clone()),
+                );
                 s.payload
                     .insert(self.head_to.clone(), JsonValue::String(head_text));
                 s.payload
                     .insert(self.body_to.clone(), JsonValue::String(body_text));
-                s.body = String::new();
+                // The primary-language side stays in the body: the
+                // `extract_*` stages a recipe declares after this one
+                // scan `body`, and consuming it here would leave them
+                // nothing to work on for every paired entry.
+                s.body = original;
+            } else if !s.body.trim().is_empty() {
+                // Without both markers the entry carries one side of the
+                // pair only. Record it under the key the paired branch
+                // uses for the same text, so the finalize stage — which
+                // copies declared payload keys and nothing else — has
+                // something to carry forward.
+                let unpaired = s.body.trim().to_string();
+                s.payload
+                    .insert(self.original_to.clone(), JsonValue::String(unpaired));
             }
-            // Without both markers in order, the entry passes through
-            // untouched: no payload keys are declared, and the body is
-            // left as-is.
             s
         });
         Ok(StageData::Splits(out))
@@ -864,18 +876,62 @@ mod tests {
         );
     }
 
+    fn unpack_stage() -> Box<dyn Stage> {
+        unpack_paired_body(
+            "<<<translation_head>>>".to_string(),
+            "<<<translation_body>>>".to_string(),
+            "zh_head".to_string(),
+            "zh_text".to_string(),
+            "en_text".to_string(),
+        )
+    }
+
+    /// Recipes declare their `extract_*` stages after this one, and
+    /// those stages scan `body`. Consuming the body here would leave
+    /// every paired entry with nothing to extract from, so the
+    /// primary-language side stays in place; the payload holds a copy.
     #[test]
-    fn unpack_paired_body_without_both_markers_leaves_payload_untouched() {
-        let inputs = vec![split("philosophical", "no markers here")];
+    fn unpack_paired_body_leaves_the_primary_side_in_the_body() {
+        let body = "[from Latin] relating to philosophy<<<translation_head>>>\
+            \u{54F2}\u{5B66}\u{77E5}\u{8BC6}<<<translation_body>>>\
+            related to phil knowledge";
+        let out = run(unpack_stage(), vec![split("philosophical", body)]);
+        assert_eq!(out[0].body, "[from Latin] relating to philosophy");
+    }
+
+    /// An entry the pairing stage could not pair reaches this stage
+    /// without markers. Its body is the primary-language text, so it
+    /// goes under the same key the paired branch uses; leaving it in the
+    /// payload-free state would drop it at the finalize stage, which
+    /// copies declared payload keys and nothing else.
+    #[test]
+    fn unpack_paired_body_records_an_unpaired_body_under_the_original_key() {
         let out = run(
-            unpack_paired_body(
-                "<<<translation_head>>>".to_string(),
-                "<<<translation_body>>>".to_string(),
-                "zh_head".to_string(),
-                "zh_text".to_string(),
-                "en_text".to_string(),
-            ),
-            inputs,
+            unpack_stage(),
+            vec![split("philosophical", "relating to philosophy")],
+        );
+        assert_eq!(
+            out[0].payload.get("en_text").unwrap(),
+            "relating to philosophy"
+        );
+        assert!(
+            !out[0].payload.contains_key("zh_head"),
+            "an unpaired entry must not claim a secondary-language head"
+        );
+        assert!(
+            !out[0].payload.contains_key("zh_text"),
+            "an unpaired entry must not claim a secondary-language body"
+        );
+        assert_eq!(out[0].body, "relating to philosophy");
+    }
+
+    /// An entry with neither markers nor a body — a bare cross-reference
+    /// headword — declares nothing rather than an empty string.
+    #[test]
+    fn unpack_paired_body_declares_nothing_for_a_bodyless_entry() {
+        let out = run(
+            unpack_stage(),
+            vec![split("consequentialism, see ethics", "")],
         );
         assert!(out[0].payload.is_empty());
     }

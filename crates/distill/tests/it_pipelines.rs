@@ -149,20 +149,46 @@ fn assert_philosophy(slug: &str, drafts: &[EntryDraft], coverage: &Coverage) {
          the coverage counter"
     );
 
-    // Every draft from the bilingual pipeline must carry at least
-    // one of the bilingual keys, otherwise the unpack_paired_body
-    // stage silently dropped its work.
+    // A draft the pairing stage matched must carry the full set of
+    // bilingual keys; anything less means unpack_paired_body dropped
+    // part of its work. A draft it could not match carries `en_text`
+    // alone — except for a bare cross-reference headword, whose source
+    // entry has no body to carry.
     for draft in drafts {
-        let has_bilingual = ["zh_head", "en_text", "zh_text"]
-            .iter()
-            .any(|k| draft.payload.contains_key(*k));
-        assert!(
-            has_bilingual,
-            "{slug}: draft missing bilingual payload keys: \
-             headword={:?}, payload={:?}",
-            draft.headword, draft.payload
-        );
+        let paired = !draft.quality_flags.iter().any(|f| f == "pair_mismatch");
+        if paired {
+            for key in ["zh_head", "en_text", "zh_text"] {
+                assert!(
+                    draft.payload.contains_key(key),
+                    "{slug}: paired draft missing {key:?}: \
+                     headword={:?}, payload={:?}",
+                    draft.headword,
+                    draft.payload
+                );
+            }
+        } else {
+            assert!(
+                !draft.payload.contains_key("zh_head") && !draft.payload.contains_key("zh_text"),
+                "{slug}: unpaired draft claims a translation: \
+                 headword={:?}, payload={:?}",
+                draft.headword,
+                draft.payload
+            );
+        }
     }
+
+    // The pairing stage must have matched something: a run where every
+    // sheet came out unbalanced would satisfy the per-draft checks
+    // above while carrying no translation at all.
+    let paired = drafts
+        .iter()
+        .filter(|d| d.payload.contains_key("zh_head"))
+        .count();
+    assert!(
+        paired > 0,
+        "{slug}: no draft carried a translation; pair_bilingual_entries \
+         matched nothing"
+    );
 }
 
 #[test]
