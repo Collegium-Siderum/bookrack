@@ -1003,8 +1003,8 @@ fn push_index_profile_coherence_rows_in(
     for (entry, profile_name, drift) in referencing {
         let profile_name = profile_name.as_str();
         let resolved = match profile_dir {
-            Some(dir) => match resolve(dir, profile_name) {
-                Ok(Some(profile)) => Ok(Some((
+            Some(dir) => match resolve(Some(dir), profile_name) {
+                Ok(Some((profile, _source))) => Ok(Some((
                     profile.embed.model.clone(),
                     profile.embed.dim,
                     has_errors(&validate(&profile, false)),

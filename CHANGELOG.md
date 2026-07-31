@@ -59,6 +59,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **index-profile: a resolved profile says which file defined it.**
+  `index-profile current` reports `defined by: user` or `defined by:
+  built-in` alongside the reference source it already showed, and
+  `--json` carries the same under `profile.defined_by`. A user profile
+  and a built-in of the same name resolved identically before, so
+  "the profile I wrote is not being used" and "the profile I wrote is
+  being used" produced the same output.
+
+  With it, the per-user profile directory is no longer stood in for by
+  a path relative to the working directory when no config location can
+  be found. A run started in a directory that happened to contain an
+  `index-profiles/` folder used to pick those files up; an
+  unlocatable directory is now stated as such and only built-ins
+  resolve.
+
 - **`.env` is loaded by the binaries, not by the configuration
   library.** `bookrack`, `bookrack-mcp`, and the desktop shell each
   load it as their first statement; `Config::resolve` no longer does.

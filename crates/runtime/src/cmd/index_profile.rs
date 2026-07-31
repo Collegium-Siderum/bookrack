@@ -21,8 +21,8 @@ use bookrack_config::{
     Config, EmbedConfig, LibraryEntry, LibraryKind, LibrarySelection, list_libraries, load_manifest,
 };
 use bookrack_index_profile::{
-    Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, USER_PROFILE_DIR_NAME,
-    builtin_toml, has_errors, list_profiles, resolve, validate,
+    Finding, IndexProfile, ProfileOrigin, RerankerKind, Severity, builtin_toml, has_errors,
+    list_profiles, resolve, validate,
 };
 use bookrack_vectors::ChunkStore;
 use eyre::{Result, bail};
@@ -188,9 +188,10 @@ fn user_profile_dir() -> Option<PathBuf> {
 }
 
 fn list(json: bool) -> Result<()> {
-    // A missing or unresolved directory lists built-ins only.
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let entries = list_profiles(&dir);
+    // A directory that could not be located lists built-ins only —
+    // stated as `None`, rather than as a path relative to whatever
+    // directory the command happened to start in.
+    let entries = list_profiles(user_profile_dir().as_deref());
 
     if json {
         let value = serde_json::Value::Array(
@@ -221,15 +222,22 @@ fn list(json: bool) -> Result<()> {
 }
 
 fn show(name: &str) -> Result<()> {
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let user_path = bookrack_index_profile::user_profile_path(&dir, name);
-    let user_text = std::fs::read_to_string(&user_path).ok();
+    let dir = user_profile_dir();
+    let user_path = dir
+        .as_deref()
+        .map(|d| bookrack_index_profile::user_profile_path(d, name));
+    let user_text = user_path
+        .as_deref()
+        .and_then(|p| std::fs::read_to_string(p).ok());
     let builtin_text = builtin_toml(name);
 
     match (&user_text, builtin_text) {
         (Some(user), Some(builtin)) => {
             println!("note: user profile shadows a builtin of the same name");
-            println!("# user (effective): {}", user_path.display());
+            println!(
+                "# user (effective): {}",
+                user_path.as_deref().unwrap_or(Path::new("?")).display(),
+            );
             print!("{user}");
             ensure_trailing_newline(user);
             println!();
@@ -238,7 +246,10 @@ fn show(name: &str) -> Result<()> {
             ensure_trailing_newline(builtin);
         }
         (Some(user), None) => {
-            println!("# user: {}", user_path.display());
+            println!(
+                "# user: {}",
+                user_path.as_deref().unwrap_or(Path::new("?")).display(),
+            );
             print!("{user}");
             ensure_trailing_newline(user);
         }
@@ -251,17 +262,17 @@ fn show(name: &str) -> Result<()> {
     }
 
     // The effective profile (user wins) drives the validation summary.
-    let profile =
-        resolve(&dir, name)?.ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
+    let (profile, _) = resolve(dir.as_deref(), name)?
+        .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
     println!();
     render_findings(&validate(&profile, false));
     Ok(())
 }
 
 fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let profile =
-        resolve(&dir, name)?.ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
+    let dir = user_profile_dir();
+    let (profile, _source) = resolve(dir.as_deref(), name)?
+        .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
     let findings = validate(&profile, allow_unknown_model);
     render_findings(&findings);
     if has_errors(&findings) {
@@ -285,10 +296,10 @@ fn validate_cmd(name: &str, allow_unknown_model: bool) -> Result<()> {
 fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
     let target = resolve_target(selection)?;
     let effective = crate::profile::effective_index_profile(target.config())?;
-    let resolved = effective.as_ref().map(|e| (&e.profile, e.origin));
+    let resolved = effective.as_ref().map(|e| (&e.profile, e.origin, e.source));
     let drift = effective.as_ref().map_or(&[][..], |e| e.drift.as_slice());
 
-    let profile_model = resolved.as_ref().map(|(p, _)| p.embed.model.as_str());
+    let profile_model = resolved.as_ref().map(|(p, _, _)| p.embed.model.as_str());
     let effective_model = EmbedConfig::resolve(profile_model).model;
     // An unstamped corpus reports as "no built index", same as a
     // missing one: there is nothing to compare a profile against. An
@@ -300,7 +311,7 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
             Err(reason) => (None, Some(reason)),
         };
     let findings = match (&resolved, &built) {
-        (Some((profile, _)), Some(stamps)) => {
+        (Some((profile, _, _)), Some(stamps)) => {
             let stamps_target =
                 Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
             Some(crate::profile::profile_stamp_findings(
@@ -316,9 +327,13 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
             "library": target.label(),
             "registered": target.entry.is_some(),
             "data_dir": target.data_dir().display().to_string(),
-            "profile": resolved.as_ref().map(|(p, origin)| serde_json::json!({
+            "profile": resolved.as_ref().map(|(p, origin, source)| serde_json::json!({
                 "name": p.name,
                 "origin": origin,
+                // Which file defined it, as distinct from which
+                // reference named it: a user file and the built-in of
+                // the same name were otherwise indistinguishable here.
+                "defined_by": origin_str(*source),
             })),
             "drift": drift,
             "effective_embed_model": effective_model,
@@ -348,8 +363,13 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
         );
     }
     match &resolved {
-        Some((profile, origin)) => {
-            println!("profile: {} (source: {})", profile.name, origin.as_str());
+        Some((profile, origin, source)) => {
+            println!(
+                "profile: {} (source: {}, defined by: {})",
+                profile.name,
+                origin.as_str(),
+                origin_str(*source),
+            );
             println!(
                 "  embed: {}/{} dim {}",
                 profile.embed.backend, profile.embed.model, profile.embed.dim
@@ -514,9 +534,11 @@ fn root_label(data_dir: &Path) -> String {
 
 /// Compare two profiles field by field.
 fn diff(a: &str, b: &str, json: bool) -> Result<()> {
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let profile_a = resolve(&dir, a)?.ok_or_else(|| eyre::eyre!("unknown index profile '{a}'"))?;
-    let profile_b = resolve(&dir, b)?.ok_or_else(|| eyre::eyre!("unknown index profile '{b}'"))?;
+    let dir = user_profile_dir();
+    let (profile_a, _) =
+        resolve(dir.as_deref(), a)?.ok_or_else(|| eyre::eyre!("unknown index profile '{a}'"))?;
+    let (profile_b, _) =
+        resolve(dir.as_deref(), b)?.ok_or_else(|| eyre::eyre!("unknown index profile '{b}'"))?;
     let rows = diff_rows(&profile_a, &profile_b);
 
     if json {
@@ -743,9 +765,9 @@ pub async fn plan_apply(
     if let Some(refusal) = crate::profile::refuse_bad_profile_reference(name) {
         return Err(ApplyRefusal(refusal).into());
     }
-    let dir = user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME));
-    let profile =
-        resolve(&dir, name)?.ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
+    let dir = user_profile_dir();
+    let (profile, _source) = resolve(dir.as_deref(), name)?
+        .ok_or_else(|| eyre::eyre!("unknown index profile '{name}'"))?;
 
     let mut sections = Vec::new();
     for pipeline in Pipeline::ALL {

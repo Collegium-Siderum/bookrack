@@ -30,7 +30,8 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, has_errors, resolve, validate,
+    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors, resolve,
+    validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -41,6 +42,11 @@ use eyre::{Result, eyre};
 pub struct EffectiveProfile {
     /// Which source the reference was read from.
     pub origin: ProfileRefOrigin,
+    /// Which source the profile *definition* was read from — a second
+    /// axis: `origin` says who named the profile, this says who
+    /// defined it. A user file and a built-in of the same name are
+    /// otherwise indistinguishable to a caller.
+    pub source: ProfileOrigin,
     /// The resolved profile.
     pub profile: IndexProfile,
     /// Sources naming a different profile than the effective one. Empty
@@ -55,13 +61,6 @@ pub fn user_profile_dir() -> Option<PathBuf> {
     registry_target_path()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .map(|d| d.join(USER_PROFILE_DIR_NAME))
-}
-
-/// [`user_profile_dir`] with the relative fallback every caller uses
-/// when no config location resolves: user files then never match, so
-/// only built-ins resolve.
-pub fn user_profile_dir_or_default() -> PathBuf {
-    user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME))
 }
 
 /// The `index_profile` the registry records for the library `cfg`
@@ -117,8 +116,8 @@ fn effective_index_profile_in(
     };
     let drift = profile_reference_drift(manifest_ref, registry_ref.as_deref());
 
-    let dir = user_profile_dir_or_default();
-    let profile = resolve(&dir, &name)
+    let dir = user_profile_dir();
+    let (profile, source) = resolve(dir.as_deref(), &name)
         .map_err(|e| eyre!("index profile '{name}' failed to load: {e}"))?
         .ok_or_else(|| {
             eyre!(
@@ -129,6 +128,7 @@ fn effective_index_profile_in(
 
     Ok(Some(EffectiveProfile {
         origin,
+        source,
         profile,
         drift,
     }))
@@ -151,14 +151,14 @@ pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
 /// consistency is deliberately not checked — reconciling a valid
 /// profile against a built index is `index-profile apply`'s job.
 pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
-    let dir = user_profile_dir_or_default();
-    match resolve(&dir, name) {
+    let dir = user_profile_dir();
+    match resolve(dir.as_deref(), name) {
         Err(e) => Some(format!("index profile '{name}' failed to load: {e}")),
         Ok(None) => Some(format!(
             "index profile '{name}' is not defined; \
              `bookrack index-profile list` shows the available names"
         )),
-        Ok(Some(profile)) => has_errors(&validate(&profile, false)).then(|| {
+        Ok(Some((profile, _))) => has_errors(&validate(&profile, false)).then(|| {
             format!(
                 "index profile '{name}' has validation errors; \
                  run `bookrack index-profile validate {name}`"
