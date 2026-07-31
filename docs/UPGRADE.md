@@ -40,6 +40,7 @@ earlier ones already happened.
 | `catalog.db` / `papers_catalog.db` schema bump | catalog `user_version` | none — migrated forward in place (one exception: the v14 OCR-derivation edge, see below) | open the library (migration is automatic); after upgrading a library that predates v14, run `bookrack doctor --backfill-ocr-derivation` once |
 | `corpus.db` schema bump | corpus `schema_version` | corpus tree | `bookrack corpus rebuild` |
 | `papers_corpus.db` schema bump | papers corpus `schema_version` | papers corpus tree | `bookrack papers corpus rebuild` |
+| A `bookrack-distill` stage's behaviour, or a book's `parser.stages` | that book's `parser_version` (declared in its `book.toml`, bumped by hand) | the book's distilled entries in `reference.db` | `bookrack distill verify <path>` to see the diff, then `bookrack distill build <path>` |
 | `rusqlite`, `lancedb` | engine-level | normally none — upstream guarantees backward compatibility for reads | open the library |
 | Workspace `READER_VERSION` (manual bump) | per-store `min_reader_version` on next write | none on its own — a guard against older binaries | open the library |
 
@@ -49,6 +50,18 @@ normalization version bump, or an embedding-model / vector-width change
 refresh command from the stamp comparison, prints the plan, and runs it
 after one confirmation. The commands named in the matrix remain the
 low-level escape hatch.
+
+The distill row is the one stamp nothing advances for you.
+`parser_version` lives in the operator's `book.toml`, and a stage whose
+behaviour changed produces different entries from the same source and
+the same recipe. Nothing refuses to serve the old entries, so a build
+that is never re-run leaves `reference.db` holding what the previous
+binary derived. Bump the book's `parser_version` in the same change that
+adopts the new behaviour, so the row in `reference.db` records which
+pipeline produced its entries. `bookrack distill verify <path>` re-runs
+the pipeline in memory and diffs it against the live database, which is
+the cheap way to see what a stage change did to a book before rebuilding
+it.
 
 ### Stamps that advance without a refresh command
 

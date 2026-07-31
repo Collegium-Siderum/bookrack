@@ -57,6 +57,43 @@ release workflow extracts the matching section verbatim from this file.
   `library.show_metadata_audit` and `metadata show` embed widens with
   the detail read.
 
+### Fixed
+
+- **distill: the `angle` tag shape matches CJK brackets.** It matched
+  the ASCII pair only, so a tag written with U+3008/3009 — the shape a
+  Chinese reference book actually prints — never produced a match and
+  every stage reading it returned nothing. It now matches ASCII,
+  U+3008/3009, U+2329/232A and U+FF1C/FF1E. U+300A/300B stays out: it
+  wraps work titles, not tags.
+
+- **distill: bilingual entries pair per sheet by position.** The block
+  splitter emits one primary-language block and one secondary-language
+  block per sheet, so entries reached the pairing stage grouped by
+  language rather than interleaved. Pairing on list adjacency fired
+  once per sheet and joined the last primary entry to the first
+  secondary entry — the one pair it produced carried the wrong
+  translation, and everything else was flagged as a mismatch. Pairing
+  now takes the Nth primary of a sheet with the Nth secondary, and a
+  sheet whose two sides differ in entry count is emitted unpaired
+  rather than pairing its common prefix.
+
+- **distill: `unpack_paired_body` leaves the body live.** It consumed
+  the body once it had split the packed markers apart, so every
+  `extract_*` stage a recipe declared after it ran against an empty
+  string for any entry that paired. The primary-language side now stays
+  in the body, and an entry that arrives without markers records its
+  body under the same payload key the paired branch uses instead of
+  losing it at the finalize stage.
+
+### Added
+
+- **distill: `partition_body_around_match` takes `skip_inner`.** A book
+  can spell two kinds of tag with one bracket shape, in which case the
+  leftmost-match rule writes the wrong one into the payload key. The
+  new list names the captured values that are not the tag the stage is
+  after, so matching walks past them. Omitting it leaves the
+  leftmost-match rule unchanged.
+
 ### Changed
 
 - **cli: a session lock that cannot be read is reported instead of
