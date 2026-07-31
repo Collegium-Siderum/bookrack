@@ -282,9 +282,13 @@ the exit-code bucket does not distinguish the two.
   but funnelled through the write mutex because it opens the same
   catalog handle the writes mutate, so it cannot overlap one in flight.
 - `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
-  scrubbed }`. Bundles crash reports, recent logs, and a catalog
-  snapshot for a bug attachment. Scrubbed of local paths and titles
-  unless `no_scrub` is set.
+  scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
+  catalog snapshot for a bug attachment. Scrubbed of local paths and
+  titles unless `no_scrub` is set. `scrub_gaps` names the redactions
+  that had no input to work from — `["home_dir"]` when the host
+  exposed no home directory — so a caller can warn before the bundle
+  leaves the machine; it is empty on full coverage and empty when
+  `scrubbed` is `false`.
 - `tray.focus` — no params; `{ ok: true }`. Signals one waiter on the
   daemon's focus notification, which a GUI host attached in-process
   uses to raise its window. A daemon with no GUI attached accepts the

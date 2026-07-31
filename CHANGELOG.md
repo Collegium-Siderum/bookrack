@@ -59,6 +59,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **diagnose: a host without `HOME` still redacts its home directory.**
+  The scrubber's home-directory rule read `HOME` and nothing else, so a
+  process started without that variable — a container, a service
+  account, and every Windows host, which exports `USERPROFILE`
+  instead — silently lost one of the five redaction rules. The generic
+  user-root patterns still covered the conventional layouts, but a home
+  outside them (`/root`, a container's `HOME`, a Windows profile off
+  the system drive) reached the bundle verbatim. Resolution now falls
+  back to the platform lookup — the passwd database on unix, the
+  profile known folder on Windows — when the environment carries
+  nothing. When neither source yields a path the bundle is still
+  written, and the shortfall is stated three times over: `bookrack
+  diagnose` warns on stderr before the file is sent, `manifest.json`
+  carries `scrub_gaps: ["home_dir"]` next to `scrubbed: true`, and
+  `env.txt` records which source the redaction came from. The manifest
+  schema is version 3; `diagnose.run` returns `scrub_gaps` alongside
+  `scrubbed`.
+
 - **distill: the `angle` tag shape matches CJK brackets.** It matched
   the ASCII pair only, so a tag written with U+3008/3009 — the shape a
   Chinese reference book actually prints — never produced a match and

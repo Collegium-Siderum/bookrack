@@ -18,7 +18,7 @@ use crate::Options;
 
 /// Bundle schema version. Bump when any file's shape changes, when a
 /// new scrub rule is added, or when the tarball layout rearranges.
-pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// The top-level `manifest.json` document.
 #[derive(Debug, Serialize)]
@@ -37,6 +37,12 @@ pub struct Manifest {
     pub days: u32,
     /// `true` when the scrubber ran over every collected file.
     pub scrubbed: bool,
+    /// Redactions the scrubber could not perform, named by a stable
+    /// token — `["home_dir"]` when the host exposed no home directory,
+    /// so scrub rule 3 had no prefix to substitute. Empty when
+    /// coverage was complete, and empty when `scrubbed` is `false`:
+    /// an unredacted bundle has no partial coverage to qualify.
+    pub scrub_gaps: Vec<&'static str>,
     /// Every regular file inside the tarball, in the order it was
     /// written.
     pub files: Vec<FileEntry>,
@@ -55,11 +61,13 @@ pub struct FileEntry {
 ///
 /// Walks `bundle_dir` to list every file the collectors wrote, sorted
 /// by path so two runs over the same inputs produce identical
-/// manifests.
+/// manifests. `scrub_gaps` is the redaction-coverage list the caller
+/// derived from the scrubber's inputs.
 pub fn build(
     opts: &Options,
     bundle_dir: &Path,
     now: SystemTime,
+    scrub_gaps: Vec<&'static str>,
 ) -> Result<Manifest, DiagnoseError> {
     let mut files = Vec::new();
     walk(bundle_dir, bundle_dir, &mut files)?;
@@ -72,6 +80,7 @@ pub fn build(
         generated_at: iso8601_z(now),
         days: opts.days,
         scrubbed: opts.scrub,
+        scrub_gaps,
         files,
     })
 }
@@ -146,10 +155,24 @@ mod tests {
         std::fs::write(root.join("logs/a"), b"first").unwrap();
         std::fs::write(root.join("env.txt"), b"hi\n").unwrap();
         let opts = Options::default();
-        let m = build(&opts, root, UNIX_EPOCH).unwrap();
+        let m = build(&opts, root, UNIX_EPOCH, Vec::new()).unwrap();
         let paths: Vec<&str> = m.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["env.txt", "logs/a", "logs/c"]);
         assert_eq!(m.files[0].bytes, 3);
         assert_eq!(m.files[1].bytes, 5);
+    }
+
+    #[test]
+    fn a_scrub_gap_rides_into_the_written_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let opts = Options::default();
+        let m = build(&opts, root, UNIX_EPOCH, vec![crate::SCRUB_GAP_HOME_DIR]).unwrap();
+        write(root, &m).unwrap();
+        let bytes = std::fs::read(root.join("manifest.json")).unwrap();
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["schema_version"], MANIFEST_SCHEMA_VERSION);
+        assert_eq!(doc["scrubbed"], true);
+        assert_eq!(doc["scrub_gaps"], serde_json::json!(["home_dir"]));
     }
 }

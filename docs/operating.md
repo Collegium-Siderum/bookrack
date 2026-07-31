@@ -240,6 +240,15 @@ recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
 issue attachments. The scrubber removes local paths and book titles;
 `--no-scrub` keeps them verbatim for a bundle kept locally.
 
+A redaction whose input the host does not expose is reported rather
+than skipped quietly: the command warns on stderr, and the bundle's
+`manifest.json` lists the shortfall under `scrub_gaps` next to
+`scrubbed`. The one case today is a host that exposes no home
+directory at all — neither `HOME` nor the platform lookup — which
+leaves home paths outside the generic user-root patterns unredacted.
+Fix it by setting `HOME` and running again, or read the bundle before
+attaching it.
+
 ## Observability
 
 `bookrack logs` reads the daemon's log stream: `--follow` (the default

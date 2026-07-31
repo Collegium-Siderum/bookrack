@@ -56,5 +56,6 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         "out_path": report.out_path,
         "files": report.files,
         "scrubbed": report.scrubbed,
+        "scrub_gaps": report.scrub_gaps,
     }))
 }

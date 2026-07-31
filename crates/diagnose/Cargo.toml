@@ -13,6 +13,7 @@ bookrack-core = { path = "../core" }
 bookrack-corpus = { path = "../corpus" }
 bookrack-vectors = { path = "../vectors" }
 chrono.workspace = true
+dirs.workspace = true
 flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
