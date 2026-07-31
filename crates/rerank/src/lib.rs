@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use bookrack_core::{Explain, Problem};
 use serde::{Deserialize, Serialize};
 
 /// Why a rerank request failed. Callers branch on the variant, not the
@@ -64,6 +65,36 @@ impl RerankError {
     /// at once so the caller can decide.
     pub fn is_transient(&self) -> bool {
         matches!(self, RerankError::Unreachable(_))
+    }
+}
+
+impl Explain for RerankError {
+    fn explain(&self) -> Problem {
+        match self {
+            // 503 also covers the window in which a supervised server is
+            // still loading its model, so this stays past tense and
+            // retryable even though the same status can mean saturation.
+            RerankError::Overloaded { status, body } => {
+                Problem::new("could not rerank: the reranker is overloaded or still loading")
+                    .detail(format!("The reranker answered HTTP {status}: {body}."))
+                    .hint("Wait for the model to finish loading, then retry.")
+                    .retryable(true)
+            }
+
+            RerankError::Unreachable(reason) => Problem::new("could not reach the reranker")
+                .detail(format!(
+                    "The request failed before a response arrived: {reason}."
+                ))
+                .hint(
+                    "The supervised server may still be starting or restarting. \
+                     Run `bookrack doctor` to check the reranker backend.",
+                )
+                .retryable(true),
+
+            // No wording written for these yet, so the flattening
+            // fallback applies rather than a guessed hint.
+            other => Problem::from_error_chain(other),
+        }
     }
 }
 

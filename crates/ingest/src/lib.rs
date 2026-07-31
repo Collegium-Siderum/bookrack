@@ -211,6 +211,17 @@ pub enum IngestError {
     },
 }
 
+impl bookrack_core::Explain for IngestError {
+    fn explain(&self) -> bookrack_core::Problem {
+        match self {
+            // The embed leaf writes its own wording; the wrapper's own
+            // `Display` ("embed error") names a module, not a failure.
+            IngestError::Embed(e) => e.explain(),
+            other => bookrack_core::Problem::from_error_chain(other),
+        }
+    }
+}
+
 /// A fallible `ingest` operation.
 pub type Result<T> = std::result::Result<T, IngestError>;
 

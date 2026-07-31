@@ -246,6 +246,17 @@ pub enum GleanError {
     Envelope(#[from] bookrack_extract::envelope::EnvelopeError),
 }
 
+impl bookrack_core::Explain for GleanError {
+    fn explain(&self) -> bookrack_core::Problem {
+        match self {
+            // The embed leaf writes its own wording; the wrapper's own
+            // `Display` ("embed error") names a module, not a failure.
+            GleanError::Embed(e) => e.explain(),
+            other => bookrack_core::Problem::from_error_chain(other),
+        }
+    }
+}
+
 /// Convenience alias for the crate's fallible operations.
 pub type Result<T> = std::result::Result<T, GleanError>;
 

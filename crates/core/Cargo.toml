@@ -14,3 +14,7 @@ chrono.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# TypeScript bindings for `Problem` / `ProblemData`, emitted under
+# `cargo test` so the desktop shell's webview can render the
+# three-part diagnostic without restating its shape.
+ts-rs.workspace = true

@@ -13,6 +13,7 @@ mod item_kind;
 mod kinded_node_id;
 mod node_type;
 mod partition;
+mod problem;
 pub mod queue;
 mod scope;
 
@@ -21,4 +22,5 @@ pub use item_kind::ItemKind;
 pub use kinded_node_id::KindedNodeId;
 pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
+pub use problem::{Explain, Problem, ProblemData};
 pub use scope::{Scope, ScopeParseError};

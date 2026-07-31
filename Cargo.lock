@@ -939,6 +939,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
@@ -1001,8 +1002,10 @@ dependencies = [
 name = "bookrack-embed"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "reqwest 0.13.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -1218,6 +1221,7 @@ dependencies = [
 name = "bookrack-rerank"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "reqwest 0.13.4",
  "serde",
  "thiserror 2.0.18",

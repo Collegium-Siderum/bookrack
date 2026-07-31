@@ -6,8 +6,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `Problem` / `Explain`: the three-part diagnostic `EmbedError`
+# renders itself into for the operator-facing front ends.
+bookrack-core = { path = "../core" }
 reqwest.workspace = true
 serde.workspace = true
+# Parses Ollama's `{"error": "..."}` failure envelope, which is what
+# separates a 404 from the daemon (model absent) from a 404 served by
+# whatever else `BOOKRACK_OLLAMA_URL` happens to point at.
+serde_json.workspace = true
 thiserror.workspace = true
 # `time` for the inter-retry backoff sleep.
 tokio = { workspace = true, features = ["time"] }
