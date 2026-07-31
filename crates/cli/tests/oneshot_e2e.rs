@@ -20,16 +20,12 @@
 use std::process::Stdio;
 
 use bookrack_session::RootLock;
+use bookrack_test_support::{Sandbox, bookrack_cmd};
 use eyre::Result;
-
-fn bookrack_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_bookrack")
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
-    let data_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let cases: &[(&[&str], CaseExpect)] = &[
         (
             &["ingest", "/tmp/phase4-fixture.txt"],
@@ -70,10 +66,8 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["exec", "info"], CaseExpect::LocalFallback),
     ];
     for (argv, expect) in cases {
-        let output = tokio::process::Command::new(bookrack_bin())
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
             .args(argv.iter().copied())
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-            .env("BOOKRACK_DATA_DIR", data_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -136,12 +130,9 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
-    let data_dir = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["doctor", "--json"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -170,12 +161,9 @@ async fn doctor_without_daemon_falls_back_to_local_probe() -> Result<()> {
 /// short card a single valid JSON object.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_without_daemon_prints_a_short_card_and_exits_zero() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
-    let data_dir = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["status"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -194,10 +182,8 @@ async fn status_without_daemon_prints_a_short_card_and_exits_zero() -> Result<()
         "short card should report not-running and point at `bookrack run`: {stdout}",
     );
 
-    let json_out = tokio::process::Command::new(bookrack_bin())
+    let json_out = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--json", "status"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -212,10 +198,8 @@ async fn status_without_daemon_prints_a_short_card_and_exits_zero() -> Result<()
         "{stdout}",
     );
 
-    let quiet = tokio::process::Command::new(bookrack_bin())
+    let quiet = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["--quiet", "status"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -240,9 +224,8 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
 
     use fs2::FileExt;
 
-    let runtime_dir = tempfile::tempdir()?;
-    let data_dir = tempfile::tempdir()?;
-    let lock_path = runtime_dir.path().join("bookrack.tty.lock");
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
     let holder = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -256,14 +239,12 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
     writeln!(
         writer,
         "control_sock={}",
-        runtime_dir.path().join("no-such-control.sock").display()
+        sandbox.runtime_dir().join("no-such-control.sock").display()
     )?;
     writer.flush()?;
 
-    let output = tokio::process::Command::new(bookrack_bin())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
         .args(["status"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -290,7 +271,7 @@ async fn status_with_a_stale_lock_exits_three() -> Result<()> {
 /// entry's kind defaulting to `prod`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_list_renders_the_registry_offline() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     std::fs::write(
@@ -302,16 +283,18 @@ async fn libraries_list_renders_the_registry_offline() -> Result<()> {
          data_dir = \"/roots/beta\"\n\
          kind = \"test\"\n",
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "list"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "list"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -341,7 +324,7 @@ async fn libraries_list_renders_the_registry_offline() -> Result<()> {
 /// rewritten into the entry-table form in the process.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_default_writes_the_registry_offline() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     std::fs::write(
@@ -351,16 +334,18 @@ async fn libraries_default_writes_the_registry_offline() -> Result<()> {
          alpha = \"/roots/alpha\"\n\
          beta = \"/roots/beta\"\n",
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "default", "beta"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "default", "beta"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -399,7 +384,7 @@ async fn libraries_default_writes_the_registry_offline() -> Result<()> {
 /// resolving a leftover.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_config_unset_index_profile_clears_every_reference_site() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let data_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -426,16 +411,18 @@ async fn libraries_config_unset_index_profile_clears_every_reference_site() -> R
          kind = \"test\"\n\
          index_profile = \"qwen3-0.6b-default\"\n",
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "alpha", "--unset", "index_profile"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "alpha", "--unset", "index_profile"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -468,16 +455,18 @@ async fn libraries_config_unset_index_profile_clears_every_reference_site() -> R
         "config.toml still records the profile: {config_written}",
     );
     // The reference is gone from both sites, so `current` reports none.
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["index-profile", "current", "--library", "alpha"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["index-profile", "current", "--library", "alpha"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -500,7 +489,7 @@ async fn libraries_config_unset_index_profile_clears_every_reference_site() -> R
 /// apply`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let data_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -520,21 +509,23 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
         "index_profile = \"qwen3-0.6b-default\"\nollama_url = \"http://127.0.0.1:11434\"\n",
     )?;
 
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args([
-            "libraries",
-            "config",
-            "alpha",
-            "index_profile=qwen3-0.6b-default",
-        ])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args([
+        "libraries",
+        "config",
+        "alpha",
+        "index_profile=qwen3-0.6b-default",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -568,16 +559,18 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
     );
 
     // `current` reads it back from its new home, with nothing drifted.
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["index-profile", "current", "--library", "alpha", "--json"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["index-profile", "current", "--library", "alpha", "--json"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -596,7 +589,7 @@ async fn libraries_config_set_index_profile_declares_into_the_manifest() -> Resu
 /// reports the stale copy, and `libraries scan` refreshes it away.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let holder = tempfile::tempdir()?;
     let data_dir = holder.path().join("alpha");
@@ -625,15 +618,17 @@ async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -
     )?;
 
     let current = || {
-        tokio::process::Command::new(bookrack_bin())
-            .args(["index-profile", "current", "--library", "alpha", "--json"])
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-            .env("BOOKRACK_REGISTRY", &registry_path)
-            .env_remove("BOOKRACK_DATA_DIR")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        tokio::process::Command::from(
+            bookrack_cmd!(&sandbox)
+                .registry(&registry_path)
+                .without_data_dir()
+                .build(),
+        )
+        .args(["index-profile", "current", "--library", "alpha", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
     };
 
     let output = current().await?;
@@ -654,18 +649,20 @@ async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -
     );
 
     // `scan --register` re-reads the manifests and refreshes the cache.
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "scan"])
-        .arg(holder.path())
-        .arg("--register")
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "scan"])
+    .arg(holder.path())
+    .arg("--register")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -689,20 +686,22 @@ async fn a_stale_registry_reference_is_reported_as_drift_and_scan_repairs_it() -
 /// disturb the file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     std::fs::write(&registry_path, "[libraries]\nalpha = \"/roots/alpha\"\n")?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "default", "ghost"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "default", "ghost"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -736,14 +735,12 @@ fn write_manifest(dir: &std::path::Path, name: &str) {
 /// prints a confirmed verdict, and exits 0 with no daemon.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_detect_confirms_a_manifest_root_offline() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
     write_manifest(root.path(), "alpha");
-    let output = tokio::process::Command::new(bookrack_bin())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["libraries", "detect"])
         .arg(root.path())
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -767,13 +764,11 @@ async fn libraries_detect_confirms_a_manifest_root_offline() -> Result<()> {
 /// (a determination, not the daemon-not-running code 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_detect_on_a_plain_dir_exits_1() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["libraries", "detect"])
         .arg(root.path())
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -791,13 +786,11 @@ async fn libraries_detect_on_a_plain_dir_exits_1() -> Result<()> {
 /// `libraries detect` on a missing path is a caller-input fault: exit 2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_detect_on_a_missing_path_exits_2() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["libraries", "detect"])
         .arg(root.path().join("nope"))
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -816,16 +809,14 @@ async fn libraries_detect_on_a_missing_path_exits_2() -> Result<()> {
 /// roots below it, and exits 0 offline. `--json` carries the found root.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_scan_lists_child_roots_offline() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let parent = tempfile::tempdir()?;
     let lib = parent.path().join("lib-a");
     std::fs::create_dir(&lib)?;
     write_manifest(&lib, "alpha");
-    let output = tokio::process::Command::new(bookrack_bin())
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["--json", "libraries", "scan"])
         .arg(parent.path())
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -849,11 +840,9 @@ async fn libraries_scan_lists_child_roots_offline() -> Result<()> {
 /// argument error (exit 2): exactly one target is required.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_scan_requires_a_target() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
         .args(["libraries", "scan"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -889,7 +878,7 @@ fn write_manifest_uuid(dir: &std::path::Path, name: &str, uuid: &str) {
 /// disk in a single command.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     // The registry file does not exist yet — as after a reinstall.
     let registry_path = registry_dir.path().join("registry.toml");
@@ -900,18 +889,20 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
     std::fs::create_dir(&b)?;
     write_manifest_uuid(&a, "alpha", "01890a5d-0000-7000-8000-00000000000a");
     write_manifest_uuid(&b, "beta", "01890a5d-0000-7000-8000-00000000000b");
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "scan"])
-        .arg(parent.path())
-        .arg("--register")
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "scan"])
+    .arg(parent.path())
+    .arg("--register")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -932,16 +923,18 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
     }
     // The rebuilt registry serves `libraries list` again: both roots
     // show up under their manifest names, closing the recovery loop.
-    let list = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "list"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let list = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "list"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         list.status.code(),
         Some(0),
@@ -964,7 +957,7 @@ async fn libraries_scan_register_rebuilds_the_registry() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let root = tempfile::tempdir()?;
@@ -975,18 +968,20 @@ async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
         return Ok(());
     }
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "register"])
-        .arg(root.path())
-        .args(["--name", "ro", "--yes"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "register"])
+    .arg(root.path())
+    .args(["--name", "ro", "--yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     // Restore write permission so tempdir teardown can remove the root.
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o755)).ok();
     assert_eq!(
@@ -1016,21 +1011,23 @@ async fn libraries_register_degrades_on_a_read_only_root() -> Result<()> {
 /// library was registered when none was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_add_on_a_closed_stdin_is_a_user_error() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let root = tempfile::tempdir()?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "add", "fresh"])
-        .arg(root.path())
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "add", "fresh"])
+    .arg(root.path())
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
@@ -1057,7 +1054,7 @@ async fn libraries_add_on_a_closed_stdin_is_a_user_error() -> Result<()> {
 /// cannot destroy it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_remove_purge_refuses_a_non_library_target() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let target = tempfile::tempdir()?;
@@ -1065,16 +1062,18 @@ async fn libraries_remove_purge_refuses_a_non_library_target() -> Result<()> {
         &registry_path,
         format!("[libraries]\nvictim = \"{}\"\n", target.path().display()),
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "remove", "victim", "--purge", "--yes"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "remove", "victim", "--purge", "--yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -1092,7 +1091,7 @@ async fn libraries_remove_purge_refuses_a_non_library_target() -> Result<()> {
 /// forgets the entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let holder = tempfile::tempdir()?;
@@ -1103,16 +1102,18 @@ async fn libraries_remove_purge_deletes_a_confirmed_root() -> Result<()> {
         &registry_path,
         format!("[libraries]\ngone = \"{}\"\n", root.display()),
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "remove", "gone", "--purge", "--yes"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "remove", "gone", "--purge", "--yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1137,9 +1138,9 @@ struct PurgeRun {
 }
 
 /// A registry holding one purgeable library named `shelf`. The
-/// tempdirs are returned so the caller keeps them alive.
+/// sandbox and tempdirs are returned so the caller keeps them alive.
 struct PurgeFixture {
-    runtime_dir: tempfile::TempDir,
+    sandbox: Sandbox,
     _registry_dir: tempfile::TempDir,
     registry_path: std::path::PathBuf,
     _holder: tempfile::TempDir,
@@ -1147,7 +1148,7 @@ struct PurgeFixture {
 }
 
 fn purge_fixture() -> Result<PurgeFixture> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let holder = tempfile::tempdir()?;
@@ -1159,7 +1160,7 @@ fn purge_fixture() -> Result<PurgeFixture> {
         format!("[libraries]\nshelf = \"{}\"\n", root.display()),
     )?;
     Ok(PurgeFixture {
-        runtime_dir,
+        sandbox,
         _registry_dir: registry_dir,
         registry_path,
         _holder: holder,
@@ -1174,18 +1175,21 @@ fn spawn_purge(
     fixture: &PurgeFixture,
     timeout_secs: Option<&str>,
 ) -> Result<tokio::process::Child> {
-    let mut command = tokio::process::Command::new(bookrack_bin());
+    let mut spawn = bookrack_cmd!(&fixture.sandbox)
+        .registry(&fixture.registry_path)
+        .without_data_dir()
+        .stdin_pipe();
+    if let Some(secs) = timeout_secs {
+        // `CONFIRM_TIMEOUT_ENV` lives in the `bookrack` binary crate,
+        // which has no library target, so the name reaches the child
+        // as free text rather than as the constant.
+        spawn = spawn.extra_env("BOOKRACK_CONFIRM_TIMEOUT_SECS", secs);
+    }
+    let mut command = tokio::process::Command::from(spawn.build());
     command
         .args(["libraries", "remove", "shelf", "--purge"])
-        .env("BOOKRACK_RUNTIME_DIR", fixture.runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &fixture.registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(secs) = timeout_secs {
-        command.env("BOOKRACK_CONFIRM_TIMEOUT_SECS", secs);
-    }
     Ok(command.spawn()?)
 }
 
@@ -1375,7 +1379,7 @@ async fn libraries_remove_purge_deletes_when_the_name_is_retyped() -> Result<()>
 /// retry once the holder is stopped (exit 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_remove_purge_refuses_a_root_in_use() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let holder_dir = tempfile::tempdir()?;
@@ -1388,16 +1392,18 @@ async fn libraries_remove_purge_refuses_a_root_in_use() -> Result<()> {
     )?;
     let held = RootLock::acquire(&root, std::process::id(), "daemon")?;
 
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "remove", "busy", "--purge", "--yes"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "remove", "busy", "--purge", "--yes"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
@@ -1423,7 +1429,7 @@ async fn libraries_remove_purge_refuses_a_root_in_use() -> Result<()> {
 /// different library: the operator must pick an explicit alias (exit 2).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
     let first = tempfile::tempdir()?;
@@ -1431,17 +1437,19 @@ async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
     write_manifest_uuid(first.path(), "dup", "01890a5d-0000-7000-8000-000000000001");
     write_manifest_uuid(second.path(), "dup", "01890a5d-0000-7000-8000-000000000002");
     let register = |root: &std::path::Path| {
-        tokio::process::Command::new(bookrack_bin())
-            .args(["libraries", "register"])
-            .arg(root)
-            .arg("--yes")
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-            .env("BOOKRACK_REGISTRY", &registry_path)
-            .env_remove("BOOKRACK_DATA_DIR")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+        tokio::process::Command::from(
+            bookrack_cmd!(&sandbox)
+                .registry(&registry_path)
+                .without_data_dir()
+                .build(),
+        )
+        .args(["libraries", "register"])
+        .arg(root)
+        .arg("--yes")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
     };
     let first_out = register(first.path()).await?;
     assert_eq!(
@@ -1472,7 +1480,7 @@ async fn libraries_register_rejects_a_derived_name_clash() -> Result<()> {
 /// whole file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_config_edits_root_config_offline() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -1489,16 +1497,18 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         "# operator note: leave this here\nollama_url = \"http://old:11434\"\n",
     )?;
 
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "ollama_url=http://new:11434"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod", "ollama_url=http://new:11434"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -1521,16 +1531,18 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
     );
 
     // No pairs: dump the file verbatim, comment included.
-    let dump = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let dump = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(dump.status.code(), Some(0));
     let dump_out = String::from_utf8_lossy(&dump.stdout);
     assert!(
@@ -1545,7 +1557,7 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
 /// (operator input) and leaves the file untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -1556,16 +1568,18 @@ async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
             toml_escape(root.path()),
         ),
     )?;
-    let output = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "not_a_key=1"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let output = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod", "not_a_key=1"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         output.status.code(),
         Some(2),
@@ -1588,7 +1602,7 @@ async fn libraries_config_rejects_an_unknown_key_with_exit_2() -> Result<()> {
 /// usable again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -1605,16 +1619,18 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
     )?;
 
     let doctor = || async {
-        tokio::process::Command::new(bookrack_bin())
-            .args(["--library", "prod", "doctor"])
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-            .env("BOOKRACK_REGISTRY", &registry_path)
-            .env_remove("BOOKRACK_DATA_DIR")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
+        tokio::process::Command::from(
+            bookrack_cmd!(&sandbox)
+                .registry(&registry_path)
+                .without_data_dir()
+                .build(),
+        )
+        .args(["--library", "prod", "doctor"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
     };
 
     // The root does not resolve, so `doctor` reports it unhealthy and
@@ -1643,16 +1659,18 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
     // still there -- `libraries config` resolves the root from the
     // registry and edits the file as text, so the cure cannot be
     // blocked by the disease.
-    let unset = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "--unset", "embed_model"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let unset = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod", "--unset", "embed_model"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         unset.status.code(),
         Some(0),
@@ -1675,16 +1693,18 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
     );
 
     // And setting it back is refused: the key no longer exists.
-    let reset = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod", "embed_model=whatever"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let reset = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod", "embed_model=whatever"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         reset.status.code(),
         Some(2),
@@ -1701,7 +1721,7 @@ async fn a_root_config_with_a_retired_key_is_refused_until_the_line_goes() -> Re
 /// instead of handing back a line that resolves to nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Result<()> {
-    let runtime_dir = tempfile::tempdir()?;
+    let sandbox = Sandbox::new();
     let registry_dir = tempfile::tempdir()?;
     let root = tempfile::tempdir()?;
     let registry_path = registry_dir.path().join("registry.toml");
@@ -1718,16 +1738,18 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
          log_directive = \"debug\"\n",
     )?;
 
-    let doctor = tokio::process::Command::new(bookrack_bin())
-        .args(["--library", "prod", "doctor"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let doctor = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["--library", "prod", "doctor"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         doctor.status.code(),
         Some(1),
@@ -1741,16 +1763,18 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
 
     // The verbatim dump still prints the file -- an operator has to see
     // what to delete -- and annotates each retired line on stderr.
-    let dump = tokio::process::Command::new(bookrack_bin())
-        .args(["libraries", "config", "prod"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let dump = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["libraries", "config", "prod"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(dump.status.code(), Some(0));
     let dumped = String::from_utf8_lossy(&dump.stdout);
     assert!(
@@ -1768,24 +1792,26 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
     );
 
     // Both lines go in one invocation, and the root resolves again.
-    let unset = tokio::process::Command::new(bookrack_bin())
-        .args([
-            "libraries",
-            "config",
-            "prod",
-            "--unset",
-            "mcp_addr",
-            "--unset",
-            "log_directive",
-        ])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let unset = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args([
+        "libraries",
+        "config",
+        "prod",
+        "--unset",
+        "mcp_addr",
+        "--unset",
+        "log_directive",
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert_eq!(
         unset.status.code(),
         Some(0),
@@ -1800,16 +1826,18 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
         "the rest of the file survives: {written}"
     );
 
-    let cured = tokio::process::Command::new(bookrack_bin())
-        .args(["--library", "prod", "doctor"])
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry_path)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
+    let cured = tokio::process::Command::from(
+        bookrack_cmd!(&sandbox)
+            .registry(&registry_path)
+            .without_data_dir()
+            .build(),
+    )
+    .args(["--library", "prod", "doctor"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .await?;
     assert!(
         !String::from_utf8_lossy(&cured.stdout).contains("retired key"),
         "the refusal must be gone once the lines are",
