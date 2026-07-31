@@ -31,7 +31,12 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 
+mod error_map;
 mod reference;
+use error_map::{
+    invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
+    respond_with,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
@@ -67,6 +72,20 @@ pub struct SearchArgs {
     /// or `"all"` (both stores, merged by ascending distance).
     #[serde(default)]
     pub kind: Option<String>,
+    /// Catalog intake ids of books whose passages must not be returned.
+    /// Omit or pass an empty list to filter nothing. Applies to `kind`
+    /// `"book"` and `"all"`; passing it with `kind="paper"` is an
+    /// error, since the two id name spaces are unrelated. Ids that name
+    /// no book simply exclude nothing. `library.search_in_book` takes
+    /// no exclusions — recall is already confined to one book there.
+    #[serde(default)]
+    pub exclude_book_intake_ids: Vec<i64>,
+    /// Catalog intake ids of papers whose passages must not be
+    /// returned. The paper-side mirror of `exclude_book_intake_ids`:
+    /// applies to `kind` `"paper"` and `"all"`, and passing it with
+    /// `kind="book"` is an error.
+    #[serde(default)]
+    pub exclude_paper_intake_ids: Vec<i64>,
 }
 
 /// Arguments for the `library.search_in_book` tool.
@@ -94,13 +113,30 @@ pub struct SearchInBookArgs {
 }
 
 impl SearchArgs {
+    /// The side of the library to dispatch to, with the exclusion lists
+    /// checked against it: naming the other side's ids is refused as
+    /// invalid params rather than silently ignored. An unrecognized
+    /// kind passes through here and is rejected by the dispatch itself.
+    fn checked_kind(&self) -> Result<&str, ErrorData> {
+        let kind = self.kind.as_deref().unwrap_or("book");
+        reads::search::validate_exclusions(
+            kind,
+            &self.exclude_book_intake_ids,
+            &self.exclude_paper_intake_ids,
+        )
+        .map_err(|e| invalid_params_err(&e))?;
+        Ok(kind)
+    }
+
     /// Project the override fields onto the underlying [`SearchOptions`]
-    /// struct the ops layer consumes.
-    fn overrides(&self) -> SearchOptions {
+    /// struct the ops layer consumes, excluding the books named by
+    /// `exclude` — the ids of whichever side this call dispatches to.
+    fn overrides_excluding(&self, exclude: &[i64]) -> SearchOptions {
         SearchOptions {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: reads::search::exclusions_to_partitions(exclude),
         }
     }
 }
@@ -113,6 +149,9 @@ impl SearchInBookArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            // A search already confined to one book has nothing to
+            // exclude, so this tool carries no exclusion fields.
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -315,6 +354,7 @@ impl SearchInPaperArgs {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -724,7 +764,7 @@ impl BookrackServer {
     ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, ErrorData> {
         self.registry
             .get(library)
-            .map_err(|e| ErrorData::invalid_params(e.to_string(), None))
+            .map_err(|e| invalid_params_err(&e))
     }
 
     /// Search the library and return cited passages as a JSON array.
@@ -735,29 +775,37 @@ impl BookrackServer {
                        breadcrumb trail and source location. `kind` selects which \
                        side: `\"book\"` (the default; existing behaviour), `\"paper\"` \
                        (only the paper-side store), or `\"all\"` (both stores, merged \
-                       by ascending distance)."
+                       by ascending distance). To suppress books you have already \
+                       read or judged irrelevant, pass their intake ids in \
+                       `exclude_book_intake_ids` (or `exclude_paper_intake_ids` for \
+                       papers); the ids must match the `kind` being searched."
     )]
     async fn library_search(
         &self,
         Parameters(args): Parameters<SearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let overrides = args.overrides();
-        let kind = args.kind.as_deref().unwrap_or("book");
+        let kind = args.checked_kind()?;
+        let book_overrides = args.overrides_excluding(&args.exclude_book_intake_ids);
+        let paper_overrides = args.overrides_excluding(&args.exclude_paper_intake_ids);
         let hits = match kind {
-            "book" => reads::search::search(handle.ops(), &args.query, overrides, args.top_k)
+            "book" => reads::search::search(handle.ops(), &args.query, book_overrides, args.top_k)
                 .await
                 .map_err(ops_error_to_internal)?,
             "paper" => {
-                reads::search::search_paper(handle.ops(), &args.query, overrides, args.top_k)
+                reads::search::search_paper(handle.ops(), &args.query, paper_overrides, args.top_k)
                     .await
                     .map_err(ops_error_to_internal)?
             }
-            "all" => {
-                reads::search::search_unified(handle.ops(), &args.query, overrides, args.top_k)
-                    .await
-                    .map_err(ops_error_to_internal)?
-            }
+            "all" => reads::search::search_unified(
+                handle.ops(),
+                &args.query,
+                book_overrides,
+                paper_overrides,
+                args.top_k,
+            )
+            .await
+            .map_err(ops_error_to_internal)?,
             other => {
                 return Err(ErrorData::invalid_params(
                     format!(
@@ -833,7 +881,10 @@ impl BookrackServer {
         name = "library.list_books",
         description = "List books known to the library, paginated. Returns a slice \
                        of book summaries plus the total matching count and a \
-                       truncated flag."
+                       truncated flag. Each summary carries source_filename, the \
+                       basename of the file the book was ingested from, which \
+                       identifies a book whose title is missing or is an export-tool \
+                       placeholder."
     )]
     async fn library_list_books(
         &self,
@@ -892,11 +943,14 @@ impl BookrackServer {
                        Returns effective biblio attributes, the active overrides \
                        (which fields are curated rather than extracted, by whom and \
                        when; `value: null` marks a suppressed extracted value), the \
-                       contributor list, and toc_stats (entry_count / max_depth of \
-                       the ingested TOC; null when nothing is ingested) — check \
-                       toc_stats before library.show_toc to pick a pagination or \
-                       projection strategy. Returns null when no such book is \
-                       registered."
+                       contributor list, the source-side record of the ingested file \
+                       (source_path / source_filename / source_sha256 / intake_at / \
+                       page_count / byte_size; source_path is recorded verbatim at \
+                       intake, so it may be relative or no longer exist on disk), and \
+                       toc_stats (entry_count / max_depth of the ingested TOC; null \
+                       when nothing is ingested) — check toc_stats before \
+                       library.show_toc to pick a pagination or projection strategy. \
+                       Returns null when no such book is registered."
     )]
     async fn library_show_book(
         &self,
@@ -1136,9 +1190,7 @@ impl BookrackServer {
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::ContextWindow>>(&None)
             }
-            Err(e @ OpsError::NotALeaf { .. }) => {
-                Err(ErrorData::invalid_params(e.to_string(), None))
-            }
+            Err(e @ OpsError::NotALeaf { .. }) => Err(invalid_params_err(&e)),
             Err(e) => Err(ops_error_to_internal(e)),
         }
     }
@@ -1167,9 +1219,7 @@ impl BookrackServer {
             Err(OpsError::NodeNotFound { .. }) => {
                 respond_with::<Option<bookrack_ops::dto::SpanText>>(&None)
             }
-            Err(e @ OpsError::NotOrganizing { .. }) => {
-                Err(ErrorData::invalid_params(e.to_string(), None))
-            }
+            Err(e @ OpsError::NotOrganizing { .. }) => Err(invalid_params_err(&e)),
             Err(e) => Err(ops_error_to_internal(e)),
         }
     }
@@ -1734,7 +1784,7 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let refs_path = handle.ops().reference_db_path();
-        let refs = bookrack_refs::Refs::open(&refs_path)
+        let refs = bookrack_refs::Refs::open_read_only(&refs_path)
             .map_err(|e| ErrorData::internal_error(format!("open reference.db: {e}"), None))?;
         let catalogs = reference::catalogs().map_err(reference_error_to_mcp)?;
         let result = reference::reference_lookup_logic(&refs, catalogs, &args)
@@ -1777,7 +1827,9 @@ impl ServerHandler for BookrackServer {
              (browse and search the registry), `library.show_book` / `library.show_toc` \
              (per-book metadata and table of contents), `library.search` (vector \
              search across the whole library), `library.search_in_book` (vector \
-             search confined to one book)."
+             search confined to one book). Curation tools also write: the \
+             `library.metadata.*` family edits a book's bibliographic record and \
+             review status, and `reference.overlay_set` edits a reference entry."
                 .to_string(),
         )
     }
@@ -1798,49 +1850,6 @@ impl ServerHandler for BookrackServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         with_caller_override(Caller::mcp(), self.tool_router.call(tcc)).await
-    }
-}
-
-/// Encode `value` to a JSON string and wrap it as the body of a successful
-/// tool response. Centralises serialization so every tool returns the same
-/// `text` content shape.
-fn respond_with<T: Serialize>(value: &T) -> Result<CallToolResult, ErrorData> {
-    let json =
-        serde_json::to_string(value).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(json)]))
-}
-
-/// Map a generic [`OpsError`] to an MCP internal error.
-fn ops_error_to_internal(e: OpsError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
-}
-
-/// Map an [`OpsError`] from a metadata field edit to an MCP error:
-/// a rejected field name is the caller's input problem, so it surfaces
-/// as `invalid_params` (with the editable list in the message) rather
-/// than an internal error.
-fn ops_error_to_edit_error(e: OpsError) -> ErrorData {
-    match &e {
-        OpsError::UnknownMetadataField { .. }
-        | OpsError::UnknownContributorRole { .. }
-        | OpsError::ContributorNotFound { .. } => ErrorData::invalid_params(e.to_string(), None),
-        _ => ops_error_to_internal(e),
-    }
-}
-
-/// Map a [`reference::ReferenceError`] to an MCP error: the
-/// catalog / argument-shape variants are caller-input problems and
-/// surface as `invalid_params`, the refs-store and catalog-load
-/// variants are environmental and surface as `internal_error`.
-fn reference_error_to_mcp(e: reference::ReferenceError) -> ErrorData {
-    match e {
-        reference::ReferenceError::InvalidArgument(_)
-        | reference::ReferenceError::UnknownOverlayProperty { .. } => {
-            ErrorData::invalid_params(e.to_string(), None)
-        }
-        reference::ReferenceError::Refs(_) | reference::ReferenceError::Catalog(_) => {
-            ErrorData::internal_error(e.to_string(), None)
-        }
     }
 }
 
@@ -2061,11 +2070,13 @@ mod tests {
             format: Some("epub".to_string()),
             status: "extracted".to_string(),
             top_contributor: Some("An Author".to_string()),
+            source_filename: Some("book.epub".to_string()),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value["intake_id"], 1);
         assert_eq!(value["title"], "A Title");
         assert_eq!(value["status"], "extracted");
+        assert_eq!(value["source_filename"], "book.epub");
     }
 
     #[test]
@@ -2082,6 +2093,8 @@ mod tests {
             source_filename: Some("book.pdf".to_string()),
             source_sha256: "0".repeat(64),
             intake_at: "2026-01-01T00:00:00Z".to_string(),
+            page_count: Some(612),
+            byte_size: Some(4096),
             effective_biblio: biblio,
             overrides: Vec::new(),
             contributors: vec![ContributorEntry {
@@ -2105,6 +2118,8 @@ mod tests {
         assert_eq!(value["source_filename"], "book.pdf");
         assert_eq!(value["source_path"], "library/book.pdf");
         assert_eq!(value["intake_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(value["page_count"], 612);
+        assert_eq!(value["byte_size"], 4096);
         assert!(
             value["source_sha256"]
                 .as_str()
@@ -2228,6 +2243,88 @@ mod tests {
     }
 
     #[test]
+    fn search_args_default_to_no_exclusions() {
+        let args: super::SearchArgs =
+            serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
+        assert!(args.exclude_book_intake_ids.is_empty());
+        assert!(args.exclude_paper_intake_ids.is_empty());
+        assert!(
+            args.overrides_excluding(&args.exclude_book_intake_ids)
+                .exclude_partitions
+                .is_empty(),
+            "an omitted list must reach the store as no filter at all",
+        );
+    }
+
+    #[test]
+    fn search_args_project_each_sides_exclusions_separately() {
+        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "hello",
+            "kind": "all",
+            "exclude_book_intake_ids": [2, 5],
+            "exclude_paper_intake_ids": [9],
+        }))
+        .expect("parse");
+        use bookrack_core::PartitionIdx;
+        assert_eq!(
+            args.overrides_excluding(&args.exclude_book_intake_ids)
+                .exclude_partitions,
+            vec![PartitionIdx::new(2), PartitionIdx::new(5)],
+        );
+        assert_eq!(
+            args.overrides_excluding(&args.exclude_paper_intake_ids)
+                .exclude_partitions,
+            vec![PartitionIdx::new(9)],
+        );
+    }
+
+    #[test]
+    fn search_args_reject_the_other_sides_exclusion_list() {
+        for (kind, field) in [
+            ("book", "exclude_paper_intake_ids"),
+            ("paper", "exclude_book_intake_ids"),
+        ] {
+            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+                "query": "hello",
+                "kind": kind,
+                field: [9],
+            }))
+            .expect("parse");
+            let err = args
+                .checked_kind()
+                .expect_err("the mismatched list is refused");
+            assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(
+                err.message.contains(field) && err.message.contains(kind),
+                "the message must name the field and the kind: {}",
+                err.message
+            );
+        }
+        // Each kind admits the list that belongs to it.
+        for (kind, field) in [
+            ("book", "exclude_book_intake_ids"),
+            ("paper", "exclude_paper_intake_ids"),
+        ] {
+            let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+                "query": "hello",
+                "kind": kind,
+                field: [9],
+            }))
+            .expect("parse");
+            assert_eq!(args.checked_kind().expect("admissible"), kind);
+        }
+        // `all` searches both sides, so both lists apply at once.
+        let args: super::SearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "hello",
+            "kind": "all",
+            "exclude_book_intake_ids": [2],
+            "exclude_paper_intake_ids": [9],
+        }))
+        .expect("parse");
+        assert_eq!(args.checked_kind().expect("admissible"), "all");
+    }
+
+    #[test]
     fn search_args_kind_defaults_to_none_for_book_side_behavior() {
         let args: super::SearchArgs =
             serde_json::from_value(serde_json::json!({ "query": "hello" })).expect("parse");
@@ -2306,5 +2403,55 @@ mod tests {
         let payload = serde_json::json!({ "node_id": 7 });
         let args: super::ReadSpanArgs = serde_json::from_value(payload).expect("deserialize");
         assert_eq!(args.kind, ItemKind::Book);
+    }
+
+    #[test]
+    fn edit_errors_promote_caller_input_variants_to_invalid_params() {
+        use bookrack_ops::OpsError;
+        use rmcp::model::ErrorCode;
+
+        for err in [
+            OpsError::UnknownMetadataField {
+                field: "bogus".to_string(),
+            },
+            OpsError::UnknownContributorRole {
+                role: "bogus".to_string(),
+            },
+            OpsError::ContributorNotFound {
+                contributor_id: 7,
+                intake_id: 1,
+            },
+        ] {
+            let mapped = super::ops_error_to_edit_error(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        // Every other variant stays an environmental fault.
+        let mapped = super::ops_error_to_edit_error(OpsError::SearchUnavailable);
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn reference_errors_split_into_caller_input_and_environmental() {
+        use rmcp::model::ErrorCode;
+
+        use super::reference::ReferenceError;
+
+        let invalid = [
+            ReferenceError::InvalidArgument("bad".to_string()),
+            ReferenceError::UnknownOverlayProperty {
+                key: "bogus".to_string(),
+            },
+        ];
+        for err in invalid {
+            let mapped = super::reference_error_to_mcp(err);
+            assert_eq!(mapped.code, ErrorCode::INVALID_PARAMS, "{}", mapped.message);
+        }
+        let mapped = super::reference_error_to_mcp(ReferenceError::Refs(
+            bookrack_refs::RefsError::SchemaTooNew {
+                found: 99,
+                supported: 1,
+            },
+        ));
+        assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
     }
 }

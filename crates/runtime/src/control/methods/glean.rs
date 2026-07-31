@@ -53,6 +53,12 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         .priority
         .map(PriorityRepr::into_priority)
         .unwrap_or_default();
+    // The paper pipeline runs the same extractor, so the same allowlist
+    // applies: refuse an unsupported file here instead of enqueueing a
+    // job that fails at EXTRACT.
+    for path in &parsed.paths {
+        queue::check_extension_supported(path).map_err(|msg| RpcError::new(INVALID_PARAMS, msg))?;
+    }
     let (ids, tick) = super::queue_writes::mutate_jobs_and_persist(
         &ctx.queue_state,
         &ctx.queue_state_path,

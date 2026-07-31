@@ -282,6 +282,49 @@ mod tests {
     }
 
     #[test]
+    fn upsert_keeps_the_ocr_marker_stamp_unless_a_new_one_is_given() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_book_state(
+                &NewItemState::new(100_000_001, 1, "extract")
+                    .ocr_marker_finished_at("2026-01-01T12:00:00Z"),
+            )
+            .expect("first write");
+
+        // An update that carries no stamp keeps the recorded one: the
+        // column is an append-only audit stamp, not ordinary state.
+        catalog
+            .upsert_book_state(&NewItemState::new(100_000_001, 1, "embed"))
+            .expect("stampless update");
+        let read = catalog
+            .book_state(100_000_001)
+            .expect("read")
+            .expect("present");
+        assert_eq!(read.current_stage, "embed");
+        assert_eq!(
+            read.ocr_marker_finished_at.as_deref(),
+            Some("2026-01-01T12:00:00Z"),
+            "a stampless upsert must not clear the recorded stamp"
+        );
+
+        // An update that does carry a stamp replaces the recorded one.
+        catalog
+            .upsert_book_state(
+                &NewItemState::new(100_000_001, 1, "embed")
+                    .ocr_marker_finished_at("2026-02-02T00:00:00Z"),
+            )
+            .expect("restamping update");
+        let read = catalog
+            .book_state(100_000_001)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            read.ocr_marker_finished_at.as_deref(),
+            Some("2026-02-02T00:00:00Z")
+        );
+    }
+
+    #[test]
     fn upsert_overwrites_a_books_previous_state() {
         let catalog = Catalog::open_in_memory().expect("open");
         catalog

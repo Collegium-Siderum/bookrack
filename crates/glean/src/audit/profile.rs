@@ -663,14 +663,55 @@ mod tests {
 
     #[test]
     fn trust_source_disables_every_toggle() {
-        let p = PaperAuditProfile::trust_source();
-        assert_eq!(p.name, PROFILE_TRUST_SOURCE);
-        assert!(!p.audit_enabled);
-        assert!(!p.identifier.require_any);
-        assert!(!p.title.required);
-        assert!(!p.year.required);
-        assert!(!p.venue.whitelist_check);
-        assert!(!p.source_prior.enabled);
+        // Walked off the serialized profile rather than listed by hand,
+        // so a toggle added to any section is covered the day it lands.
+        // The six the hand-written list named were a fraction of the
+        // schema's booleans.
+        let profile = PaperAuditProfile::trust_source();
+        assert_eq!(profile.name, PROFILE_TRUST_SOURCE);
+
+        // Read through the same summary the profile fingerprint is
+        // built from, so nothing here names a toggle or re-implements
+        // the walk over the schema.
+        let summary =
+            bookrack_audit_profile::profile_toggle_summary(&profile).expect("a profile summarizes");
+        assert_eq!(
+            summary.matches("\"name\":").count(),
+            TOGGLE_COUNT,
+            "every boolean in the profile is enumerated; a schema change belongs in this \
+             count: {summary}",
+        );
+        let still_on = toggles_left_on(&summary);
+        assert!(
+            still_on.is_empty(),
+            "trust-source leaves these toggles on: {still_on:?}",
+        );
+
+        // Non-empty anchor: the default profile turns most of the same
+        // switches on, so an all-off reading is a property of
+        // trust-source rather than of the enumeration.
+        let default_summary =
+            bookrack_audit_profile::profile_toggle_summary(&PaperAuditProfile::default_profile())
+                .expect("a profile summarizes");
+        assert!(
+            default_summary.matches("\"enabled\":true").count() > TOGGLE_COUNT / 2,
+            "the default profile should leave most toggles on: {default_summary}",
+        );
+    }
+
+    /// Number of boolean toggles the paper profile schema carries.
+    /// Pinned so an enumeration that silently stops finding them fails
+    /// instead of passing vacuously.
+    const TOGGLE_COUNT: usize = 23;
+
+    /// Names the toggle summary reports as on, so a failure points at
+    /// the offending switch rather than dumping the whole summary.
+    fn toggles_left_on(summary: &str) -> Vec<&str> {
+        summary
+            .split("{\"enabled\":true,\"name\":\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect()
     }
 
     #[test]
@@ -741,5 +782,58 @@ mod tests {
         std::fs::write(&overlay, "schema_version = 1\nnonsense_top_level = true\n").unwrap();
         let err = PaperAuditProfile::load_from(dir.path()).unwrap_err();
         assert!(matches!(err, LoadError::Parse { .. }));
+    }
+
+    #[test]
+    fn overlay_ratio_outside_unit_range_is_rejected() {
+        // One probe per rejection class: above 1.0, negative, and NaN.
+        // The field name in the error identifies which knob misfired.
+        let cases = [
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = 1.5\n",
+                "language.body_cjk_min_ratio",
+                1.5,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_latin_min_ratio = -0.25\n",
+                "language.body_latin_min_ratio",
+                -0.25,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_max_ratio = nan\n",
+                "language.body_cjk_max_ratio",
+                f64::NAN,
+            ),
+        ];
+        for (overlay_toml, expected_field, expected_value) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = PaperAuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::RatioOutOfRange { field, value, .. } => {
+                    assert_eq!(field, expected_field);
+                    assert!(
+                        value == expected_value || (value.is_nan() && expected_value.is_nan()),
+                        "error carries the offending value: {value} vs {expected_value}",
+                    );
+                }
+                other => panic!("expected RatioOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_ratio_in_range_lands_as_basis_points() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = 0.0\n\
+             body_latin_min_ratio = 0.35\nbody_cjk_max_ratio = 1.0\n",
+        )
+        .unwrap();
+        let p = PaperAuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(p.language.body_cjk_min_ratio_bp, 0);
+        assert_eq!(p.language.body_latin_min_ratio_bp, 3500);
+        assert_eq!(p.language.body_cjk_max_ratio_bp, 10_000);
     }
 }

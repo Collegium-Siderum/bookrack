@@ -45,6 +45,12 @@ pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
 
 /// Environment variable naming the library registry file (TOML). Optional;
 /// only `--library` selection needs it. See [`registry`].
+///
+/// Set it, and it names the *only* registry anything consults: the
+/// platform-default file at [`default_registry_path`] is then never
+/// read, so no library configured on this machine can annotate or win a
+/// resolution behind the caller's back. A blank value is treated as
+/// unset.
 pub const REGISTRY_ENV: &str = "BOOKRACK_REGISTRY";
 
 /// Environment variable overriding the Ollama endpoint.
@@ -83,6 +89,46 @@ pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
 /// [`daemon_state_dir`].
 pub const DAEMON_STATE_DIR_ENV: &str = "BOOKRACK_DAEMON_STATE_DIR";
 
+/// Environment variable that suppresses loading `.env`.
+///
+/// A non-blank value turns loading off, except `0`, `false`, `no`, and
+/// `off`, which turn it back on; blank is treated as unset. The same
+/// rule `BOOKRACK_REQUIRE_PDFIUM` follows.
+///
+/// It has to come from the real environment: a value written inside
+/// `.env` is only read once the file has been loaded, which is the
+/// decision this variable makes.
+pub const NO_DOTENV_ENV: &str = "BOOKRACK_NO_DOTENV";
+
+/// Load `.env`, searching upward from the current working directory,
+/// unless [`NO_DOTENV_ENV`] suppresses it. A missing file is normal and
+/// not an error.
+///
+/// Call it from a binary's entry point, as that entry point's first
+/// statement. Two properties depend on that placement. Anything read
+/// before it sees an environment the file has not been applied to, so
+/// one process could otherwise observe two different values for one
+/// variable depending on which code path asked. And taking a file out
+/// of the caller's working directory is a decision only a program can
+/// make on its own behalf — a library that did it would hand its
+/// embedder a configuration source the embedder never asked for.
+pub fn load_dotenv() {
+    if should_load_dotenv(|key| std::env::var(key).ok()) {
+        dotenvy::dotenv().ok();
+    }
+}
+
+/// The pure core of [`load_dotenv`]: whether the file should be read.
+fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
+    match env_trimmed(get(NO_DOTENV_ENV)) {
+        Some(value) => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
 /// Resolved configuration. Construct with [`Config::load`] (from the
 /// environment) or [`Config::new`] (from an explicit data root, e.g. a
 /// CLI override).
@@ -95,6 +141,7 @@ pub struct Config {
     root_config: RootConfig,
     shadowed_default: Option<ShadowedDefault>,
     library_identification: Option<LibraryIdentification>,
+    unusable_registry: Option<UnusableRegistry>,
 }
 
 /// A registry `default` library that a path-class resolution silently
@@ -114,6 +161,28 @@ pub struct ShadowedDefault {
     /// The data root that name maps to — the root that would have been
     /// served had no path source pre-empted it.
     pub data_dir: PathBuf,
+}
+
+/// A registry that could not be read, on a resolution that did not need
+/// it.
+///
+/// A root fixed by the `--data-dir` flag, [`DATA_DIR_ENV`], or the
+/// portable layout consults no registry, so an unreadable one must not
+/// veto it. The resolution succeeds; what it loses is the annotation
+/// layer — [`Config::shadowed_default`] and
+/// [`Config::library_identification`] simply have no input — and the
+/// failure is recorded here for a front end to render.
+///
+/// `None` means the registry loaded, there was none to load, or the
+/// failure was fatal: a rung that consumes the registry raises it
+/// instead of recording it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnusableRegistry {
+    /// The file that could not be read.
+    pub path: PathBuf,
+    /// Why it could not be used. Carried as text because
+    /// [`ConfigError`] is not `Clone` and [`Config`] is.
+    pub reason: String,
 }
 
 /// How the data root in a resolved [`Config`] was selected.
@@ -139,6 +208,10 @@ pub enum ResolutionSource {
     RegistryDefault,
     /// Won by the `default` entry of the registry at the platform
     /// config-directory path. Written by `bookrack init`.
+    ///
+    /// Unreachable while [`REGISTRY_ENV`] carries a non-blank value:
+    /// that registry is then the only one loaded, and this rung has
+    /// nothing to read.
     DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
@@ -284,20 +357,36 @@ impl Config {
         Config::resolve(&LibrarySelection::default())
     }
 
+    /// Resolve the data root and everything derived from it, reading the
+    /// process environment.
+    ///
+    /// The precedence ladder lives in [`select_root`]; what this
+    /// function adds is the environment it reads and the two
+    /// annotations it attaches afterwards — the eclipsed registry
+    /// `default` and the name claimed for a path-class root.
+    ///
+    /// [`REGISTRY_ENV`], when it carries a non-blank value, names the
+    /// only registry consulted: the platform-default one is not read.
+    ///
+    /// Only the process environment is read. `.env` is loaded by the
+    /// binaries, at their entry points — see [`load_dotenv`] — so a
+    /// caller that embeds this crate as a library gets exactly the
+    /// environment it set.
     pub fn resolve(selection: &LibrarySelection) -> Result<Config, ConfigError> {
-        // A missing .env is fine: the variables may be set directly.
-        dotenvy::dotenv().ok();
-        let registry = load_registry(std::env::var(REGISTRY_ENV).ok())?;
-        let default_registry = load_default_registry()?;
+        let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
+        let registry = registries.env;
+        let default_registry = registries.platform_default;
         let portable = portable_data_dir();
-        let resolved = select_root(
+        let selected = select_root(
             selection,
             std::env::var(DATA_DIR_ENV).ok(),
             registry.as_ref(),
             portable,
             default_registry.as_ref(),
-        )?;
+        );
+        let (resolved, deferred) = raise_deferred_registry_failure(selected, registries.failure)?;
         let mut config = finish(resolved, std::env::var(OLLAMA_URL_ENV).ok())?;
+        config.unusable_registry = deferred.as_ref().and_then(unusable_registry_record);
         // A path-class resolution can leave a registry `default` set but
         // ineffective. Detecting it here — after the root is chosen —
         // enriches the Config without touching which root won.
@@ -332,6 +421,7 @@ impl Config {
             root_config: RootConfig::default(),
             shadowed_default: None,
             library_identification: None,
+            unusable_registry: None,
         }
     }
 
@@ -377,6 +467,15 @@ impl Config {
         self.shadowed_default.as_ref()
     }
 
+    /// The registry that could not be read on a resolution that did not
+    /// need it. `None` when the registry loaded, when there was none to
+    /// load, or when the failure was fatal — a rung that consumes the
+    /// registry raises the error rather than recording it here. See
+    /// [`UnusableRegistry`].
+    pub fn unusable_registry(&self) -> Option<&UnusableRegistry> {
+        self.unusable_registry.as_ref()
+    }
+
     /// How the resolved library name was determined — `Selected` for a
     /// registry selection, `ManifestUuid` or `Path` when a path-class
     /// root was claimed against the registry after selection. `Some`
@@ -414,6 +513,13 @@ impl Config {
     /// other stores).
     pub fn translate_db(&self) -> PathBuf {
         self.data_dir.join("translate.db")
+    }
+
+    /// SQLite database for the distilled reference store, opened by
+    /// the `refs` crate on the MCP `reference.*` and CLI `distill`
+    /// surfaces.
+    pub fn reference_db(&self) -> PathBuf {
+        reference_db_in(&self.data_dir)
     }
 
     /// LanceDB directory for the vector store.
@@ -478,6 +584,14 @@ fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
     env_trimmed(override_dir)
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("backup"))
+}
+
+/// The reference-store database under `data_dir`. The single
+/// definition of that file's name and location: [`Config::reference_db`]
+/// and callers that hold a data root without a `Config` both route
+/// through it.
+pub fn reference_db_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("reference.db")
 }
 
 /// Directory for daemon-scoped state that spans libraries: the ingest
@@ -597,11 +711,14 @@ pub const ROOT_CONFIG_NAME: &str = "config.toml";
 /// Per-data-root configuration loaded from `<data_root>/config.toml`.
 ///
 /// Carries runtime knobs that vary by library: the Ollama endpoint, the
-/// embed model, the MCP listen address, the log filter directive, the
-/// index-profile reference, and the search knobs. Each field is `None`
+/// search knobs, and the reranker deployment knobs. Each field is `None`
 /// when the file does not set it; the matching env var (where one
 /// exists) overrides this layer, and the hardcoded default wins when
 /// both are absent. Written by `bookrack init`; safe to edit by hand.
+///
+/// The retired fields carry nothing: they exist so a document written
+/// by an older release still parses far enough for
+/// [`load_root_config`] to refuse the key by name.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RootConfig {
@@ -614,10 +731,12 @@ pub struct RootConfig {
     /// in [`ConfigError::RootConfigRetiredKey`]; nothing reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embed_model: Option<String>,
-    /// Address the MCP server binds.
+    /// Retired: the MCP listen address is resolved before any data root
+    /// is known. Kept for the same reason as [`RootConfig::embed_model`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_addr: Option<String>,
-    /// `EnvFilter` directive for tracing verbosity.
+    /// Retired: log verbosity is resolved before any data root is known.
+    /// Kept for the same reason as [`RootConfig::embed_model`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_directive: Option<String>,
     /// Retired: a library's profile reference lives in its manifest.
@@ -685,13 +804,44 @@ const RETIRED_ROOT_CONFIG_KEYS: &[(&str, &str)] = &[
          `bookrack libraries config <name> index_profile=<profile>`, then drop the line \
          (`bookrack libraries config <name> --unset index_profile`)",
     ),
+    (
+        "mcp_addr",
+        "the MCP listen address is a process-level knob, resolved before any data root is \
+         known -- set BOOKRACK_MCP_ADDR (or pass `bookrack run --mcp-addr`), then drop the line \
+         (`bookrack libraries config <name> --unset mcp_addr`)",
+    ),
+    (
+        "log_directive",
+        "log verbosity is a process-level knob, resolved before any data root is known -- \
+         set BOOKRACK_LOG (and BOOKRACK_LOG_CONSOLE for the stderr layer), then drop the \
+         line (`bookrack libraries config <name> --unset log_directive`)",
+    ),
 ];
+
+/// The way out of `key`, if `key` is retired. Lets a surface that prints
+/// a `config.toml` verbatim — where a retired line is text, not a parse
+/// failure — say what the line means without keeping a second copy of
+/// [`RETIRED_ROOT_CONFIG_KEYS`].
+pub fn retired_root_config_key_help(key: &str) -> Option<&'static str> {
+    RETIRED_ROOT_CONFIG_KEYS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, help)| *help)
+}
+
+/// Every retired key, in the order they are listed. Lets a caller walk
+/// the set without owning it.
+pub fn retired_root_config_keys() -> impl Iterator<Item = &'static str> {
+    RETIRED_ROOT_CONFIG_KEYS.iter().map(|(key, _)| *key)
+}
 
 /// Which retired key `cfg` sets, if any, in the order they are listed.
 fn retired_root_config_key(cfg: &RootConfig) -> Option<(&'static str, &'static str)> {
     let set = |key: &str| match key {
         "embed_model" => cfg.embed_model.is_some(),
         "index_profile" => cfg.index_profile.is_some(),
+        "mcp_addr" => cfg.mcp_addr.is_some(),
+        "log_directive" => cfg.log_directive.is_some(),
         _ => false,
     };
     RETIRED_ROOT_CONFIG_KEYS
@@ -756,8 +906,6 @@ pub fn render_root_config_toml(ollama_url: &str) -> String {
 /// nested table (`search.top_k` edits `top_k` under `[search]`).
 pub const ROOT_CONFIG_KEYS: &[&str] = &[
     "ollama_url",
-    "mcp_addr",
-    "log_directive",
     "search.top_k",
     "search.weak_threshold",
     "reranker.url",
@@ -772,8 +920,6 @@ pub const ROOT_CONFIG_KEYS: &[&str] = &[
 pub fn root_config_env_override(key: &str) -> Option<&'static str> {
     match key {
         "ollama_url" => Some(OLLAMA_URL_ENV),
-        "mcp_addr" => Some(MCP_ADDR_ENV),
-        "log_directive" => Some(LOG_ENV),
         "search.top_k" => Some(SEARCH_TOP_K_ENV),
         "search.weak_threshold" => Some(SEARCH_WEAK_THRESHOLD_ENV),
         "reranker.url" => Some(RERANKER_URL_ENV),
@@ -939,12 +1085,10 @@ fn validate_root_config_unset_key(key: &str) -> Result<(), RootConfigSetError> {
     validate_root_config_key(key)
 }
 
-/// Light per-key value check: `ollama_url` must carry a scheme and an
-/// authority, `mcp_addr` must have a `host:port` shape with a numeric
-/// port, `search.top_k` must be a positive integer, and
-/// `search.weak_threshold` a finite number. `log_directive` is
-/// free-form — a tracing directive is validated by the runtime that
-/// consumes it.
+/// Light per-key value check: `ollama_url` and `reranker.url` must carry
+/// a scheme and an authority, `search.top_k`, `reranker.ctx`, and
+/// `reranker.threads` must be positive integers, and
+/// `search.weak_threshold` a finite number.
 fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSetError> {
     let invalid = |reason: &str| {
         Err(RootConfigSetError::InvalidValue {
@@ -959,15 +1103,6 @@ fn validate_root_config_value(key: &str, value: &str) -> Result<(), RootConfigSe
             };
             if scheme.is_empty() || rest.is_empty() {
                 return invalid("expected a URL like 'http://host:port'");
-            }
-            Ok(())
-        }
-        "mcp_addr" => {
-            let Some((host, port)) = value.rsplit_once(':') else {
-                return invalid("expected a 'host:port' address");
-            };
-            if host.is_empty() || port.parse::<u16>().is_err() {
-                return invalid("expected a 'host:port' address with a numeric port");
             }
             Ok(())
         }
@@ -1187,10 +1322,12 @@ impl EmbedConfig {
 pub struct SearchConfig {
     /// How many nearest passages a query returns.
     pub top_k: usize,
-    /// Cosine-distance threshold at or above which a hit is treated as
-    /// a weak match. When every top-`top_k` hit lands at or above this
-    /// value, the CLI prints an advisory line so the operator knows
-    /// the recall set is probably noise.
+    /// Cosine-distance threshold at or above which a hit counts as a
+    /// weak match. Nothing grades an individual hit: when every
+    /// recorded hit of a call lands at or above this value,
+    /// `bookrack retrieval show` prints an advisory line naming the
+    /// threshold, so the operator knows the recall set is probably
+    /// noise. A call with no hits draws no line.
     pub weak_distance_threshold: f32,
 }
 
@@ -1425,6 +1562,11 @@ struct Resolved {
 /// 4. a `bookrack-data` directory probed beside the running binary,
 /// 5. the registry's default library,
 /// 6. the platform-default registry's default library.
+///
+/// Both registries are parameters because the function is pure, not
+/// because both are ever populated at once: [`Config::resolve`] passes
+/// at most one of them, so rungs 2 and 6 fall back to the second table
+/// only in tests that construct one directly.
 fn select_root(
     selection: &LibrarySelection,
     env_data_dir: Option<String>,
@@ -1689,6 +1831,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         root_config,
         shadowed_default: None,
         library_identification: None,
+        unusable_registry: None,
     })
 }
 
@@ -2383,6 +2526,119 @@ pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<(
     Ok(())
 }
 
+/// The registries available to one resolution, plus the read failure of
+/// whichever one was attempted.
+///
+/// At most one of the two is ever `Some`, by construction: see
+/// [`load_registries`].
+struct LoadedRegistries {
+    /// The registry named by [`REGISTRY_ENV`].
+    env: Option<Registry>,
+    /// The registry at the platform config-directory path, loaded only
+    /// when [`REGISTRY_ENV`] names none.
+    platform_default: Option<Registry>,
+    /// Why the attempted registry could not be read.
+    failure: Option<ConfigError>,
+}
+
+/// Load the registries for one resolution.
+///
+/// A non-blank [`REGISTRY_ENV`] value makes that file the only registry
+/// consulted: `load_default` is never called, so the platform
+/// config-directory file is not even opened. This is not a new rule but
+/// the removal of an exception — [`list_libraries`] and
+/// [`registry_target_path_from`] have always been env-wins, and
+/// [`Config::resolve`] was the one reader that fell through to the
+/// platform default anyway. A blank value is treated as unset, matching
+/// [`env_trimmed`] and the write side.
+///
+/// `load_default` is taken as a closure for two reasons: laziness, so a
+/// pinned registry never touches the platform config directory; and
+/// testability, so a test can pass `|| panic!(...)` and let the panic
+/// message state the defect being guarded against.
+///
+/// A read failure is returned rather than raised, so the caller decides
+/// whether this resolution needed the registry at all.
+fn load_registries(
+    env: Option<String>,
+    load_default: impl FnOnce() -> Result<Option<Registry>, ConfigError>,
+) -> LoadedRegistries {
+    if env_trimmed(env.clone()).is_some() {
+        return match load_registry(env) {
+            Ok(registry) => LoadedRegistries {
+                env: registry,
+                platform_default: None,
+                failure: None,
+            },
+            Err(failure) => LoadedRegistries {
+                env: None,
+                platform_default: None,
+                failure: Some(failure),
+            },
+        };
+    }
+    match load_default() {
+        Ok(platform_default) => LoadedRegistries {
+            env: None,
+            platform_default,
+            failure: None,
+        },
+        Err(failure) => LoadedRegistries {
+            env: None,
+            platform_default: None,
+            failure: Some(failure),
+        },
+    }
+}
+
+/// Decide what a deferred registry read failure means for the ladder's
+/// verdict.
+///
+/// [`load_registries`] fills at most one registry, so a deferred
+/// failure always means *both* are `None` — the failure belongs to the
+/// one that was attempted, and nothing else was. That narrows the
+/// verdicts [`select_root`] can reach to two:
+/// [`ConfigError::RegistryNotConfigured`], from a `--library` that had
+/// no table to look in, and [`ConfigError::MissingDataDir`], from
+/// falling off the end past rungs 5 and 6. Both are symptoms of the
+/// read failure, and both are replaced by it, so the caller is told the
+/// registry could not be read rather than that no library is
+/// configured. [`ConfigError::UnknownLibrary`] cannot occur: naming it
+/// requires a table that parsed.
+///
+/// A resolution that succeeded keeps the failure and hands it back, for
+/// the caller to record as an [`UnusableRegistry`].
+fn raise_deferred_registry_failure(
+    selected: Result<Resolved, ConfigError>,
+    deferred: Option<ConfigError>,
+) -> Result<(Resolved, Option<ConfigError>), ConfigError> {
+    match selected {
+        Ok(resolved) => Ok((resolved, deferred)),
+        Err(symptom @ (ConfigError::RegistryNotConfigured | ConfigError::MissingDataDir)) => {
+            Err(deferred.unwrap_or(symptom))
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// Render a registry read failure as the record a [`Config`] carries.
+///
+/// `None` for anything that is not a registry read failure: those are
+/// raised, never recorded.
+fn unusable_registry_record(error: &ConfigError) -> Option<UnusableRegistry> {
+    match error {
+        ConfigError::RegistryUnreadable { path, source } => Some(UnusableRegistry {
+            path: path.clone(),
+            reason: format!("cannot be read: {source}"),
+        }),
+        ConfigError::RegistryMalformed { path, .. } => Some(UnusableRegistry {
+            path: path.clone(),
+            reason: "does not parse".to_string(),
+        }),
+        _ => None,
+    }
+}
+
 /// Load the registry from the file named by [`REGISTRY_ENV`]. Returns
 /// `Ok(None)` when the variable is unset or blank — the registry is
 /// optional, and only `--library` selection requires it.
@@ -2457,15 +2713,28 @@ fn default_registry_path_from(config_dir: Option<PathBuf>) -> Option<PathBuf> {
 /// the offline CLI write verbs and the daemon's `fork` helper so the
 /// two agree on which file is the registry.
 pub fn registry_target_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(REGISTRY_ENV) {
-        return Some(PathBuf::from(path));
+    registry_target_path_from(std::env::var(REGISTRY_ENV).ok(), default_registry_path())
+}
+
+/// Pure resolution for [`registry_target_path`], factored out so the
+/// precedence can be tested without touching the process environment.
+/// A blank [`REGISTRY_ENV`] value is ignored and falls through to
+/// `default`, matching the read side ([`load_registry`]) so the two
+/// agree on which file is the registry rather than one resolving to an
+/// empty path.
+fn registry_target_path_from(env: Option<String>, default: Option<PathBuf>) -> Option<PathBuf> {
+    match env_trimmed(env) {
+        Some(path) => Some(PathBuf::from(path)),
+        None => default,
     }
-    default_registry_path()
 }
 
 /// Load the platform-default registry, if present. A missing file is
 /// not an error: the resolver simply falls through to
 /// [`ConfigError::MissingDataDir`].
+///
+/// [`Config::resolve`] reaches this only when [`REGISTRY_ENV`] names no
+/// registry; see [`load_registries`].
 fn load_default_registry() -> Result<Option<Registry>, ConfigError> {
     let Some(path) = default_registry_path() else {
         return Ok(None);
@@ -3195,12 +3464,13 @@ mod tests {
     }
 
     #[test]
-    fn embed_config_env_overrides_the_batching_knobs_only() {
+    fn embed_config_reads_each_env_knob_from_its_own_variable() {
         let cfg = EmbedConfig::resolve_from(
             |key| match key {
                 EMBED_BATCH_CHAR_BUDGET_ENV => Some("4000".to_string()),
                 EMBED_BATCH_MAX_CHUNKS_ENV => Some("32".to_string()),
                 EMBED_BATCH_MIN_CHAR_BUDGET_ENV => Some("250".to_string()),
+                EMBED_PROGRESS_INTERVAL_ENV => Some("11".to_string()),
                 _ => None,
             },
             Some("profile-model"),
@@ -3209,11 +3479,39 @@ mod tests {
         assert_eq!(cfg.batch_char_budget, 4_000);
         assert_eq!(cfg.batch_max_chunks, 32);
         assert_eq!(cfg.batch_min_char_budget, 250);
+        assert_eq!(cfg.progress_interval, Duration::from_secs(11));
         // Untouched fields keep their calibrated defaults.
         let d = EmbedConfig::default();
         assert_eq!(cfg.request_timeout, d.request_timeout);
         assert_eq!(cfg.max_retries, d.max_retries);
         assert_eq!(cfg.channel_capacity, d.channel_capacity);
+    }
+
+    #[test]
+    fn no_embed_field_outside_the_four_env_knobs_answers_to_the_environment() {
+        // The reader answers *every* variable, so a field wired to the
+        // environment moves off its default whatever key it reads. The
+        // untouched assertions below are therefore falsifiable: they
+        // fail the moment a fifth knob is added, which is what keeps
+        // the content-identity fields (and the retry posture) frozen.
+        let d = EmbedConfig::default();
+        let cfg = EmbedConfig::resolve_from(|_| Some("7".to_string()), Some("profile-model"));
+
+        assert_eq!(
+            cfg.model, "profile-model",
+            "the model comes from the profile"
+        );
+        assert_eq!(cfg.request_timeout, d.request_timeout);
+        assert_eq!(cfg.max_retries, d.max_retries);
+        assert_eq!(cfg.backoff_base, d.backoff_base);
+        assert_eq!(cfg.channel_capacity, d.channel_capacity);
+
+        // The four that do read the environment took the answer, so the
+        // reader above is proven to have been consulted at all.
+        assert_eq!(cfg.batch_char_budget, 7);
+        assert_eq!(cfg.batch_max_chunks, 7);
+        assert_eq!(cfg.batch_min_char_budget, 7);
+        assert_eq!(cfg.progress_interval, Duration::from_secs(7));
     }
 
     #[test]
@@ -3309,6 +3607,80 @@ mod tests {
             assert!(text.contains("ollama_url"), "{text}");
 
             // And the root loads again once the line is gone.
+            let cfg = load_root_config(dir.path()).expect("load after unset");
+            assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
+        }
+    }
+
+    #[test]
+    fn a_root_config_setting_mcp_addr_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ROOT_CONFIG_NAME),
+            "mcp_addr = \"127.0.0.1:9999\"\n",
+        )
+        .expect("write config");
+
+        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
+        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
+            panic!("expected RootConfigRetiredKey, got {err:?}");
+        };
+        assert_eq!(*key, "mcp_addr");
+        // The way out names the knob's actual home and the command that
+        // deletes the dead line.
+        assert!(help.contains(MCP_ADDR_ENV), "{help}");
+        assert!(help.contains("--unset mcp_addr"), "{help}");
+    }
+
+    #[test]
+    fn a_root_config_setting_log_directive_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ROOT_CONFIG_NAME),
+            "log_directive = \"debug\"\n",
+        )
+        .expect("write config");
+
+        let err = load_root_config(dir.path()).expect_err("a retired key must be refused");
+        let ConfigError::RootConfigRetiredKey { key, help, .. } = &err else {
+            panic!("expected RootConfigRetiredKey, got {err:?}");
+        };
+        assert_eq!(*key, "log_directive");
+        assert!(help.contains(LOG_ENV), "{help}");
+        assert!(help.contains("--unset log_directive"), "{help}");
+    }
+
+    #[test]
+    fn the_retired_process_level_keys_cannot_be_set_but_can_be_unset() {
+        for (key, value) in [("mcp_addr", "127.0.0.1:1"), ("log_directive", "debug")] {
+            let dir = tempfile::tempdir().expect("tempdir");
+
+            // A process-level knob has no per-library file to write to.
+            let err =
+                set_root_config_values(dir.path(), &[(key.to_string(), value.to_string())], &[])
+                    .expect_err("a retired key cannot be set");
+            assert!(
+                matches!(err, RootConfigSetError::UnknownKey { .. }),
+                "{err:?}"
+            );
+
+            // Deleting the line is the cure the load error prescribes, so
+            // it stays available against a file that still carries it.
+            std::fs::write(
+                dir.path().join(ROOT_CONFIG_NAME),
+                format!(
+                    "# operator note: keep me\nollama_url = \"http://127.0.0.1:11434\"\n\
+                     {key} = \"{value}\"\n"
+                ),
+            )
+            .expect("write config");
+            set_root_config_values(dir.path(), &[], &[key.to_string()])
+                .expect("a retired key can be unset");
+
+            let text = std::fs::read_to_string(dir.path().join(ROOT_CONFIG_NAME)).expect("read");
+            assert!(!text.contains(key), "{text}");
+            assert!(text.contains("operator note"), "{text}");
+            assert!(text.contains("ollama_url"), "{text}");
             let cfg = load_root_config(dir.path()).expect("load after unset");
             assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
         }
@@ -3783,6 +4155,218 @@ mod tests {
         assert!(default_registry_path_from(None).is_none());
     }
 
+    /// An unreadable registry named by the environment is carried, not
+    /// raised: the caller has not yet said whether this resolution
+    /// needed it.
+    #[test]
+    fn an_unreadable_env_registry_is_deferred_not_raised() {
+        let loaded = load_registries(Some("/does/not/exist/registry.toml".to_string()), || {
+            panic!("the platform-default registry must not be consulted")
+        });
+
+        match loaded.failure {
+            Some(ConfigError::RegistryUnreadable { source, .. }) => {
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected a deferred RegistryUnreadable, got {other:?}"),
+        }
+        assert!(loaded.env.is_none());
+        assert!(loaded.platform_default.is_none());
+    }
+
+    /// The four cases the replacement rule has to get right. Kills both
+    /// of the one-line implementations: "always raise the deferred
+    /// failure" fails the third row, "always swallow it" fails the
+    /// first two.
+    #[test]
+    fn a_deferred_failure_replaces_the_symptom_the_ladder_reported() {
+        let resolved = || Resolved {
+            data_dir: PathBuf::from("/roots/alpha"),
+            source: ResolutionSource::DataDirFlag,
+            library: None,
+        };
+        let deferred = || ConfigError::RegistryMalformed {
+            path: PathBuf::from("/registry.toml"),
+            source: toml::from_str::<toml::Value>("= not toml").expect_err("malformed"),
+        };
+
+        for symptom in [
+            ConfigError::RegistryNotConfigured,
+            ConfigError::MissingDataDir,
+        ] {
+            let raised = raise_deferred_registry_failure(Err(symptom), Some(deferred()))
+                .expect_err("a consuming rung must raise");
+            assert!(
+                matches!(raised, ConfigError::RegistryMalformed { .. }),
+                "the read failure must replace the symptom, got {raised:?}",
+            );
+        }
+
+        let (root, carried) = raise_deferred_registry_failure(Ok(resolved()), Some(deferred()))
+            .expect("a pinned root survives");
+        assert_eq!(root.source, ResolutionSource::DataDirFlag);
+        assert!(
+            carried.is_some(),
+            "the failure must be handed back to record"
+        );
+
+        let untouched = raise_deferred_registry_failure(
+            Err(ConfigError::UnknownLibrary {
+                name: "ghost".to_string(),
+                available: vec![],
+            }),
+            None,
+        )
+        .expect_err("an unrelated error passes through");
+        assert!(matches!(untouched, ConfigError::UnknownLibrary { .. }));
+    }
+
+    /// The record names the file and says why, in the same words
+    /// `doctor` uses for a registry it probed directly. Anything that is
+    /// not a registry read failure records nothing: those are raised.
+    #[test]
+    fn an_unusable_registry_record_names_the_file_and_the_reason() {
+        let unreadable = ConfigError::RegistryUnreadable {
+            path: PathBuf::from("/registry.toml"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let record = unusable_registry_record(&unreadable).expect("a record");
+        assert_eq!(record.path, PathBuf::from("/registry.toml"));
+        assert!(
+            record.reason.starts_with("cannot be read: "),
+            "{}",
+            record.reason,
+        );
+
+        let malformed = ConfigError::RegistryMalformed {
+            path: PathBuf::from("/registry.toml"),
+            source: toml::from_str::<toml::Value>("= not toml").expect_err("malformed"),
+        };
+        assert_eq!(
+            unusable_registry_record(&malformed)
+                .expect("a record")
+                .reason,
+            "does not parse",
+        );
+
+        assert_eq!(unusable_registry_record(&ConfigError::MissingDataDir), None);
+    }
+
+    /// Any value that is not one of the four falsy words turns the
+    /// load off. Closure-injected, so the rule is tested without this
+    /// process's own environment taking part.
+    #[test]
+    fn no_dotenv_suppresses_loading_on_any_truthy_value() {
+        for value in ["1", "true", "yes", "on", "please", "0.0"] {
+            assert!(
+                !should_load_dotenv(|_| Some(value.to_string())),
+                "{value:?} should suppress the load",
+            );
+        }
+    }
+
+    /// The four falsy words turn it back on, case- and
+    /// whitespace-insensitively — the same set `BOOKRACK_REQUIRE_PDFIUM`
+    /// accepts, so an operator does not have to remember two spellings.
+    #[test]
+    fn no_dotenv_falsy_words_keep_loading() {
+        for value in ["0", "false", "no", "off", "FALSE", "  Off  "] {
+            assert!(
+                should_load_dotenv(|_| Some(value.to_string())),
+                "{value:?} should keep the load on",
+            );
+        }
+    }
+
+    /// Blank is unset, matching the registry and pdfium knobs: an
+    /// exported-but-empty variable must not silently disable the file.
+    #[test]
+    fn a_blank_no_dotenv_is_treated_as_unset() {
+        for value in ["", "   ", "\t"] {
+            assert!(should_load_dotenv(|_| Some(value.to_string())));
+        }
+        assert!(should_load_dotenv(|_| None));
+    }
+
+    #[test]
+    fn registry_target_path_prefers_a_non_blank_env_over_the_default() {
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        assert_eq!(
+            registry_target_path_from(Some("/custom/reg.toml".to_string()), default),
+            Some(PathBuf::from("/custom/reg.toml")),
+        );
+    }
+
+    /// A registry named by the environment is the only one consulted.
+    ///
+    /// The suppression is asserted as an absence: `load_default` here
+    /// panics, so a fall-through cannot pass quietly — the panic
+    /// message is the statement of the defect.
+    #[test]
+    fn registry_env_suppresses_the_platform_default_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("pinned.toml");
+        std::fs::write(&path, "[libraries]\nalpha = \"/roots/alpha\"\n").expect("write");
+
+        let loaded = load_registries(Some(path.display().to_string()), || {
+            panic!("the platform-default registry must not be consulted")
+        });
+
+        assert!(
+            loaded
+                .env
+                .is_some_and(|r| r.libraries.contains_key("alpha")),
+            "the env-named registry must be the one loaded",
+        );
+        assert!(loaded.platform_default.is_none());
+        assert!(loaded.failure.is_none());
+    }
+
+    /// Blank is unset, here as on the write side: a whitespace-only
+    /// value must not suppress anything. Kills the over-wide
+    /// `.is_some()` reading of the suppression condition.
+    #[test]
+    fn a_blank_registry_env_still_consults_the_platform_default() {
+        for blank in ["", "   ", "\t"] {
+            let loaded = load_registries(Some(blank.to_string()), || {
+                Ok(Some(
+                    parse_registry("default = \"platform\"\n").expect("parse"),
+                ))
+            });
+            assert!(
+                loaded
+                    .platform_default
+                    .is_some_and(|r| r.default.as_deref() == Some("platform")),
+                "blank env {blank:?} must fall through to the platform default",
+            );
+            assert!(loaded.env.is_none());
+        }
+    }
+
+    #[test]
+    fn registry_target_path_ignores_a_blank_env_matching_the_read_side() {
+        // A blank BOOKRACK_REGISTRY must fall through to the platform
+        // default just as `load_registry` does — never resolve to an
+        // empty path the write verbs would then try to create.
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                registry_target_path_from(Some(blank.to_string()), default.clone()),
+                default,
+                "blank env {blank:?} must fall through to the default",
+            );
+        }
+        // With no default either, a blank env yields None, never Some("").
+        assert_eq!(registry_target_path_from(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn registry_target_path_falls_back_when_env_is_unset() {
+        let default = Some(PathBuf::from("/platform/registry.toml"));
+        assert_eq!(registry_target_path_from(None, default.clone()), default);
+        assert_eq!(registry_target_path_from(None, None), None);
+    }
+
     #[test]
     fn portable_data_dir_beats_registry_default_but_loses_to_env_var() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -3857,7 +4441,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nlog_directive = \"info\"\n",
+            "# hand-written note\nollama_url = \"http://127.0.0.1:11434\"\n",
         )
         .expect("seed config");
         set_root_config_values(
@@ -3900,7 +4484,7 @@ mod tests {
         assert!(cfg.search.is_none());
         // A scalar key sitting beside the table is untouched by the
         // table's removal.
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://127.0.0.1:11434"));
     }
 
     #[test]
@@ -3938,13 +4522,17 @@ mod tests {
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
             "ollama_url = \"http://elsewhere:1234\"\n\
-             log_directive = \"debug\"\n",
+             \n[search]\ntop_k = 9\n",
         )
         .expect("write root config");
         let cfg = load_root_config(tmp.path()).expect("root config parses");
         assert_eq!(cfg.ollama_url.as_deref(), Some("http://elsewhere:1234"));
-        assert_eq!(cfg.log_directive.as_deref(), Some("debug"));
-        assert!(cfg.mcp_addr.is_none());
+        let search = cfg.search.expect("search table present");
+        assert_eq!(search.top_k, Some(9));
+        // A key the file leaves out stays `None` rather than picking up
+        // a default at this layer.
+        assert!(search.weak_threshold.is_none());
+        assert!(cfg.reranker.is_none());
     }
 
     #[test]
@@ -4010,19 +4598,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "# hand-written note\nlog_directive = \"old-directive\"\n",
+            "# hand-written note\nollama_url = \"http://old:11434\"\n",
         )
         .expect("seed config");
         set_root_config_values(
             tmp.path(),
-            &[("log_directive".to_string(), "new-directive".to_string())],
+            &[("ollama_url".to_string(), "http://new:11434".to_string())],
             &[],
         )
         .expect("set applies");
         let text = read_root_config_text(tmp.path()).expect("read back");
         assert!(text.contains("# hand-written note"));
-        assert!(text.contains("new-directive"));
-        assert!(!text.contains("old-directive"));
+        assert!(text.contains("http://new:11434"));
+        assert!(!text.contains("http://old:11434"));
     }
 
     #[test]
@@ -4053,17 +4641,17 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("mcp_addr".to_string(), "host-without-port".to_string())],
+                &[("reranker.url".to_string(), "not-a-url".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::InvalidValue { .. })
         ));
-        // A well-formed URL and address pass.
+        // Well-formed URLs pass.
         set_root_config_values(
             tmp.path(),
             &[
                 ("ollama_url".to_string(), "http://host:11434".to_string()),
-                ("mcp_addr".to_string(), "127.0.0.1:8765".to_string()),
+                ("reranker.url".to_string(), "http://host:8080".to_string()),
             ],
             &[],
         )
@@ -4075,12 +4663,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         set_root_config_values(
             tmp.path(),
-            &[("log_directive".to_string(), "info".to_string())],
+            &[("ollama_url".to_string(), "http://host:11434".to_string())],
             &[],
         )
         .expect("write from empty");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
     }
 
     #[test]
@@ -4088,18 +4676,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             tmp.path().join(ROOT_CONFIG_NAME),
-            "log_directive = \"info\"\n",
+            "ollama_url = \"http://host:11434\"\n",
         )
         .expect("seed config");
         // Unsetting a key the file never set is a no-op, not an error.
-        set_root_config_values(tmp.path(), &[], &["mcp_addr".to_string()]).expect("unset absent");
+        set_root_config_values(tmp.path(), &[], &["reranker.url".to_string()])
+            .expect("unset absent");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert_eq!(cfg.log_directive.as_deref(), Some("info"));
+        assert_eq!(cfg.ollama_url.as_deref(), Some("http://host:11434"));
         // Unsetting a key that is present removes it.
-        set_root_config_values(tmp.path(), &[], &["log_directive".to_string()])
+        set_root_config_values(tmp.path(), &[], &["ollama_url".to_string()])
             .expect("unset present");
         let cfg = load_root_config(tmp.path()).expect("reloads");
-        assert!(cfg.log_directive.is_none());
+        assert!(cfg.ollama_url.is_none());
     }
 
     #[test]
@@ -4110,7 +4699,7 @@ mod tests {
         assert!(matches!(
             set_root_config_values(
                 tmp.path(),
-                &[("log_directive".to_string(), "info".to_string())],
+                &[("ollama_url".to_string(), "http://host:11434".to_string())],
                 &[],
             ),
             Err(RootConfigSetError::Malformed { .. })
@@ -4119,18 +4708,30 @@ mod tests {
 
     #[test]
     fn root_config_env_override_maps_each_key() {
-        assert_eq!(root_config_env_override("ollama_url"), Some(OLLAMA_URL_ENV));
-        assert_eq!(root_config_env_override("mcp_addr"), Some(MCP_ADDR_ENV));
-        assert_eq!(root_config_env_override("log_directive"), Some(LOG_ENV));
+        // Every writable key carries an explicit decision here, so a key
+        // added to ROOT_CONFIG_KEYS without one fails this test rather
+        // than defaulting to "no env counterpart" — which would silently
+        // drop the shadowing warning the CLI prints after a write.
+        let expected: &[(&str, Option<&str>)] = &[
+            ("ollama_url", Some(OLLAMA_URL_ENV)),
+            ("search.top_k", Some(SEARCH_TOP_K_ENV)),
+            ("search.weak_threshold", Some(SEARCH_WEAK_THRESHOLD_ENV)),
+            ("reranker.url", Some(RERANKER_URL_ENV)),
+            // The supervised-server knobs are file-only by design.
+            ("reranker.ctx", None),
+            ("reranker.threads", None),
+        ];
+        let covered: Vec<&str> = expected.iter().map(|(key, _)| *key).collect();
         assert_eq!(
-            root_config_env_override("search.top_k"),
-            Some(SEARCH_TOP_K_ENV)
+            covered.as_slice(),
+            ROOT_CONFIG_KEYS,
+            "every writable key needs an env-counterpart decision, in list order",
         );
-        assert_eq!(
-            root_config_env_override("search.weak_threshold"),
-            Some(SEARCH_WEAK_THRESHOLD_ENV)
-        );
-        // The profile reference has no env counterpart by design.
+        for (key, env) in expected {
+            assert_eq!(root_config_env_override(key), *env, "key '{key}'");
+        }
+        // The profile reference is retired from the writable set and has
+        // no env counterpart; an unknown key resolves the same way.
         assert_eq!(root_config_env_override("index_profile"), None);
         assert_eq!(root_config_env_override("nope"), None);
     }

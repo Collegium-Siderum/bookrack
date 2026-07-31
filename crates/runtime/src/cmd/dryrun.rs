@@ -53,9 +53,14 @@ pub fn run(
 }
 
 /// Open a `pipeline_runs` row labeled `command` for tracking. A
-/// catalog-open failure here logs and demotes to a NULL run id; the
-/// dryrun itself proceeds unchanged.
+/// missing catalog skips tracking entirely — a preview must not
+/// materialise and migrate a database for one lifecycle row — and a
+/// catalog-open failure logs and demotes to a NULL run id; the dryrun
+/// itself proceeds unchanged either way.
 fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
+    if !cfg.catalog_db().exists() {
+        return None;
+    }
     let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
         Ok(c) => c,
         Err(err) => {

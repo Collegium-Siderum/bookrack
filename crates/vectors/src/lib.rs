@@ -362,6 +362,50 @@ pub struct SearchOptions {
     /// AB-testing recall against the ground truth without dropping
     /// the index on disk.
     pub bypass_index: bool,
+    /// Partitions whose rows this query must not return. Empty — the
+    /// default — leaves the query byte-for-byte what it would be
+    /// without the field.
+    ///
+    /// Three properties of the mechanism:
+    ///
+    /// * Only [`ChunkStore::search_with`] honours it.
+    ///   [`ChunkStore::search_partition_with`] ignores it, since a
+    ///   search already confined to one partition has nothing to
+    ///   exclude.
+    /// * The exclusion is a metadata filter over the candidates the
+    ///   ANN query produces, not a narrowing of the IVF cells it
+    ///   probes. Excluding partitions that dominate the neighbourhood
+    ///   can therefore return fewer than `top_k` hits unless `nprobes`
+    ///   is raised to compensate.
+    /// * Indices that name no stored partition are silently inert —
+    ///   [`PartitionIdx::new`] validates nothing, so an out-of-range
+    ///   or never-allocated index only contributes a range no row
+    ///   falls in.
+    pub exclude_partitions: Vec<PartitionIdx>,
+}
+
+/// The inclusive `start_node_id` range that `partition` owns: from its
+/// root node to the last id its block can hold.
+fn partition_bounds(partition: PartitionIdx) -> (i64, i64) {
+    (
+        partition.root().get(),
+        partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY,
+    )
+}
+
+/// A SQL predicate that holds for every row outside `excluded`: one
+/// negated range per partition, conjoined. Callers must not pass an
+/// empty slice — the empty conjunction is `TRUE`, which is a predicate
+/// the query builder need not carry at all.
+fn exclusion_predicate(excluded: &[PartitionIdx]) -> String {
+    excluded
+        .iter()
+        .map(|p| {
+            let (lo, hi) = partition_bounds(*p);
+            format!("NOT (start_node_id BETWEEN {lo} AND {hi})")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// One hit from a [`ChunkStore::search`], carrying the slim row plus
@@ -396,13 +440,6 @@ pub struct ChunkStore {
 }
 
 impl ChunkStore {
-    /// Open the chunks table under `lancedb_dir`, creating an empty one
-    /// if none exists.
-    ///
-    /// `dim` is the embedding vector dimension. It is fixed when the
-    /// table is first created; reopening a store with a different `dim`
-    /// than its rows were written with will fail later, on write or
-    /// read — a directory must be reused only with one embedding model.
     /// Open the existing chunks table under `lancedb_dir`, or return
     /// `None` if no such table is on disk.
     ///
@@ -481,6 +518,13 @@ impl ChunkStore {
         Ok(())
     }
 
+    /// Open the chunks table under `lancedb_dir`, creating an empty one
+    /// if none exists.
+    ///
+    /// `dim` is the embedding vector dimension. It is fixed when the
+    /// table is first created; reopening a store with a different `dim`
+    /// than its rows were written with will fail later, on write or
+    /// read — a directory must be reused only with one embedding model.
     pub async fn open(lancedb_dir: &Path, dim: usize) -> Result<ChunkStore> {
         ensure_lance_env();
         // Reader-version axis: a meta file written by a future binary
@@ -559,8 +603,7 @@ impl ChunkStore {
     /// same form the search prefilter uses. Re-embedding a book is
     /// therefore delete-then-append, which cannot duplicate rows.
     pub async fn delete_partition(&self, partition: PartitionIdx) -> Result<()> {
-        let lo = partition.root().get();
-        let hi = partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY;
+        let (lo, hi) = partition_bounds(partition);
         self.table
             .delete(&format!("start_node_id BETWEEN {lo} AND {hi}"))
             .await?;
@@ -580,8 +623,7 @@ impl ChunkStore {
     /// whatever order LanceDB walks the underlying fragments — callers
     /// that care about a deterministic order must sort themselves.
     pub async fn scan_partition(&self, partition: PartitionIdx) -> Result<Vec<ChunkRow>> {
-        let lo = partition.root().get();
-        let hi = partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY;
+        let (lo, hi) = partition_bounds(partition);
         let batches: Vec<RecordBatch> = self
             .table
             .query()
@@ -831,6 +873,10 @@ impl ChunkStore {
     /// forces a brute-force scan even when an index is present (an
     /// AB-testing escape hatch). When no override is set the index's
     /// built-in defaults apply.
+    ///
+    /// `opts.exclude_partitions` drops the named books' rows from the
+    /// result through a `start_node_id` range predicate; an empty list
+    /// attaches no predicate at all.
     pub async fn search_with(
         &self,
         query: &[f32],
@@ -841,6 +887,9 @@ impl ChunkStore {
             .table
             .vector_search(query)?
             .distance_type(DistanceType::Cosine);
+        if !opts.exclude_partitions.is_empty() {
+            q = q.only_if(exclusion_predicate(&opts.exclude_partitions));
+        }
         if opts.bypass_index {
             q = q.bypass_vector_index();
         }
@@ -878,6 +927,11 @@ impl ChunkStore {
     }
 
     /// [`Self::search_by_partition`] with explicit ANN overrides.
+    ///
+    /// `opts.exclude_partitions` is ignored here: the query is already
+    /// confined to `partition`, so excluding other books changes
+    /// nothing and excluding `partition` itself would make the call
+    /// pointless.
     pub async fn search_partition_with(
         &self,
         query: &[f32],
@@ -885,8 +939,7 @@ impl ChunkStore {
         top_k: usize,
         opts: SearchOptions,
     ) -> Result<Vec<SearchHit>> {
-        let lo = partition.root().get();
-        let hi = partition.get() * NODE_PARTITION_FACTOR + NODE_CAPACITY;
+        let (lo, hi) = partition_bounds(partition);
         let mut q = self
             .table
             .vector_search(query)?
@@ -1187,6 +1240,108 @@ mod tests {
             matches!(err, VectorsError::ReaderTooOld { required, current }
                 if required == too_new && current == bookrack_dbkit::READER_VERSION),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_open_on_a_missing_dir_returns_none_without_materializing_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let lancedb_dir = dir.path().join("lancedb");
+        let opened = ChunkStore::try_open(&lancedb_dir).await.expect("try_open");
+        assert!(opened.is_none(), "no table on disk must read as None");
+        assert!(
+            !lancedb_dir.exists(),
+            "a read-only probe must not leave a half-built lancedb layout on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_open_refuses_a_meta_stamp_above_this_binarys_reader_version() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let too_new = bookrack_dbkit::READER_VERSION + 1;
+        // Only the sidecar exists — no chunks table. The reader-version
+        // guard must fire before the table probe, so the refusal wins
+        // over the `Ok(None)` a missing table would otherwise produce.
+        let forged = meta::VectorsMeta {
+            schema_version: meta::SCHEMA_VERSION,
+            min_reader_version: Some(too_new),
+            kind: "ivf-flat".to_string(),
+            num_partitions: 64,
+            num_sub_vectors: None,
+            num_bits: None,
+            default_nprobes: 40,
+            default_refine_factor: None,
+            built_at: "2026-06-04T00:00:00Z".to_string(),
+            built_at_chunk_count: 0,
+            churn_since_rebuild: 0,
+            lance_index_name: crate::DEFAULT_INDEX_NAME.to_string(),
+        };
+        meta::store(dir.path(), &forged).expect("store forged meta");
+
+        let Err(err) = ChunkStore::try_open(dir.path()).await else {
+            panic!("try_open must refuse a too-new reader stamp")
+        };
+        assert!(
+            matches!(err, VectorsError::ReaderTooOld { required, current }
+                if required == too_new && current == bookrack_dbkit::READER_VERSION),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_open_finds_the_existing_table_and_its_dimension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        {
+            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("append");
+        }
+        let store = ChunkStore::try_open(dir.path())
+            .await
+            .expect("try_open")
+            .expect("table present");
+        assert_eq!(store.dimension(), DIM);
+        assert_eq!(store.count_rows().await.expect("count"), 1);
+    }
+
+    #[tokio::test]
+    async fn open_with_a_mismatched_dim_hint_adopts_the_on_disk_dimension() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        {
+            let store = ChunkStore::open(dir.path(), DIM).await.expect("open");
+            store
+                .append(&[row(1, 1, [1.0, 0.0, 0.0, 0.0])])
+                .await
+                .expect("append");
+        }
+        // Reopen with a wrong hint: the table schema is the source of
+        // truth, so the handle must reflect the on-disk dimension.
+        let reopened = ChunkStore::open(dir.path(), DIM + 3).await.expect("reopen");
+        assert_eq!(
+            reopened.dimension(),
+            DIM,
+            "the on-disk schema, not the caller's hint, fixes the dimension"
+        );
+        // Write validation follows the adopted dimension on both sides:
+        // an on-disk-dim row is accepted, a hint-dim row is rejected.
+        reopened
+            .append(&[row(1, 2, [0.0, 1.0, 0.0, 0.0])])
+            .await
+            .expect("append at the on-disk dimension");
+        let mut bad = row(1, 3, [0.0, 0.0, 1.0, 0.0]);
+        bad.vector = vec![0.0; DIM + 3];
+        let err = reopened.append(&[bad]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VectorsError::DimensionMismatch {
+                    got: 7,
+                    expected: 4
+                }
+            ),
+            "got {err:?}"
         );
     }
 
@@ -1767,6 +1922,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whole_store_search_skips_excluded_partitions() {
+        let (_dir, store) = fresh_store().await;
+        // Three books carrying the same two directions: nothing but the
+        // exclusion predicate can tell their rows apart.
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(2, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(3, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(3, 2, [0.0, 1.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+
+        // Two exclusions, so the conjunction of the negated ranges is
+        // exercised: a disjunction would let every row through.
+        let hits = store
+            .search_with(
+                &[0.9, 0.1, 0.0, 0.0],
+                6,
+                SearchOptions {
+                    exclude_partitions: vec![PartitionIdx::new(1), PartitionIdx::new(3)],
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("search_with");
+
+        assert_eq!(hits.len(), 2, "only the unexcluded book's rows survive");
+        for hit in &hits {
+            assert_eq!(hit.start_node_id.partition(), PartitionIdx::new(2));
+        }
+        assert_eq!(hits[0].text, "chunk p2 o1", "nearest-first order holds");
+    }
+
+    #[tokio::test]
+    async fn empty_exclusion_matches_the_unfiltered_search() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 1, [0.0, 0.0, 1.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+
+        let hits = store
+            .search_with(
+                &[0.9, 0.1, 0.0, 0.0],
+                6,
+                SearchOptions {
+                    exclude_partitions: Vec::new(),
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("search_with");
+
+        // Every appended row comes back: an empty list must attach no
+        // predicate at all, not an empty one that matches nothing.
+        let mut texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        texts.sort_unstable();
+        assert_eq!(texts, ["chunk p1 o1", "chunk p1 o2", "chunk p2 o1"]);
+    }
+
+    #[tokio::test]
+    async fn partition_search_ignores_the_exclusion_list() {
+        let (_dir, store) = fresh_store().await;
+        store
+            .append(&[
+                row(1, 1, [1.0, 0.0, 0.0, 0.0]),
+                row(1, 2, [0.0, 1.0, 0.0, 0.0]),
+                row(2, 1, [1.0, 0.0, 0.0, 0.0]),
+            ])
+            .await
+            .expect("append");
+
+        // Excluding the very partition the search is confined to has no
+        // effect: the single-book form does not read the list.
+        let hits = store
+            .search_partition_with(
+                &[0.9, 0.1, 0.0, 0.0],
+                PartitionIdx::new(1),
+                4,
+                SearchOptions {
+                    exclude_partitions: vec![PartitionIdx::new(1), PartitionIdx::new(2)],
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("search_partition_with");
+
+        assert_eq!(hits.len(), 2);
+        for hit in &hits {
+            assert_eq!(hit.start_node_id.partition(), PartitionIdx::new(1));
+        }
+    }
+
+    #[tokio::test]
     async fn optimize_on_an_empty_table_is_a_noop() {
         let (_dir, store) = fresh_store().await;
         store.optimize().await.expect("optimize");
@@ -1881,12 +2138,72 @@ mod tests {
             nprobes: Some(5),
             refine_factor: Some(2),
             bypass_index: false,
+            exclude_partitions: Vec::new(),
         };
         let hits = store
             .search_with(&[0.9, 0.1, 0.0, 0.0], 2, opts)
             .await
             .expect("search_with");
         assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn nprobes_and_refine_overrides_apply_on_a_real_ivf_index() {
+        // Build a real IVF-flat index so the overrides reach an actual
+        // ANN query plan instead of the no-index brute-force fallback.
+        let (dir, store) = fresh_store().await;
+        let rows: Vec<ChunkRow> = (0..300)
+            .map(|i| {
+                let v = i as f32 / 300.0;
+                row(1, i + 1, [v, 1.0 - v, 0.5, 0.25])
+            })
+            .collect();
+        store.append(&rows).await.expect("append");
+        let cfg = AnnConfig {
+            kind: AnnKind::IvfFlat,
+            num_partitions: 2,
+            num_sub_vectors: None,
+            num_bits: None,
+            nprobes: 1,
+            refine_factor: None,
+        };
+        store
+            .build_ann_index(&cfg, dir.path(), fixed_ts())
+            .await
+            .expect("build");
+
+        // With nprobes covering every IVF cell, the indexed search is
+        // exhaustive and must agree with a brute-force scan of the
+        // same query — result set and order both.
+        let query = [0.0, 1.0, 0.5, 0.25];
+        let indexed = store
+            .search_with(
+                &query,
+                3,
+                SearchOptions {
+                    nprobes: Some(2),
+                    refine_factor: Some(2),
+                    bypass_index: false,
+                    exclude_partitions: Vec::new(),
+                },
+            )
+            .await
+            .expect("indexed search");
+        let brute = store
+            .search_with(
+                &query,
+                3,
+                SearchOptions {
+                    bypass_index: true,
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("brute-force search");
+        let indexed_texts: Vec<&str> = indexed.iter().map(|h| h.text.as_str()).collect();
+        let brute_texts: Vec<&str> = brute.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(indexed_texts, brute_texts);
+        assert_eq!(indexed[0].text, "chunk p1 o1", "exact match ranks first");
     }
 
     #[tokio::test]

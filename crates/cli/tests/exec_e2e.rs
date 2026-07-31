@@ -3,51 +3,37 @@
 //! End-to-end round-trip for `bookrack exec library.info` against a
 //! live `bookrack run` daemon.
 //!
-//! Marked `#[ignore]` because the daemon's startup path opens a
-//! `bookrack_query::Library`, which probes the configured embedder
-//! (Ollama by default). That is a real network call that cannot
-//! be made on a CI runner without a local Ollama or a stand-in.
-//!
-//! Run it manually after wiring up Ollama against the configured
-//! `BOOKRACK_DATA_DIR`:
-//!
-//! ```text
-//! cargo test -p bookrack-cli --test exec_e2e -- --ignored --nocapture
-//! ```
+//! The embedder probe on the daemon's startup path is answered by
+//! [`EmbedStub`], so no Ollama daemon is required.
 
 mod common;
 
 use std::time::Duration;
 
+use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
-use crate::common::{DaemonProcess, bookrack_bin, wait_for_lock};
+use crate::common::{DaemonProcess, wait_for_lock};
 
 #[tokio::test]
-#[ignore]
 async fn library_info_round_trips_through_running_daemon() {
-    let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
-    let data_dir = tempfile::tempdir().expect("data tempdir");
-    let lock_path = runtime_dir.path().join("bookrack.tty.lock");
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
 
-    let daemon = DaemonProcess::spawn(
-        Command::new(bookrack_bin())
-            .arg("run")
-            .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-            .env("BOOKRACK_DATA_DIR", data_dir.path()),
-    )
-    .expect("spawn bookrack run");
+    let mut daemon_cmd =
+        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    daemon_cmd.arg("run");
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
 
     assert!(
         wait_for_lock(&lock_path, Duration::from_secs(20)).await,
         "session lock did not appear; bookrack run may have failed to start",
     );
 
-    let output = Command::new(bookrack_bin())
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
         .arg("exec")
         .arg("library.info")
         .arg("{}")
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
         .output()
         .await
         .expect("run bookrack exec");
@@ -72,12 +58,20 @@ async fn library_info_round_trips_through_running_daemon() {
             .status()
             .await;
     }
-    let (status, _stdout, _stderr) = daemon
+    let (status, _stdout, stderr) = daemon
         .wait_with_output(Duration::from_secs(5))
         .await
         .expect("daemon must exit within 5 s of SIGTERM");
-    assert!(
-        status.code().is_some() || status.success(),
-        "daemon exited abnormally: {status:?}",
+    // A signalled shutdown unwinds the session and leaves through
+    // `std::process::exit(0)`, so the only acceptable status is a clean
+    // zero: dying from the signal itself, or unwinding into an error
+    // code, both mean the graceful path did not run. The session lock
+    // file is left on disk on purpose — it carries an advisory flock
+    // the OS releases at exit — so its presence afterwards is not a
+    // leak and is deliberately not asserted here.
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "SIGTERM must produce a clean exit: status={status:?} stderr={stderr}",
     );
 }

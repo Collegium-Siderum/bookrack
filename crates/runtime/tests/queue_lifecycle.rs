@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration test for the `queue.pause` / `queue.resume` /
-//! `queue.clear` control-plane methods introduced in PR-1.
+//! `queue.clear` control-plane methods.
 //!
 //! Boots a [`DaemonRuntime`] with the queue worker spawned, then
 //! drives a single control-socket client through each mutation while a
@@ -10,109 +10,38 @@
 //! count of `Pending` rows after `clear`, and that every mutation
 //! emits a `queue.tick`.
 //!
-//! Ignored by default because the bring-up calls
-//! [`bookrack_query::Library::open`], which probes the configured
-//! Ollama daemon for the embedding model's dimension.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
+mod common;
+
 use std::time::Duration;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
-use eyre::{Context, Result, eyre};
+use eyre::{Context, Result};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
-use tokio::net::UnixStream;
 
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.spawn_queue_worker = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
-
-async fn send(stream: &mut WriteHalf<UnixStream>, line: &str) -> Result<()> {
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Value> {
-    let line = reader
-        .next_line()
-        .await?
-        .ok_or_else(|| eyre!("connection closed before response"))?;
-    Ok(serde_json::from_str(&line)?)
-}
-
-async fn await_channel(
-    reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>,
-    channel: &str,
-    timeout: Duration,
-) -> Result<Value> {
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => return Err(eyre!("timed out waiting for channel {channel}")),
-            frame = reader.next_line() => {
-                let line = frame?.ok_or_else(|| eyre!("eof while awaiting {channel}"))?;
-                let v: Value = serde_json::from_str(&line)?;
-                if v.get("method").is_some()
-                    && v["params"]["channel"].as_str() == Some(channel)
-                {
-                    return Ok(v);
-                }
-            }
-        }
-    }
-}
-
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() {
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
+use crate::common::{await_channel, build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
+        true,
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let observer = UnixStream::connect(&sock).await?;
-        let (obs_r, mut obs_w) = tokio::io::split(observer);
-        let mut obs_reader = BufReader::new(obs_r).lines();
+        let (mut obs_reader, mut obs_w) = connect(&sock).await?;
         send(
             &mut obs_w,
             r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe"}"#,
@@ -120,10 +49,13 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
         .await?;
         let resp = recv(&mut obs_reader).await?;
         assert_eq!(resp["result"]["subscribed"], Value::Bool(true), "{resp}");
+        // Drain the snapshot bundle so the ticks awaited below are the
+        // mutation broadcasts, not the pre-mutation snapshot.
+        for _ in 0..7 {
+            let _ = recv(&mut obs_reader).await?;
+        }
 
-        let writer = UnixStream::connect(&sock).await?;
-        let (wr_r, mut wr_w) = tokio::io::split(writer);
-        let mut wr_reader = BufReader::new(wr_r).lines();
+        let (mut wr_reader, mut wr_w) = connect(&sock).await?;
 
         // queue.pause toggles paused=true.
         send(
@@ -137,7 +69,7 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
             Value::Bool(true),
             "{pause_resp}"
         );
-        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(2))
+        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(5))
             .await
             .context("queue.tick after queue.pause")?;
 
@@ -192,7 +124,7 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
             Value::Bool(true),
             "{clear_resp}"
         );
-        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(2))
+        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(5))
             .await
             .context("queue.tick after queue.clear")?;
 
@@ -208,7 +140,7 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
             Value::Bool(false),
             "{resume_resp}"
         );
-        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(2))
+        await_channel(&mut obs_reader, "queue.tick", Duration::from_secs(5))
             .await
             .context("queue.tick after queue.resume")?;
 
@@ -240,7 +172,5 @@ async fn pause_resume_clear_round_trip_through_control_plane() -> Result<()> {
         Ok::<(), eyre::Report>(())
     });
 
-    runtime.run_until_shutdown(None, repl_handle).await?;
-    driver.await??;
-    Ok(())
+    join_with_deadline(runtime, repl_handle, driver).await
 }

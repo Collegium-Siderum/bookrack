@@ -507,9 +507,11 @@ impl AuditProfile {
         }
     }
 
-    /// The `strict` profile: built on `default`, raises a few signals
-    /// the team has chosen to treat as harder errors. The exact set is
-    /// stable across patches.
+    /// The `strict` profile: currently the `default` toggle set under a
+    /// distinct name, reserved for future upgrades that promote selected
+    /// signals to higher severities. Until such an upgrade lands its
+    /// effective fingerprint equals `default_profile`; only `name`
+    /// differs.
     pub fn strict() -> Self {
         let mut profile = Self::default_profile();
         profile.name = PROFILE_STRICT.to_string();
@@ -729,30 +731,69 @@ mod tests {
 
     #[test]
     fn trust_source_profile_disables_every_toggle() {
+        // Walked off the serialized profile rather than listed by hand,
+        // so a toggle added to any section is covered the day it lands.
+        // The hand-written list this replaces had already drifted past
+        // `publisher.whitelist_normalize_abbreviations`.
         let profile = AuditProfile::trust_source();
         assert_eq!(profile.name, PROFILE_TRUST_SOURCE);
-        assert!(!profile.audit_enabled);
-        assert!(!profile.year.range_check);
-        assert!(!profile.year.pdf_likely_file_date);
-        assert!(!profile.year.timestamp_form);
-        assert!(!profile.year.cross_field_filename_override);
-        assert!(!profile.title.placeholder_check);
-        assert!(!profile.title.purely_numeric);
-        assert!(!profile.title.any_bracketed_enabled());
-        assert!(!profile.language.bcp47_check);
-        assert!(!profile.language.body_script_match);
-        assert!(!profile.publisher.url_watermark);
-        assert!(!profile.publisher.drop_10digit_isbn_to_filename);
-        assert!(!profile.toc_shape.suspicious_flat);
-        assert!(!profile.toc_shape.heading_block_skew);
-        assert!(!profile.toc_shape.empty_large_body);
-        assert!(!profile.source_prior.enabled);
-        assert!(!profile.copyright_blocks.enabled);
-        assert!(!profile.filename_parser.enabled);
-        assert!(!profile.extract.epub_year_range_check);
-        assert!(!profile.extract.epub_isbn_recognition);
-        assert!(!profile.extract.marc_role_mapping);
-        assert!(!profile.extract.txt_toc_enabled);
+
+        let toggles = toggle_states(&profile);
+        assert_eq!(
+            toggles.len(),
+            TOGGLE_COUNT,
+            "every boolean in the profile is enumerated; a schema change belongs in this count: {:?}",
+            toggles.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        );
+        let still_on: Vec<&str> = toggles
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(
+            still_on.is_empty(),
+            "trust-source leaves these toggles on: {still_on:?}",
+        );
+
+        // Non-empty anchor: the default profile turns most of the same
+        // switches on, so an all-off reading is a property of
+        // trust-source rather than of the enumeration.
+        let default_on = toggle_states(&AuditProfile::default_profile())
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .count();
+        assert!(
+            default_on > toggles.len() / 2,
+            "the default profile should leave most toggles on, got {default_on}",
+        );
+    }
+
+    /// Number of boolean toggles the profile schema carries. Pinned so
+    /// an enumeration that silently stops finding them fails instead of
+    /// passing vacuously.
+    const TOGGLE_COUNT: usize = 26;
+
+    /// Every toggle and its state, read through the same summary the
+    /// fingerprint and the operator-facing report are built from, so
+    /// nothing here names a toggle or re-implements the walk.
+    fn toggle_states(profile: &AuditProfile) -> Vec<(String, bool)> {
+        let summary = profile_toggle_summary(profile).expect("a profile summarizes");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&summary).expect("the summary is a JSON array");
+        entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry["name"]
+                        .as_str()
+                        .expect("each entry names a toggle")
+                        .to_string(),
+                    entry["enabled"]
+                        .as_bool()
+                        .expect("each entry carries state"),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -761,6 +802,26 @@ mod tests {
         assert!(AuditProfile::from_named(PROFILE_TRUST_SOURCE).is_some());
         assert!(AuditProfile::from_named(PROFILE_STRICT).is_some());
         assert!(AuditProfile::from_named("unknown-profile").is_none());
+    }
+
+    #[test]
+    fn strict_currently_matches_the_default_toggle_set() {
+        let strict = AuditProfile::strict();
+        let default = AuditProfile::default_profile();
+        // The name is the only difference the two carry.
+        assert_eq!(strict.name, PROFILE_STRICT);
+        assert_eq!(default.name, PROFILE_DEFAULT);
+        assert_eq!(
+            profile_fingerprint(&strict).expect("strict fingerprint"),
+            profile_fingerprint(&default).expect("default fingerprint"),
+            "strict must equal default until an upgrade promotes signals",
+        );
+        // The pin is not vacuous: a profile that genuinely differs in its
+        // toggles produces a different fingerprint.
+        assert_ne!(
+            profile_fingerprint(&strict).expect("strict fingerprint"),
+            profile_fingerprint(&AuditProfile::trust_source()).expect("trust-source fingerprint"),
+        );
     }
 
     #[test]
@@ -832,6 +893,101 @@ mod tests {
         std::fs::write(&overlay, "not = valid = toml\n").unwrap();
         let err = AuditProfile::load_from(dir.path()).unwrap_err();
         assert!(matches!(err, LoadError::Parse { .. }));
+    }
+
+    #[test]
+    fn overlay_ratio_outside_unit_range_is_rejected() {
+        // One probe per rejection class: above 1.0, negative, and NaN.
+        // The field name in the error identifies which knob misfired.
+        let cases = [
+            (
+                "schema_version = 1\n\n[quality]\nreplacement_ocr = 1.5\n",
+                "quality.replacement_ocr",
+                1.5,
+            ),
+            (
+                "schema_version = 1\n\n[language]\nbody_cjk_min_ratio = -0.25\n",
+                "language.body_cjk_min_ratio",
+                -0.25,
+            ),
+            (
+                "schema_version = 1\n\n[quality]\npua_ocr = nan\n",
+                "quality.pua_ocr",
+                f64::NAN,
+            ),
+        ];
+        for (overlay_toml, expected_field, expected_value) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = AuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::RatioOutOfRange { field, value, .. } => {
+                    assert_eq!(field, expected_field);
+                    assert!(
+                        value == expected_value || (value.is_nan() && expected_value.is_nan()),
+                        "error carries the offending value: {value} vs {expected_value}",
+                    );
+                }
+                other => panic!("expected RatioOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_ratio_in_range_lands_as_basis_points() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[quality]\nreplacement_ocr = 0.35\n\n\
+             [language]\nbody_cjk_min_ratio = 0.0\nbody_cjk_max_ratio = 1.0\n",
+        )
+        .unwrap();
+        let loaded = AuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(loaded.quality.replacement_ocr_bp, 3500);
+        assert_eq!(loaded.language.body_cjk_min_ratio_bp, 0);
+        assert_eq!(loaded.language.body_cjk_max_ratio_bp, 10_000);
+    }
+
+    #[test]
+    fn overlay_chars_per_page_outside_u32_domain_is_rejected() {
+        // A negative, NaN, or oversized count must be refused, not
+        // silently saturated to 0 / u32::MAX by the float-to-int cast.
+        let cases = [
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_ocr = -50\n",
+                "quality.chars_per_page_ocr",
+            ),
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_doubt = nan\n",
+                "quality.chars_per_page_doubt",
+            ),
+            (
+                "schema_version = 1\n\n[quality]\nchars_per_page_ocr = 5e9\n",
+                "quality.chars_per_page_ocr",
+            ),
+        ];
+        for (overlay_toml, expected_field) in cases {
+            let dir = TempDir::new().unwrap();
+            std::fs::write(dir.path().join(PROFILE_OVERLAY_FILE), overlay_toml).unwrap();
+            let err = AuditProfile::load_from(dir.path()).unwrap_err();
+            match err {
+                LoadError::CountOutOfRange { field, .. } => assert_eq!(field, expected_field),
+                other => panic!("expected CountOutOfRange for {expected_field}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_chars_per_page_in_domain_truncates_to_the_stored_count() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(PROFILE_OVERLAY_FILE),
+            "schema_version = 1\n\n[quality]\nchars_per_page_ocr = 72.9\nchars_per_page_doubt = 300\n",
+        )
+        .unwrap();
+        let loaded = AuditProfile::load_from(dir.path()).unwrap();
+        assert_eq!(loaded.quality.chars_per_page_ocr, 72);
+        assert_eq!(loaded.quality.chars_per_page_doubt, 300);
     }
 
     #[test]

@@ -243,14 +243,39 @@ pub fn user_profile_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.{PROFILE_FILE_EXT}"))
 }
 
-/// Resolve a profile by name: a user file under `dir` wins over a
-/// built-in of the same name. Returns `Ok(None)` when neither defines the
-/// name.
-pub fn resolve(dir: &Path, name: &str) -> Result<Option<IndexProfile>, ProfileLoadError> {
+/// Resolve a profile by name, reporting which source answered.
+///
+/// A user file under `dir` wins over a built-in of the same name; the
+/// [`ProfileOrigin`] alongside the profile is what makes the two
+/// distinguishable, so a caller can say "the name you asked for came
+/// from the built-in, not from your file". `Ok(None)` when neither
+/// defines the name.
+///
+/// `dir` is an `Option` because "no user profile directory could be
+/// located" is a real state, not a directory: passing `None` resolves
+/// built-ins only. A path relative to the working directory used to
+/// stand in for it, which meant a run started in a directory that
+/// happened to contain one picked those files up.
+///
+/// Only `NotFound` falls back to the built-in. A user file that exists
+/// but cannot be read or does not parse is an error — that asymmetry is
+/// deliberate: a broken file the caller wrote is worth saying out loud,
+/// where an absent one is not.
+pub fn resolve(
+    dir: Option<&Path>,
+    name: &str,
+) -> Result<Option<(IndexProfile, ProfileOrigin)>, ProfileLoadError> {
+    let builtin = || IndexProfile::from_named(name).map(|p| (p, ProfileOrigin::BuiltIn));
+    let Some(dir) = dir else {
+        return Ok(builtin());
+    };
     let path = user_profile_path(dir, name);
     match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(parse_str(&text, &path.to_string_lossy())?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(IndexProfile::from_named(name)),
+        Ok(text) => Ok(Some((
+            parse_str(&text, &path.to_string_lossy())?,
+            ProfileOrigin::User,
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(builtin()),
         Err(source) => Err(ProfileLoadError::Io {
             path: path.to_string_lossy().into_owned(),
             reason: source.to_string(),
@@ -260,11 +285,15 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<IndexProfile>, ProfileLo
 
 /// List every profile name visible under `dir`, built-ins merged with the
 /// user directory, sorted, each marked with its origin and whether a user
-/// file shadows a built-in. A user directory that cannot be read is
-/// treated as empty — only the built-ins are listed.
-pub fn list_profiles(dir: &Path) -> Vec<ProfileEntry> {
+/// file shadows a built-in. A user directory that cannot be read — or,
+/// as `None`, one that could not be located at all — is treated as
+/// empty: only the built-ins are listed.
+pub fn list_profiles(dir: Option<&Path>) -> Vec<ProfileEntry> {
     let mut user_names: Vec<String> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
+    if let Ok(entries) = dir
+        .ok_or(())
+        .and_then(|d| std::fs::read_dir(d).map_err(|_| ()))
+    {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some(PROFILE_FILE_EXT)
@@ -341,6 +370,66 @@ mod tests {
         assert_eq!(quality.reranker.top_k_out, Some(10));
     }
 
+    /// The two sources are told apart, which is the whole point of the
+    /// return type: the same name can be answered by a file the caller
+    /// wrote or by the shipped default, and before this they were
+    /// indistinguishable.
+    #[test]
+    fn resolve_reports_whether_a_user_file_or_a_builtin_answered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let (_, origin) = resolve(Some(dir.path()), PROFILE_QWEN3_06B_DEFAULT)
+            .expect("resolves")
+            .expect("the built-in answers");
+        assert_eq!(origin, ProfileOrigin::BuiltIn);
+
+        std::fs::write(
+            user_profile_path(dir.path(), PROFILE_QWEN3_06B_DEFAULT),
+            QWEN3_06B_DEFAULT_TOML,
+        )
+        .expect("write user profile");
+        let (_, origin) = resolve(Some(dir.path()), PROFILE_QWEN3_06B_DEFAULT)
+            .expect("resolves")
+            .expect("the user file answers");
+        assert_eq!(origin, ProfileOrigin::User);
+    }
+
+    /// A guardrail on the asymmetry: only `NotFound` falls back. A user
+    /// file that exists but does not parse must stay an error, or a
+    /// typo in it is silently answered by the built-in of the same name
+    /// — the exact confusion the origin was added to remove.
+    #[test]
+    fn a_malformed_user_profile_still_errors_rather_than_falling_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            user_profile_path(dir.path(), PROFILE_QWEN3_06B_DEFAULT),
+            "this is not toml = = =",
+        )
+        .expect("write user profile");
+        assert!(
+            resolve(Some(dir.path()), PROFILE_QWEN3_06B_DEFAULT).is_err(),
+            "a broken user file must not be papered over by the built-in",
+        );
+    }
+
+    /// No user profile directory is a state the caller states, not a
+    /// path. Passing `None` resolves built-ins and consults no
+    /// directory at all — in particular not one that a working
+    /// directory happens to contain.
+    #[test]
+    fn an_absent_user_profile_directory_resolves_built_ins_only() {
+        let (profile, origin) = resolve(None, PROFILE_QWEN3_06B_DEFAULT)
+            .expect("resolves")
+            .expect("the built-in answers");
+        assert_eq!(profile.name, PROFILE_QWEN3_06B_DEFAULT);
+        assert_eq!(origin, ProfileOrigin::BuiltIn);
+        assert!(
+            resolve(None, "no-such-profile")
+                .expect("resolves")
+                .is_none()
+        );
+    }
+
     #[test]
     fn from_named_rejects_an_unknown_name() {
         assert!(IndexProfile::from_named("no-such-profile").is_none());
@@ -356,12 +445,13 @@ mod tests {
         )
         .expect("write user profile");
 
-        let resolved = resolve(dir.path(), PROFILE_QWEN3_06B_DEFAULT)
+        let (resolved, origin) = resolve(Some(dir.path()), PROFILE_QWEN3_06B_DEFAULT)
             .expect("resolves")
             .expect("some profile");
         assert_eq!(resolved.embed.dim, 2048, "user file should win");
+        assert_eq!(origin, ProfileOrigin::User);
 
-        let listed = list_profiles(dir.path());
+        let listed = list_profiles(Some(dir.path()));
         let shadowed = listed
             .iter()
             .find(|e| e.name == PROFILE_QWEN3_06B_DEFAULT)
@@ -373,6 +463,10 @@ mod tests {
     #[test]
     fn resolve_returns_none_for_an_unknown_name() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(resolve(dir.path(), "nope").expect("resolves").is_none());
+        assert!(
+            resolve(Some(dir.path()), "nope")
+                .expect("resolves")
+                .is_none()
+        );
     }
 }

@@ -53,6 +53,7 @@ crates/app/web/dist/*
 # OS / editor cruft
 .DS_Store
 Thumbs.db
+/.vscode/
 
 # Drafts
 /drafts

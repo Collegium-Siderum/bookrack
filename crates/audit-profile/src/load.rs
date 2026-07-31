@@ -29,6 +29,13 @@ pub enum LoadError {
         field: &'static str,
         value: f64,
     },
+    /// A count overlay value was negative, NaN, or too large for the
+    /// stored `u32` field.
+    CountOutOfRange {
+        path: PathBuf,
+        field: &'static str,
+        value: f64,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -50,6 +57,12 @@ impl std::fmt::Display for LoadError {
                 "overlay `{field}` in {} has value {value}, expected a ratio in 0.0..=1.0",
                 path.display()
             ),
+            Self::CountOutOfRange { path, field, value } => write!(
+                f,
+                "overlay `{field}` in {} has value {value}, expected a whole count in 0..={}",
+                path.display(),
+                u32::MAX
+            ),
         }
     }
 }
@@ -66,6 +79,20 @@ fn ratio_to_bp(value: f64, path: &Path, field: &'static str) -> Result<u32, Load
         });
     }
     Ok((value * 10_000.0) as u32)
+}
+
+/// Convert a non-negative count to the stored `u32`. Rejects NaN,
+/// negative, and out-of-`u32` values instead of letting the `as u32`
+/// cast saturate silently; a fractional count truncates.
+fn count_to_u32(value: f64, path: &Path, field: &'static str) -> Result<u32, LoadError> {
+    if !value.is_finite() || !(0.0..=u32::MAX as f64).contains(&value) {
+        return Err(LoadError::CountOutOfRange {
+            path: path.to_path_buf(),
+            field,
+            value,
+        });
+    }
+    Ok(value as u32)
 }
 
 impl std::error::Error for LoadError {}
@@ -291,10 +318,12 @@ fn apply_overlay(
     }
     if let Some(s) = file.quality {
         if let Some(v) = s.chars_per_page_ocr {
-            profile.quality.chars_per_page_ocr = v as u32;
+            profile.quality.chars_per_page_ocr =
+                count_to_u32(v, path, "quality.chars_per_page_ocr")?;
         }
         if let Some(v) = s.chars_per_page_doubt {
-            profile.quality.chars_per_page_doubt = v as u32;
+            profile.quality.chars_per_page_doubt =
+                count_to_u32(v, path, "quality.chars_per_page_doubt")?;
         }
         if let Some(v) = s.replacement_ocr {
             profile.quality.replacement_ocr_bp = ratio_to_bp(v, path, "quality.replacement_ocr")?;

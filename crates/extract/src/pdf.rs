@@ -1042,3 +1042,72 @@ mod fallback_tests {
         assert!(!is_page_number("12", 40.0, 0.0));
     }
 }
+
+#[cfg(test)]
+mod lock_tests {
+    use std::path::PathBuf;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use bookrack_audit_profile::QualityThresholds;
+
+    use super::*;
+
+    fn probe_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pdf/prose_en.pdf")
+    }
+
+    /// How long one uncontended extraction of the probe fixture takes,
+    /// or `None` when [`crate::pdfium_gate`] reports the native library
+    /// absent.
+    fn uncontended_extraction() -> Option<Duration> {
+        if !crate::pdfium_gate::available() {
+            return None;
+        }
+        let start = Instant::now();
+        match extract(&probe_fixture(), &QualityThresholds::default()) {
+            Ok(_) => Some(start.elapsed()),
+            Err(e) => panic!("probe fixture failed to extract: {e}"),
+        }
+    }
+
+    #[test]
+    fn extract_waits_for_the_extraction_lock() {
+        let Some(solo) = uncontended_extraction() else {
+            return;
+        };
+        // The window a held guard must keep a competing extraction out
+        // for, scaled from the uncontended time so that a slow machine
+        // cannot pass this by being slow rather than by being blocked.
+        let window = (solo * 20).max(Duration::from_millis(500));
+
+        let guard = EXTRACTION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let contender = thread::spawn(move || {
+            let outcome = extract(&probe_fixture(), &QualityThresholds::default());
+            let _ = finished_tx.send(());
+            outcome
+        });
+
+        assert!(
+            matches!(
+                finished_rx.recv_timeout(window),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "an extraction ran to completion while EXTRACTION_LOCK was held",
+        );
+
+        drop(guard);
+        finished_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the waiting extraction proceeds once the guard drops");
+        let outcome = contender.join().expect("contending extraction thread");
+        assert!(
+            matches!(outcome, Ok(ExtractOutcome::Extracted(_))),
+            "the waiting extraction succeeds after the guard drops, got {outcome:?}",
+        );
+    }
+}

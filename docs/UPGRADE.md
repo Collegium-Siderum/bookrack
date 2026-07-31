@@ -185,17 +185,27 @@ What you will see:
 Migrating, per library. Nothing here rebuilds an index or needs a
 running daemon:
 
-1. **See what the library's vectors were written with.** `bookrack
+1. **Delete the retired lines first.** `bookrack libraries config <name>
+   --unset embed_model` (and `--unset index_profile`, if the root
+   carries one) removes them while leaving the rest of the file, and its
+   comments, alone. Unsetting a retired key still works — it is the cure
+   the refusal prescribes, and it reads the registry directly rather
+   than resolving a data root, which is why it works while the line is
+   still there. Every step below resolves a root, so it has to go first.
+   Unset `BOOKRACK_EMBED_MODEL` in any shell profile or CI environment
+   that exports it; it does nothing now, but a variable that does
+   nothing is a trap for the next reader.
+2. **See what the library's vectors were written with.** `bookrack
    index-profile current --library <name>` prints the `stamps:` line.
    That is the model the built index carries, and the one your profile
    must declare.
-2. **Pick a profile that declares that same model** and declare it:
+3. **Pick a profile that declares that same model** and declare it:
    `bookrack libraries config <name> index_profile=<profile>`.
    `bookrack index-profile list` shows the built-ins and what each
    declares. The declaration is written to the library's manifest; a root
    old enough to have no manifest gets one minted here, which is why a
    new `bookrack-library.toml` may appear.
-3. **Confirm the profile matches the vectors you already have.** Re-run
+4. **Confirm the profile matches the vectors you already have.** Re-run
    `index-profile current` and read its `stamps:` line:
 
    - `stamps: consistent with the built index (…)` — the profile
@@ -203,15 +213,8 @@ running daemon:
    - `stamp mismatch: embed.model: profile declares 'X' but the built
      index is stamped 'Y'` — **stop**. The library now resolves to `X`,
      and every query and embed will fail against vectors written by `Y`.
-     Go back to step 2 and pick a profile declaring `Y`, or change the
+     Go back to step 3 and pick a profile declaring `Y`, or change the
      library deliberately with `index-profile apply` (below).
-4. **Delete the retired lines.** `bookrack libraries config <name>
-   --unset embed_model` (and `--unset index_profile`, if the root
-   carries one) removes them while leaving the rest of the file, and its
-   comments, alone. Unsetting a retired key still works — it is the cure
-   the refusal prescribes. Unset `BOOKRACK_EMBED_MODEL` in any shell
-   profile or CI environment that exports it; it does nothing now, but a
-   variable that does nothing is a trap for the next reader.
 
 `index-profile apply` is a different job and is not part of this
 migration. It reconciles a library *to* a profile — rebuilding the ANN
@@ -223,11 +226,18 @@ changed, not when you are only moving where its model is declared.
 
 A library's `index_profile` reference now lives in its manifest
 (`bookrack-library.toml`), and the registry entry's copy is a cache of
-it. Nothing breaks on upgrade and there is no deadline: a reference
-declared the old way — in the root's `config.toml`, or in the registry
-entry alone — keeps resolving, because resolution reads all three
-sources and takes the first that names one, in the order manifest →
-`config.toml` → registry entry.
+it. A reference declared in the registry entry alone keeps resolving:
+resolution reads the manifest first and the entry second, taking the
+first that names one.
+
+A reference in the root's `config.toml` does not. That key is retired,
+and every command that resolves a data root refuses the file by name
+until the line goes. One offline verb — which reads the registry
+directly rather than resolving a root — clears it:
+
+```
+bookrack libraries config <name> --unset index_profile
+```
 
 To move a library's reference to its new home, declare it once:
 
@@ -241,10 +251,10 @@ or, without the reconciliation plan,
 bookrack libraries config <name> index_profile=<profile>
 ```
 
-Either writes the manifest, refreshes the registry cache, and clears a
-superseded `config.toml` declaration. `bookrack index-profile current`
-names the source in effect (`origin`) and lists any source still holding
-a different name (`drift`); `bookrack doctor` warns about the same drift.
+Either writes the manifest and refreshes the registry cache. `bookrack
+index-profile current` names the source in effect (`origin`) and lists
+any source still holding a different name (`drift`); `bookrack doctor`
+warns about the same drift.
 
 Two consequences worth knowing:
 
@@ -258,6 +268,39 @@ Two consequences worth knowing:
   because it is in the manifest. `bookrack libraries scan` refills the
   registry cache for every root it finds, which is also the repair for a
   registry that drifted or was lost.
+
+## Retiring the process-level keys from `config.toml`
+
+`mcp_addr` and `log_directive` are no longer `config.toml` keys. Neither
+ever resolved: both are read before a data root is known — the log
+subscriber is installed by the binary that then goes looking for a
+library, and the MCP listen address is chosen by the same process — so a
+value written inside a library was accepted, stored, and never consulted.
+Writing one succeeded, restarting the daemon changed nothing, and nothing
+said so.
+
+They are now refused by name. **A library whose `config.toml` still
+carries either line fails on every command that resolves a data root**
+until the line goes. That is the point: a hard error naming the key beats
+the silent ignore it replaces, and the error carries both the real home
+and the command that deletes the line.
+
+One offline verb — it reads the registry directly rather than resolving a
+root, so the cure is not blocked by the disease — clears them:
+
+```
+bookrack libraries config <name> --unset mcp_addr --unset log_directive
+```
+
+`bookrack libraries config <name>` with no arguments still prints the
+file, and annotates each retired line it finds.
+
+The knobs themselves are unchanged. Declare the listen address with
+`BOOKRACK_MCP_ADDR` or `bookrack run --mcp-addr`, and verbosity with
+`BOOKRACK_LOG` (plus `BOOKRACK_LOG_CONSOLE` for the stderr layer);
+[`.env.example`](../.env.example) documents both with their defaults.
+Nothing about the resolved values changes — only where they may be
+written.
 
 ## What never refreshes automatically
 
@@ -278,9 +321,10 @@ the serve-side gate (every query) refuse anything else. A library is
 not a multi-model index.
 
 The preferred front door is `bookrack index-profile apply <profile>`:
-it declares the target profile in `config.toml` and the registry entry
-before any action runs (handlers re-read the file per call, so the new
-model takes effect without a pre-reset restart), derives the reset from
+it declares the target profile in the library manifest and refreshes the
+registry cache before any action runs (handlers re-read the declaration
+per call, so the new model takes effect without a pre-reset restart),
+derives the reset from
 the stamp comparison, and demands the library name retyped before
 executing it. To rehearse, fork first and apply on the copy. The
 workflows below drive the same switch through the low-level verbs.

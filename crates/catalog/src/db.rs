@@ -142,17 +142,15 @@ impl Catalog {
                 {
                     backup_catalog(&conn, dir, stem, current)?;
                 }
-                // Foreign keys are toggled around the migration, not
-                // inside it: a future 12-step table rebuild needs them
-                // off, and `PRAGMA foreign_keys` is a no-op within the
-                // migration's transaction. `catalog.db` declares none
-                // today; the dance keeps the seam ready for one that
-                // does.
+                // Foreign keys are switched off for the migration: a
+                // 12-step table rebuild needs them off, and `PRAGMA
+                // foreign_keys` is a no-op within the migration's
+                // transaction. The unconditional enable below restores
+                // enforcement once the migration has committed.
                 conn.pragma_update(None, "foreign_keys", "OFF")?;
                 migrations()
                     .to_latest(&mut conn)
                     .map_err(CatalogError::Migrate)?;
-                conn.pragma_update(None, "foreign_keys", "ON")?;
             }
             OpenDecision::Match => {}
             // `catalog.db` is source-of-truth and never produces this
@@ -160,6 +158,15 @@ impl Catalog {
             // forward, and there is no derived-stamp axis to disagree on.
             OpenDecision::Rederive { .. } => unreachable!("catalog.db is never rederived"),
         }
+
+        // `foreign_keys` is a per-connection PRAGMA whose default is a
+        // compile-time option of the linked SQLite: the bundled build
+        // sets `SQLITE_DEFAULT_FOREIGN_KEYS=1`, stock SQLite defaults
+        // to off. The schema declares `ON DELETE CASCADE` edges
+        // (distill stage rows, pipeline run summaries, retrieval calls
+        // and hits), so enable enforcement explicitly on every open
+        // rather than relying on the vendored build flag.
+        conn.pragma_update(None, "foreign_keys", "ON")?;
 
         // Acceptance gate, run on every open: `rusqlite_migration` advances
         // `user_version` but does not check the resulting schema shape.
@@ -207,9 +214,11 @@ impl Catalog {
     /// Open the `catalog.db` at `path` for read-only access.
     ///
     /// Skips the migration step entirely — the file must already be at
-    /// the current schema revision — and locks the connection with
-    /// `PRAGMA query_only = ON`, so any subsequent write through the
-    /// resulting handle is rejected by SQLite with `SQLITE_READONLY`.
+    /// the current schema revision — and opens with the strict
+    /// read-only flags plus `PRAGMA query_only = ON`, so any write
+    /// through the resulting handle is rejected by SQLite with
+    /// `SQLITE_READONLY` and a missing file is an open failure rather
+    /// than an empty database materialised on disk.
     ///
     /// Designed for daemon-side query consumers that share one schema
     /// migration owned by a separate read-write entry point at process
@@ -217,7 +226,7 @@ impl Catalog {
     /// unmigrated or schema-drifted database is refused at open rather
     /// than discovered halfway through a query.
     pub fn open_read_only(path: &Path) -> Result<Catalog> {
-        let conn = bookrack_dbkit::open_production_query_only(path)?;
+        let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current > TARGET_VERSION {
             return Err(CatalogError::SchemaTooNew {
@@ -422,6 +431,25 @@ mod tests {
     }
 
     #[test]
+    fn reopening_a_current_version_database_enforces_foreign_keys() {
+        // The second open takes the no-migration branch; enforcement must
+        // be on regardless of the linked SQLite's compile-time default.
+        let dir = unique_dir("fk-steady-state");
+        let path = dir.join("catalog.db");
+        Catalog::open(&path).expect("first open");
+        {
+            let reopened = Catalog::open(&path).expect("second open");
+            let fk: i64 = reopened
+                .conn
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+                .expect("read pragma");
+            assert_eq!(fk, 1, "foreign_keys must be on for a current-version open");
+        }
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
     fn a_newer_schema_version_is_refused() {
         // A database whose user_version exceeds the highest migration this
         // binary defines must be refused, not downgraded.
@@ -613,6 +641,21 @@ mod tests {
     }
 
     #[test]
+    fn open_read_only_refuses_a_missing_file_without_creating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("catalog.db");
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("missing file must refuse to open")
+        };
+        assert!(
+            matches!(err, CatalogError::Sqlite(_)),
+            "expected a SQLite open failure, got {err:?}"
+        );
+        assert!(!path.exists(), "read-only open must not create catalog.db");
+    }
+
+    #[test]
     fn open_read_only_rejects_writes() {
         use crate::{IntakeStatus, NewIntake};
 
@@ -656,6 +699,89 @@ mod tests {
         let version = read_only.meta_get(SCHEMA_VERSION_KEY).expect("read");
         assert_eq!(version, Some(SCHEMA_VERSION.to_string()));
         assert!(read_only.is_read_only());
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_refuses_an_unmigrated_older_schema() {
+        // A file stopped at an early revision: user_version is below
+        // target, so only the spec-conformance gate can catch it — the
+        // read-only path never migrates forward.
+        let dir = unique_dir("read-only-older");
+        let path = dir.join("catalog.db");
+        {
+            let mut conn = Connection::open(&path).expect("seed connection");
+            migrations()
+                .to_version(&mut conn, 2)
+                .expect("stop at an early revision");
+        }
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("an old-revision file must be refused")
+        };
+        assert!(matches!(err, CatalogError::Verify(_)), "{err:?}");
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_refuses_a_newer_schema_version() {
+        let dir = unique_dir("read-only-newer");
+        let path = dir.join("catalog.db");
+        {
+            let catalog = Catalog::open(&path).expect("create");
+            catalog
+                .conn
+                .pragma_update(None, "user_version", TARGET_VERSION + 1)
+                .expect("bump user_version");
+        }
+
+        let Err(err) = Catalog::open_read_only(&path) else {
+            panic!("a newer-revision file must be refused")
+        };
+        assert!(
+            matches!(err, CatalogError::SchemaTooNew { found, expected }
+                if found == TARGET_VERSION + 1 && expected == TARGET_VERSION),
+            "{err:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_read_only_accepts_a_missing_reader_stamp_without_seeding_it() {
+        let dir = unique_dir("read-only-unseeded");
+        let path = dir.join("catalog.db");
+        {
+            let catalog = Catalog::open(&path).expect("create");
+            catalog
+                .conn
+                .execute(
+                    &format!("DELETE FROM catalog_meta WHERE key = '{MIN_READER_VERSION_KEY}'"),
+                    [],
+                )
+                .expect("remove the reader stamp");
+        }
+
+        // A missing stamp resolves to Match, and the read-only contract
+        // forbids writing the seed the read-write path would take.
+        {
+            let read_only = Catalog::open_read_only(&path).expect("open without a stamp");
+            assert_eq!(
+                read_only.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+                None,
+                "a read-only open must not seed the stamp"
+            );
+        }
+        // The next read-write open seeds it again.
+        {
+            let reopened = Catalog::open(&path).expect("read-write reopen");
+            assert_eq!(
+                reopened.meta_get(MIN_READER_VERSION_KEY).expect("read"),
+                Some(MIN_READER_VERSION.to_string())
+            );
+        }
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

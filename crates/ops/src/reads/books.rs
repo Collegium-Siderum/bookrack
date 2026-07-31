@@ -176,7 +176,7 @@ pub fn show_book<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<BookDetail
             let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
             let contributors =
                 catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
-            let corpus = Corpus::open(ops.corpus_db())?;
+            let corpus = Corpus::open_read_only(ops.corpus_db())?;
             let toc_stats = corpus
                 .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
                 .map(TocStats::from);
@@ -211,7 +211,7 @@ pub fn show_toc<E: Embedder>(ops: &Ops<E>, intake_id: i64, args: &ShowTocArgs) -
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Err(OpsError::IntakeNotFound { intake_id });
         }
-        let corpus = Corpus::open(ops.corpus_db())?;
+        let corpus = Corpus::open_read_only(ops.corpus_db())?;
         let book_root_id = PartitionIdx::new(intake_id).root();
         let q = args.to_query();
         let total = corpus.count_toc_nodes(book_root_id, &q)?;

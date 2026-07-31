@@ -62,7 +62,7 @@ pub fn read_context<E: Embedder>(
                      are book/paper only — distill exposes its own lookup",
                 ),
             };
-            let corpus = Corpus::open(corpus_path)?;
+            let corpus = Corpus::open_read_only(corpus_path)?;
             let id = target.node_id;
             let Some(anchor) = corpus.get_node(id)? else {
                 return Err(OpsError::NodeNotFound { node_id });
@@ -126,7 +126,7 @@ pub fn read_span<E: Embedder>(
                      are book/paper only — distill exposes its own lookup",
                 ),
             };
-            let corpus = Corpus::open(corpus_path)?;
+            let corpus = Corpus::open_read_only(corpus_path)?;
             let id = target.node_id;
             let Some(node) = corpus.get_node(id)? else {
                 return Err(OpsError::NodeNotFound { node_id });

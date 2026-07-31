@@ -5,11 +5,37 @@
 
 use std::path::PathBuf;
 
+#[doc(hidden)]
+pub mod help_gate;
+
+/// Renders a leaf's `Examples:` block for `#[command(after_long_help = ...)]`.
+///
+/// Each argument is one invocation with the binary name left off — the
+/// macro adds the `  $ bookrack ` prefix, so an example reads the way an
+/// operator would paste it. `concat!` folds the whole block at compile
+/// time, which is what makes it usable in an attribute; the arguments
+/// must therefore be literals, and an example must spell out its own
+/// full invocation path.
+///
+/// Exported only so `crates/cli` and `crates/runtime` can reach it from
+/// their own command definitions; it has no other consumer.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! examples {
+    ($($line:literal),+ $(,)?) => {
+        concat!("Examples:", $("\n  $ bookrack ", $line),+)
+    };
+}
+
 /// Lifecycle actions on the persistent ingest queue. Dispatch maps
 /// each variant to the matching control-plane RPC.
 #[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum QueueAction {
     /// List every row in the queue document, oldest first.
+    #[command(after_long_help = crate::examples![
+        "queue list",
+        "queue list --long",
+    ])]
     List {
         /// Print full UUIDv7 job ids instead of the 8-character
         /// prefix the table shows by default.
@@ -18,16 +44,32 @@ pub enum QueueAction {
     },
     /// Pause the worker loop. Running jobs run to completion; pending
     /// rows stay pending until `resume`.
+    #[command(after_long_help = crate::examples![
+        "queue pause",
+        "queue pause --library demo",
+    ])]
     Pause,
     /// Resume the worker loop, allowing it to pull pending rows again.
+    #[command(after_long_help = crate::examples![
+        "queue resume",
+        "queue resume --library demo",
+    ])]
     Resume,
     /// Cancel every pending row in one sweep. Running jobs are left
     /// alone.
+    #[command(after_long_help = crate::examples![
+        "queue clear",
+        "queue clear --json",
+    ])]
     Clear,
     /// Cancel the unique job whose id starts with `<JOB_ID>`.
     ///
     /// Empty prefixes are rejected. An ambiguous prefix returns an
     /// error without cancelling anything.
+    #[command(after_long_help = crate::examples![
+        "queue cancel a1b2c3d4",
+        "queue cancel a1b2c3d4 --json",
+    ])]
     Cancel {
         /// Prefix of the job's UUIDv7 to cancel. The first eight
         /// characters listed by `queue list` are usually enough.
@@ -125,6 +167,10 @@ pub enum IntakeAction {
     /// source hash, a best-effort page count, and why the text layer
     /// was rejected. Run OCR with any tool, then re-enter the product
     /// through `intake ocr`. `--json` emits the full manifest.
+    #[command(after_long_help = crate::examples![
+        "intake list-ocr-pending",
+        "intake list-ocr-pending --limit 20",
+    ])]
     ListOcrPending {
         /// Maximum number of sources to list. Omitted or zero uses the
         /// default page size; the value is clamped to the read cap.
@@ -144,6 +190,10 @@ pub enum IntakeAction {
     /// `/Pages`; pass `--expected-pages` to override it when PDFium
     /// cannot read the source, and `--allow-partial` to accept an OCR
     /// product whose sheets do not cover every page.
+    #[command(after_long_help = crate::examples![
+        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf",
+        "intake ocr /path/to/scan.md --from-pdf /path/to/scan.pdf --allow-partial",
+    ])]
     Ocr {
         /// Path to the polyocr single-file Markdown product, with
         /// page markers `<!-- page <label> (sheet <n>) -->`.
@@ -194,14 +244,32 @@ pub enum IntakeAction {
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum DistillAction {
     /// Build distilled entries for the books reachable from `<PATHS>`.
+    #[command(after_long_help = crate::examples![
+        "distill build /path/to/book.epub",
+        "distill build /path/to/book.epub --dry-run",
+    ])]
     Build(DistillBuildArgs),
     /// Re-run distill in memory and diff against the live database.
+    #[command(after_long_help = crate::examples![
+        "distill verify /path/to/book.epub",
+        "distill verify /path/to/book.epub --library demo",
+    ])]
     Verify(DistillVerifyArgs),
-    /// Statically validate each `book.toml` against the catalogs and
-    /// run a per-stage retention report against a truncated source
-    /// sample, without touching the database.
+    /// Validate each `book.toml` against the catalogs statically and
+    /// sample-run the pipeline.
+    ///
+    /// The sample run produces a per-stage retention report over a
+    /// truncated source sample, and nothing touches the database.
+    #[command(after_long_help = crate::examples![
+        "distill lint /path/to/book.epub",
+        "distill lint /path/to/book.epub --sample-lines 20",
+    ])]
     Lint(DistillLintArgs),
     /// List the registered reference books and their entry counts.
+    #[command(after_long_help = crate::examples![
+        "distill list",
+        "distill list --json",
+    ])]
     List(DistillListArgs),
 }
 
@@ -287,6 +355,10 @@ pub struct DistillListArgs {}
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum RunsAction {
     /// List recent `pipeline_runs` rows.
+    #[command(after_long_help = crate::examples![
+        "runs list",
+        "runs list --last 20",
+    ])]
     List {
         /// Cap the result to the most recent N runs. Default is no cap.
         #[arg(long, value_name = "N")]
@@ -296,8 +368,14 @@ pub enum RunsAction {
         #[arg(long, value_name = "NAME")]
         command: Option<String>,
     },
-    /// Show one run by id, with its summary verdict / flag / coverage
-    /// distributions rendered as horizontal histograms.
+    /// Show one run by id.
+    ///
+    /// The summary's verdict, flag, and coverage distributions render
+    /// as horizontal histograms.
+    #[command(after_long_help = crate::examples![
+        "runs show ingest-20260101T000000Z-a1b2c3d4",
+        "runs show ingest-20260101T000000Z-a1b2c3d4 --json",
+    ])]
     Show {
         /// The `pipeline_runs.pipeline_run_id` to show. The composite
         /// form is `<command>-<ISO8601>-<sha8>`.
@@ -312,6 +390,10 @@ pub enum RunsAction {
 #[derive(clap::Subcommand, Debug, Clone)]
 pub enum RetrievalAction {
     /// List recent retrieval calls.
+    #[command(after_long_help = crate::examples![
+        "retrieval list",
+        "retrieval list --corpus-fingerprint a1b2c3d4e5f60718",
+    ])]
     List {
         /// Cap the result to the most recent N calls. Default is no cap.
         #[arg(long, value_name = "N")]
@@ -323,6 +405,10 @@ pub enum RetrievalAction {
     },
     /// Show one retrieval call by id: call metadata and its hits in
     /// rank order.
+    #[command(after_long_help = crate::examples![
+        "retrieval show 42",
+        "retrieval show 42 --json",
+    ])]
     Show {
         /// The `mcp_tool_calls.call_id` the retrieval was logged under.
         call_id: i64,
@@ -615,24 +701,48 @@ pub enum PapersAction {
     ///
     /// Mirrors the book-side `ingest` command. With `--recursive`,
     /// every supported file under a directory is enqueued.
+    #[command(after_long_help = crate::examples![
+        "papers ingest /path/to/paper.pdf",
+        "papers ingest /path/to/papers-dir/ --recursive",
+    ])]
     Ingest(PapersIngestArgs),
     /// List papers in catalog order, paginated.
+    #[command(after_long_help = crate::examples![
+        "papers list",
+        "papers list --limit 20",
+    ])]
     List(PapersListArgs),
     /// Find papers by title substring, contributor, year, venue, or
     /// DOI.
+    #[command(after_long_help = crate::examples![
+        "papers find --title \"Sample Title\"",
+        "papers find --contributor \"Doe, Jane\"",
+    ])]
     Find(PapersFindArgs),
     /// Print the full bibliographic record of one paper by intake id.
+    #[command(after_long_help = crate::examples![
+        "papers show 101",
+        "papers show 101 --json",
+    ])]
     Show {
         /// The intake id of the paper.
         intake_id: i64,
     },
     /// Print the table of contents of one paper.
+    #[command(after_long_help = crate::examples![
+        "papers toc 101",
+        "papers toc 101 --json",
+    ])]
     Toc {
         /// The intake id of the paper.
         intake_id: i64,
     },
     /// Project one paper's stored bibliographic row onto CSL-JSON and
     /// print it to stdout.
+    #[command(after_long_help = crate::examples![
+        "papers export-csl 101",
+        "papers export-csl 101 --library demo",
+    ])]
     ExportCsl {
         /// The intake id of the paper.
         intake_id: i64,
@@ -642,6 +752,10 @@ pub enum PapersAction {
     /// Reports the absolute on-disk path, byte size, and SHA-256. The
     /// bytes are not streamed — open the path with the platform's own
     /// tools.
+    #[command(after_long_help = crate::examples![
+        "papers source 101",
+        "papers source 101 --json",
+    ])]
     Source {
         /// The intake id of the paper.
         intake_id: i64,
@@ -651,27 +765,32 @@ pub enum PapersAction {
     /// Removes the catalog cascade, the corpus partition, the vector
     /// partition, the envelope file, and the archived source PDF.
     /// Audit trail rows are preserved.
+    #[command(after_long_help = crate::examples![
+        "papers remove 101",
+        "papers remove --sha a1b2c3d4 --yes",
+    ])]
     Remove(PapersRemoveArgs),
-    /// Paper-side corpus write commands. Peer of the top-level
-    /// `corpus` subcommand for the book pipeline.
+    /// Write the paper-side corpus.
+    ///
+    /// Peer of the top-level `corpus` subcommand for the book pipeline.
     Corpus {
         #[command(subcommand)]
         action: PapersCorpusAction,
     },
-    /// Paper-side vector-store write commands. Peer of the top-level
-    /// `vectors` subcommand for the book pipeline.
+    /// Write to the paper-side vector store.
     ///
-    /// Prefer `bookrack index-profile apply`; this namespace is the
-    /// low-level escape hatch.
+    /// Peer of the top-level `vectors` subcommand for the book
+    /// pipeline. Prefer `bookrack index-profile apply`; this namespace
+    /// is the low-level escape hatch.
     Vectors {
         #[command(subcommand)]
         action: PapersVectorsAction,
     },
-    /// Paper-side index-stamp reconciliation. Peer of the top-level
-    /// `stamps` subcommand for the book pipeline.
+    /// Reconcile the paper-side index stamps.
     ///
-    /// Prefer `bookrack index-profile apply`; this namespace is the
-    /// low-level escape hatch.
+    /// Peer of the top-level `stamps` subcommand for the book
+    /// pipeline. Prefer `bookrack index-profile apply`; this namespace
+    /// is the low-level escape hatch.
     Stamps {
         #[command(subcommand)]
         action: PapersStampsAction,
@@ -682,9 +801,15 @@ pub enum PapersAction {
     /// JSONL report of IDENTIFY hit rates and predicted STRUCTURE
     /// stats. The real catalog, corpus, and vector store are not
     /// touched.
+    #[command(after_long_help = crate::examples![
+        "papers dryrun /path/to/paper.pdf",
+        "papers dryrun /path/to/papers-dir/ --stdout",
+    ])]
     Dryrun(PapersDryrunArgs),
-    /// Paper-side metadata curation commands. Peer of the top-level
-    /// `metadata` subcommand for the book pipeline.
+    /// Curate the paper-side metadata.
+    ///
+    /// Peer of the top-level `metadata` subcommand for the book
+    /// pipeline.
     Metadata {
         #[command(subcommand)]
         action: PapersMetadataAction,
@@ -696,9 +821,14 @@ pub enum PapersAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersMetadataAction {
     /// Re-run the paper-side metadata audit on an existing intake's
-    /// cached extraction. Writes only the `confidence` /
-    /// `audit_verdict` rollup; the base attrs, contributors, and
-    /// review status all stay as they are.
+    /// cached extraction.
+    ///
+    /// Writes only the `confidence` / `audit_verdict` rollup; the base
+    /// attrs, contributors, and review status all stay as they are.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reaudit 101",
+        "papers metadata reaudit 101 --audit-profile strict",
+    ])]
     Reaudit {
         /// The intake id of the paper to re-audit.
         intake_id: i64,
@@ -708,6 +838,10 @@ pub enum PapersMetadataAction {
         audit_profile: Option<String>,
     },
     /// Override one field on a paper's effective record.
+    #[command(after_long_help = crate::examples![
+        "papers metadata set 101 --field title --value \"Sample Title\"",
+        "papers metadata set 101 --field title --value \"Sample Title\" --confirmed",
+    ])]
     Set {
         /// Intake id of the paper.
         intake_id: i64,
@@ -724,6 +858,10 @@ pub enum PapersMetadataAction {
     },
     /// Remove an override on one field, reverting to the extracted
     /// value.
+    #[command(after_long_help = crate::examples![
+        "papers metadata clear 101 --field title",
+        "papers metadata clear 101 --field publisher --library demo",
+    ])]
     Clear {
         /// Intake id of the paper.
         intake_id: i64,
@@ -732,6 +870,10 @@ pub enum PapersMetadataAction {
         field: String,
     },
     /// Set an override that deliberately voids one field's value.
+    #[command(after_long_help = crate::examples![
+        "papers metadata void 101 --field publisher",
+        "papers metadata void 101 --field publisher --json",
+    ])]
     Void {
         /// Intake id of the paper.
         intake_id: i64,
@@ -741,6 +883,10 @@ pub enum PapersMetadataAction {
     },
     /// Acknowledge a flagged paper without changing its metadata —
     /// move the review row to `acknowledged`.
+    #[command(after_long_help = crate::examples![
+        "papers metadata ack 101",
+        "papers metadata ack 101 --library demo",
+    ])]
     Ack {
         /// Intake id of the paper.
         intake_id: i64,
@@ -749,6 +895,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Approve a paper's metadata as correct.
+    #[command(after_long_help = crate::examples![
+        "papers metadata approve 101",
+        "papers metadata approve 101 --json",
+    ])]
     Approve {
         /// Intake id of the paper.
         intake_id: i64,
@@ -757,6 +907,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Reject a paper's metadata as wrong.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reject 101",
+        "papers metadata reject 101 --library demo",
+    ])]
     Reject {
         /// Intake id of the paper.
         intake_id: i64,
@@ -766,6 +920,10 @@ pub enum PapersMetadataAction {
     },
     /// Move a previously approved / rejected paper back to
     /// `pending`.
+    #[command(after_long_help = crate::examples![
+        "papers metadata reopen 101",
+        "papers metadata reopen 101 --json",
+    ])]
     Reopen {
         /// Intake id of the paper.
         intake_id: i64,
@@ -774,6 +932,10 @@ pub enum PapersMetadataAction {
         notes: Option<String>,
     },
     /// Add a contributor row to a paper.
+    #[command(after_long_help = crate::examples![
+        "papers metadata contributor-add 101 --role author --name \"Doe, Jane\"",
+        "papers metadata contributor-add 101 --role author --name \"Doe, Jane\" --json",
+    ])]
     ContributorAdd {
         /// Intake id of the paper.
         intake_id: i64,
@@ -795,6 +957,10 @@ pub enum PapersMetadataAction {
         orcid: Option<String>,
     },
     /// Remove a contributor row by id.
+    #[command(after_long_help = crate::examples![
+        "papers metadata contributor-remove 7",
+        "papers metadata contributor-remove 7 --library demo",
+    ])]
     ContributorRemove {
         /// Surrogate id of the contributor row to remove (listed by
         /// `papers show`).
@@ -806,8 +972,14 @@ pub enum PapersMetadataAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersCorpusAction {
     /// Rebuild `papers_corpus.db` from the v1 extraction envelopes
-    /// recorded in `papers_dir`. Intakes whose envelope is missing,
-    /// mismatched, or corrupt are reported but skipped.
+    /// recorded in `papers_dir`.
+    ///
+    /// Intakes whose envelope is missing, mismatched, or corrupt are
+    /// reported but skipped.
+    #[command(after_long_help = crate::examples![
+        "papers corpus rebuild",
+        "papers corpus rebuild --paper 101 --dry-run",
+    ])]
     Rebuild {
         /// After the corpus tree is rebuilt, also re-embed every
         /// rebuilt paper's abstract chunks. Without this flag the
@@ -841,6 +1013,10 @@ pub enum PapersCorpusAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersVectorsAction {
     /// Build or rebuild the ANN index over `lancedb_papers`.
+    #[command(after_long_help = crate::examples![
+        "papers vectors rebuild",
+        "papers vectors rebuild --library demo",
+    ])]
     Rebuild {
         /// IVF family — `ivf-flat`, `ivf-sq`, `ivf-pq`, `ivf-hnsw-flat`,
         /// `ivf-hnsw-sq`, `ivf-hnsw-pq`.
@@ -870,16 +1046,27 @@ pub enum PapersVectorsAction {
         refine_factor: Option<u32>,
     },
     /// Drop the ANN index over `lancedb_papers` and mark the meta as
-    /// brute-force. Peer of [`WriteVectorsAction::Drop`]; the daemon
-    /// rejects the call without `--yes`.
+    /// brute-force.
+    ///
+    /// Peer of the book-side `vectors drop`; the daemon rejects the
+    /// call without `--yes`.
+    #[command(after_long_help = crate::examples![
+        "papers vectors drop",
+        "papers vectors drop --yes",
+    ])]
     Drop {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
         yes: bool,
     },
-    /// Re-embed every (or a single) paper's chunks in place: read the
-    /// existing chunk rows back from `lancedb_papers`, drop their
-    /// vectors, and rewrite under the active embedder.
+    /// Re-embed every (or a single) paper's chunks in place.
+    ///
+    /// Reads the existing chunk rows back from `lancedb_papers`, drops
+    /// their vectors, and rewrites them under the active embedder.
+    #[command(after_long_help = crate::examples![
+        "papers vectors reembed",
+        "papers vectors reembed --paper 101 --dry-run",
+    ])]
     Reembed {
         /// Restrict the reembed to one paper intake id.
         #[arg(long, value_name = "INTAKE_ID")]
@@ -897,9 +1084,16 @@ pub enum PapersVectorsAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Drop the papers chunks table, clear the papers_corpus index
-    /// stamps, and re-derive every paper's abstract chunk with the
-    /// env-configured embedding model.
+    /// Drop the papers chunks table and re-derive every paper's
+    /// abstract chunk.
+    ///
+    /// The `papers_corpus` index stamps are cleared in the same pass,
+    /// and the abstract chunks are re-derived with the env-configured
+    /// embedding model.
+    #[command(after_long_help = crate::examples![
+        "papers vectors reset",
+        "papers vectors reset --yes",
+    ])]
     Reset {
         /// Skip the destructive-action confirmation prompt.
         #[arg(long)]
@@ -918,7 +1112,13 @@ pub enum PapersVectorsAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersStampsAction {
     /// Probe the embedder for its vector dimension and write the
-    /// resulting stamps into `papers_corpus.db`'s `index_meta`.
+    /// resulting stamps.
+    ///
+    /// The stamps land in `papers_corpus.db`'s `index_meta`.
+    #[command(after_long_help = crate::examples![
+        "papers stamps reconcile",
+        "papers stamps reconcile --library demo",
+    ])]
     Reconcile,
 }
 
@@ -1085,6 +1285,38 @@ mod tests {
         Intake {
             #[command(subcommand)]
             action: IntakeAction,
+        },
+        Queue {
+            #[command(subcommand)]
+            action: QueueAction,
+        },
+        Distill {
+            #[command(subcommand)]
+            action: DistillAction,
+        },
+        Runs {
+            #[command(subcommand)]
+            action: RunsAction,
+        },
+        Retrieval {
+            #[command(subcommand)]
+            action: RetrievalAction,
+        },
+        Metadata {
+            #[command(subcommand)]
+            action: WriteMetadataAction,
+        },
+        Vectors {
+            #[command(subcommand)]
+            action: WriteVectorsAction,
+        },
+        Corpus {
+            #[command(subcommand)]
+            action: CorpusAction,
+        },
+        Stamps {
+            #[command(subcommand)]
+            action: StampsAction,
         },
     }
 
@@ -1390,5 +1622,29 @@ mod tests {
             panic!("the two selectors must not be combined");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    /// The gate runs here as well as in `crates/cli` because the daily
+    /// gate narrows to the crate a commit touches: a change to this
+    /// crate's grammar does not run the binary's tests, so a leaf that
+    /// lands here without examples would only be caught in CI. The
+    /// shell mounts each enum under the name the binary gives it, so
+    /// the paths the walk builds are the paths the debt list records.
+    #[test]
+    fn this_crates_command_surface_obeys_the_help_gate() {
+        use clap::CommandFactory;
+
+        let violations =
+            help_gate::audit_tree(&TestCli::command(), help_gate::Scope::MirroredEnums);
+        assert!(
+            violations.is_empty(),
+            "the help gate rejected this crate's grammar:{}",
+            help_gate::report(&violations)
+        );
+        let defects = help_gate::policy_defects();
+        assert!(
+            defects.is_empty(),
+            "the help gate's own constants are malformed: {defects:?}"
+        );
     }
 }

@@ -97,6 +97,13 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         .priority
         .map(PriorityRepr::into_priority)
         .unwrap_or_default();
+    // Paths that arrive without a directory walk are checked against the
+    // extractor's allowlist up front, so an unsupported file is refused
+    // here instead of becoming a job that fails at EXTRACT. Walked paths
+    // are already filtered by `collect_supported_files`.
+    let check = |path: &PathBuf| -> Result<(), RpcError> {
+        queue::check_extension_supported(path).map_err(|msg| RpcError::new(INVALID_PARAMS, msg))
+    };
     let expanded: Vec<PathBuf> = if parsed.recursive {
         let mut out = Vec::new();
         for path in &parsed.paths {
@@ -106,11 +113,15 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
                 })?;
                 out.append(&mut found);
             } else {
+                check(path)?;
                 out.push(path.clone());
             }
         }
         out
     } else {
+        for path in &parsed.paths {
+            check(path)?;
+        }
         parsed.paths.clone()
     };
     if expanded.is_empty() {

@@ -4,11 +4,11 @@
 //!
 //! Each CSL item type the papers pipeline emits carries its own
 //! minimum-viable field set. An `article-journal` needs a container
-//! title and a DOI; a `paper-conference` needs a venue; a preprint
-//! (`article`) needs an arXiv id or a DOI; a `thesis` needs an
-//! institution. Lumping every paper under one flat list mis-grades
-//! both directions: it floors clean preprints (no container) and
-//! ignores missing essentials on conference papers.
+//! title and a DOI; a `paper-conference` needs a venue
+//! (`container_title`) but not a DOI; a `thesis` needs an institution
+//! (`publisher`). Lumping every paper under one flat list mis-grades
+//! both directions: it floors clean conference papers that carry no
+//! DOI and ignores a missing container on a journal article.
 //!
 //! The matrix is consulted at audit time after the profile decides
 //! whether a given field is in scope at all.
@@ -20,8 +20,10 @@ use bookrack_extract::CslType;
 pub enum RequirementLevel {
     /// Missing the field floors the verdict to `NeedsWork`.
     Required,
-    /// Missing the field downgrades it to `Weak` but does not floor
-    /// the verdict.
+    /// The field is relevant to this CSL type but its absence does not
+    /// currently affect the verdict: the roll-up consults only
+    /// `Required`. The level marks fields a future pass could weaken
+    /// the verdict on without re-shaping the matrix.
     Recommended,
     /// The field is not graded for this CSL type.
     Optional,
@@ -37,12 +39,12 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
     match csl_type {
         Some(CslType::ArticleJournal) => match field {
             "title" | "author" | "year" | "container_title" | "doi" => Required,
-            "issn" | "abstract" | "volume" => Recommended,
+            "issn" | "abstract_text" | "volume" => Recommended,
             _ => Optional,
         },
         Some(CslType::PaperConference) => match field {
             "title" | "author" | "year" | "container_title" => Required,
-            "doi" | "abstract" | "page" => Recommended,
+            "doi" | "abstract_text" | "page" => Recommended,
             _ => Optional,
         },
         Some(CslType::Chapter) => match field {
@@ -52,7 +54,7 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
         },
         Some(CslType::Thesis) => match field {
             "title" | "author" | "year" | "publisher" => Required,
-            "abstract" => Recommended,
+            "abstract_text" => Recommended,
             _ => Optional,
         },
         Some(CslType::Report) => match field {
@@ -67,7 +69,7 @@ pub fn requirement(csl_type: Option<CslType>, field: &str) -> RequirementLevel {
         },
         None => match field {
             "title" | "author" | "year" => Required,
-            "doi" | "abstract" => Recommended,
+            "doi" | "abstract_text" => Recommended,
             _ => Optional,
         },
     }
@@ -87,7 +89,7 @@ mod tests {
         assert_eq!(requirement(t, "container_title"), Required);
         assert_eq!(requirement(t, "doi"), Required);
         assert_eq!(requirement(t, "issn"), Recommended);
-        assert_eq!(requirement(t, "abstract"), Recommended);
+        assert_eq!(requirement(t, "abstract_text"), Recommended);
         assert_eq!(requirement(t, "arxiv_id"), Optional);
     }
 

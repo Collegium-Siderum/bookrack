@@ -18,11 +18,15 @@ use crate::dto::vectors_status::{
 use crate::recorder::record_call_async;
 
 /// Snapshot the vector store. Read-only end to end: opens the corpus
-/// read-only, opens the lancedb directory through `ChunkStore::open`,
-/// and walks every enumerated index for its per-shard statistics.
+/// read-only, attaches to the lancedb directory through
+/// `ChunkStore::try_open` — which never creates the directory or the
+/// chunks table — and walks every enumerated index for its per-shard
+/// statistics.
 ///
 /// Returns the "empty" form (every field cleared) when the corpus has
-/// no `vector_dim` stamp yet — i.e. no chunks have ever been ingested.
+/// no `vector_dim` stamp yet — i.e. no chunks have ever been ingested
+/// — or when the stamp is present but the lance store is not on disk:
+/// a status query must not materialise an empty layout to report on it.
 pub async fn status<E: Embedder>(ops: &Ops<E>) -> Result<VectorsStatus> {
     record_call_async!(ops, "library.vectors_status", serde_json::Value::Null, {
         if !ops.corpus_db().exists() {
@@ -32,13 +36,17 @@ pub async fn status<E: Embedder>(ops: &Ops<E>) -> Result<VectorsStatus> {
         let Some(dim_str) = corpus.meta_get(VECTOR_DIM_KEY)? else {
             return Ok(empty_status());
         };
-        let dim: usize = dim_str.parse().map_err(|e| {
+        // The dimension itself is not needed to attach read-only, but
+        // an unparseable stamp is a health failure, not an empty store.
+        let _dim: usize = dim_str.parse().map_err(|e| {
             crate::OpsError::Other(eyre::eyre!("parse vector_dim stamp {dim_str:?}: {e}"))
         })?;
         drop(corpus);
 
         let lancedb_dir = ops.lancedb_dir();
-        let store = ChunkStore::open(lancedb_dir, dim).await?;
+        let Some(store) = ChunkStore::try_open(lancedb_dir).await? else {
+            return Ok(empty_status());
+        };
         let row_count = store.count_rows().await?;
         let raw_indices = store.list_indices().await?;
         let ann_cfg = store.current_ann_cfg(lancedb_dir)?;

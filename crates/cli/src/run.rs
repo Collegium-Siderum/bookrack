@@ -21,6 +21,7 @@ use std::time::Duration;
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
 use bookrack_ops::Caller;
+use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use eyre::{Context, Result};
@@ -67,6 +68,16 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         Err(err) => {
             if bookrack_session::is_lock_conflict(&err) {
                 return handle_lock_conflict(err, &lock_path, LaunchMode::Cli).await;
+            }
+            // A refused pre-flight is operator input, not a bug: hand
+            // it to the typed CLI error so it picks up exit 2 and the
+            // three-part reporter. `runtime` cannot depend on `cli`,
+            // so the conversion has to happen on this side.
+            if let Some(refusal) = err.downcast_ref::<PreflightRefusal>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.problem.clone(),
+                }
+                .into());
             }
             return Err(err);
         }

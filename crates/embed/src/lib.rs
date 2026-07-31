@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use bookrack_core::{Explain, Problem};
 use serde::{Deserialize, Serialize};
 
 mod probe;
@@ -55,6 +56,17 @@ pub enum EmbedError {
     #[error("Ollama unreachable: {0}")]
     Unreachable(String),
 
+    /// Ollama answered 404 with its error envelope: the configured model
+    /// is not present on the daemon. Pulling it is the only repair, so
+    /// this never retries and never shrinks the batch.
+    #[error("Ollama does not have the model {model:?}")]
+    ModelNotFound {
+        /// The model this client is configured to embed with.
+        model: String,
+        /// The `error` string from Ollama's response envelope.
+        reason: String,
+    },
+
     /// HTTP 4xx: a bad request, an unpulled model, or malformed input.
     /// An operator error — fail fast, since retrying cannot fix it.
     #[error("Ollama rejected the request (HTTP {status}): {body}")]
@@ -84,6 +96,52 @@ impl EmbedError {
     pub fn is_overload(&self) -> bool {
         matches!(self, EmbedError::Overloaded { .. })
     }
+}
+
+impl Explain for EmbedError {
+    fn explain(&self) -> Problem {
+        match self {
+            // Present tense: no amount of waiting puts the model on the
+            // daemon. The response body is evidence, not the message.
+            EmbedError::ModelNotFound { model, reason } => Problem::new(format!(
+                "cannot embed: the model {model:?} is not available on the Ollama daemon"
+            ))
+            .detail(format!("Ollama answered HTTP 404: {reason}."))
+            .hint(format!("Pull it first: {}.", pull_command(model))),
+
+            // Past tense: the daemon may be up by the next attempt.
+            EmbedError::Unreachable(reason) => Problem::new("could not reach Ollama")
+                .detail(format!(
+                    "The request failed before a response arrived: {reason}."
+                ))
+                .hint(
+                    "Start Ollama, or point BOOKRACK_OLLAMA_URL at the host that runs it. \
+                     Run `bookrack doctor` to check.",
+                )
+                .retryable(true),
+
+            EmbedError::Overloaded { status, body } => {
+                Problem::new("could not embed: the Ollama daemon is overloaded")
+                    .detail(format!("Ollama answered HTTP {status}: {body}."))
+                    .hint("Wait for the current load to clear, then retry with a smaller batch.")
+                    .retryable(true)
+            }
+
+            // No wording written for these yet, so the flattening
+            // fallback applies rather than a guessed hint.
+            other => Problem::from_error_chain(other),
+        }
+    }
+}
+
+/// The command that puts `model` on the local Ollama daemon.
+///
+/// Shared as a fragment rather than as a finished sentence: the
+/// callers that need it wrap it differently — a hint ends in a period,
+/// a diagnostic table cell does not — and a shared sentence would force
+/// one of them to change wording.
+pub fn pull_command(model: &str) -> String {
+    format!("ollama pull {model}")
 }
 
 /// A fallible `embed` operation.
@@ -279,6 +337,20 @@ impl OllamaEmbedClient {
         } else {
             let code = status.as_u16();
             let body = error_body(response).await;
+            // Ollama serves "model not found" from three call sites whose
+            // wording differs (quote style, and whether the sentence ends
+            // in "try pulling it first") within one release, so the body
+            // text is not a judgement. The status is: `EmbedHandler`
+            // reserves 404 for an absent model and answers every other
+            // failure 400 / 499 / 500 / 503. Requiring the error envelope
+            // on top of the status keeps a 404 page from some unrelated
+            // service at `BOOKRACK_OLLAMA_URL` out of this arm.
+            if let (404, Some(reason)) = (code, error_envelope(&body)) {
+                return Err(EmbedError::ModelNotFound {
+                    model: self.model.clone(),
+                    reason,
+                });
+            }
             if status.is_client_error() {
                 Err(EmbedError::BadRequest { status: code, body })
             } else {
@@ -322,6 +394,19 @@ impl Embedder for OllamaEmbedClient {
     ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send {
         OllamaEmbedClient::embed_batch(self, texts)
     }
+}
+
+/// The `error` string of an Ollama failure envelope
+/// (`{"error": "..."}`), or `None` when `body` is not one.
+///
+/// Every failure `EmbedHandler` reports goes out through `gin.H{"error":
+/// ...}`, so the envelope is the shape that identifies the responder.
+fn error_envelope(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: String,
+    }
+    serde_json::from_str::<Envelope>(body).ok().map(|e| e.error)
 }
 
 /// Read a bounded, diagnostic prefix of an error response body.
@@ -388,6 +473,49 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawn a counting mock: the first `failures` connections are
+    /// dropped after the request is read (a transient transport
+    /// failure), every later request is answered with `status_line`
+    /// and `body`. Returns the base URL and the connection counter.
+    async fn counting_mock(
+        failures: usize,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0u8; 8192];
+                let _ = socket.read(&mut scratch).await;
+                if attempt < failures {
+                    // Close without a response: the client sees the
+                    // connection die mid-request, a transient failure.
+                    continue;
+                }
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
     /// A client with a short request timeout and no retries, for the
     /// body-read-timeout path.
     fn short_timeout_client(base_url: &str) -> OllamaEmbedClient {
@@ -425,6 +553,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_transient_failure_is_retried_until_the_server_recovers() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(2, "200 OK", r#"{"embeddings":[[1.0,2.0]]}"#).await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let vectors = client
+            .embed_batch(&["a".to_string()])
+            .await
+            .expect("recovers inside the retry budget");
+        assert_eq!(vectors, vec![vec![1.0, 2.0]]);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "two dropped attempts plus the success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_max_retries_attempts() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(usize::MAX, "200 OK", "{}").await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            2,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.embed_batch(&["a".to_string()]).await.unwrap_err();
+        assert!(matches!(err, EmbedError::Unreachable(_)), "got {err:?}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "the initial attempt plus exactly max_retries retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_transient_failure_does_not_consume_the_retry_budget() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(0, "400 Bad Request", r#"{"error":"bad"}"#).await;
+        let client = OllamaEmbedClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.embed_batch(&["a".to_string()]).await.unwrap_err();
+        assert!(
+            matches!(err, EmbedError::BadRequest { status: 400, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a 4xx fails fast instead of retrying"
+        );
+    }
+
+    #[tokio::test]
     async fn a_successful_batch_returns_vectors_in_order() {
         let url = mock_once("200 OK", r#"{"embeddings":[[1.0,2.0],[3.0,4.0]]}"#).await;
         let client = test_client(&url);
@@ -447,7 +644,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_404_is_classified_as_bad_request() {
+    async fn an_envelope_404_is_classified_as_model_not_found() {
+        let url = mock_once(
+            "404 Not Found",
+            r#"{"error":"model \"test-model\" not found, try pulling it first"}"#,
+        )
+        .await;
+        let err = test_client(&url)
+            .embed_batch(&["x".to_string()])
+            .await
+            .unwrap_err();
+        let EmbedError::ModelNotFound { model, reason } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(model, "test-model");
+        assert!(reason.contains("not found"), "{reason}");
+    }
+
+    /// A 404 without Ollama's error envelope is somebody else's 404 —
+    /// a proxy, a static file server, whatever `BOOKRACK_OLLAMA_URL`
+    /// was pointed at by mistake. It must not be reported as an
+    /// absent model.
+    #[tokio::test]
+    async fn a_bare_404_stays_a_bad_request() {
         let url = mock_once("404 Not Found", "model not found").await;
         let err = test_client(&url)
             .embed_batch(&["x".to_string()])
@@ -457,6 +676,82 @@ mod tests {
             matches!(err, EmbedError::BadRequest { status: 404, .. }),
             "got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn model_not_found_names_the_configured_model_not_the_response_body() {
+        let url = mock_once(
+            "404 Not Found",
+            r#"{"error":"model 'some-other-model' not found"}"#,
+        )
+        .await;
+        let err = test_client(&url)
+            .embed_batch(&["x".to_string()])
+            .await
+            .unwrap_err();
+        let EmbedError::ModelNotFound { model, .. } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(
+            model, "test-model",
+            "the model name must come from this client's configuration, not the response body"
+        );
+    }
+
+    #[test]
+    fn model_not_found_names_the_pull_command_in_hint() {
+        let p = EmbedError::ModelNotFound {
+            model: "test-model".into(),
+            reason: "model not found".into(),
+        }
+        .explain();
+        let hint = p.data.hint.expect("hint");
+        assert!(hint.contains("ollama pull test-model"), "{hint}");
+    }
+
+    #[test]
+    fn model_not_found_is_not_retryable_and_uses_present_tense() {
+        let p = EmbedError::ModelNotFound {
+            model: "test-model".into(),
+            reason: "model not found".into(),
+        }
+        .explain();
+        assert!(!p.data.retryable);
+        assert!(p.summary.starts_with("cannot "), "{}", p.summary);
+    }
+
+    #[test]
+    fn unreachable_is_retryable_and_uses_past_tense() {
+        let p = EmbedError::Unreachable("connection refused".into()).explain();
+        assert!(p.data.retryable);
+        assert!(p.summary.starts_with("could not "), "{}", p.summary);
+    }
+
+    /// The raw HTTP payload is evidence, not the headline: it belongs
+    /// in `detail`, where a terse renderer can drop it. Covers the
+    /// variants `Explain` writes wording for; `BadRequest` and
+    /// `MalformedResponse` still take the flattening fallback.
+    #[test]
+    fn raw_http_body_stays_out_of_the_summary() {
+        let body = "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 512.00 MiB failed";
+        for e in [
+            EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: body.into(),
+            },
+            EmbedError::Overloaded {
+                status: 500,
+                body: body.into(),
+            },
+        ] {
+            let p = e.explain();
+            assert!(!p.summary.contains(body), "{}", p.summary);
+            assert!(
+                p.data.detail.as_deref().is_some_and(|d| d.contains(body)),
+                "{:?}",
+                p.data.detail
+            );
+        }
     }
 
     #[tokio::test]

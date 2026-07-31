@@ -13,58 +13,29 @@
 //! excludes every other writer from its root until shutdown, and a root
 //! already locked by someone else refuses bring-up.
 //!
-//! Ignored by default because [`bookrack_query::Library::open`] probes
-//! the configured Ollama daemon for the embedding model's dimension;
-//! CI without a stub Ollama would surface the probe failure as a test
-//! failure rather than as a missing prerequisite.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
+mod common;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
+use bookrack_runtime::DaemonRuntime;
 use bookrack_session::{RootLock, TtyLock, is_root_lock_conflict, tty_lock_name};
 use eyre::Result;
 
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() -> &'static std::path::Path {
-    DAEMON_STATE_DIR
-        .get_or_init(|| {
-            let dir = tempfile::tempdir().expect("daemon state tempdir");
-            // SAFETY: env is mutated exactly once, inside
-            // `OnceLock::get_or_init`'s single-initialization guarantee,
-            // as the first statement of every test in this binary,
-            // before any concurrent env reads.
-            unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-            dir
-        })
-        .path()
-}
-
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
+use crate::common::build_opts;
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
     let runtime_path = runtime_root.path().to_path_buf();
 
-    let runtime = DaemonRuntime::start(build_opts(data_path.clone(), runtime_path.clone())).await?;
+    let runtime =
+        DaemonRuntime::start(build_opts(data_path.clone(), runtime_path.clone(), false)).await?;
     let shutdown_tx = runtime.shutdown_tx.clone();
     let lock_path = runtime.lock_path.clone();
     let queue_state_path = runtime.queue_state_path.clone();
@@ -94,15 +65,14 @@ async fn start_then_shutdown_releases_lock_and_skips_queue_file() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
     let runtime_path = runtime_root.path().to_path_buf();
 
-    let runtime = DaemonRuntime::start(build_opts(data_path.clone(), runtime_path)).await?;
+    let runtime = DaemonRuntime::start(build_opts(data_path.clone(), runtime_path, false)).await?;
     let shutdown_tx = runtime.shutdown_tx.clone();
 
     let contended = RootLock::acquire(&data_path, std::process::id(), "test");
@@ -129,9 +99,8 @@ async fn serving_daemon_holds_the_root_lock_until_shutdown() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn bring_up_refuses_a_root_locked_by_another_writer() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
     let data_path = data_root.path().to_path_buf();
@@ -139,7 +108,7 @@ async fn bring_up_refuses_a_root_locked_by_another_writer() -> Result<()> {
 
     let held = RootLock::acquire(&data_path, std::process::id(), "test")?;
 
-    let err = match DaemonRuntime::start(build_opts(data_path, runtime_path.clone())).await {
+    let err = match DaemonRuntime::start(build_opts(data_path, runtime_path.clone(), false)).await {
         Ok(_) => panic!("bring-up must refuse a root another writer holds"),
         Err(e) => e,
     };

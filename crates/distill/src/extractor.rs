@@ -7,6 +7,8 @@
 //! strips the matched substring from the source text. All operate
 //! per-entry and are order-independent within the same shape.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde_json::{Value as JsonValue, json};
 
@@ -203,6 +205,10 @@ where
 
 // --- ExtractYearSpan --------------------------------------------------------
 
+static YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(?\s*(\d{3,4})\s*[-\u{2013}]\s*(\d{3,4})?\s*\)?").expect("year regex")
+});
+
 impl Stage for ExtractYearSpan {
     fn name(&self) -> &str {
         "extract_year_span"
@@ -210,8 +216,7 @@ impl Stage for ExtractYearSpan {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        let year_re =
-            Regex::new(r"\(?\s*(\d{3,4})\s*[-\u{2013}]\s*(\d{3,4})?\s*\)?").expect("year regex");
+        let year_re = &*YEAR_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
@@ -264,6 +269,12 @@ impl Stage for ExtractBracketedTag {
 
 // --- ExtractGenderTag -------------------------------------------------------
 
+/// Cheap markers seen across the v1 books: "(F)" / "(M)" /
+/// "(woman)" / CJK gender markers in parens.
+static GENDER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\(\s*(F|M|f|m|woman|man|\u{5973}|\u{7537})\s*\)").expect("gender regex")
+});
+
 impl Stage for ExtractGenderTag {
     fn name(&self) -> &str {
         "extract_gender_tag"
@@ -271,10 +282,7 @@ impl Stage for ExtractGenderTag {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        // Cheap markers seen across the v1 books: "(F)" / "(M)" /
-        // "(woman)" / CJK gender markers in parens.
-        let re =
-            Regex::new(r"\(\s*(F|M|f|m|woman|man|\u{5973}|\u{7537})\s*\)").expect("gender regex");
+        let re = &*GENDER_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
@@ -328,6 +336,13 @@ impl Stage for SplitVariants {
 
 // --- ExtractQuotes ----------------------------------------------------------
 
+/// Recognizes ASCII double quotes and the CJK corner-bracket pair
+/// (U+300C / U+300D). The attribution slot is left empty in this
+/// minimal extractor; a future hop can fill it in.
+static QUOTE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex")
+});
+
 impl Stage for ExtractQuotes {
     fn name(&self) -> &str {
         "extract_quotes"
@@ -335,10 +350,7 @@ impl Stage for ExtractQuotes {
 
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
-        // Recognize ASCII double quotes and the CJK corner-bracket
-        // pair (U+300C / U+300D). The attribution slot is left empty
-        // in this minimal extractor; a future hop can fill it in.
-        let re = Regex::new("\"([^\"]+)\"|\u{300C}([^\u{300D}]+)\u{300D}").expect("quote regex");
+        let re = &*QUOTE_RE;
         let key = self.payload_key.clone();
         let search_in = self.search_in;
         let out = map_splits(splits, |mut s| {
@@ -454,14 +466,10 @@ impl Stage for UnpackPairedBody {
                 s.payload
                     .insert(self.body_to.clone(), JsonValue::String(body_text));
                 s.body = String::new();
-            } else if !s.payload.contains_key(&self.head_to) {
-                // No markers, but make sure the keys are at least
-                // declared with an empty placeholder so downstream
-                // finalize keys never miss them; this keeps the
-                // book.toml-declared keyset consistent.
             }
-            // ensure quality_flags untouched
-            let _ = &s.quality_flags;
+            // Without both markers in order, the entry passes through
+            // untouched: no payload keys are declared, and the body is
+            // left as-is.
             s
         });
         Ok(StageData::Splits(out))
@@ -542,14 +550,14 @@ mod tests {
     }
 
     /// In name-translation dictionaries the year span often rides on
-    /// the latin headword (`Balch, Emily Greene (1867-1961)`) after
+    /// the latin headword (`Smith, Mary Anne (1870-1955)`) after
     /// `split_at_first_cjk` has cut the CJK gloss out into the body.
     /// `search_in = "headword"` finds it there and strips it from the
     /// headword without touching the body.
     #[test]
     fn extract_year_span_with_search_in_headword_strips_from_headword_only() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1867-1961)",
+            "Smith, Mary Anne (1870-1955)",
             "American sociologist",
         )];
         let out = run(
@@ -558,9 +566,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].headword, "Smith, Mary Anne");
         assert_eq!(out[0].body, "American sociologist");
     }
 
@@ -570,8 +578,8 @@ mod tests {
     #[test]
     fn extract_year_span_with_search_in_both_prefers_body() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1900-1980)",
-            "American sociologist (1867-1961)",
+            "Smith, Mary Anne (1900-1980)",
+            "American sociologist (1870-1955)",
         )];
         let out = run(
             extract_year_span("year_span".to_string(), SearchTarget::Both),
@@ -579,9 +587,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene (1900-1980)");
+        assert_eq!(out[0].headword, "Smith, Mary Anne (1900-1980)");
         assert_eq!(out[0].body, "American sociologist");
     }
 
@@ -590,7 +598,7 @@ mod tests {
     #[test]
     fn extract_year_span_with_search_in_both_falls_back_to_headword() {
         let inputs = vec![split(
-            "Balch, Emily Greene (1867-1961)",
+            "Smith, Mary Anne (1870-1955)",
             "American sociologist",
         )];
         let out = run(
@@ -599,9 +607,9 @@ mod tests {
         );
         assert_eq!(
             out[0].payload.get("year_span").unwrap(),
-            &json!({"birth": 1867, "death": 1961})
+            &json!({"birth": 1870, "death": 1955})
         );
-        assert_eq!(out[0].headword, "Balch, Emily Greene");
+        assert_eq!(out[0].headword, "Smith, Mary Anne");
         assert_eq!(out[0].body, "American sociologist");
     }
 

@@ -4,94 +4,45 @@
 //! triplet: `papers.corpus_rebuild`, `papers.vectors_*`, and
 //! `papers.stamps_reconcile`.
 //!
-//! Drives the daemon's JSON-RPC dispatch, asserts the six new methods
-//! appear under `daemon.methods`, and exercises the dry-run paths that
-//! do not require a populated library to validate the parameter shapes
-//! and the queue-bound write gate.
+//! Drives the daemon's JSON-RPC dispatch, asserts the maintenance
+//! methods appear under `daemon.methods`, and exercises the dry-run
+//! paths that do not require a populated library to validate the
+//! parameter shapes and the queue-bound write gate.
 //!
-//! Ignored by default because the runtime calls
-//! [`bookrack_query::Library::open`], which probes the configured
-//! Ollama daemon for the embedding model's dimension. Run manually
-//! with `cargo test -p bookrack-runtime -- --ignored`.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Result, eyre};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
-use tokio::net::UnixStream;
+use serde_json::json;
 
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.spawn_queue_worker = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
-
-async fn send(stream: &mut WriteHalf<UnixStream>, line: &str) -> Result<()> {
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Value> {
-    let line = reader
-        .next_line()
-        .await?
-        .ok_or_else(|| eyre!("connection closed before response"))?;
-    Ok(serde_json::from_str(&line)?)
-}
-
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() {
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
+        true,
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = UnixStream::connect(&sock).await?;
-        let (r, mut w) = tokio::io::split(stream);
-        let mut reader = BufReader::new(r).lines();
+        let (mut reader, mut w) = connect(&sock).await?;
 
-        // 1. `daemon.methods` enumerates every new method exactly once.
+        // 1. `daemon.methods` enumerates every maintenance method.
         send(
             &mut w,
             r#"{"jsonrpc":"2.0","id":1,"method":"daemon.methods"}"#,
@@ -120,7 +71,8 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
         }
 
         // 2. `papers.corpus_rebuild` with dry_run=true on an empty
-        //    library succeeds and reports zero rebuildable intakes.
+        //    library registers a plan and reports zero rebuildable
+        //    intakes across every bucket.
         let req = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -129,10 +81,106 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
         });
         send(&mut w, &serde_json::to_string(&req)?).await?;
         let resp = recv(&mut reader).await?;
+        let result = &resp["result"];
+        assert!(
+            result["plan_id"].as_str().is_some_and(|id| !id.is_empty()),
+            "papers.corpus_rebuild dry_run must return a plan_id: {resp}"
+        );
+        for bucket in ["rebuilt", "missing_envelope", "mismatched", "failed"] {
+            assert_eq!(
+                result[bucket],
+                json!([]),
+                "empty library must report an empty `{bucket}` bucket: {resp}"
+            );
+        }
+
+        // 3. The dry-run leg is exempt from the yes gate: confirmation
+        //    protects the execute leg; dry_run only reads and pins.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "papers.corpus_rebuild",
+            "params": {"dry_run": true},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        let exec_plan = resp["result"]["plan_id"]
+            .as_str()
+            .ok_or_else(|| eyre!("dry_run without yes must still pin a plan: {resp}"))?
+            .to_string();
+
+        // 4. The execute leg without a plan_id is refused: the
+        //    two-phase protocol requires the dry-run's pinned plan.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32602), "{resp}");
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("plan_id")),
+            "the refusal must name the missing plan_id: {resp}"
+        );
+
+        // 5. The yes gate runs ahead of the plan lookup: an
+        //    unconfirmed execute fails CONFIRMATION_REQUIRED even with
+        //    a bogus plan id.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "papers.corpus_rebuild",
+            "params": {"plan_id": "bogus-plan"},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32012), "{resp}");
+
+        // 6. A confirmed execute with an unknown plan id is
+        //    PLAN_NOT_FOUND.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": "bogus-plan"},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32013), "{resp}");
+
+        // 7. The pinned plan executes once against the empty library…
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": exec_plan.as_str()},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
         assert_eq!(
-            resp["result"],
-            json!({"ok": true}),
-            "papers.corpus_rebuild dry_run should succeed: {resp}"
+            resp["result"]["rebuilt"],
+            json!([]),
+            "executing an empty pinned plan reports an empty rebuilt bucket: {resp}"
+        );
+
+        // 8. …and is consumed by that execute: a replay of the same
+        //    plan id is PLAN_NOT_FOUND, never a second run.
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "papers.corpus_rebuild",
+            "params": {"yes": true, "plan_id": exec_plan.as_str()},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32013),
+            "a consumed plan must not execute twice: {resp}"
         );
 
         send(
@@ -144,7 +192,5 @@ async fn papers_maintenance_methods_are_dispatched_and_callable_on_empty_library
         Ok::<(), eyre::Report>(())
     });
 
-    runtime.run_until_shutdown(None, repl_handle).await?;
-    driver.await??;
-    Ok(())
+    join_with_deadline(runtime, repl_handle, driver).await
 }

@@ -63,6 +63,17 @@ pub enum QueryError {
     EmptyProbe,
 }
 
+impl bookrack_core::Explain for QueryError {
+    fn explain(&self) -> bookrack_core::Problem {
+        match self {
+            // The embed leaf writes its own wording; the wrapper's own
+            // `Display` ("embed error") names a module, not a failure.
+            QueryError::Embed(e) => e.explain(),
+            other => bookrack_core::Problem::from_error_chain(other),
+        }
+    }
+}
+
 /// A fallible query operation.
 pub type Result<T> = std::result::Result<T, QueryError>;
 
@@ -121,7 +132,7 @@ impl<E: Embedder> Library<E> {
         if let Some(s) = &store
             && s.count_rows().await? > 0
         {
-            let corpus = Corpus::open(&corpus_db)?;
+            let corpus = Corpus::open_read_only(&corpus_db)?;
             corpus.verify_index_stamps(&current_stamps(
                 &embed_model,
                 probed_dim as u32,
@@ -169,7 +180,7 @@ impl<E: Embedder> Library<E> {
         if let Some(s) = &fresh
             && s.count_rows().await? > 0
         {
-            let corpus = Corpus::open(&self.corpus_db)?;
+            let corpus = Corpus::open_read_only(&self.corpus_db)?;
             corpus.verify_index_stamps(&current_stamps(
                 &self.embed_model,
                 self.probed_dim as u32,
@@ -196,7 +207,7 @@ impl<E: Embedder> Library<E> {
             return Ok(());
         };
         if s.count_rows().await? > 0 {
-            let corpus = Corpus::open(&self.corpus_db)?;
+            let corpus = Corpus::open_read_only(&self.corpus_db)?;
             corpus.verify_index_stamps(&current_stamps(
                 &self.embed_model,
                 self.probed_dim as u32,
@@ -267,7 +278,7 @@ impl<E: Embedder> Library<E> {
             top_k,
         )
         .await?;
-        let corpus = Corpus::open(&self.corpus_db)?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
@@ -315,7 +326,7 @@ impl<E: Embedder> Library<E> {
             partition,
         )
         .await?;
-        let corpus = Corpus::open(&self.corpus_db)?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
@@ -361,7 +372,7 @@ impl<E: Embedder> Library<E> {
             partition,
         )
         .await?;
-        let corpus = Corpus::open(&self.corpus_db)?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
@@ -504,7 +515,7 @@ impl<E: Embedder> Library<E> {
         let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
         let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
         let contributors = catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
-        let corpus = Corpus::open(&self.corpus_db)?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let toc_stats = corpus
             .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
             .map(dto::TocStats::from);
@@ -527,7 +538,7 @@ impl<E: Embedder> Library<E> {
         if catalog.intake_by_id(intake_id)?.is_none() {
             return Ok(None);
         }
-        let corpus = Corpus::open(&self.corpus_db)?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let book_root_id = PartitionIdx::new(intake_id).root();
         let q = args.to_query();
         let total = corpus.count_toc_nodes(book_root_id, &q)?;

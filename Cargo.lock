@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-app"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-config",
  "bookrack-control-client",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-audit-profile"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-catalog"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-cli"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "anstyle",
  "bookrack-catalog",
@@ -879,6 +879,7 @@ dependencies = [
  "bookrack-refs",
  "bookrack-runtime",
  "bookrack-session",
+ "bookrack-test-support",
  "chrono",
  "clap",
  "color-eyre",
@@ -896,15 +897,16 @@ dependencies = [
 
 [[package]]
 name = "bookrack-cli-grammar"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "bookrack-config"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
+ "bookrack-test-support",
  "chrono",
  "dirs 5.0.1",
  "dotenvy",
@@ -920,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-control-client"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-session",
  "eyre",
@@ -934,16 +936,17 @@ dependencies = [
 
 [[package]]
 name = "bookrack-core"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "ts-rs",
 ]
 
 [[package]]
 name = "bookrack-corpus"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-core",
  "bookrack-dbkit",
@@ -954,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-dbkit"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -965,13 +968,14 @@ dependencies = [
 
 [[package]]
 name = "bookrack-diagnose"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
  "bookrack-config",
  "bookrack-core",
  "bookrack-corpus",
+ "bookrack-test-support",
  "bookrack-vectors",
  "chrono",
  "flate2",
@@ -986,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-distill"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "regex",
@@ -999,17 +1003,19 @@ dependencies = [
 
 [[package]]
 name = "bookrack-embed"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "reqwest 0.13.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
 ]
 
 [[package]]
 name = "bookrack-extract"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-config",
@@ -1031,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-glean"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1056,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-index-profile"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "serde",
  "tempfile",
@@ -1066,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-ingest"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1092,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-mcp"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "axum",
  "bookrack-catalog",
@@ -1112,6 +1118,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -1120,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-metadata"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
  "bookrack-catalog",
@@ -1134,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-normalize"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "sha2 0.10.9",
  "unicode-normalization",
@@ -1142,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-obs"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-config",
  "chrono",
@@ -1156,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-ops"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-config",
@@ -1181,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-query"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-config",
@@ -1202,20 +1209,22 @@ dependencies = [
 
 [[package]]
 name = "bookrack-refs"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-dbkit",
  "rusqlite",
  "rusqlite_migration",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "bookrack-rerank"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "reqwest 0.13.4",
  "serde",
  "thiserror 2.0.18",
@@ -1224,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-runtime"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "async-trait",
  "bookrack-audit-profile",
@@ -1247,6 +1256,7 @@ dependencies = [
  "bookrack-query",
  "bookrack-rerank",
  "bookrack-session",
+ "bookrack-test-support",
  "bookrack-vectors",
  "chrono",
  "clap",
@@ -1268,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-search"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-core",
@@ -1287,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-session"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "dirs 5.0.1",
  "eyre",
@@ -1296,8 +1306,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bookrack-test-support"
+version = "0.11.0-dev"
+dependencies = [
+ "bookrack-config",
+ "bookrack-session",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "bookrack-translate"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "bookrack-catalog",
  "bookrack-dbkit",
@@ -1309,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "bookrack-vectors"
-version = "0.10.0-dev"
+version = "0.11.0-dev"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -3659,11 +3679,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -6665,15 +6683,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
 dependencies = [
  "aws-lc-rs",
  "bytes",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "lru-slab",
- "rand 0.9.4",
+ "rand 0.10.1",
+ "rand_pcg",
  "ring",
  "rustc-hash",
  "rustls",
@@ -6789,6 +6808,15 @@ checksum = "6a8615d50dcf34fa31f7ab52692afec947c4dd0ab803cc87cb3b0b4570ff7463"
 dependencies = [
  "num-traits",
  "rand 0.9.4",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]

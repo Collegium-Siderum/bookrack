@@ -8,57 +8,28 @@
 //! sequence of intentionally-bad write RPCs through a single
 //! connection and asserts on `error.code` for each.
 //!
-//! Ignored by default because the runtime calls
-//! [`bookrack_query::Library::open`], which probes the configured
-//! Ollama daemon for the embedding model's dimension. Run manually
-//! with `cargo test -p bookrack-runtime --test control_error_codes
-//! -- --ignored`.
+//! The embedder probe daemon bring-up performs is answered by
+//! `bookrack_test_support::EmbedStub`, so no Ollama daemon is
+//! required.
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::time::Duration;
+mod common;
 
-use bookrack_config::LibrarySelection;
-use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::{Result, eyre};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines, ReadHalf, WriteHalf};
-use tokio::net::UnixStream;
+
+use crate::common::{Reader, Writer};
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
+use bookrack_test_support::{ProcessEnv, process_env};
 
 const INVALID_PARAMS: i64 = -32602;
 const INVALID_LIBRARY: i64 = -32010;
-
-fn build_opts(data_dir: PathBuf, runtime_dir: PathBuf) -> RuntimeOpts {
-    let mut opts = RuntimeOpts::headless(Some(data_dir), None);
-    opts.no_mcp = true;
-    opts.runtime_dir = Some(runtime_dir);
-    opts.selection = LibrarySelection {
-        data_dir: opts.selection.data_dir,
-        library: opts.selection.library,
-    };
-    opts
-}
-
-async fn send(stream: &mut WriteHalf<UnixStream>, line: &str) -> Result<()> {
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
-}
-
-async fn recv(reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>) -> Result<Value> {
-    let line = reader
-        .next_line()
-        .await?
-        .ok_or_else(|| eyre!("eof while expecting response"))?;
-    Ok(serde_json::from_str(&line)?)
-}
+const CONFIRMATION_REQUIRED: i64 = -32012;
 
 async fn rpc_code(
-    writer: &mut WriteHalf<UnixStream>,
-    reader: &mut Lines<BufReader<ReadHalf<UnixStream>>>,
+    writer: &mut Writer,
+    reader: &mut Reader,
     id: u64,
     method: &str,
     params: Value,
@@ -78,41 +49,22 @@ async fn rpc_code(
     Ok((code, message))
 }
 
-static DAEMON_STATE_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-
-/// Redirect the daemon state directory into a per-binary tempdir so
-/// bring-up never touches the user's real per-user data directory.
-fn isolate_daemon_state_dir() {
-    DAEMON_STATE_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("daemon state tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of every test in this binary, before
-        // any concurrent env reads.
-        unsafe { std::env::set_var("BOOKRACK_DAEMON_STATE_DIR", dir.path()) };
-        dir
-    });
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a reachable Ollama embedding daemon"]
 async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
-    isolate_daemon_state_dir();
+    process_env(ProcessEnv::daemon());
     let data_root = tempfile::tempdir()?;
     let runtime_root = tempfile::tempdir()?;
-    let runtime = DaemonRuntime::start(build_opts(
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
         data_root.path().into(),
         runtime_root.path().into(),
+        true,
     ))
     .await?;
     let sock = runtime.control_sock.path.clone();
     let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
 
     let driver = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let stream = UnixStream::connect(&sock).await?;
-        let (r, mut w) = tokio::io::split(stream);
-        let mut reader = BufReader::new(r).lines();
+        let (mut reader, mut w) = connect(&sock).await?;
 
         // `library.set_default` with an unknown name has always returned
         // INVALID_LIBRARY (-32010); this guards the regression.
@@ -162,6 +114,8 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         // `corpus.rebuild` targeting an unknown book surfaces
         // `IngestError::UnknownIntake` (or `OpsError::IntakeNotFound`,
         // depending on where the lookup happens first) as INVALID_PARAMS.
+        // The dry-run leg is what resolves the selector; the execute
+        // leg would fail earlier, on the missing plan_id.
         let (code, msg) = rpc_code(
             &mut w,
             &mut reader,
@@ -169,6 +123,7 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
             "corpus.rebuild",
             serde_json::json!({
                 "book": 9_999_999_i64,
+                "dry_run": true,
                 "yes": true,
             }),
         )
@@ -190,6 +145,105 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         .await?;
         assert_eq!(code, INVALID_PARAMS, "vectors.reembed unknown book: {msg}");
 
+        // `ingest.submit` with a path the extractor has no adapter for
+        // is refused before a job is enqueued; mobi/azw3 carry a
+        // conversion hint.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            6,
+            "ingest.submit",
+            serde_json::json!({ "paths": ["/tmp/book.mobi"] }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "ingest.submit mobi path: {msg}");
+        assert!(
+            msg.contains("convert to EPUB"),
+            "ingest.submit mobi hint: {msg}"
+        );
+
+        // `glean.submit` runs the same extractor and applies the same
+        // allowlist.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            7,
+            "glean.submit",
+            serde_json::json!({ "paths": ["/tmp/paper.mobi"] }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "glean.submit mobi path: {msg}");
+
+        // `corpus.rebuild` execute leg without a plan_id is refused:
+        // the two-phase protocol requires the dry-run's pinned plan.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            8,
+            "corpus.rebuild",
+            serde_json::json!({ "yes": true }),
+        )
+        .await?;
+        assert_eq!(
+            code, INVALID_PARAMS,
+            "corpus.rebuild without plan_id: {msg}"
+        );
+        assert!(
+            msg.contains("plan_id"),
+            "the refusal must name the missing plan_id: {msg}"
+        );
+
+        // The yes gate runs ahead of the plan lookup: an unconfirmed
+        // execute fails CONFIRMATION_REQUIRED even with a bogus plan.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            9,
+            "corpus.rebuild",
+            serde_json::json!({ "plan_id": "bogus-plan" }),
+        )
+        .await?;
+        assert_eq!(
+            code, CONFIRMATION_REQUIRED,
+            "corpus.rebuild unconfirmed execute: {msg}"
+        );
+
+        // `library.fork` fails closed without the client-side
+        // confirmation; nothing is copied or registered.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            10,
+            "library.fork",
+            serde_json::json!({ "new_name": "forked", "data_dir": "/tmp/fork-target" }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "library.fork without yes: {msg}");
+        assert!(
+            msg.contains("yes"),
+            "the refusal must name the missing confirmation: {msg}"
+        );
+
+        // `library.fork` validates copy_mode before doing any work.
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            11,
+            "library.fork",
+            serde_json::json!({
+                "new_name": "forked",
+                "data_dir": "/tmp/fork-target",
+                "yes": true,
+                "copy_mode": "symlink",
+            }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "library.fork bad copy_mode: {msg}");
+        assert!(
+            msg.contains("copy_mode"),
+            "the refusal must name the offending knob: {msg}"
+        );
+
         send(
             &mut w,
             r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
@@ -199,7 +253,5 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
         Ok::<(), eyre::Report>(())
     });
 
-    runtime.run_until_shutdown(None, repl_handle).await?;
-    driver.await??;
-    Ok(())
+    join_with_deadline(runtime, repl_handle, driver).await
 }

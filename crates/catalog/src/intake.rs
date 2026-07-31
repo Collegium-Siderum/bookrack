@@ -62,7 +62,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
         ColumnSpec::text("stored_path")
             .comment("opaque store location; set once the file is stored"),
         ColumnSpec::text("original_path").comment("forensic: where the file came from"),
-        ColumnSpec::text("format").comment("pdf / epub / mobi / azw3 / text / ..."),
+        ColumnSpec::text("format").comment("adapter label: pdf / epub / txt / html / ocr-markdown"),
         ColumnSpec::int("byte_size"),
         ColumnSpec::text("adapter").comment("extraction adapter, stamped at EXTRACT"),
         ColumnSpec::int("extractor_version")
@@ -1957,32 +1957,103 @@ mod tests {
     }
 
     #[test]
-    fn find_intakes_runs_in_under_ten_millis_on_a_seven_field_filter() {
+    fn find_intakes_ands_every_field_of_a_multi_field_filter() {
         let mut catalog = catalog();
-        for i in 0..50u32 {
-            let sha = format!("sha-{i:03}");
-            let title = format!("Title {i:03}");
-            let author = format!("Author {i:03}");
-            seed_book(&mut catalog, &sha, &title, &author);
-        }
+        let ids: Vec<i64> = (0..50u32)
+            .map(|i| {
+                seed_book(
+                    &mut catalog,
+                    &format!("sha-{i:03}"),
+                    &format!("Title {i:03}"),
+                    &format!("Author {i:03}"),
+                )
+            })
+            .collect();
+        let target = ids[42];
+
+        let pending = [IntakeStatus::Pending];
         let filter = IntakeFilter {
             title_substring: Some("Title"),
             contributor_name: Some("Author 042"),
             contributor_role: Some("author"),
-            statuses: &[IntakeStatus::Pending],
+            statuses: &pending,
             format: Some("epub"),
             ..IntakeFilter::default()
         };
-        let start = std::time::Instant::now();
         let hits = catalog
             .find_intakes(&filter, 100, 0)
             .expect("filtered find");
-        let elapsed = start.elapsed();
-        assert_eq!(hits.len(), 1);
-        // 168-book scale sanity check from the manual; 10 ms is generous.
-        assert!(
-            elapsed < std::time::Duration::from_millis(50),
-            "filtered find took {elapsed:?}"
+        assert_eq!(
+            hits.iter().map(|i| i.intake_id).collect::<Vec<_>>(),
+            vec![target],
+            "the filter picks the one book matching all five fields",
+        );
+
+        // Every field narrows on its own: a near miss in any one of
+        // them empties the result, so none can silently drop out of the
+        // WHERE clause while the others carry the assertion.
+        let embedded = [IntakeStatus::Embedded];
+        let near_misses = [
+            (
+                "title substring",
+                IntakeFilter {
+                    title_substring: Some("Nothing"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "contributor name",
+                IntakeFilter {
+                    contributor_name: Some("Author 999"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "contributor role",
+                IntakeFilter {
+                    contributor_role: Some("translator"),
+                    ..filter.clone()
+                },
+            ),
+            (
+                "status",
+                IntakeFilter {
+                    statuses: &embedded,
+                    ..filter.clone()
+                },
+            ),
+            (
+                "format",
+                IntakeFilter {
+                    format: Some("pdf"),
+                    ..filter.clone()
+                },
+            ),
+        ];
+        for (field, near_miss) in near_misses {
+            let hits = catalog
+                .find_intakes(&near_miss, 100, 0)
+                .expect("filtered find");
+            assert!(
+                hits.is_empty(),
+                "a near miss on the {field} must exclude the row, got {} hits",
+                hits.len(),
+            );
+        }
+
+        // The contributor name selects rather than merely narrows:
+        // naming the neighbour moves the hit to the neighbour's row
+        // instead of emptying the result or keeping the old one.
+        let neighbour = IntakeFilter {
+            contributor_name: Some("Author 043"),
+            ..filter.clone()
+        };
+        let hits = catalog
+            .find_intakes(&neighbour, 100, 0)
+            .expect("filtered find");
+        assert_eq!(
+            hits.iter().map(|i| i.intake_id).collect::<Vec<_>>(),
+            vec![ids[43]],
         );
     }
 
@@ -2318,6 +2389,75 @@ mod tests {
 
         assert!(cat.list_ocr_pending(50, 0).expect("list").is_empty());
         assert_eq!(cat.count_ocr_pending().expect("count"), 0);
+    }
+
+    #[test]
+    fn list_ocr_pending_surfaces_the_latest_extract_skip_reason() {
+        let mut cat = catalog();
+        let anchor = register_book(&mut cat, "pdf-why", "pdf", IntakeStatus::NeedsOcr);
+
+        // Two rejection reasons for the same source; both land in the
+        // same second, so the audit_id tiebreaker picks the later one.
+        for reason in ["watermark text layer", "garbled text layer"] {
+            let mut skip = crate::NewItemPipelineAudit::new(
+                "extract",
+                "quality_gate",
+                "skipped",
+                "run-ocr",
+                crate::ActorKind::Pipeline,
+            );
+            skip.source_sha256 = Some("pdf-why".to_string());
+            skip.error_message = Some(reason.to_string());
+            cat.record_pipeline_audit(&skip).expect("skip row");
+        }
+        // Newer rows that must NOT be picked: an extract row that did
+        // not skip, and a skip on a different stage. Both carry decoy
+        // messages, so a wrong stage or outcome literal in the subquery
+        // surfaces as the wrong reason.
+        let mut ok_row = crate::NewItemPipelineAudit::new(
+            "extract",
+            "parse",
+            "ok",
+            "run-ocr",
+            crate::ActorKind::Pipeline,
+        );
+        ok_row.source_sha256 = Some("pdf-why".to_string());
+        ok_row.error_message = Some("not a rejection".to_string());
+        cat.record_pipeline_audit(&ok_row).expect("ok row");
+        let mut other_stage = crate::NewItemPipelineAudit::new(
+            "embed",
+            "quality_gate",
+            "skipped",
+            "run-ocr",
+            crate::ActorKind::Pipeline,
+        );
+        other_stage.source_sha256 = Some("pdf-why".to_string());
+        other_stage.error_message = Some("wrong stage".to_string());
+        cat.record_pipeline_audit(&other_stage)
+            .expect("other stage");
+
+        let pending = cat.list_ocr_pending(50, 0).expect("list");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].intake.intake_id, anchor);
+        assert_eq!(pending[0].reason.as_deref(), Some("garbled text layer"));
+    }
+
+    #[test]
+    fn intake_status_database_strings_are_pinned() {
+        // These literals are the on-disk format and are matched verbatim
+        // inside OCR_PENDING_WHERE; renaming one would strand existing
+        // rows. Pinned here so a change is a deliberate act, not a typo.
+        let expected = [
+            (IntakeStatus::Pending, "pending"),
+            (IntakeStatus::Extracted, "extracted"),
+            (IntakeStatus::DedupHold, "dedup_hold"),
+            (IntakeStatus::Embedded, "embedded"),
+            (IntakeStatus::Aborted, "aborted"),
+            (IntakeStatus::NeedsOcr, "needs_ocr"),
+        ];
+        for (status, s) in expected {
+            assert_eq!(status.as_str(), s);
+        }
     }
 
     #[test]

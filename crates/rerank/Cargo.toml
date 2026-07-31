@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# `Problem` / `Explain`: the three-part diagnostic `RerankError`
+# renders itself into for the operator-facing front ends.
+bookrack-core = { path = "../core" }
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true

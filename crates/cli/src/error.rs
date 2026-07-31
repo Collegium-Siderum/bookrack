@@ -16,11 +16,13 @@
 use std::path::PathBuf;
 
 use bookrack_control_client::ControlError;
+use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
     JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
     PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND,
 };
+use serde_json::Value;
 
 /// Predictable, operator-facing failures the CLI emits.
 #[derive(Debug, thiserror::Error)]
@@ -72,7 +74,14 @@ pub enum BookrackCliError {
     /// token, or an unknown RPC method (typo or unsupported by this
     /// daemon version).
     #[error("rpc error {code}: {message}")]
-    RpcUserError { code: i32, message: String },
+    RpcUserError {
+        code: i32,
+        message: String,
+        /// The daemon's `error.data` object, carried through unparsed
+        /// so the reporter can render detail and hint. `Display` stays
+        /// a self-sufficient single line and ignores it.
+        data: Option<Value>,
+    },
 
     /// Daemon is busy or not yet ready to handle the call. A scripted
     /// caller can retry after a backoff.
@@ -84,7 +93,12 @@ pub enum BookrackCliError {
     /// implies the CLI sent something the daemon could not parse.
     /// Treated as a CLI/daemon bug; not retryable.
     #[error("rpc error {code}: {message}")]
-    RpcInternal { code: i32, message: String },
+    RpcInternal {
+        code: i32,
+        message: String,
+        /// See [`BookrackCliError::RpcUserError`].
+        data: Option<Value>,
+    },
 
     /// Awaited a batch of ingest jobs and one or more reached a
     /// non-`Done` terminal state (`Failed` or `Cancelled`). The
@@ -117,6 +131,26 @@ pub enum BookrackCliError {
     #[error("{message}")]
     LocalUserError { message: String },
 
+    /// A destructive action needed a confirmation and stdin could not
+    /// carry one — the stream ended before any byte arrived. Distinct
+    /// from a decline, which is an answer and exits 0: nothing was
+    /// decided here, so the caller must not read the run as either a
+    /// completed action or a considered refusal. Shares the exit-2
+    /// user-error bucket.
+    #[error("{action}: {reason}. {hint}")]
+    ConfirmationUnanswerable {
+        action: String,
+        reason: String,
+        hint: String,
+    },
+
+    /// The daemon refused to start because an external backend it
+    /// needs is unusable — the check runs before any library is
+    /// opened, so nothing was half-started. Operator input, not a
+    /// bug: exit 2, and the reporter draws the three parts.
+    #[error("{}", .problem.summary)]
+    PreflightRefused { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -141,6 +175,8 @@ impl BookrackCliError {
             Self::IngestPartialFailure { .. } => 5,
             Self::ExecParamsInvalid { .. } => 2,
             Self::LocalUserError { .. } => 2,
+            Self::ConfirmationUnanswerable { .. } => 2,
+            Self::PreflightRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -159,7 +195,7 @@ impl BookrackCliError {
     /// binary's exit code reflects whether the failure was a user
     /// input mistake (exit 2), a transient busy/not-ready state
     /// (exit 4), or an internal/protocol error (exit 1).
-    pub fn from_rpc(code: i32, message: String) -> Self {
+    pub fn from_rpc(code: i32, message: String, data: Option<Value>) -> Self {
         match code {
             METHOD_NOT_FOUND
             | INVALID_PARAMS
@@ -168,11 +204,39 @@ impl BookrackCliError {
             | CONFIRMATION_REQUIRED
             | PLAN_NOT_FOUND
             | PLAN_KIND_MISMATCH
-            | PLAN_LIBRARY_MISMATCH => Self::RpcUserError { code, message },
+            | PLAN_LIBRARY_MISMATCH => Self::RpcUserError {
+                code,
+                message,
+                data,
+            },
             BUSY | NOT_READY => Self::RpcBusy { code, message },
-            PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal { code, message },
-            _ => Self::RpcInternal { code, message },
+            PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal {
+                code,
+                message,
+                data,
+            },
+            _ => Self::RpcInternal {
+                code,
+                message,
+                data,
+            },
         }
+    }
+
+    /// The detail / hint / retryable triple the daemon attached to this
+    /// failure, if it attached one.
+    ///
+    /// Read back as a whole [`ProblemData`] rather than key by key, so
+    /// the CLI cannot drift from the shape the control plane emits. A
+    /// `data` slot that does not parse is treated as absent: an
+    /// unrenderable extra is not worth failing the report over.
+    pub fn problem_data(&self) -> Option<ProblemData> {
+        let data = match self {
+            Self::RpcUserError { data, .. } | Self::RpcInternal { data, .. } => data.as_ref()?,
+            Self::PreflightRefused { problem } => return Some(problem.data.clone()),
+            _ => return None,
+        };
+        serde_json::from_value(data.clone()).ok()
     }
 }
 
@@ -207,11 +271,16 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
         if let Some(cli_err) = cause.downcast_ref::<BookrackCliError>() {
             return Some(CliReportCause::Cli(cli_err));
         }
-        if let Some(ControlError::Rpc { code, message, .. }) = cause.downcast_ref::<ControlError>()
+        if let Some(ControlError::Rpc {
+            code,
+            message,
+            data,
+        }) = cause.downcast_ref::<ControlError>()
         {
             return Some(CliReportCause::Rpc(BookrackCliError::from_rpc(
                 *code,
                 message.clone(),
+                data.clone(),
             )));
         }
     }
@@ -240,6 +309,44 @@ mod tests {
             }
             .exit_code(),
             2
+        );
+        assert_eq!(
+            BookrackCliError::LocalUserError {
+                message: "x".into()
+            }
+            .exit_code(),
+            2
+        );
+    }
+
+    /// A confirmation that could not be asked is a user error, not a
+    /// decline: it must exit 2 and it must tell the operator how to
+    /// proceed without a terminal, because the callers that hit it are
+    /// scripts whose only signal is the exit code.
+    #[test]
+    fn confirmation_unanswerable_is_exit_two_and_names_the_escape_hatch() {
+        let err = BookrackCliError::ConfirmationUnanswerable {
+            action: "libraries remove --purge".into(),
+            reason: crate::render::confirm::NoAnswer::EndOfStream.reason(),
+            hint: "re-run with --yes to confirm".into(),
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            !err.is_self_reported(),
+            "the reporter must print this one; no call site renders it"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("libraries remove --purge"),
+            "the message must name the action: {rendered}"
+        );
+        assert!(
+            rendered.contains("end of file"),
+            "the message must say why no answer arrived: {rendered}"
+        );
+        assert!(
+            rendered.contains("--yes"),
+            "the message must name the escape hatch: {rendered}"
         );
     }
 
@@ -309,7 +416,7 @@ mod tests {
             PLAN_KIND_MISMATCH,
             PLAN_LIBRARY_MISMATCH,
         ] {
-            let err = BookrackCliError::from_rpc(code, "boom".into());
+            let err = BookrackCliError::from_rpc(code, "boom".into(), None);
             assert!(
                 matches!(err, BookrackCliError::RpcUserError { .. }),
                 "code {code} should be RpcUserError"
@@ -321,7 +428,7 @@ mod tests {
     #[test]
     fn from_rpc_classifies_busy_codes_as_exit_four() {
         for &code in &[BUSY, NOT_READY] {
-            let err = BookrackCliError::from_rpc(code, "later".into());
+            let err = BookrackCliError::from_rpc(code, "later".into(), None);
             assert!(matches!(err, BookrackCliError::RpcBusy { .. }));
             assert_eq!(err.exit_code(), 4, "code {code}");
         }
@@ -330,7 +437,7 @@ mod tests {
     #[test]
     fn from_rpc_classifies_protocol_and_internal_codes_as_exit_one() {
         for &code in &[PARSE_ERROR, INVALID_REQUEST, INTERNAL_ERROR, -32999] {
-            let err = BookrackCliError::from_rpc(code, "bug".into());
+            let err = BookrackCliError::from_rpc(code, "bug".into(), None);
             assert!(matches!(err, BookrackCliError::RpcInternal { .. }));
             assert_eq!(err.exit_code(), 1, "code {code}");
         }
@@ -357,6 +464,50 @@ mod tests {
         let cli_err = cause.as_cli();
         assert!(matches!(cli_err, BookrackCliError::RpcUserError { .. }));
         assert_eq!(cli_err.exit_code(), 2);
+    }
+
+    /// The daemon attaches detail and hint to `error.data`; the CLI
+    /// has to still be holding them when the reporter runs. Before
+    /// this, `classify_eyre` destructured `ControlError::Rpc` with a
+    /// `..` that dropped the slot on the floor.
+    #[test]
+    fn classify_eyre_keeps_the_data_slot_from_the_rpc_error() {
+        let rpc = ControlError::Rpc {
+            code: INTERNAL_ERROR,
+            message: "cannot embed: the model \"m\" is not available".into(),
+            data: Some(serde_json::json!({
+                "detail": "Ollama answered HTTP 404: model not found.",
+                "hint": "Pull it first: ollama pull m.",
+                "retryable": false,
+            })),
+        };
+        let err: eyre::Report = eyre::Report::from(rpc).wrap_err("library.search rpc");
+        let cause = classify_eyre(&err).expect("wrapped RPC must classify");
+        let problem = cause
+            .as_cli()
+            .problem_data()
+            .expect("the data slot must survive classification");
+        assert_eq!(
+            problem.hint.as_deref(),
+            Some("Pull it first: ollama pull m.")
+        );
+        assert!(!problem.retryable);
+    }
+
+    /// A daemon that sends no `data`, or sends something the CLI
+    /// cannot parse, must not turn into a reporting failure — the
+    /// single-line report is still correct.
+    #[test]
+    fn an_absent_or_unparseable_data_slot_reads_as_no_problem_data() {
+        let none = BookrackCliError::from_rpc(INVALID_PARAMS, "bad arg".into(), None);
+        assert!(none.problem_data().is_none());
+
+        let junk = BookrackCliError::from_rpc(
+            INVALID_PARAMS,
+            "bad arg".into(),
+            Some(serde_json::json!(["not", "an", "object"])),
+        );
+        assert!(junk.problem_data().is_none());
     }
 
     #[test]

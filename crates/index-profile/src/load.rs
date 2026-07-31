@@ -101,6 +101,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_the_hnsw_graph_keys_the_ann_spec_omits() {
+        // The AnnSpec doc promises a profile naming an HNSW graph
+        // parameter (`m`, `ef`) is rejected, because the vector store
+        // does not expose them.
+        for key in ["m", "ef"] {
+            let toml = format!(
+                "schema_version = 1\nname = \"x\"\n\
+                 [embed]\nbackend = \"ollama\"\nmodel = \"m\"\ndim = 8\n\
+                 [ann]\nkind = \"ivf-hnsw-sq\"\nnum_partitions = 1\nnprobes = 1\n{key} = 16\n"
+            );
+            let err = parse_str(&toml, "x").expect_err("graph key rejected");
+            match err {
+                super::ProfileLoadError::Parse { reason, .. } => assert!(
+                    reason.contains(&format!("`{key}`")),
+                    "error names the offending key: {reason}",
+                ),
+                other => panic!("expected Parse for `{key}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn rejects_a_wrong_schema_version() {
         let toml = "schema_version = 99\nname = \"x\"\n\
                     [embed]\nbackend = \"ollama\"\nmodel = \"m\"\ndim = 8\n\

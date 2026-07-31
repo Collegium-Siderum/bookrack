@@ -68,11 +68,40 @@ pub fn save_atomic(state: &QueueState, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// File-extension allowlist for the `queue add <dir>` walk. The same
-/// list that the legacy `bookrack ingest --recursive` walker uses, so
-/// queueing a directory enqueues the same set the operator would have
-/// gotten from the standalone command.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["epub", "pdf", "mobi", "azw3", "txt"];
+/// File-extension allowlist for the `queue add <dir>` walk and the
+/// pre-enqueue check on explicit paths. Re-exported from
+/// `bookrack_extract`, the owner of the adapter surface, so the queue
+/// cannot accept a format the extractor has no adapter for.
+pub use bookrack_extract::SUPPORTED_EXTENSIONS;
+
+/// Check an explicitly submitted path against [`SUPPORTED_EXTENSIONS`]
+/// before it is enqueued, so a file the extractor cannot handle is
+/// rejected up front instead of becoming a job that fails at EXTRACT.
+/// The error is the operator-facing message; mobi and azw3 get a
+/// conversion hint because they are common e-book formats.
+pub fn check_extension_supported(path: &Path) -> Result<(), String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some(ext) if SUPPORTED_EXTENSIONS.contains(&ext) => Ok(()),
+        Some("mobi" | "azw3") => Err(format!(
+            "{}: mobi/azw3 are not supported; convert to EPUB first (e.g. Calibre's ebook-convert)",
+            path.display()
+        )),
+        Some(ext) => Err(format!(
+            "{}: .{ext} is not a supported format (supported: {})",
+            path.display(),
+            SUPPORTED_EXTENSIONS.join(", ")
+        )),
+        None => Err(format!(
+            "{}: file has no extension (supported: {})",
+            path.display(),
+            SUPPORTED_EXTENSIONS.join(", ")
+        )),
+    }
+}
 
 /// Walk `dir` depth-first and collect every regular file whose extension
 /// is in [`SUPPORTED_EXTENSIONS`]. Hidden files (those whose name starts
@@ -511,15 +540,22 @@ where
     R: Fn(QueueJob) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = std::result::Result<JobSuccess, JobError>> + Send,
 {
-    // Crash recovery once at startup.
+    // Crash recovery once at startup. A tick promises values
+    // derivable from the on-disk document, so a failed persist
+    // publishes nothing; the next successful save carries the full
+    // state.
     {
         let mut guard = state.lock().expect("queue state mutex poisoned");
         crash_recovery_reset(&mut guard);
-        if let Err(err) = save_atomic(&guard, &state_path) {
-            tracing::error!(error = %err, "queue worker: persist after crash recovery");
+        match save_atomic(&guard, &state_path) {
+            Ok(()) => {
+                let tick = derive_tick(&guard, None);
+                events.publish(Event::QueueTick(tick));
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "queue worker: persist after crash recovery");
+            }
         }
-        let tick = derive_tick(&guard, None);
-        events.publish(Event::QueueTick(tick));
     }
 
     loop {
@@ -536,11 +572,15 @@ where
             let mut guard = state.lock().expect("queue state mutex poisoned");
             let job = pull_pending(&mut guard);
             if job.is_some() {
-                if let Err(err) = save_atomic(&guard, &state_path) {
-                    tracing::error!(error = %err, "queue worker: persist after pull");
+                match save_atomic(&guard, &state_path) {
+                    Ok(()) => {
+                        let tick = derive_tick(&guard, None);
+                        events.publish(Event::QueueTick(tick));
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "queue worker: persist after pull");
+                    }
                 }
-                let tick = derive_tick(&guard, None);
-                events.publish(Event::QueueTick(tick));
             }
             job
         };
@@ -627,13 +667,15 @@ where
                     guard.paused = false;
                 }
             }
-            let last_finished = guard
-                .jobs
-                .iter()
-                .find(|j| j.id == job.id)
-                .map(summarize_outcome);
-            let tick = derive_tick(&guard, last_finished);
-            events.publish(Event::QueueTick(tick));
+            if save_result.is_ok() {
+                let last_finished = guard
+                    .jobs
+                    .iter()
+                    .find(|j| j.id == job.id)
+                    .map(summarize_outcome);
+                let tick = derive_tick(&guard, last_finished);
+                events.publish(Event::QueueTick(tick));
+            }
         }
     }
 }
@@ -958,12 +1000,43 @@ mod tests {
         std::fs::write(root.join("c.unsupported"), b"x").unwrap();
         std::fs::write(root.join(".hidden.epub"), b"h").unwrap();
         std::fs::write(root.join("sub/d.txt"), b"t").unwrap();
+        std::fs::write(root.join("e.html"), b"<p>h</p>").unwrap();
+        std::fs::write(root.join("f.mobi"), b"m").unwrap();
         let files = collect_supported_files(root).unwrap();
         let names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["a.epub", "b.pdf", "d.txt"]);
+        // html is in the allowlist; mobi has no extraction adapter and
+        // stays out of the walk.
+        assert_eq!(names, vec!["a.epub", "b.pdf", "e.html", "d.txt"]);
+    }
+
+    #[test]
+    fn check_extension_supported_accepts_allowlisted_case_insensitively() {
+        assert!(check_extension_supported(&PathBuf::from("/tmp/a.epub")).is_ok());
+        assert!(check_extension_supported(&PathBuf::from("/tmp/B.HTML")).is_ok());
+    }
+
+    #[test]
+    fn check_extension_supported_hints_conversion_for_mobi_and_azw3() {
+        for name in ["a.mobi", "b.azw3", "C.MOBI"] {
+            let err = check_extension_supported(&PathBuf::from(name)).unwrap_err();
+            assert!(err.contains("convert to EPUB"), "no hint in: {err}");
+        }
+    }
+
+    #[test]
+    fn check_extension_supported_lists_allowlist_for_other_extensions() {
+        let err = check_extension_supported(&PathBuf::from("a.docx")).unwrap_err();
+        assert!(err.contains(".docx"), "extension missing from: {err}");
+        assert!(err.contains("epub"), "allowlist missing from: {err}");
+    }
+
+    #[test]
+    fn check_extension_supported_rejects_missing_extension() {
+        let err = check_extension_supported(&PathBuf::from("/tmp/noext")).unwrap_err();
+        assert!(err.contains("no extension"), "unexpected message: {err}");
     }
 
     #[test]
@@ -1109,6 +1182,153 @@ mod tests {
         assert!(snapshot.jobs[0].finished_at.is_some());
         tx.send(()).expect("send shutdown");
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn worker_loop_publishes_no_tick_when_persist_fails() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        // Every tick promises values derivable from the on-disk
+        // document, so a worker whose persists all fail must publish
+        // nothing. A regular file blocks the state path's parent, so
+        // every save_atomic fails while the in-memory queue still
+        // advances.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"file-not-dir").unwrap();
+        let path = blocker.join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/only.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, flag);
+        let mut subscriber = events.subscribe();
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                |_job| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
+                events,
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+        // The job still settles in memory despite the failing persists.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let done = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Done)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not settle the job within 3 s"
+            );
+        }
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let mut ticks = 0;
+        while let Ok(event) = subscriber.try_recv() {
+            if matches!(event, Event::QueueTick(_)) {
+                ticks += 1;
+            }
+        }
+        assert_eq!(
+            ticks, 0,
+            "a queue.tick was published without a successful persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_loop_ticks_follow_each_successful_persist() {
+        use crate::control::events::{DaemonState, DaemonStateFlag};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queue.json");
+        let mut initial = QueueState::default();
+        let _ids = enqueue_files(
+            &mut initial,
+            &[PathBuf::from("/tmp/only.epub")],
+            "default",
+            ItemKind::Book,
+            Priority::Normal,
+            false,
+            false,
+            None,
+        );
+        let state = Arc::new(Mutex::new(initial));
+        let flag = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+        let events = EventStreamHandle::new(8, flag);
+        let mut subscriber = events.subscribe();
+        let (tx, rx) = broadcast::channel::<()>(2);
+        let handle = {
+            let state = Arc::clone(&state);
+            tokio::spawn(worker_loop(
+                path,
+                state,
+                rx,
+                |_job| async { Ok::<JobSuccess, JobError>(JobSuccess::done()) },
+                events,
+                Arc::new(AtomicBool::new(false)),
+            ))
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let done = {
+                let guard = state.lock().unwrap();
+                guard.jobs.iter().any(|j| j.state == JobState::Done)
+            };
+            if done {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not mark the job Done within 3 s"
+            );
+        }
+        tx.send(()).expect("send shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+
+        let mut ticks = Vec::new();
+        while let Ok(event) = subscriber.try_recv() {
+            if let Event::QueueTick(tick) = event {
+                ticks.push(tick);
+            }
+        }
+        // Startup, pull, and outcome each persisted and ticked.
+        assert!(
+            ticks.len() >= 3,
+            "expected startup, pull, and outcome ticks, got {}",
+            ticks.len()
+        );
+        assert!(
+            ticks.iter().any(|t| t.running == 1),
+            "the pull tick reports the running job"
+        );
+        let last = ticks.last().expect("at least one tick");
+        assert_eq!(last.pending, 0);
+        assert_eq!(last.running, 0);
+        assert!(
+            matches!(&last.last_finished, Some(s) if s.state == JobState::Done),
+            "the outcome tick carries the finished summary"
+        );
     }
 
     #[tokio::test]

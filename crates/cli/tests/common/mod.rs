@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared helpers for the `bookrack run` end-to-end tests.
+//! Process plumbing for the `bookrack run` end-to-end tests.
 //!
 //! Spawning the daemon as a child with piped stdout/stderr and then
 //! blocking on `wait()` deadlocks the moment either pipe's ~64 KiB
@@ -14,10 +14,13 @@
 //! and stderr into in-memory buffers. The test calls
 //! [`DaemonProcess::wait_with_output`] to retrieve the exit status
 //! and captured streams once the daemon exits on its own.
+//!
+//! Isolation is not this module's job: the caller builds the command
+//! through `bookrack_test_support::bookrack_cmd!`, which is the only
+//! owner of the child's environment.
 
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -25,10 +28,6 @@ use eyre::{Context, ContextCompat, Result};
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
-
-pub fn bookrack_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_bookrack"))
-}
 
 /// Wait until the daemon's TTY session lock contains the MCP address,
 /// the marker that startup has finished and the control socket is
@@ -53,22 +52,14 @@ pub struct DaemonProcess {
     child: Child,
     stdout_handle: JoinHandle<String>,
     stderr_handle: JoinHandle<String>,
-    /// Keeps the per-spawn daemon state directory alive for the
-    /// child's lifetime; the spawned daemon writes its queue snapshot
-    /// and logs here instead of the user's real per-user directory.
-    _daemon_state_dir: tempfile::TempDir,
 }
 
 impl DaemonProcess {
-    /// Spawn the configured command with stdin closed and stdout/stderr
-    /// piped; immediately start background drainer tasks so the
-    /// child's pipes never fill while the test holds `wait()`. The
-    /// child's daemon state directory is pinned to a fresh tempdir,
-    /// overriding any value the caller or the environment carries.
-    pub fn spawn(cmd: &mut Command) -> Result<Self> {
-        let daemon_state_dir = tempfile::tempdir().context("daemon state tempdir")?;
+    /// Spawn `cmd` with stdin closed and stdout/stderr piped; immediately
+    /// start background drainer tasks so the child's pipes never fill
+    /// while the test holds `wait()`.
+    pub fn spawn(mut cmd: Command) -> Result<Self> {
         let mut child = cmd
-            .env("BOOKRACK_DAEMON_STATE_DIR", daemon_state_dir.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -83,7 +74,6 @@ impl DaemonProcess {
             child,
             stdout_handle,
             stderr_handle,
-            _daemon_state_dir: daemon_state_dir,
         })
     }
 

@@ -10,10 +10,13 @@
 //! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
 //! script can branch on the result.
 //!
-//! The store rows deliberately stop at `path.exists()`. Opening the
-//! catalog or corpus would race the daemon's exclusive write lock and
-//! could deadlock or corrupt a running session; deeper introspection
-//! lives behind the REPL `status` command instead.
+//! The store-presence rows deliberately stop at `path.exists()`: a
+//! read-write open would apply pending migrations and contend for the
+//! daemon's exclusive write lock. The registry-coherence rows do open
+//! the corpus read-only to read its built stamps — a `query_only` WAL
+//! open takes no write lock and is safe alongside a running daemon —
+//! but no row opens a store read-write. Deeper introspection lives
+//! behind the REPL `status` command instead.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
@@ -28,10 +31,12 @@ use bookrack_config::{
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
-use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, ProbeReport, probe_ollama};
+use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
 use bookrack_index_profile::{has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
+
+use crate::backend_probe::{EmbedBackendState, check_embed_backend};
 
 /// One row of the health report.
 #[derive(Debug, Clone, serde::Deserialize, Serialize)]
@@ -144,8 +149,11 @@ pub async fn gather_with(
         push_catalog_row(&mut rows, cfg);
         push_corpus_row(&mut rows, cfg);
     }
-    push_registry_consistency_rows(&mut rows);
-    push_index_profile_coherence_rows(&mut rows);
+    // One resolution feeds both registry-backed sections, so they can
+    // never disagree about what the registry says.
+    let registry = probe_registry(list_libraries());
+    push_registry_consistency_rows(&mut rows, &registry);
+    push_index_profile_coherence_rows(&mut rows, &registry);
     let ollama_url = ollama_url_for_probe(cfg.as_ref());
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
@@ -734,18 +742,96 @@ fn manifest_error_reason(error: &ManifestError) -> String {
     }
 }
 
+/// What resolving the library registry found. Kept as a value so the
+/// two registry-backed sections classify one observation rather than
+/// reading the registry once each, and so a test drives them without
+/// touching the process environment.
+#[derive(Debug, Clone)]
+enum RegistryProbe {
+    /// No registry is configured, or the file it names does not exist.
+    /// Both sections stay silent: the registry is optional and the write
+    /// verbs create it on first use, so its absence is a fresh install
+    /// rather than a fault.
+    Absent,
+    /// The registry resolved; the entries it lists, sorted by name.
+    Entries(Vec<LibraryEntry>),
+    /// The registry file is present but could not be read: its path and
+    /// the compact reason.
+    Unreadable { path: String, reason: String },
+}
+
+/// Map a [`list_libraries`] outcome to a [`RegistryProbe`], keeping
+/// "there is no registry" and "the registry cannot be read" apart. A
+/// file that does not exist joins [`RegistryProbe::Absent`] whether the
+/// environment named it or it resolved as the platform default, so the
+/// two states the config layer distinguishes reach the report intact.
+fn probe_registry(listed: Result<Option<Vec<LibraryEntry>>, ConfigError>) -> RegistryProbe {
+    match listed {
+        Ok(Some(entries)) => RegistryProbe::Entries(entries),
+        Ok(None) => RegistryProbe::Absent,
+        Err(ConfigError::RegistryUnreadable { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            RegistryProbe::Absent
+        }
+        Err(error) => RegistryProbe::Unreadable {
+            path: registry_error_path(&error),
+            reason: registry_error_reason(&error),
+        },
+    }
+}
+
+/// The registry path a read failure names, for the row's value column.
+/// Falls back to the platform default so the row still points at a
+/// file when the error carries no path of its own.
+fn registry_error_path(error: &ConfigError) -> String {
+    match error {
+        ConfigError::RegistryUnreadable { path, .. }
+        | ConfigError::RegistryMalformed { path, .. } => path.display().to_string(),
+        _ => default_registry_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown)".to_string()),
+    }
+}
+
+/// A compact reason for a registry read failure, in the shape
+/// [`manifest_error_reason`] uses for an identity manifest.
+fn registry_error_reason(error: &ConfigError) -> String {
+    match error {
+        ConfigError::RegistryUnreadable { source, .. } => format!("cannot be read: {source}"),
+        ConfigError::RegistryMalformed { .. } => "does not parse".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Emit the registry–manifest consistency check. One WARN row per
 /// drifted entry, or a single OK summary when every entry agrees with its
-/// manifest. Skipped entirely when there is no registry or it is empty.
-fn push_registry_consistency_rows(rows: &mut Vec<Row>) {
-    let Ok(Some(entries)) = list_libraries() else {
-        return;
+/// manifest. Skipped entirely when there is no registry or it is empty;
+/// a registry that exists but cannot be read is reported as its own WARN
+/// row instead of joining that silence.
+fn push_registry_consistency_rows(rows: &mut Vec<Row>, probe: &RegistryProbe) {
+    let entries = match probe {
+        RegistryProbe::Absent => return,
+        RegistryProbe::Unreadable { path, reason } => {
+            rows.push(Row {
+                label: "registry".to_string(),
+                value: path.clone(),
+                status: Status::Warn {
+                    note: format!(
+                        "the registry {reason}; library names cannot be resolved until it is \
+                         fixed or rebuilt with `bookrack libraries scan --register`"
+                    ),
+                },
+            });
+            return;
+        }
+        RegistryProbe::Entries(entries) => entries,
     };
     if entries.is_empty() {
         return;
     }
     let mut clean = true;
-    for entry in &entries {
+    for entry in entries {
         let probe = probe_manifest(&entry.data_dir);
         if let Some(note) = registry_entry_issue(entry, &probe) {
             clean = false;
@@ -773,22 +859,27 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
 }
 
 /// The built embed-model/dimension stamp pair for the book pipeline;
-/// see [`crate::profile::built_stamps`].
-fn built_stamps(data_dir: &Path) -> Option<(String, u32)> {
+/// see [`crate::profile::built_stamps`] for the three-way contract
+/// (missing / unreadable / stamped) this passes through.
+fn built_stamps(data_dir: &Path) -> Result<Option<(String, u32)>, String> {
     crate::profile::built_stamps(&crate::profile::Pipeline::Books.corpus_db(data_dir))
-        .and_then(|b| b.embed_pair())
+        .map(|stamps| stamps.and_then(|b| b.embed_pair()))
 }
 
 /// Classify one entry's index-profile reference against its resolution
-/// outcome and (optionally) the built stamps. Pure, so a test drives it
-/// without a filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
+/// outcome and the built stamps. Pure, so a test drives it without a
+/// filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
 /// for a valid profile, `Ok(None)` when the name does not resolve, and
-/// `Err(reason)` when the file failed to load.
+/// `Err(reason)` when the file failed to load. `built` is
+/// `Ok(Some(pair))` for a stamped index, `Ok(None)` when no index has
+/// been built, and `Err(reason)` when the corpus database exists but
+/// cannot be opened — the latter is reported instead of being passed
+/// off as a clean skip.
 fn coherence_issue(
     entry_name: &str,
     profile_name: &str,
     resolved: Result<Option<(String, u32, bool)>, String>,
-    built: Option<(String, u32)>,
+    built: Result<Option<(String, u32)>, String>,
 ) -> Option<String> {
     match resolved {
         Err(reason) => Some(format!(
@@ -801,14 +892,20 @@ fn coherence_issue(
             "'{entry_name}' references index profile '{profile_name}', which has validation errors \
              (run `bookrack index-profile validate {profile_name}`)"
         )),
-        Ok(Some((model, dim, false))) => built.and_then(|(built_model, built_dim)| {
-            (built_model != model || built_dim != dim).then(|| {
-                format!(
-                    "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
-                     the built index is {built_model}/{built_dim}; the daemon will refuse to start"
-                )
-            })
-        }),
+        Ok(Some((model, dim, false))) => match built {
+            Err(reason) => Some(format!(
+                "corpus database for '{entry_name}' cannot be opened ({reason}); coherence with \
+                 index profile '{profile_name}' was not checked"
+            )),
+            Ok(built) => built.and_then(|(built_model, built_dim)| {
+                (built_model != model || built_dim != dim).then(|| {
+                    format!(
+                        "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
+                         the built index is {built_model}/{built_dim}; the daemon will refuse to start"
+                    )
+                })
+            }),
+        },
     }
 }
 
@@ -858,10 +955,35 @@ fn drift_issue(entry_name: &str, effective: &str, drift: &[ProfileRefDrift]) -> 
 /// compare it against the library's built index stamps, and report any
 /// lower-priority source still naming a different profile. One WARN row
 /// per problem, or a single OK summary when every referenced profile is
-/// coherent. Skipped entirely when no library references a profile.
-fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
-    let Ok(Some(entries)) = list_libraries() else {
-        return;
+/// coherent. Skipped entirely when no library references a profile; a
+/// registry that cannot be read leaves a row saying the check was
+/// skipped, so an absent section is never read as a clean one.
+fn push_index_profile_coherence_rows(rows: &mut Vec<Row>, probe: &RegistryProbe) {
+    push_index_profile_coherence_rows_in(rows, probe, index_profile_dir().as_deref());
+}
+
+/// [`push_index_profile_coherence_rows`] with the user profile
+/// directory supplied, so a test resolves references against a seeded
+/// directory instead of the per-user one.
+fn push_index_profile_coherence_rows_in(
+    rows: &mut Vec<Row>,
+    probe: &RegistryProbe,
+    profile_dir: Option<&Path>,
+) {
+    let entries = match probe {
+        RegistryProbe::Absent => return,
+        RegistryProbe::Unreadable { .. } => {
+            rows.push(Row {
+                label: "index-profile".to_string(),
+                value: "(skipped)".to_string(),
+                status: Status::Warn {
+                    note: "the registry could not be read, so profile coherence was not checked"
+                        .to_string(),
+                },
+            });
+            return;
+        }
+        RegistryProbe::Entries(entries) => entries,
     };
     let referencing: Vec<(&LibraryEntry, String, Vec<ProfileRefDrift>)> = entries
         .iter()
@@ -873,13 +995,16 @@ fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
     if referencing.is_empty() {
         return;
     }
-    let dir = index_profile_dir();
+    // The summary counts what the loop below checks — the effective
+    // reference, manifest first — not the registry's cached copy, which
+    // a manifest-only declaration leaves empty.
+    let referenced = referencing.len();
     let mut clean = true;
     for (entry, profile_name, drift) in referencing {
         let profile_name = profile_name.as_str();
-        let resolved = match &dir {
-            Some(dir) => match resolve(dir, profile_name) {
-                Ok(Some(profile)) => Ok(Some((
+        let resolved = match profile_dir {
+            Some(dir) => match resolve(Some(dir), profile_name) {
+                Ok(Some((profile, _source))) => Ok(Some((
                     profile.embed.model.clone(),
                     profile.embed.dim,
                     has_errors(&validate(&profile, false)),
@@ -910,10 +1035,7 @@ fn push_index_profile_coherence_rows(rows: &mut Vec<Row>) {
     if clean {
         rows.push(Row {
             label: "index-profile".to_string(),
-            value: format!(
-                "{} referenced",
-                entries.iter().filter(|e| e.index_profile.is_some()).count()
-            ),
+            value: format!("{referenced} referenced"),
             status: Status::Ok {
                 note: Some("coherent with their built indexes".to_string()),
             },
@@ -1087,78 +1209,66 @@ fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
     }
 }
 
+/// Lay the embed-backend judgement out as the two rows the table has
+/// always shown. The judgement itself lives in
+/// [`crate::backend_probe`]; only the layout is here, so bring-up can
+/// reach the same verdict without inheriting a table cell's phrasing.
 async fn push_ollama_rows(rows: &mut Vec<Row>, base_url: &str, embed_model: &str) {
-    let probe = probe_ollama(base_url).await;
-    match probe {
-        Ok(report) if report.reachable => {
-            push_ollama_reachable_rows(rows, base_url, embed_model, &report);
-        }
-        Ok(_) => {
-            rows.push(Row {
-                label: "Ollama daemon".to_string(),
-                value: base_url.to_string(),
-                status: Status::Fail {
-                    note: format!(
-                        "unreachable within {}s -- is Ollama running? install: https://ollama.com",
-                        DEFAULT_PROBE_TIMEOUT.as_secs(),
-                    ),
-                },
-            });
-            rows.push(Row {
-                label: "embed model".to_string(),
-                value: embed_model.to_string(),
-                status: Status::Fail {
-                    note: "skipped: Ollama unreachable".to_string(),
-                },
-            });
-        }
-        Err(e) => {
-            rows.push(Row {
-                label: "Ollama daemon".to_string(),
-                value: base_url.to_string(),
-                status: Status::Fail {
-                    note: format!("{e}"),
-                },
-            });
-            rows.push(Row {
-                label: "embed model".to_string(),
-                value: embed_model.to_string(),
-                status: Status::Fail {
-                    note: "skipped: Ollama probe failed".to_string(),
-                },
-            });
-        }
-    }
+    let state = check_embed_backend(base_url, embed_model).await;
+    rows.extend(ollama_rows(base_url, embed_model, state));
 }
 
-fn push_ollama_reachable_rows(
-    rows: &mut Vec<Row>,
-    base_url: &str,
-    embed_model: &str,
-    probe: &ProbeReport,
-) {
-    rows.push(Row {
-        label: "Ollama daemon".to_string(),
-        value: base_url.to_string(),
-        status: Status::Ok {
-            note: Some(format!("{} model(s) pulled", probe.models.len())),
-        },
-    });
-    if probe.models.iter().any(|m| m == embed_model) {
-        rows.push(Row {
-            label: "embed model".to_string(),
-            value: embed_model.to_string(),
-            status: Status::Ok { note: None },
-        });
-    } else {
-        rows.push(Row {
-            label: "embed model".to_string(),
-            value: embed_model.to_string(),
-            status: Status::Fail {
-                note: format!("not pulled -- run `ollama pull {embed_model}`"),
+/// The pure layout half of [`push_ollama_rows`], separated so the four
+/// outcomes can be pinned without a network.
+fn ollama_rows(base_url: &str, embed_model: &str, state: EmbedBackendState) -> [Row; 2] {
+    let (daemon_status, model_status) = match state {
+        EmbedBackendState::Ready { models } => (
+            Status::Ok {
+                note: Some(format!("{} model(s) pulled", models.len())),
             },
-        });
-    }
+            Status::Ok { note: None },
+        ),
+        EmbedBackendState::ModelMissing { model, available } => (
+            Status::Ok {
+                note: Some(format!("{} model(s) pulled", available.len())),
+            },
+            Status::Fail {
+                // The same fragment the bring-up hint wraps in a
+                // sentence. Sharing the whole sentence instead
+                // would force one of the two to change shape.
+                note: format!("not pulled -- run `{}`", pull_command(&model)),
+            },
+        ),
+        EmbedBackendState::Unreachable => (
+            Status::Fail {
+                note: format!(
+                    "unreachable within {}s -- is Ollama running? install: https://ollama.com",
+                    DEFAULT_PROBE_TIMEOUT.as_secs(),
+                ),
+            },
+            Status::Fail {
+                note: "skipped: Ollama unreachable".to_string(),
+            },
+        ),
+        EmbedBackendState::ProbeFailed { reason } => (
+            Status::Fail { note: reason },
+            Status::Fail {
+                note: "skipped: Ollama probe failed".to_string(),
+            },
+        ),
+    };
+    [
+        Row {
+            label: "Ollama daemon".to_string(),
+            value: base_url.to_string(),
+            status: daemon_status,
+        },
+        Row {
+            label: "embed model".to_string(),
+            value: embed_model.to_string(),
+            status: model_status,
+        },
+    ]
 }
 
 fn resolution_source_label(source: ResolutionSource) -> &'static str {
@@ -1247,7 +1357,100 @@ fn render_json(report: &Report) {
 
 #[cfg(test)]
 mod tests {
+    use bookrack_core::Explain;
+
     use super::*;
+
+    /// Every note the two Ollama rows can carry, transcribed from the
+    /// table as it stood before the judgement moved out. Pinning the
+    /// literals is the point: extracting the judgement must not shift
+    /// a single character of what an operator reads.
+    #[test]
+    fn doctor_rows_are_unchanged_by_the_extraction() {
+        let cases = [
+            (
+                EmbedBackendState::Ready {
+                    models: vec!["m".into(), "n".into()],
+                },
+                Status::Ok {
+                    note: Some("2 model(s) pulled".to_string()),
+                },
+                Status::Ok { note: None },
+            ),
+            (
+                EmbedBackendState::ModelMissing {
+                    model: "m".into(),
+                    available: vec!["n".into()],
+                },
+                Status::Ok {
+                    note: Some("1 model(s) pulled".to_string()),
+                },
+                Status::Fail {
+                    note: "not pulled -- run `ollama pull m`".to_string(),
+                },
+            ),
+            (
+                EmbedBackendState::Unreachable,
+                Status::Fail {
+                    note: "unreachable within 2s -- is Ollama running? \
+                           install: https://ollama.com"
+                        .to_string(),
+                },
+                Status::Fail {
+                    note: "skipped: Ollama unreachable".to_string(),
+                },
+            ),
+            (
+                EmbedBackendState::ProbeFailed {
+                    reason: "Ollama returned a malformed /api/tags response: eof".to_string(),
+                },
+                Status::Fail {
+                    note: "Ollama returned a malformed /api/tags response: eof".to_string(),
+                },
+                Status::Fail {
+                    note: "skipped: Ollama probe failed".to_string(),
+                },
+            ),
+        ];
+        for (state, daemon, model) in cases {
+            let label = format!("{state:?}");
+            let [daemon_row, model_row] = ollama_rows("http://host:11434", "m", state);
+            assert_eq!(daemon_row.label, "Ollama daemon", "{label}");
+            assert_eq!(daemon_row.value, "http://host:11434", "{label}");
+            assert_eq!(
+                format!("{:?}", daemon_row.status),
+                format!("{daemon:?}"),
+                "{label}"
+            );
+            assert_eq!(model_row.label, "embed model", "{label}");
+            assert_eq!(model_row.value, "m", "{label}");
+            assert_eq!(
+                format!("{:?}", model_row.status),
+                format!("{model:?}"),
+                "{label}"
+            );
+        }
+    }
+
+    /// The table cell and the bring-up hint share the repair command,
+    /// not the sentence around it. Asserting on the shared fragment is
+    /// what makes this a same-source check rather than two literals
+    /// that happen to agree today.
+    #[test]
+    fn doctor_and_preflight_share_one_pull_command() {
+        let state = EmbedBackendState::ModelMissing {
+            model: "wanted-model".to_string(),
+            available: Vec::new(),
+        };
+        let command = pull_command("wanted-model");
+        let hint = state.explain().data.hint.expect("hint");
+        let [_, model_row] = ollama_rows("http://host:11434", "wanted-model", state);
+        let Status::Fail { note } = model_row.status else {
+            panic!("a missing model is a FAIL row");
+        };
+        assert!(note.contains(&command), "{note}");
+        assert!(hint.contains(&command), "{hint}");
+    }
 
     fn row(label: &str, value: &str, status: Status) -> Row {
         Row {
@@ -1391,20 +1594,127 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_registry_is_reported_by_both_registry_sections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("registry.toml");
+        std::fs::write(&path, "this is not = valid = toml").expect("seed a malformed registry");
+        let error = bookrack_config::list_libraries_at(&path)
+            .expect_err("a malformed registry must not parse");
+
+        let probe = probe_registry(Err(error));
+        let RegistryProbe::Unreadable {
+            path: shown,
+            reason,
+        } = &probe
+        else {
+            panic!("a registry that exists but cannot be read must not probe as absent: {probe:?}");
+        };
+        assert_eq!(shown, &path.display().to_string());
+        assert!(reason.contains("does not parse"), "{reason}");
+
+        let mut rows = Vec::new();
+        push_registry_consistency_rows(&mut rows, &probe);
+        push_index_profile_coherence_rows(&mut rows, &probe);
+
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, vec!["registry", "index-profile"], "{rows:?}");
+        for row in &rows {
+            assert!(
+                matches!(row.status, Status::Warn { .. }),
+                "an unreadable registry is a warning, not a pass: {row:?}"
+            );
+        }
+        assert!(rows[0].value.contains("registry.toml"), "{:?}", rows[0]);
+        let Status::Warn { note } = &rows[1].status else {
+            unreachable!()
+        };
+        assert!(note.contains("could not be read"), "{note}");
+    }
+
+    #[test]
+    fn the_coherence_summary_counts_the_libraries_it_actually_checked() {
+        // The manifest outranks the registry's cached copy, so a library
+        // that declares its profile only in the manifest is checked by
+        // the loop above. The summary must count the same set, or a
+        // library it inspected goes unmentioned in the total.
+        let root = tempfile::tempdir().expect("tempdir");
+        bookrack_config::set_manifest_index_profile(
+            root.path(),
+            Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
+            bookrack_config::ManifestIdentitySeed {
+                name: "declared",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("seed a manifest declaring a profile");
+
+        let mut entry = entry("declared", None);
+        entry.data_dir = root.path().to_path_buf();
+        assert!(
+            entry.index_profile.is_none(),
+            "the registry cache is deliberately empty",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        // No corpus.db, so the stamp comparison is skipped and the
+        // section lands on its clean summary.
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(matches!(rows[0].status, Status::Ok { .. }), "{rows:?}");
+        assert_eq!(rows[0].value, "1 referenced");
+    }
+
+    #[test]
+    fn a_registry_that_is_absent_or_uncreated_leaves_both_sections_silent() {
+        // `Ok(None)` is "no registry is configured"; a `NotFound` read
+        // failure is a configured path the write verbs have not created
+        // yet. Neither is a fault, so neither may produce a row — the
+        // reporting above must not be bought by warning on fresh
+        // installs.
+        let listed: [Result<Option<Vec<LibraryEntry>>, ConfigError>; 2] = [
+            Ok(None),
+            Err(ConfigError::RegistryUnreadable {
+                path: std::path::PathBuf::from("/roots/registry.toml"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+        ];
+        for outcome in listed {
+            let probe = probe_registry(outcome);
+            assert!(
+                matches!(probe, RegistryProbe::Absent),
+                "expected an absent registry, got {probe:?}"
+            );
+            let mut rows = Vec::new();
+            push_registry_consistency_rows(&mut rows, &probe);
+            push_index_profile_coherence_rows(&mut rows, &probe);
+            assert!(rows.is_empty(), "{rows:?}");
+        }
+    }
+
+    #[test]
     fn coherence_unresolved_and_invalid_and_mismatch_are_flagged() {
         // Unresolved profile.
-        assert!(coherence_issue("lib", "p", Ok(None), None).is_some());
+        assert!(coherence_issue("lib", "p", Ok(None), Ok(None)).is_some());
         // Failed to load.
-        assert!(coherence_issue("lib", "p", Err("boom".to_string()), None).is_some());
+        assert!(coherence_issue("lib", "p", Err("boom".to_string()), Ok(None)).is_some());
         // Has validation errors.
-        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), None).is_some());
+        assert!(
+            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), Ok(None)).is_some()
+        );
         // Valid and coherent with the built stamps.
         assert!(
             coherence_issue(
                 "lib",
                 "p",
                 Ok(Some(("m".to_string(), 8, false))),
-                Some(("m".to_string(), 8)),
+                Ok(Some(("m".to_string(), 8))),
             )
             .is_none()
         );
@@ -1413,7 +1723,7 @@ mod tests {
             "lib",
             "p",
             Ok(Some(("m".to_string(), 8, false))),
-            Some(("other".to_string(), 8)),
+            Ok(Some(("other".to_string(), 8))),
         )
         .expect("mismatch flagged");
         assert!(note.contains("refuse to start"), "{note}");
@@ -1421,9 +1731,26 @@ mod tests {
 
     #[test]
     fn coherence_skips_the_stamp_check_when_the_index_is_unbuilt() {
-        // No built stamps (corpus missing/unbuilt) and a valid profile is
-        // not a problem — the check simply cannot compare.
-        assert!(coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), None).is_none());
+        // No built stamps (corpus missing, so no index built yet) and a
+        // valid profile is not a problem — the check cannot compare.
+        assert!(
+            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), Ok(None)).is_none()
+        );
+    }
+
+    #[test]
+    fn coherence_flags_an_unreadable_corpus_instead_of_skipping() {
+        // An existing corpus that cannot be opened is a distinct state
+        // from "unbuilt": the check must surface it, not report clean.
+        let note = coherence_issue(
+            "lib",
+            "p",
+            Ok(Some(("m".to_string(), 8, false))),
+            Err("schema version 99 is newer than this binary".to_string()),
+        )
+        .expect("unreadable corpus flagged");
+        assert!(note.contains("cannot be opened"), "{note}");
+        assert!(note.contains("was not checked"), "{note}");
     }
 
     #[test]

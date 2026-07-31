@@ -37,20 +37,20 @@ pub fn run(selection: &bookrack_config::LibrarySelection, action: RunsAction) ->
     }
 }
 
-/// Open every catalog that carries a `pipeline_runs` registry. The
-/// paper catalog joins only when its file already exists, so a
-/// read-only `runs` invocation does not materialize an empty papers
-/// database as a side effect.
+/// Open every catalog that carries a `pipeline_runs` registry,
+/// read-only. Each catalog joins only when its file already exists,
+/// so a `runs` invocation neither materializes an empty database as a
+/// side effect nor competes with a live writer; a root with no
+/// catalog at all yields an empty set and renders as zero runs.
 fn open_run_catalogs(cfg: &Config) -> Result<Vec<Catalog>> {
-    let book_path = cfg.catalog_db();
-    let mut catalogs =
-        vec![Catalog::open(&book_path).with_context(|| format!("open {}", book_path.display()))?];
-    let papers_path = cfg.papers_catalog_db();
-    if papers_path.exists() {
-        catalogs.push(
-            Catalog::open(&papers_path)
-                .with_context(|| format!("open {}", papers_path.display()))?,
-        );
+    let mut catalogs = Vec::new();
+    for path in [cfg.catalog_db(), cfg.papers_catalog_db()] {
+        if path.exists() {
+            catalogs.push(
+                Catalog::open_read_only(&path)
+                    .with_context(|| format!("open {}", path.display()))?,
+            );
+        }
     }
     Ok(catalogs)
 }

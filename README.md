@@ -1,9 +1,9 @@
 # bookrack
 
 A local, offline RAG library. Point bookrack at a collection of
-long-form books and academic papers — EPUB, TXT, or PDF — and it turns
-them into a knowledge base an AI agent can search with precise, cited
-passages. The pipeline runs entirely on your own machine; nothing ever
+long-form books and academic papers — EPUB, PDF, TXT, or HTML — and it
+turns them into a knowledge base an AI agent can search with precise,
+cited passages. The pipeline runs entirely on your own machine; nothing ever
 leaves the host. An MCP server speaks the standard agent protocol, so
 clients like Claude Code can search the library as a tool.
 
@@ -145,9 +145,13 @@ ingest is unavailable but EPUB and TXT still work.
 
 ## Features
 
-- **Books and papers, side by side** — EPUB / TXT / PDF books and
-  academic papers in two parallel stores under one data root;
-  `library.search` queries one store or both.
+- **Books and papers, side by side** — books and academic papers in
+  two parallel stores under one data root; `library.search` queries
+  one store or both.
+- **Four source formats** — EPUB, PDF, TXT, and HTML (`.html` /
+  `.htm` / `.xhtml`); image-only scans route to the OCR worklist.
+  MOBI and AZW3 are not supported: convert them to EPUB first (e.g.
+  with Calibre's `ebook-convert`).
 - **Cited, fully offline search** — passages return with precise
   citations, and extraction, embedding, and search all run on the
   host. Nothing leaves the machine.
@@ -160,6 +164,12 @@ ingest is unavailable but EPUB and TXT still work.
 - **A managed, daemon-free registry** — `libraries` verbs register,
   detect, scan, and configure data roots with no daemon running; each
   root self-describes with an identity manifest.
+- **Many libraries, one daemon** — started through the registry, the
+  daemon mounts every registered library at bring-up: each answers
+  reads, and queue jobs route to their target library by name.
+- **One-screen status** — `bookrack status` answers "is a daemon
+  running, which library does it serve, is it busy" in a single
+  no-argument call, and through the exit code alone under `--quiet`.
 - **An OCR worklist** — image-only scans land on a durable worklist
   instead of failing; run any OCR engine and re-enter the product.
 - **Observable pipelines** — every ingest and search records to
@@ -171,7 +181,7 @@ ingest is unavailable but EPUB and TXT still work.
 
 | Guide | Covers |
 | --- | --- |
-| [Operating](docs/operating.md) | the daemon, ingesting, the queue, the OCR worklist, health checks, observability |
+| [Operating](docs/operating.md) | the daemon, ingesting, the queue, the OCR worklist, the status card, health checks, observability |
 | [Configuration](docs/configuration.md) | data-root resolution, the library registry, `config.toml`, index profiles, the audit profile |
 | [Upgrading](docs/UPGRADE.md) | the bump-to-refresh matrix and switching the embedding model |
 | [Control plane](docs/control-plane.md) | the JSON-RPC surface behind the CLI and MCP |

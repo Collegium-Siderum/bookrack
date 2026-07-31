@@ -18,7 +18,10 @@ bookrack chooses its data root by precedence, highest first:
    portable layout)
 5. The `default` entry of the registry named by `BOOKRACK_REGISTRY`
 6. The `default` entry of the platform-default registry at
-   `<config_dir>/bookrack/registry.toml`, where `<config_dir>` is:
+   `<config_dir>/bookrack/registry.toml` — **only when
+   `BOOKRACK_REGISTRY` is unset or blank**; a variable that names a
+   registry makes that registry the only one consulted, and this rung
+   is not reached. `<config_dir>` is:
 
    | Platform | `<config_dir>` |
    | --- | --- |
@@ -30,6 +33,16 @@ bookrack chooses its data root by precedence, highest first:
 path-class source (1, 3, or 4) wins while a registry `default` is also
 set, `bookrack info` and `bookrack doctor` report the eclipse so the
 shadowed default is visible rather than silently ignored.
+
+A registry that cannot be read is fatal only to a resolution that
+needed it. A root fixed by `--data-dir`, `BOOKRACK_DATA_DIR`, or the
+portable layout never consults the registry, so an unreadable or
+malformed one does not veto it: the resolution succeeds and the
+annotations that would have come from the registry — the shadowed
+default, the library name claimed for a path-class root — are simply
+absent. A selection that does need the registry (`--library`, or
+falling through to a `default`) still fails, and it fails naming the
+registry rather than reporting that no library is configured.
 
 ## The library registry
 
@@ -79,13 +92,13 @@ index profile's fact, and nothing overrides it. The file accepts these
 keys:
 
 ```toml
-ollama_url    = "http://localhost:11434"
-mcp_addr      = "127.0.0.1:8765"
-log_directive = "info,lance=warn"
+ollama_url = "http://localhost:11434"
 
 [search]
 top_k          = 5      # passages a query returns
-weak_threshold = 0.5    # cosine distance at or above which a hit is weak
+weak_threshold = 0.5    # cosine distance at or above which a hit is
+                        # weak; `retrieval show` flags a call whose every
+                        # recorded hit sits there
 
 [reranker]
 url     = "http://localhost:8080"  # probe an operator-run server instead
@@ -105,14 +118,26 @@ library's manifest rather than to this file, because it is a property of
 the library rather than of this machine. See [Retrieval
 profiles](#retrieval-profiles-index-profile).
 
-Two keys are **retired**: `embed_model` and `index_profile` as *file*
-fields. The embed model is declared by the library's index profile, and
-the profile reference lives in the manifest. A file still carrying
-either is refused by name — every command fails until the line goes,
-rather than the field being silently ignored — and `libraries config
-<name> --unset <key>` deletes it. See [Declaring the embed model through
-an index
-profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile).
+Four keys are **retired**. Two of them belong to the library rather than
+to this machine: `embed_model` is declared by the library's index
+profile, and `index_profile` as a *file* field is superseded by the
+manifest. The other two belong to the process rather than to a library:
+`mcp_addr` and `log_directive` are resolved before any data root is
+known — the log subscriber is installed and the listen address is chosen
+by the binary that then goes looking for a library, so a value sitting
+inside a library could never have been read. Their homes are
+`BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) and `BOOKRACK_LOG` /
+`BOOKRACK_LOG_CONSOLE`; both variables are alive and unchanged.
+
+A file still carrying any of the four is refused by name — every command
+that resolves a data root fails until the line goes, rather than the
+field being silently ignored — and `libraries config <name> --unset
+<key>` deletes it. Printing the file with `libraries config <name>`
+still works and annotates each retired line. See [Declaring the embed
+model through an index
+profile](UPGRADE.md#declaring-the-embed-model-through-an-index-profile)
+and [Retiring the process-level keys from
+`config.toml`](UPGRADE.md#retiring-the-process-level-keys-from-configtoml).
 
 ## Environment knobs
 
@@ -122,6 +147,64 @@ registry selectors, the Ollama endpoint, the embed-batch and search
 knobs, the PDFium library directory, the log filters, and the
 per-query ANN overrides. Copy that file to `.env` and fill in what you
 need.
+
+### Process-level knobs with no `config.toml` key
+
+`BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
+`BOOKRACK_VECTORS_REFINE_FACTOR` are read from the environment and have
+no `config.toml` counterpart, on purpose. They are per-query overrides
+for tuning retrieval breadth on a daemon that cannot take a per-call
+flag on its request surface — a debugging escape hatch, not a durable
+property of a library. Giving them a key would give a temporary knob a
+permanent home, and `libraries config set` would then warn that a
+library-level value is "overridden by the environment" for a value the
+library never had.
+
+The same reasoning retired `mcp_addr` and `log_directive` from
+`config.toml`: a knob read before any data root is known does not
+belong to a data root.
+
+### When `.env` is read
+
+`.env` is loaded by the binaries — `bookrack`, `bookrack-mcp`, and the
+desktop shell — as the first thing each of them does, before anything
+reads a variable. The search runs upward from the working directory,
+so which file is found depends on where the command was started.
+
+Two consequences follow. A process that reads a variable does so after
+the file has been applied, whichever variable it is: there is no
+ordering in which one part of a command sees the file and another part
+does not. And embedding a bookrack crate as a *library* gets no `.env`
+at all — loading a file out of the caller's working directory is a
+binary's decision, not a library's, so an embedder configures itself
+through the real environment.
+
+`BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
+environment, since a value written inside `.env` is only read if the
+file is loaded. `scripts/test-clean.sh` is why it exists: that script
+starts the test suite from an empty environment, and without the
+suppression cargo's package-root working directory would let dotenv
+refill it from the repository's own file.
+
+### Running the test suite against nothing
+
+```sh
+./scripts/test-clean.sh                 # the whole workspace
+./scripts/test-clean.sh -p bookrack-cli # or a narrowed run
+```
+
+`cargo nextest run --workspace` inherits the machine it runs on: its
+home directory, its registry, whatever `BOOKRACK_*` variables the shell
+exports, and the `.env` above the package root. That is the right loop
+for development. `scripts/test-clean.sh` is the contract underneath it:
+it starts from an empty environment and lets through only what cargo
+itself needs, plus `CI` and the two PDFium variables — those, because
+dropping them would turn the PDF tests from a loud failure into a
+silent skip, which is the outcome the script exists to prevent.
+
+Both are worth running. A difference between them is a test reading the
+machine rather than its fixtures. CI runs the scrubbed form as its own
+job.
 
 ## Retrieval profiles: `index-profile`
 
@@ -142,7 +225,10 @@ cache from the manifests. Declare one offline with:
 bookrack libraries config <name> index_profile=<profile>
 ```
 
-Five read-only verbs resolve locally with no daemon:
+Five read-only verbs resolve locally with no daemon. `current` needs a
+library and takes it from the ordinary selection — `--data-dir`,
+`--library`, `BOOKRACK_DATA_DIR`, then the registry default — so it
+reports on the same root every other command would use:
 
 ```
 bookrack index-profile list                 # built-ins + user profiles
@@ -167,10 +253,17 @@ bookrack index-profile apply <profile> [--library <name>] [--dry-run]
 `apply` reconciles a library *to* a profile — re-embedding, rebuilding
 the ANN index, reconciling stamps — so it derives an action plan and needs
 a daemon already serving that library. It prints the plan and asks before
-running it; `--dry-run` prints and exits, offline. It is the preferred
+running it; `--dry-run` prints and exits, offline. It selects its library
+the same way `current` does, `--data-dir` included. It is the preferred
 front door for switching the embedding model or the ANN shape; use
 `libraries config` above when you only mean to declare a profile the
 library already matches.
+
+A data root the registry does not carry is a valid target for both
+verbs: the manifest owns the profile reference, so `current` reports it
+and `apply` declares it. There is simply no registry entry to refresh,
+and `apply` says so instead of minting one — `libraries add` registers
+a root.
 
 ## The metadata audit profile
 

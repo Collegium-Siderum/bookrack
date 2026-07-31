@@ -40,9 +40,10 @@ impl Stage for SplitAtFirstCjk {
         "split_at_first_cjk"
     }
 
-    fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
+    fn run(&self, data: StageData, ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let raws = data.expect_raws(self.name())?;
-        let splits = raws.into_iter().map(raw_to_split_at_first_cjk).collect();
+        let splits: Vec<SplitEntry> = raws.into_iter().map(raw_to_split_at_first_cjk).collect();
+        ctx.coverage.splits = splits.len();
         Ok(StageData::Splits(splits))
     }
 }
@@ -52,9 +53,10 @@ impl Stage for SplitHeadlineOnly {
         "split_headline_only"
     }
 
-    fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
+    fn run(&self, data: StageData, ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let raws = data.expect_raws(self.name())?;
-        let splits = raws.into_iter().map(raw_to_split_headline_only).collect();
+        let splits: Vec<SplitEntry> = raws.into_iter().map(raw_to_split_headline_only).collect();
+        ctx.coverage.splits = splits.len();
         Ok(StageData::Splits(splits))
     }
 }
@@ -137,6 +139,21 @@ mod tests {
         match out {
             StageData::Splits(s) => s,
             other => panic!("expected Splits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_splitters_record_the_split_count_in_coverage() {
+        for stage in [split_at_first_cjk(), split_headline_only()] {
+            let name = stage.name().to_string();
+            let inputs = vec![raw("Smith", vec!["one"]), raw("Jones", vec!["two"])];
+            let mut ctx = Ctx::new();
+            let out = stage.run(StageData::Raws(inputs), &mut ctx).expect("run");
+            assert!(matches!(out, StageData::Splits(ref s) if s.len() == 2));
+            assert_eq!(
+                ctx.coverage.splits, 2,
+                "{name} must record its split count in coverage",
+            );
         }
     }
 

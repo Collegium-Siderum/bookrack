@@ -17,8 +17,19 @@
 //! reserved for that shape, e.g. [`INVALID_LIBRARY`]). Anything that
 //! does not match a known user-input variant falls through to
 //! [`INTERNAL_ERROR`].
+//!
+//! Wording is not written here. Each error renders itself through
+//! [`bookrack_core::Explain`], and [`rpc_from_problem`] splits the
+//! result across the envelope: the summary into `message`, the
+//! detail / hint / retryable triple into `data`. A type with no
+//! `Explain` impl takes [`Problem::from_error_chain`], whose summary
+//! is the flattened cause chain — `Display` on a wrapper variant
+//! prints only its own text ("query error"), so a bare `to_string()`
+//! here would drop the root cause at the process boundary.
+//! `scripts/error-boundary-check.sh` enforces that.
 
 use bookrack_config::ConfigError;
+use bookrack_core::{Explain, Problem};
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
@@ -103,9 +114,20 @@ pub(crate) fn plan_lookup_err(e: PlanLookupError) -> RpcError {
     }
 }
 
+/// Build the wire envelope from a rendered [`Problem`]: the summary
+/// line becomes `message`, the other three parts become `data`.
+///
+/// `message` stays self-sufficient on its own, so a client that reads
+/// only that field learns no less than it did before `data` existed.
+pub(crate) fn rpc_from_problem(code: i32, problem: Problem) -> RpcError {
+    let mut err = RpcError::new(code, problem.summary);
+    err.data = serde_json::to_value(problem.data).ok();
+    err
+}
+
 fn from_ops(e: &OpsError) -> RpcError {
     use OpsError::*;
-    match e {
+    let code = match e {
         IntakeNotFound { .. }
         | UnknownMetadataField { .. }
         | UnknownContributorRole { .. }
@@ -113,14 +135,15 @@ fn from_ops(e: &OpsError) -> RpcError {
         | NodeNotFound { .. }
         | NotALeaf { .. }
         | NotOrganizing { .. }
-        | SourceNotArchived { .. } => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
-    }
+        | SourceNotArchived { .. } => INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    rpc_from_problem(code, e.explain())
 }
 
 fn from_ingest(e: &IngestError) -> RpcError {
     use IngestError::*;
-    match e {
+    let code = match e {
         EmptyExtraction
         | NeedsOcr { .. }
         | UnknownIntake(_)
@@ -129,36 +152,42 @@ fn from_ingest(e: &IngestError) -> RpcError {
         | IntakeNotEmbedded(_)
         | OcrSourceStatusMismatch { .. }
         | OcrPagesMissing { .. }
-        | OcrPagesExcess { .. } => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
-    }
+        | OcrPagesExcess { .. } => INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    rpc_from_problem(code, e.explain())
 }
 
 fn from_glean(e: &GleanError) -> RpcError {
     use GleanError::*;
-    match e {
+    let code = match e {
         NeedsOcr { .. }
         | UnknownIntake(_)
         | IntakeNotRebuildable(_)
         | MissingEnvelope(_)
-        | EnvelopeMismatch(_) => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
-    }
+        | EnvelopeMismatch(_) => INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    rpc_from_problem(code, e.explain())
 }
 
 fn from_registry(e: &RegistryError) -> RpcError {
-    match e {
-        RegistryError::LibraryUnknown { .. } => RpcError::new(INVALID_LIBRARY, e.to_string()),
-        RegistryError::Empty => RpcError::new(INVALID_PARAMS, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
-    }
+    let code = match e {
+        RegistryError::LibraryUnknown { .. } => INVALID_LIBRARY,
+        RegistryError::Empty => INVALID_PARAMS,
+        _ => INTERNAL_ERROR,
+    };
+    // No `Explain` impl on the registry errors yet, so the fallback
+    // applies: a flattened summary and no hint.
+    rpc_from_problem(code, Problem::from_error_chain(e))
 }
 
 fn from_config(e: &ConfigError) -> RpcError {
-    match e {
-        ConfigError::UnknownLibrary { .. } => RpcError::new(INVALID_LIBRARY, e.to_string()),
-        _ => RpcError::new(INTERNAL_ERROR, e.to_string()),
-    }
+    let code = match e {
+        ConfigError::UnknownLibrary { .. } => INVALID_LIBRARY,
+        _ => INTERNAL_ERROR,
+    };
+    rpc_from_problem(code, Problem::from_error_chain(e))
 }
 
 #[cfg(test)]
@@ -225,6 +254,83 @@ mod tests {
             available: vec!["main".into()],
         });
         assert_eq!(rpc.code, INVALID_LIBRARY);
+    }
+
+    /// The transport reason must survive the boundary somewhere in the
+    /// envelope. Before flattening, the wrapper's `Display` ("query
+    /// error") was the whole message and the reason was simply gone.
+    #[test]
+    fn wrapper_error_keeps_its_root_cause_on_the_wire() {
+        let err: Report = OpsError::Query(bookrack_query::QueryError::Embed(
+            bookrack_embed::EmbedError::Unreachable("boom".into()),
+        ))
+        .into();
+        let rpc = write_err("library.search", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        let wire = serde_json::to_string(&rpc).expect("serialize");
+        assert!(wire.contains("boom"), "root cause lost: {wire}");
+    }
+
+    #[test]
+    fn rpc_error_carries_detail_and_hint_in_data() {
+        let err: Report = OpsError::Query(bookrack_query::QueryError::Embed(
+            bookrack_embed::EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found".into(),
+            },
+        ))
+        .into();
+        let rpc = write_err("library.search", err);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        assert!(
+            data.detail.expect("detail").contains("404"),
+            "the HTTP evidence belongs in detail"
+        );
+        assert!(data.hint.expect("hint").contains("ollama pull test-model"));
+        assert!(!data.retryable);
+    }
+
+    /// A client that reads only `message` — every client written
+    /// before `data` existed — must still learn what failed.
+    #[test]
+    fn rpc_message_alone_still_names_the_failure() {
+        let explained: Report = OpsError::Query(bookrack_query::QueryError::Embed(
+            bookrack_embed::EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found".into(),
+            },
+        ))
+        .into();
+        let rpc = write_err("library.search", explained);
+        assert!(rpc.message.contains("test-model"), "{}", rpc.message);
+        assert!(
+            !rpc.message.contains("query error"),
+            "a module name is not a failure: {}",
+            rpc.message
+        );
+
+        // A variant with no wording of its own falls back to the
+        // flattened chain, which is still self-sufficient.
+        let unexplained: Report = IngestError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "source file is not readable",
+        ))
+        .into();
+        let rpc = write_err("ingest.submit", unexplained);
+        assert!(
+            rpc.message.contains("source file is not readable"),
+            "{}",
+            rpc.message
+        );
+    }
+
+    #[test]
+    fn user_input_error_message_is_unchanged_by_flattening() {
+        let e = OpsError::IntakeNotFound { intake_id: 42 };
+        let expected = e.to_string(); // error-boundary-check: allow
+        let rpc = from_ops(&e);
+        assert_eq!(rpc.message, expected);
     }
 
     #[test]

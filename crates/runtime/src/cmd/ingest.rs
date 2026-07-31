@@ -82,6 +82,12 @@ async fn run_inner<E: bookrack_embed::Embedder>(
                 path.display(),
             );
         }
+        // Refuse a file the extractor cannot handle before the pipeline
+        // starts, so the failure is an actionable message instead of an
+        // EXTRACT error.
+        if let Err(msg) = crate::queue::check_extension_supported(path) {
+            eyre::bail!(msg);
+        }
         let report = ingest_book(
             path,
             corpus,

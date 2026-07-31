@@ -5,23 +5,19 @@
 //! Every database-owning crate routes its `open()` and `open_read_only()`
 //! entry points through this module, so the per-connection PRAGMAs the
 //! production runtime needs are applied in one place rather than at each
-//! store. Three roles are distinguished:
+//! store. Two roles are distinguished:
 //!
 //! - [`open_production`] — read-write handles. Sets `journal_mode = WAL`
 //!   so readers see a committed snapshot while a writer is mid-transaction.
 //!   `WAL` is a persistent file-level mode: setting it once is enough,
 //!   but re-applying on every writer open is a SQLite no-op and keeps the
 //!   contract local to the helper.
-//! - [`open_production_query_only`] — `Connection::open` with default
-//!   `OpenFlags`, plus `query_only = ON`. The default-flags form is
-//!   robust against directories that deny `-shm` / `-wal` creation when
-//!   no writer has touched the database yet, so it suits the catalog
-//!   read path where many shorter-lived consumers open the file
-//!   independently.
 //! - [`open_production_strict_read_only`] — `SQLITE_OPEN_READ_ONLY |
 //!   SQLITE_OPEN_NO_MUTEX`, plus `query_only = ON`. The strict form
-//!   refuses to materialize the database on open, which matches the
-//!   corpus contract that already used these flags.
+//!   refuses to materialize the database on open; a read-only
+//!   connection to an existing WAL database can still create the
+//!   `-shm` / `-wal` sidecars itself, so no wider flag set is needed
+//!   for the read role.
 //!
 //! Every helper also installs a `busy_timeout`: WAL widens the
 //! read-while-write window but cannot remove the brief PENDING /
@@ -53,22 +49,6 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn open_production(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.busy_timeout(BUSY_TIMEOUT)?;
-    Ok(conn)
-}
-
-/// Open a read-side SQLite connection at `path` using the default
-/// `OpenFlags` and lock it down with `query_only = ON`.
-///
-/// `Connection::open` is used rather than `SQLITE_OPEN_READ_ONLY` so
-/// the connection can still create the WAL `-shm` / `-wal` sidecars
-/// when no writer has touched the database yet. `query_only`
-/// guarantees the write barrier the read role promises. A
-/// `busy_timeout` is installed so the reader rides through the
-/// PENDING / EXCLUSIVE windows a concurrent writer briefly takes.
-pub fn open_production_query_only(path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
-    conn.pragma_update(None, "query_only", "ON")?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(conn)
 }
@@ -120,23 +100,17 @@ mod tests {
     }
 
     #[test]
-    fn query_only_open_sets_busy_timeout_and_query_only() {
+    fn strict_read_only_open_refuses_a_missing_file() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("query.db");
-        // Materialize the file first so the read role finds something
-        // to open; mirrors the production sequence where the writer
-        // creates the database before any reader connects.
-        drop(open_production(&path).expect("seed writer"));
+        let path = dir.path().join("absent.db");
 
-        let conn = open_production_query_only(&path).expect("open reader");
-        assert_eq!(pragma_i64(&conn, "query_only"), 1);
-        assert!(pragma_i64(&conn, "busy_timeout") > 0);
-        let err = conn
-            .execute("CREATE TABLE t (x INTEGER)", [])
-            .expect_err("query_only must reject writes");
+        open_production_strict_read_only(&path).expect_err("missing file must not open");
         assert!(
-            format!("{err}").to_lowercase().contains("readonly"),
-            "expected readonly rejection, got {err}",
+            std::fs::read_dir(dir.path())
+                .expect("read dir")
+                .next()
+                .is_none(),
+            "a refused open must leave the directory untouched",
         );
     }
 
@@ -159,8 +133,9 @@ mod tests {
     }
 
     /// Lock-model regression: with a writer holding an EXCLUSIVE
-    /// transaction, a query-only reader must still complete inside
-    /// the writer's hold window thanks to WAL plus the busy timeout.
+    /// transaction, a strict read-only reader must still complete
+    /// inside the writer's hold window thanks to WAL plus the busy
+    /// timeout.
     ///
     /// The same writer in `journal_mode = delete` blocks the reader
     /// for the entire hold (no committed snapshot to read from), so
@@ -194,7 +169,7 @@ mod tests {
         ready_rx.recv().expect("writer ready");
 
         let start = Instant::now();
-        let reader = open_production_query_only(&path).expect("reader open");
+        let reader = open_production_strict_read_only(&path).expect("reader open");
         let sum: i64 = reader
             .query_row("SELECT sum(x) FROM t", [], |row| row.get(0))
             .expect("reader read");

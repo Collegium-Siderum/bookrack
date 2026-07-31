@@ -204,3 +204,239 @@ fn is_rebuildable(status: IntakeStatus) -> bool {
         IntakeStatus::Extracted | IntakeStatus::DedupHold | IntakeStatus::Embedded
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_catalog::NewIntake;
+    use bookrack_core::PartitionIdx;
+    use bookrack_extract::envelope::{envelope_filename, write_envelope};
+    use bookrack_extract::{
+        Biblio, Block, BlockKind, Contributor, Extraction, Provenance, SkippedUnit,
+        TextLayerQuality, Toc,
+    };
+    use tempfile::TempDir;
+
+    fn sample_extraction() -> Extraction {
+        Extraction {
+            biblio: Biblio {
+                title: Some("Synthetic Findings in Test Spaces".to_string()),
+                subtitle: None,
+                publisher: None,
+                year: Some(2020),
+                year_raw: Some("2020".to_string()),
+                isbn: None,
+                series: None,
+                language: Some("en".to_string()),
+                contributors: Vec::<Contributor>::new(),
+                doi: None,
+                arxiv_id: None,
+                issn: None,
+                container_title: None,
+                abstract_text: None,
+                csl_type: None,
+            },
+            blocks: vec![Block {
+                kind: BlockKind::Body,
+                text: "Body paragraph of the synthetic sample paper.".to_string(),
+                source_unit: 0,
+                style: None,
+            }],
+            toc: Toc::default(),
+            provenance: Provenance {
+                adapter: "pdf".to_string(),
+                extractor_version: 1,
+                text_layer_quality: TextLayerQuality::Usable,
+                skipped_units: Vec::<SkippedUnit>::new(),
+                derived_from_sha256: None,
+                partial_pages: None,
+                source_of_structure: None,
+                fallbacks: Vec::new(),
+            },
+        }
+    }
+
+    /// Register a paper intake at `Extracted` with an envelope on disk
+    /// whose `source_sha256` matches the catalog row.
+    fn seed_extracted(catalog: &mut Catalog, dir: &Path, sha: &str) -> i64 {
+        let intake = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new(sha.to_string()).format("pdf".to_string()),
+            )
+            .expect("register intake");
+        let intake_id = intake.intake().intake_id;
+        let envelope_path = dir.join(envelope_filename(ItemKind::Paper, intake_id));
+        write_envelope(&envelope_path, &sample_extraction(), intake_id, sha)
+            .expect("write envelope");
+        catalog
+            .set_stored_path(ItemKind::Paper, intake_id, &envelope_path.to_string_lossy())
+            .expect("set stored path");
+        catalog
+            .set_intake_status(ItemKind::Paper, intake_id, IntakeStatus::Extracted)
+            .expect("set status");
+        intake_id
+    }
+
+    fn partition_leaves(corpus: &Corpus, intake_id: i64) -> Vec<bookrack_corpus::Node> {
+        corpus
+            .leaves_in_doc_span(PartitionIdx::new(intake_id).root(), 0, i64::MAX, 100)
+            .expect("leaves query")
+    }
+
+    #[test]
+    fn an_unknown_id_in_only_ids_aborts_the_whole_call() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let known = seed_extracted(&mut catalog, dir.path(), "feedface01");
+
+        let params = RebuildParams {
+            only_ids: Some(vec![known, 9_999]),
+            ..RebuildParams::default()
+        };
+        let err = rebuild_from_intakes(&mut corpus, &catalog, &params)
+            .expect_err("an unknown pinned id must abort");
+        assert!(
+            matches!(err, GleanError::UnknownIntake(9_999)),
+            "got {err:?}"
+        );
+        // The whole call aborted: no partial work for the known intake.
+        assert!(partition_leaves(&corpus, known).is_empty());
+    }
+
+    #[test]
+    fn a_non_rebuildable_id_in_only_ids_aborts_the_whole_call() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let known = seed_extracted(&mut catalog, dir.path(), "feedface01");
+        // A second intake left at the initial (non-rebuildable) status.
+        let pending = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("feedface02".to_string()).format("pdf".to_string()),
+            )
+            .expect("register intake")
+            .intake()
+            .intake_id;
+
+        let params = RebuildParams {
+            only_ids: Some(vec![known, pending]),
+            ..RebuildParams::default()
+        };
+        let err = rebuild_from_intakes(&mut corpus, &catalog, &params)
+            .expect_err("a non-rebuildable pinned id must abort");
+        match err {
+            GleanError::IntakeNotRebuildable(id) => assert_eq!(id, pending),
+            other => panic!("expected IntakeNotRebuildable, got {other:?}"),
+        }
+        assert!(partition_leaves(&corpus, known).is_empty());
+    }
+
+    #[test]
+    fn only_ids_pins_the_target_set_and_ignores_only_and_stale_only() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let pinned = seed_extracted(&mut catalog, dir.path(), "feedface01");
+        let unpinned = seed_extracted(&mut catalog, dir.path(), "feedface02");
+
+        // `only` names an unknown id and `stale_only` is on: were either
+        // consulted, the call would abort with UnknownIntake or filter
+        // the target away. The pinned list alone decides.
+        let params = RebuildParams {
+            only: Some(9_999),
+            stale_only: true,
+            only_ids: Some(vec![pinned]),
+            dry_run: false,
+        };
+        let report = rebuild_from_intakes(&mut corpus, &catalog, &params).expect("rebuild");
+        assert_eq!(report.rebuilt, vec![pinned]);
+        assert!(!partition_leaves(&corpus, pinned).is_empty());
+        assert!(partition_leaves(&corpus, unpinned).is_empty());
+    }
+
+    #[test]
+    fn dry_run_classifies_but_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+        let intake_id = seed_extracted(&mut catalog, dir.path(), "feedface01");
+
+        let dry = RebuildParams {
+            dry_run: true,
+            ..RebuildParams::default()
+        };
+        let report = rebuild_from_intakes(&mut corpus, &catalog, &dry).expect("dry run");
+        assert_eq!(report.rebuilt, vec![intake_id]);
+        assert!(
+            partition_leaves(&corpus, intake_id).is_empty(),
+            "a dry run must not write the corpus tree"
+        );
+
+        // The same params minus dry_run do write — proving the
+        // emptiness above measured the skip, not a broken fixture.
+        let wet = RebuildParams::default();
+        let report = rebuild_from_intakes(&mut corpus, &catalog, &wet).expect("rebuild");
+        assert_eq!(report.rebuilt, vec![intake_id]);
+        assert!(!partition_leaves(&corpus, intake_id).is_empty());
+    }
+
+    #[test]
+    fn missing_and_mismatched_envelopes_land_in_their_buckets() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open_in_memory().expect("corpus");
+        let mut catalog = Catalog::open_in_memory().expect("catalog");
+
+        // No stored_path at all.
+        let missing = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("feedface01".to_string()).format("pdf".to_string()),
+            )
+            .expect("register intake")
+            .intake()
+            .intake_id;
+        catalog
+            .set_intake_status(ItemKind::Paper, missing, IntakeStatus::Extracted)
+            .expect("set status");
+
+        // An envelope whose recorded sha differs from the catalog row.
+        let mismatched = catalog
+            .register_intake(
+                ItemKind::Paper,
+                &NewIntake::new("feedface02".to_string()).format("pdf".to_string()),
+            )
+            .expect("register intake")
+            .intake()
+            .intake_id;
+        let envelope_path = dir
+            .path()
+            .join(envelope_filename(ItemKind::Paper, mismatched));
+        write_envelope(
+            &envelope_path,
+            &sample_extraction(),
+            mismatched,
+            "0ddba11c0ffee",
+        )
+        .expect("write envelope");
+        catalog
+            .set_stored_path(
+                ItemKind::Paper,
+                mismatched,
+                &envelope_path.to_string_lossy(),
+            )
+            .expect("set stored path");
+        catalog
+            .set_intake_status(ItemKind::Paper, mismatched, IntakeStatus::Extracted)
+            .expect("set status");
+
+        let report =
+            rebuild_from_intakes(&mut corpus, &catalog, &RebuildParams::default()).expect("run");
+        assert_eq!(report.missing_envelope, vec![missing]);
+        assert_eq!(report.mismatched, vec![mismatched]);
+        assert!(report.rebuilt.is_empty());
+        assert!(report.failed.is_empty());
+    }
+}

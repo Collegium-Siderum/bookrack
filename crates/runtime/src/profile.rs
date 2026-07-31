@@ -30,7 +30,8 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, USER_PROFILE_DIR_NAME, has_errors, resolve, validate,
+    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors, resolve,
+    validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
@@ -41,6 +42,11 @@ use eyre::{Result, eyre};
 pub struct EffectiveProfile {
     /// Which source the reference was read from.
     pub origin: ProfileRefOrigin,
+    /// Which source the profile *definition* was read from — a second
+    /// axis: `origin` says who named the profile, this says who
+    /// defined it. A user file and a built-in of the same name are
+    /// otherwise indistinguishable to a caller.
+    pub source: ProfileOrigin,
     /// The resolved profile.
     pub profile: IndexProfile,
     /// Sources naming a different profile than the effective one. Empty
@@ -55,13 +61,6 @@ pub fn user_profile_dir() -> Option<PathBuf> {
     registry_target_path()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .map(|d| d.join(USER_PROFILE_DIR_NAME))
-}
-
-/// [`user_profile_dir`] with the relative fallback every caller uses
-/// when no config location resolves: user files then never match, so
-/// only built-ins resolve.
-pub fn user_profile_dir_or_default() -> PathBuf {
-    user_profile_dir().unwrap_or_else(|| PathBuf::from(USER_PROFILE_DIR_NAME))
 }
 
 /// The `index_profile` the registry records for the library `cfg`
@@ -117,8 +116,8 @@ fn effective_index_profile_in(
     };
     let drift = profile_reference_drift(manifest_ref, registry_ref.as_deref());
 
-    let dir = user_profile_dir_or_default();
-    let profile = resolve(&dir, &name)
+    let dir = user_profile_dir();
+    let (profile, source) = resolve(dir.as_deref(), &name)
         .map_err(|e| eyre!("index profile '{name}' failed to load: {e}"))?
         .ok_or_else(|| {
             eyre!(
@@ -129,6 +128,7 @@ fn effective_index_profile_in(
 
     Ok(Some(EffectiveProfile {
         origin,
+        source,
         profile,
         drift,
     }))
@@ -151,14 +151,14 @@ pub fn effective_embed_config(cfg: &Config) -> Result<EmbedConfig> {
 /// consistency is deliberately not checked — reconciling a valid
 /// profile against a built index is `index-profile apply`'s job.
 pub fn refuse_bad_profile_reference(name: &str) -> Option<String> {
-    let dir = user_profile_dir_or_default();
-    match resolve(&dir, name) {
+    let dir = user_profile_dir();
+    match resolve(dir.as_deref(), name) {
         Err(e) => Some(format!("index profile '{name}' failed to load: {e}")),
         Ok(None) => Some(format!(
             "index profile '{name}' is not defined; \
              `bookrack index-profile list` shows the available names"
         )),
-        Ok(Some(profile)) => has_errors(&validate(&profile, false)).then(|| {
+        Ok(Some((profile, _))) => has_errors(&validate(&profile, false)).then(|| {
             format!(
                 "index profile '{name}' has validation errors; \
                  run `bookrack index-profile validate {name}`"
@@ -263,19 +263,25 @@ impl BuiltStamps {
     }
 }
 
-/// The index stamps recorded in the corpus database at `corpus_db`, or
-/// `None` when the database is missing or cannot be opened (so a check
-/// skips rather than racing a live writer). A database that opens but
-/// carries no stamps returns an unstamped record, not `None`.
-pub fn built_stamps(corpus_db: &Path) -> Option<BuiltStamps> {
-    let corpus = Corpus::open_read_only(corpus_db).ok()?;
+/// The index stamps recorded in the corpus database at `corpus_db`.
+/// `Ok(None)` means the database file does not exist (no index has
+/// been built); `Err` carries a human-readable reason when the file
+/// exists but cannot be opened — corruption, a newer schema, or a
+/// lock — so callers can tell "unbuilt" from "unreadable" instead of
+/// collapsing both into a skipped check. A database that opens but
+/// carries no stamps returns an unstamped record, not `Ok(None)`.
+pub fn built_stamps(corpus_db: &Path) -> Result<Option<BuiltStamps>, String> {
+    if !corpus_db.exists() {
+        return Ok(None);
+    }
+    let corpus = Corpus::open_read_only(corpus_db).map_err(|e| e.to_string())?;
     let get = |key: &str| corpus.meta_get(key).ok().flatten();
-    Some(BuiltStamps {
+    Ok(Some(BuiltStamps {
         embed_model: get(EMBED_MODEL_KEY),
         vector_dim: get(VECTOR_DIM_KEY).and_then(|v| v.parse().ok()),
         chunk_version: get(CHUNK_VERSION_KEY).and_then(|v| v.parse().ok()),
         normalize_version: get(NORMALIZE_VERSION_KEY).and_then(|v| v.parse().ok()),
-    })
+    }))
 }
 
 /// Field-level differences between the stamps a clean build would
@@ -330,7 +336,7 @@ pub fn profile_stamp_findings(target: &IndexStamps, built: &BuiltStamps) -> Vec<
 #[derive(Debug, Clone, Default)]
 pub struct PipelineState {
     /// The recorded stamps, or `None` when the corpus database is
-    /// missing or unopenable.
+    /// missing.
     pub built: Option<BuiltStamps>,
     /// The persisted ANN configuration from `vectors_meta.json`, or
     /// `None` when no meta file exists (a fresh or legacy store).
@@ -342,7 +348,9 @@ pub struct PipelineState {
 /// Read one pipeline's [`PipelineState`] from disk. Offline and
 /// read-only. A malformed `vectors_meta.json` is an error rather than a
 /// silent "no ANN": deriving a rebuild over a store this binary cannot
-/// interpret would guess where the operator must decide.
+/// interpret would guess where the operator must decide. An existing
+/// corpus database that cannot be opened is an error for the same
+/// reason, rather than a silent "unbuilt".
 pub fn read_pipeline_state(data_dir: &Path, pipeline: Pipeline) -> Result<PipelineState> {
     let lancedb_dir = pipeline.lancedb_dir(data_dir);
     let ann = match bookrack_vectors::meta::load(&lancedb_dir) {
@@ -361,7 +369,12 @@ pub fn read_pipeline_state(data_dir: &Path, pipeline: Pipeline) -> Result<Pipeli
         }
     };
     Ok(PipelineState {
-        built: built_stamps(&pipeline.corpus_db(data_dir)),
+        built: built_stamps(&pipeline.corpus_db(data_dir)).map_err(|reason| {
+            eyre!(
+                "{} corpus database cannot be opened: {reason}",
+                pipeline.as_str()
+            )
+        })?,
         ann,
         // The chunks table materializes as a `chunks.lance` directory;
         // checking for it avoids opening the store just to probe
@@ -532,6 +545,31 @@ pub fn ann_matches_profile(current: &AnnConfig, spec: &AnnSpec) -> bool {
 mod tests {
     use super::*;
     use bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+
+    #[test]
+    fn built_stamps_distinguishes_missing_from_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Missing file: no index has been built.
+        assert!(matches!(
+            built_stamps(&dir.path().join("corpus.db")),
+            Ok(None)
+        ));
+
+        // Existing file that is not a readable corpus database: an
+        // error with a reason, not a silent "unbuilt".
+        let garbage = dir.path().join("garbage.db");
+        std::fs::write(&garbage, b"not a database").expect("write garbage");
+        assert!(built_stamps(&garbage).is_err());
+
+        // Freshly created corpus: opens, carries an unstamped record.
+        let real = dir.path().join("real.db");
+        drop(Corpus::open(&real).expect("create corpus"));
+        let stamps = built_stamps(&real)
+            .expect("readable corpus")
+            .expect("stamp record");
+        assert!(stamps.is_unstamped());
+    }
 
     fn profile() -> IndexProfile {
         IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in")

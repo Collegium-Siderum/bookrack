@@ -13,15 +13,16 @@ use bookrack_config::{
     LibraryKind, LibraryManifest, LibraryOpError, ManifestIdentitySeed, ROOT_CONFIG_NAME,
     RootConfigSetError, ScanOutcome, Signal, add_library, detect_library, find_library,
     load_root_config, mounted_volumes, read_root_config_text, registry_target_path, remove_library,
-    render_manifest_toml, repoint_library, root_config_env_override, scan_for_libraries,
-    set_manifest_index_profile, set_root_config_values, upsert_library_entry,
+    render_manifest_toml, repoint_library, retired_root_config_key_help, retired_root_config_keys,
+    root_config_env_override, scan_for_libraries, set_manifest_index_profile,
+    set_root_config_values, upsert_library_entry,
 };
 use bookrack_session::{RootLock, is_root_lock_conflict};
 use eyre::{Report, Result};
 use serde::Serialize;
 
 use crate::error::BookrackCliError;
-use crate::render::confirm::{ConfirmMode, confirm_destructive};
+use crate::render::confirm::{ConfirmMode, Confirmation, confirm_destructive};
 use crate::render::ctx;
 
 /// Descent depth for a `scan <parent>`: probe the parent's immediate
@@ -209,7 +210,8 @@ pub fn add(
             "Write this manifest and register the library?",
             ConfirmMode::Soft,
             yes,
-        )
+        )?
+        .into_io_result()
     };
     let outcome = add_library(
         &registry_path,
@@ -256,29 +258,19 @@ pub fn add(
     }
 }
 
-/// Break a uuid clash. Interactively, offer to move the existing entry to
-/// the new path; otherwise refuse and print the two exact commands so a
-/// scripted caller can pick a resolution deliberately.
+/// Break a uuid clash: offer to move the existing entry to the new
+/// path. `--yes` is no answer here — the two resolutions are not more
+/// and less cautious versions of one action, they register different
+/// things — so the operator is always asked, and a stdin that carries
+/// no answer names both commands instead of picking one.
 fn resolve_uuid_clash(
     registry_path: &Path,
     path: &Path,
     uuid: &str,
     existing_key: &str,
     existing_path: &Path,
-    yes: bool,
+    _yes: bool,
 ) -> Result<()> {
-    use std::io::IsTerminal;
-    let interactive = !yes && std::io::stdin().is_terminal();
-    if !interactive {
-        return Err(Report::new(BookrackCliError::LocalUserError {
-            message: format!(
-                "uuid {uuid} is already registered as '{existing_key}'.\n\
-                 to move it (same library, new path): bookrack libraries add {existing_key} {}\n\
-                 to register a copy (new identity):   re-run with --new-uuid",
-                path.display()
-            ),
-        }));
-    }
     eprintln!(
         "uuid {uuid} is already registered as '{existing_key}' at {}.",
         existing_path.display()
@@ -290,7 +282,15 @@ fn resolve_uuid_clash(
         ConfirmMode::Hard { token: "move" },
         false,
     )
-    .map_err(|e| eyre::eyre!("read clash resolution: {e}"))?;
+    .map_err(|e| eyre::eyre!("read clash resolution: {e}"))?
+    .agreed_or_refuse(
+        &format!("libraries add: uuid {uuid} is already registered as '{existing_key}'"),
+        &format!(
+            "to move it (same library, new path): bookrack libraries add {existing_key} {}; \
+             to register a copy (new identity): re-run with --new-uuid",
+            path.display()
+        ),
+    )?;
     if move_it {
         repoint_library(registry_path, existing_key, path).map_err(config_error)?;
         if !ctx().is_quiet() {
@@ -353,6 +353,10 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
         );
         if !confirm_destructive(&prompt, ConfirmMode::Hard { token: &name }, yes)
             .map_err(|e| eyre::eyre!("read purge confirmation: {e}"))?
+            .agreed_or_refuse(
+                &format!("libraries remove '{name}' --purge"),
+                "re-run with --yes to purge without a prompt",
+            )?
         {
             eprintln!("aborted; nothing removed");
             return Ok(());
@@ -517,8 +521,38 @@ fn print_root_config(name: &str, data_dir: &Path) -> Result<()> {
         );
     } else {
         print!("{text}");
+        // The verbatim dump is the one read surface a retired line
+        // survives: `load_root_config` refuses the file, so every other
+        // command names the key already. Say so here too, rather than
+        // handing back a line that resolves to nothing.
+        for note in retired_key_notes(&text) {
+            eprintln!("{note}");
+        }
     }
     Ok(())
+}
+
+/// One `note:` line per retired key the raw `config.toml` text declares,
+/// in the order the retirement table lists them.
+///
+/// Matches on a line's leading key name rather than parsing the
+/// document: a file carrying a retired key may carry other faults too,
+/// and a dump that cannot be parsed still deserves the annotation.
+fn retired_key_notes(text: &str) -> Vec<String> {
+    let declares = |key: &str| {
+        text.lines().any(|line| {
+            let line = line.trim_start();
+            line.strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+    };
+    retired_root_config_keys()
+        .filter(|key| declares(key))
+        .map(|key| {
+            let help = retired_root_config_key_help(key).unwrap_or_default();
+            format!("note: `{key}` is retired and resolves to nothing; {help}")
+        })
+        .collect()
 }
 
 /// Report a successful edit: the keys set and unset, plus the advisory
@@ -600,17 +634,53 @@ fn root_config_set_error(err: RootConfigSetError) -> Report {
 }
 
 /// The detect gate for `remove --purge`: the target must look like a
-/// data root (confirmed or probable) before its bytes are deleted, so an
-/// entry that points at an unrelated directory cannot destroy it.
+/// data root before its bytes are deleted, so an entry that points at
+/// an unrelated directory cannot destroy it. `Confirmed` — a readable
+/// manifest — passes on its own. `Probable` rests on two filenames
+/// alone, which `touch catalog.db corpus.db` satisfies, so it must
+/// also show a real SQLite store behind at least one of the names.
+/// The header probe deliberately stops short of a schema-validating
+/// open: a root whose schema is older or newer than this binary is
+/// still a data root the operator may purge. `Unreadable` refuses
+/// with the reason rather than blending into "not a library".
 fn gate_purge_target(data_dir: &Path) -> Result<()> {
+    let refuse = |message: String| Report::new(BookrackCliError::LocalUserError { message });
     match detect_library(data_dir) {
-        Ok(DetectVerdict::Confirmed(_) | DetectVerdict::Probable { .. }) => Ok(()),
-        _ => Err(Report::new(BookrackCliError::LocalUserError {
-            message: format!(
-                "refusing to purge {}: it is not a confirmed or probable data root",
-                data_dir.display()
-            ),
-        })),
+        Ok(DetectVerdict::Confirmed(_)) => Ok(()),
+        Ok(DetectVerdict::Probable { .. }) => {
+            if ["catalog.db", "corpus.db"]
+                .iter()
+                .any(|name| has_sqlite_header(&data_dir.join(name)))
+            {
+                Ok(())
+            } else {
+                Err(refuse(format!(
+                    "refusing to purge {}: catalog.db / corpus.db are present but neither \
+                     is a SQLite database",
+                    data_dir.display()
+                )))
+            }
+        }
+        Ok(DetectVerdict::Unreadable { reason }) => Err(refuse(format!(
+            "refusing to purge {}: the root cannot be assessed: {reason}",
+            data_dir.display()
+        ))),
+        _ => Err(refuse(format!(
+            "refusing to purge {}: it is not a confirmed or probable data root",
+            data_dir.display()
+        ))),
+    }
+}
+
+/// Whether the file begins with the SQLite format-3 magic bytes. An
+/// empty, truncated, or non-SQLite file does not match.
+fn has_sqlite_header(path: &Path) -> bool {
+    use std::io::Read as _;
+    const MAGIC: &[u8; 16] = b"SQLite format 3\0";
+    let mut buf = [0u8; 16];
+    match std::fs::File::open(path) {
+        Ok(mut file) => file.read_exact(&mut buf).is_ok() && &buf == MAGIC,
+        Err(_) => false,
     }
 }
 
@@ -672,6 +742,20 @@ fn registry_path() -> Result<PathBuf> {
 /// generic (internal-error) path.
 fn op_error(err: LibraryOpError) -> Report {
     match &err {
+        // The manifest confirmation crosses `add_library`'s
+        // `io::Result<bool>` bound, so an unanswerable prompt arrives
+        // here encoded as an I/O error kind. Recover it rather than
+        // letting it fall into the generic internal-error path.
+        LibraryOpError::Confirm(io)
+            if let Some(reason) = Confirmation::no_answer_reason_from_io(io) =>
+        {
+            Report::new(BookrackCliError::ConfirmationUnanswerable {
+                action: "libraries add".to_string(),
+                reason,
+                hint: "re-run with --yes to write the identity manifest without a prompt"
+                    .to_string(),
+            })
+        }
         LibraryOpError::BadTarget(_)
         | LibraryOpError::UnreadableTarget { .. }
         | LibraryOpError::Registry(ConfigError::UnknownLibrary { .. }) => {
@@ -768,4 +852,54 @@ fn print_scan_json(outcome: &ScanOutcome) {
         "{}",
         serde_json::to_string(&value).expect("scan serializes")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purge_gate_refuses_touched_empty_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("catalog.db"), b"").expect("touch catalog");
+        std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
+
+        let err = gate_purge_target(dir.path()).expect_err("two empty files must not authorise");
+        assert!(
+            err.to_string().contains("neither is a SQLite database"),
+            "unexpected refusal: {err}"
+        );
+    }
+
+    #[test]
+    fn purge_gate_accepts_a_probable_root_with_a_real_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        drop(bookrack_catalog::Catalog::open(&dir.path().join("catalog.db")).expect("seed"));
+        std::fs::write(dir.path().join("corpus.db"), b"").expect("touch corpus");
+
+        gate_purge_target(dir.path()).expect("a real store behind the name authorises");
+    }
+
+    #[test]
+    fn retired_key_notes_annotate_only_the_lines_that_declare_one() {
+        let notes = retired_key_notes(
+            "ollama_url = \"http://127.0.0.1:11434\"\n  mcp_addr = \"127.0.0.1:9999\"\n",
+        );
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("`mcp_addr` is retired"), "{notes:?}");
+        // The way out travels with the note.
+        assert!(notes[0].contains("BOOKRACK_MCP_ADDR"), "{notes:?}");
+
+        // A file with no retired key gets no note, and neither a
+        // commented-out line nor a longer key that merely starts with a
+        // retired name counts as a declaration.
+        assert!(retired_key_notes("ollama_url = \"http://x:1\"\n").is_empty());
+        assert!(retired_key_notes("# mcp_addr = \"127.0.0.1:9999\"\n").is_empty());
+        assert!(retired_key_notes("mcp_addr_extra = \"x\"\n").is_empty());
+
+        // Two retired lines in one file are both named, so a single dump
+        // tells the operator everything to delete.
+        let both = retired_key_notes("mcp_addr = \"127.0.0.1:1\"\nlog_directive = \"debug\"\n");
+        assert_eq!(both.len(), 2, "{both:?}");
+    }
 }

@@ -209,12 +209,15 @@ corpus schemas open, PDFium is on disk, the file-descriptor limit is
 sufficient, the Ollama daemon is reachable, the embed model is pulled,
 each registry entry agrees with its on-disk identity manifest, and each
 library's referenced index profile is coherent with its built index
-stamps. When the effective profile enables a reranker, three more rows
-cover its backend: the `llama-server` binary, the reranker model, and
-whichever server is serving. A deprecated embed-model override, if one is
-in effect, gets a row of its own. Each row is `OK`, `WARN`, or `FAIL`;
-any `FAIL` exits non-zero so a script can branch on it. Pass `--json` for
-a machine-readable report suitable for a bug attachment.
+stamps. Those last two sections need a readable registry: when one is
+configured but cannot be read, they report that as a row apiece instead
+of dropping out of the report, which would be indistinguishable from an
+install that has no registry at all. When the effective profile enables
+a reranker, three more rows cover its backend: the `llama-server`
+binary, the reranker model, and whichever server is serving. Each row is
+`OK`, `WARN`, or `FAIL`; any `FAIL` exits non-zero so a script can branch
+on it. Pass `--json` for a machine-readable report suitable for a bug
+attachment.
 
 Four maintenance sub-commands cover one-off repairs; `--dry-run`
 computes the plan for the last two without touching disk:

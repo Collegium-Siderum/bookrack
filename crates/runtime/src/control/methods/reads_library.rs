@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use bookrack_core::{ItemKind, KindedNodeId, NodeId};
+use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs};
 use bookrack_ops::registry::LibraryHandle;
@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
+use crate::control::error_map::rpc_from_problem;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 /// Mirror of the MCP-side `READ_CONTEXT_DEFAULT_RADIUS`. The
@@ -117,14 +118,41 @@ pub struct SearchParams {
     /// `"all"` (both stores, merged by ascending distance).
     #[serde(default)]
     pub kind: Option<String>,
+    /// Book intake ids whose passages this search must not return.
+    /// Applies to `kind` `"book"` and `"all"`.
+    #[serde(default)]
+    pub exclude_book_intake_ids: Vec<i64>,
+    /// Paper intake ids whose passages this search must not return.
+    /// Applies to `kind` `"paper"` and `"all"`.
+    #[serde(default)]
+    pub exclude_paper_intake_ids: Vec<i64>,
 }
 
 impl SearchParams {
-    fn overrides(&self) -> SearchOptions {
+    /// The side of the library to dispatch to, with the exclusion lists
+    /// checked against it: naming the other side's ids is refused as
+    /// `INVALID_PARAMS` rather than silently ignored. An unrecognized
+    /// kind passes through here and is rejected by the dispatch itself.
+    fn checked_kind(&self) -> Result<&str, RpcError> {
+        let kind = self.kind.as_deref().unwrap_or("book");
+        reads::search::validate_exclusions(
+            kind,
+            &self.exclude_book_intake_ids,
+            &self.exclude_paper_intake_ids,
+        )
+        .map_err(|e| rpc_from_problem(INVALID_PARAMS, Problem::from_error_chain(&e)))?;
+        Ok(kind)
+    }
+
+    /// Project the override fields onto [`SearchOptions`], excluding the
+    /// books named by `exclude` — the ids of whichever side this call
+    /// is being dispatched to.
+    fn overrides_excluding(&self, exclude: &[i64]) -> SearchOptions {
         SearchOptions {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            exclude_partitions: reads::search::exclusions_to_partitions(exclude),
         }
     }
 }
@@ -187,6 +215,9 @@ impl SearchInPaperParams {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            // A search already confined to one paper has nothing to
+            // exclude, so this surface carries no exclusion fields.
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -197,6 +228,9 @@ impl SearchInBookParams {
             bypass_index: self.bypass_index,
             nprobes: self.nprobes,
             refine_factor: self.refine_factor,
+            // A search already confined to one book has nothing to
+            // exclude, so this surface carries no exclusion fields.
+            exclude_partitions: Vec::new(),
         }
     }
 }
@@ -246,17 +280,20 @@ fn resolve(
     ctx: &MethodContext,
     library: Option<&str>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
-    ctx.registry
-        .get(library)
-        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("registry: {e}")))
+    ctx.registry.get(library).map_err(|e| {
+        RpcError::new(
+            INVALID_PARAMS,
+            format!("registry: {}", bookrack_core::error_chain(&e)),
+        )
+    })
 }
 
 fn ops_internal(e: OpsError) -> RpcError {
-    RpcError::new(INTERNAL_ERROR, e.to_string())
+    rpc_from_problem(INTERNAL_ERROR, e.explain())
 }
 
 fn ops_invalid(e: OpsError) -> RpcError {
-    RpcError::new(INVALID_PARAMS, e.to_string())
+    rpc_from_problem(INVALID_PARAMS, e.explain())
 }
 
 fn to_value<T: serde::Serialize + ?Sized>(v: &T) -> Result<Value, RpcError> {
@@ -438,18 +475,25 @@ pub fn show_pipeline_trail(params: &Option<Value>, ctx: &MethodContext) -> Resul
 pub async fn search(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: SearchParams = parse(params, "library.search")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let overrides = p.overrides();
-    let kind = p.kind.as_deref().unwrap_or("book");
+    let kind = p.checked_kind()?;
+    let book_overrides = p.overrides_excluding(&p.exclude_book_intake_ids);
+    let paper_overrides = p.overrides_excluding(&p.exclude_paper_intake_ids);
     let hits = match kind {
-        "book" => reads::search::search(handle.ops(), &p.query, overrides, p.top_k)
+        "book" => reads::search::search(handle.ops(), &p.query, book_overrides, p.top_k)
             .await
             .map_err(ops_internal)?,
-        "paper" => reads::search::search_paper(handle.ops(), &p.query, overrides, p.top_k)
+        "paper" => reads::search::search_paper(handle.ops(), &p.query, paper_overrides, p.top_k)
             .await
             .map_err(ops_internal)?,
-        "all" => reads::search::search_unified(handle.ops(), &p.query, overrides, p.top_k)
-            .await
-            .map_err(ops_internal)?,
+        "all" => reads::search::search_unified(
+            handle.ops(),
+            &p.query,
+            book_overrides,
+            paper_overrides,
+            p.top_k,
+        )
+        .await
+        .map_err(ops_internal)?,
         other => {
             return Err(RpcError::new(
                 INVALID_PARAMS,
@@ -590,6 +634,7 @@ pub async fn vectors_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_core::PartitionIdx;
 
     #[test]
     fn parse_none_yields_default_when_all_fields_optional() {
@@ -642,10 +687,100 @@ mod tests {
             refine_factor: Some(3),
             library: None,
             kind: None,
+            exclude_book_intake_ids: vec![2, 5],
+            exclude_paper_intake_ids: vec![9],
         };
-        let opts = p.overrides();
+        let opts = p.overrides_excluding(&p.exclude_book_intake_ids);
         assert!(opts.bypass_index);
         assert_eq!(opts.nprobes, Some(8));
         assert_eq!(opts.refine_factor, Some(3));
+        // Each side projects its own list; the other side's ids never
+        // leak in, since the two id name spaces are unrelated.
+        assert_eq!(
+            opts.exclude_partitions,
+            vec![PartitionIdx::new(2), PartitionIdx::new(5)]
+        );
+        let papers = p.overrides_excluding(&p.exclude_paper_intake_ids);
+        assert_eq!(papers.exclude_partitions, vec![PartitionIdx::new(9)]);
+    }
+
+    #[test]
+    fn search_params_default_to_no_exclusions() {
+        let params = Some(json!({"query": "q"}));
+        let p: SearchParams = parse(&params, "library.search").unwrap();
+        assert!(p.exclude_book_intake_ids.is_empty());
+        assert!(p.exclude_paper_intake_ids.is_empty());
+        assert!(
+            p.overrides_excluding(&p.exclude_book_intake_ids)
+                .exclude_partitions
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn search_params_parse_both_exclusion_lists() {
+        let params = Some(json!({
+            "query": "q",
+            "kind": "all",
+            "exclude_book_intake_ids": [2, 5],
+            "exclude_paper_intake_ids": [9],
+        }));
+        let p: SearchParams = parse(&params, "library.search").unwrap();
+        assert_eq!(p.exclude_book_intake_ids, vec![2, 5]);
+        assert_eq!(p.exclude_paper_intake_ids, vec![9]);
+    }
+
+    #[test]
+    fn a_search_kind_rejects_the_other_sides_exclusion_list() {
+        for (kind, field, offending_field) in [
+            (
+                "book",
+                "exclude_paper_intake_ids",
+                "exclude_paper_intake_ids",
+            ),
+            (
+                "paper",
+                "exclude_book_intake_ids",
+                "exclude_book_intake_ids",
+            ),
+        ] {
+            let params = Some(json!({"query": "q", "kind": kind, field: [9]}));
+            let p: SearchParams = parse(&params, "library.search").unwrap();
+            let err = p
+                .checked_kind()
+                .expect_err("the mismatched list is refused");
+            assert_eq!(err.code, INVALID_PARAMS);
+            assert!(
+                err.message.contains(offending_field) && err.message.contains(kind),
+                "the message must name the field and the kind: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_search_kind_accepts_the_exclusion_lists_that_apply_to_it() {
+        for (kind, body) in [
+            (
+                "book",
+                json!({"query": "q", "exclude_book_intake_ids": [2]}),
+            ),
+            (
+                "paper",
+                json!({"query": "q", "kind": "paper", "exclude_paper_intake_ids": [9]}),
+            ),
+            (
+                "all",
+                json!({
+                    "query": "q",
+                    "kind": "all",
+                    "exclude_book_intake_ids": [2],
+                    "exclude_paper_intake_ids": [9],
+                }),
+            ),
+        ] {
+            let p: SearchParams = parse(&Some(body), "library.search").unwrap();
+            assert_eq!(p.checked_kind().expect("admissible"), kind);
+        }
     }
 }

@@ -86,7 +86,9 @@ pub struct DryrunPaperReport {
     /// series. Populated from `Biblio::container_title` or the venue
     /// cue scan.
     pub venue: Option<String>,
-    /// Source label of the abstract pick:
+    /// Source label of the abstract pick. The PDF paper path reports
+    /// `"heading-cn" | "heading-en" | "fallback-first-pages"`; the
+    /// block-level fallback reports
     /// `"heading" | "first_page_long_para" | "first_long_para"`.
     /// `None` when no body block could serve as the abstract.
     pub abstract_source: Option<String>,
@@ -515,9 +517,9 @@ mod tests {
                 extract_outcome: "extracted".to_string(),
                 doi: Some("10.1/abc".to_string()),
                 arxiv_id: Some("2304.00001".to_string()),
-                venue: Some("NeurIPS".to_string()),
+                venue: Some("Synthetic Conference".to_string()),
                 abstract_source: Some("heading".to_string()),
-                title: Some("Attention Is All You Need".to_string()),
+                title: Some("Synthetic Findings in Test Spaces".to_string()),
                 year: Some(2017),
                 ..Default::default()
             },

@@ -7,36 +7,26 @@
 //! race another test's environment reads under a threaded test runner.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
-use bookrack_config::REGISTRY_ENV;
 use bookrack_runtime::wizard::{
     DataRootHint, FinalizeSummary, OllamaStep, PdfiumChoice, PdfiumInstallOutcome, PdfiumReport,
     SmokeOutcome, Wizard, WizardDriver, WizardOpts,
 };
+use bookrack_test_support::{ProcessEnv, Sandbox, process_env};
 use eyre::Result;
 
-static ENV_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+/// The pinned registry file name. A file that does not exist is the
+/// point of this test — the wizard has to create it — so the registry
+/// is a *named* deviation from the sandbox default rather than the
+/// default itself.
+const PINNED: &str = "pinned-registry.toml";
 
-/// Redirect the platform config-directory lookup at a tempdir and pin
-/// [`REGISTRY_ENV`] to a file inside it, returning that file's path.
-/// Both must be set before any test body reads the environment.
-fn pin_registry_env() -> PathBuf {
-    let dir = ENV_DIR.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("env tempdir");
-        // SAFETY: env is mutated exactly once, inside
-        // `OnceLock::get_or_init`'s single-initialization guarantee,
-        // as the first statement of the only test in this binary,
-        // before any concurrent env reads.
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-            std::env::set_var("XDG_CONFIG_HOME", dir.path().join("xdg-config"));
-            std::env::set_var(REGISTRY_ENV, dir.path().join("pinned-registry.toml"));
-        }
-        dir
-    });
-    dir.path().join("pinned-registry.toml")
+/// Isolate the process with the registry variable pointing at a file
+/// nothing has created.
+fn world() -> &'static Sandbox {
+    process_env(ProcessEnv::isolated().registry_absent(PINNED))
 }
 
 /// Count files named `registry.toml` under `root`, recursively. The
@@ -89,7 +79,8 @@ impl WizardDriver for MockDriver {
 
 #[tokio::test]
 async fn finalize_registers_into_the_env_named_registry() {
-    let pinned = pin_registry_env();
+    let sandbox = world();
+    let pinned = sandbox.path().join(PINNED);
     let dir = tempfile::tempdir().unwrap();
     let driver = MockDriver {
         data_root: dir.path().to_path_buf(),
@@ -110,7 +101,7 @@ async fn finalize_registers_into_the_env_named_registry() {
     assert!(text.contains("[libraries.default]"), "{text}");
     assert!(text.contains(dir.path().to_str().unwrap()), "{text}");
     assert_eq!(
-        count_default_registries(ENV_DIR.get().unwrap().path()),
+        count_default_registries(&sandbox.home()),
         0,
         "no platform-default registry may appear under the redirected HOME"
     );

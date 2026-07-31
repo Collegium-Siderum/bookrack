@@ -80,8 +80,23 @@ mod tests {
     fn apply_schema_builds_a_usable_table() {
         let conn = Connection::open_in_memory().expect("open");
         apply_schema(&conn, &[&META]).expect("apply schema");
-        // A second application must be a harmless no-op.
+
+        // The rendered DDL carries the spec's constraints, not just the
+        // column names: the key is a primary key and the value is NOT
+        // NULL.
+        conn.execute("INSERT INTO kv(key, value) VALUES('k', 'v')", [])
+            .expect("the table accepts a row");
+        conn.execute("INSERT INTO kv(key, value) VALUES('k', 'other')", [])
+            .expect_err("the key is a primary key");
+        conn.execute("INSERT INTO kv(key, value) VALUES('n', NULL)", [])
+            .expect_err("the value is NOT NULL");
+
+        // A second application is a no-op, which means the rows survive
+        // it — an application that dropped and recreated the table would
+        // also "succeed".
         apply_schema(&conn, &[&META]).expect("re-apply schema");
+        let value: Option<String> = meta_get(&conn, "kv", "k").expect("get");
+        assert_eq!(value.as_deref(), Some("v"), "re-applying kept the row");
     }
 
     #[test]

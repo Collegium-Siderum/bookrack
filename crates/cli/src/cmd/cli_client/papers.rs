@@ -9,9 +9,9 @@
 use std::path::PathBuf;
 
 use bookrack_cli::render::confirm::ConfirmMode;
-use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::{KvTable, RowTable};
+use bookrack_cli::render::{OutputMode, ctx};
 use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
@@ -62,29 +62,30 @@ async fn metadata(
             if let Some(name) = audit_profile.or(default_audit_profile) {
                 params["audit_profile"] = Value::String(name);
             }
-            let value =
+            let response =
                 helpers::call_with_progress_value(client, "papers.metadata.reaudit", params)
                     .await?;
-            let verdict = value
+            let verdict = response
                 .get("verdict")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let confidence = value
+            let confidence = response
                 .get("confidence")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let previous_verdict = value
+            let previous_verdict = response
                 .get("previous_verdict")
                 .and_then(Value::as_str)
                 .unwrap_or("unset");
-            let previous_confidence = value
+            let previous_confidence = response
                 .get("previous_confidence")
                 .and_then(Value::as_str)
                 .unwrap_or("unset");
-            println!(
+            let sentence = format!(
                 "Reaudited paper {intake_id}: verdict {verdict} (was {previous_verdict}), \
                  confidence {confidence} (was {previous_confidence})."
             );
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::Set {
@@ -99,29 +100,35 @@ async fn metadata(
                 "value": value,
                 "confirmed": confirmed,
             });
-            helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
-            println!("Set {field} on paper {intake_id} to {value:?}.");
+            let response =
+                helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
+            emit_metadata_outcome(
+                &response,
+                format!("Set {field} on paper {intake_id} to {value:?}."),
+            );
             Ok(())
         }
         PapersMetadataAction::Clear { intake_id, field } => {
             let params = json!({ "intake_id": intake_id, "field": field });
-            let value =
+            let response =
                 helpers::call_with_progress_value(client, "papers.metadata.clear", params).await?;
-            let removed = value
+            let removed = response
                 .get("removed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if removed {
-                println!("Cleared override on {field} for paper {intake_id}.");
+            let sentence = if removed {
+                format!("Cleared override on {field} for paper {intake_id}.")
             } else {
-                println!("No override on {field} for paper {intake_id} to clear.");
-            }
+                format!("No override on {field} for paper {intake_id} to clear.")
+            };
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::Void { intake_id, field } => {
             let params = json!({ "intake_id": intake_id, "field": field });
-            helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
-            println!("Voided {field} on paper {intake_id}.");
+            let response =
+                helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
+            emit_metadata_outcome(&response, format!("Voided {field} on paper {intake_id}."));
             Ok(())
         }
         PapersMetadataAction::Ack { intake_id, notes } => {
@@ -186,36 +193,38 @@ async fn metadata(
             if let Some(orcid) = orcid {
                 params["orcid"] = Value::String(orcid);
             }
-            let value = helpers::call_with_progress_value(
+            let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_add",
                 params,
             )
             .await?;
-            let id = value.get("contributor_id").and_then(Value::as_i64);
-            println!(
+            let id = response.get("contributor_id").and_then(Value::as_i64);
+            let sentence = format!(
                 "Added contributor to paper {intake_id} (contributor_id={}).",
                 id.map_or("unknown".to_string(), |i| i.to_string()),
             );
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
         PapersMetadataAction::ContributorRemove { contributor_id } => {
             let params = json!({ "contributor_id": contributor_id });
-            let value = helpers::call_with_progress_value(
+            let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_remove",
                 params,
             )
             .await?;
-            let removed = value
+            let removed = response
                 .get("removed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if removed {
-                println!("Removed contributor {contributor_id}.");
+            let sentence = if removed {
+                format!("Removed contributor {contributor_id}.")
             } else {
-                println!("No contributor {contributor_id} to remove.");
-            }
+                format!("No contributor {contributor_id} to remove.")
+            };
+            emit_metadata_outcome(&response, sentence);
             Ok(())
         }
     }
@@ -232,9 +241,34 @@ async fn review_status_call(
     if let Some(notes) = notes {
         params["notes"] = Value::String(notes);
     }
-    helpers::call_with_progress_value(client, method, params).await?;
-    println!("Paper {intake_id} review status is now {pretty_status}.");
+    let response = helpers::call_with_progress_value(client, method, params).await?;
+    emit_metadata_outcome(
+        &response,
+        format!("Paper {intake_id} review status is now {pretty_status}."),
+    );
     Ok(())
+}
+
+/// Prints the outcome of one `papers metadata` write in the mode the
+/// operator asked for.
+fn emit_metadata_outcome(response: &Value, sentence: String) {
+    if let Some(text) = metadata_outcome_line(ctx().output(), response, sentence) {
+        println!("{text}");
+    }
+}
+
+/// Output-mode gate shared by every `papers metadata` write: `Quiet`
+/// prints nothing and lets the exit code answer, `Json` prints the
+/// server's response payload so a script parses one object, `Human`
+/// prints the one-line summary.
+fn metadata_outcome_line(mode: OutputMode, response: &Value, sentence: String) -> Option<String> {
+    match mode {
+        OutputMode::Quiet => None,
+        OutputMode::Json => {
+            Some(serde_json::to_string_pretty(response).unwrap_or_else(|_| response.to_string()))
+        }
+        OutputMode::Human => Some(sentence),
+    }
 }
 
 async fn dryrun(args: PapersDryrunArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -327,7 +361,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                     text: "About to drop the ANN index over the paper vector store.\n\
                            Search falls back to a full scan until the next\n\
                            `papers vectors rebuild`. Type 'yes' to continue:",
-                    non_tty_hint:
+                    unanswered_hint:
                         "papers vectors drop removes the paper ANN index; pass --yes to confirm",
                 },
             )
@@ -368,7 +402,7 @@ async fn vectors(action: PapersVectorsAction, runtime_dir: Option<PathBuf>) -> R
                     text: "This drops the paper chunks table and re-embeds every paper abstract from the corpus tree.\n\
                            The old vectors are unrecoverable.\n\
                            Type RESET (exact, uppercase) to continue:",
-                    non_tty_hint:
+                    unanswered_hint:
                         "papers vectors reset drops the existing paper vectors; pass --yes to confirm",
                 },
             )
@@ -520,13 +554,19 @@ fn emit_paper_list(response: &Value) {
 }
 
 fn render_paper_list(response: &Value) {
+    println!("{}", format_paper_list(response));
+}
+
+/// Renders one `library.list_papers` / `library.find_papers` page as
+/// a table of `id`, `title`, `author`, `year`, and `container`, each
+/// cell cut to a fixed width. A page that covers less than the whole
+/// result set carries a trailing count line; an empty page is one
+/// sentence and no table.
+fn format_paper_list(response: &Value) -> String {
     let papers = response.get("papers").and_then(Value::as_array);
     let rows = match papers {
         Some(arr) if !arr.is_empty() => arr,
-        _ => {
-            println!("no papers match");
-            return;
-        }
+        _ => return "no papers match".to_string(),
     };
     let mut table = RowTable::new(["id", "title", "author", "year", "container"]);
     for row in rows {
@@ -557,23 +597,42 @@ fn render_paper_list(response: &Value) {
             .unwrap_or_else(|| "-".to_string());
         table.push_row([id, title, author, year, container]);
     }
-    println!("{}", table.render());
-    let total = response.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let mut out = table.render();
     let truncated = response
         .get("truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if truncated {
-        println!(
-            "(showing {} of {total}; pass --limit to see more)",
-            rows.len()
-        );
-    } else if total as usize != rows.len() {
-        println!("({} of {total})", rows.len());
+    // A response that carries no total says nothing about the size of
+    // the result set, so neither does the footer.
+    if let Some(total) = response.get("total").and_then(Value::as_u64) {
+        if truncated {
+            out.push_str(&format!(
+                "\n(showing {} of {total}; pass --limit to see more)",
+                rows.len()
+            ));
+        } else if total as usize != rows.len() {
+            out.push_str(&format!("\n({} of {total})", rows.len()));
+        }
     }
+    out
 }
 
 fn render_paper_detail(response: &Value) {
+    println!("{}", format_paper_detail(response));
+}
+
+/// Keys the detail card renders as their own row, from the top-level
+/// response fields that carry the same values. The `effective_biblio`
+/// section skips them: the title would repeat verbatim, and the
+/// abstract body would land in the card unbounded next to the
+/// one-line `abstract` row. Both stay in the `--json` payload.
+const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
+
+/// Renders one `library.show_paper` response as a key-value card:
+/// the intake identity, the audit verdict and the profile that
+/// produced it, the effective biblio section, contributor and
+/// override counts, and the first line of the abstract.
+fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
         t.push("intake_id", id.to_string());
@@ -602,6 +661,9 @@ fn render_paper_detail(response: &Value) {
     }
     if let Some(biblio) = response.get("effective_biblio").and_then(Value::as_object) {
         for (k, v) in biblio {
+            if BIBLIO_KEYS_ROWED_SEPARATELY.contains(&k.as_str()) {
+                continue;
+            }
             let s = v
                 .as_str()
                 .map(String::from)
@@ -619,7 +681,7 @@ fn render_paper_detail(response: &Value) {
         let first_line = abs.lines().next().unwrap_or("");
         t.push("abstract", truncate_to(first_line, 80));
     }
-    println!("{}", t.render());
+    t.render()
 }
 
 async fn toc(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
@@ -650,4 +712,255 @@ async fn source(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
         json!({ "intake_id": intake_id }),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ABSTRACT: &str = "We revisit the sampler and show that the bound is tight for every \
+                            admissible input, then extend the argument to the streaming case.";
+
+    fn detail_response() -> Value {
+        json!({
+            "intake_id": 7,
+            "title": "On Tight Bounds",
+            "status": "Ready",
+            "format": "pdf",
+            "effective_biblio": {
+                "title": "On Tight Bounds",
+                "year": "2020",
+                "container_title": "Proceedings of Nothing",
+                "abstract_text": ABSTRACT,
+            },
+            "contributors": [{ "name": "Rivera" }],
+            "overrides": [],
+            "abstract_text": ABSTRACT,
+        })
+    }
+
+    const SENTENCE: &str = "Cleared override on title for paper 7.";
+
+    fn write_response() -> Value {
+        json!({ "removed": true, "field": "title", "intake_id": 7 })
+    }
+
+    #[test]
+    fn a_metadata_write_prints_nothing_in_quiet_mode() {
+        assert_eq!(
+            metadata_outcome_line(OutputMode::Quiet, &write_response(), SENTENCE.to_string()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_metadata_write_prints_the_server_payload_in_json_mode() {
+        let line = metadata_outcome_line(OutputMode::Json, &write_response(), SENTENCE.to_string())
+            .expect("json mode prints the payload");
+        assert!(
+            !line.contains(SENTENCE),
+            "the human sentence reached a --json stream:\n{line}"
+        );
+        let parsed: Value = serde_json::from_str(&line).expect("json mode prints one JSON object");
+        assert_eq!(parsed, write_response());
+    }
+
+    #[test]
+    fn a_metadata_write_prints_the_summary_in_human_mode() {
+        assert_eq!(
+            metadata_outcome_line(OutputMode::Human, &write_response(), SENTENCE.to_string()),
+            Some(SENTENCE.to_string())
+        );
+    }
+
+    fn list_response(papers: Value, total: Option<u64>, truncated: bool) -> Value {
+        let mut response = json!({ "papers": papers, "truncated": truncated });
+        if let Some(total) = total {
+            response["total"] = json!(total);
+        }
+        response
+    }
+
+    fn one_paper() -> Value {
+        json!([{
+            "intake_id": 12,
+            "title": "Title Title Title Title Title Title Title Title Title Title ",
+            "top_contributor": "Contributor Name Goes Here",
+            "year": "1999",
+            "container_title": "Journal of Long Container Names",
+        }])
+    }
+
+    #[test]
+    fn list_table_carries_the_five_documented_columns_in_order() {
+        let table = format_paper_list(&list_response(one_paper(), Some(1), false));
+        let header = table.lines().nth(1).expect("a header row");
+        let mut at = 0;
+        for column in ["id", "title", "author", "year", "container"] {
+            let found = header[at..]
+                .find(column)
+                .unwrap_or_else(|| panic!("column {column:?} out of order in:\n{table}"));
+            at += found + column.len();
+        }
+    }
+
+    #[test]
+    fn list_cells_are_cut_to_their_column_width() {
+        let table = format_paper_list(&list_response(one_paper(), Some(1), false));
+        for needle in [
+            "Title Title Title Title Title Title Title Title…",
+            "Contributor Name Goes H…",
+            "Journal of Long Contain…",
+        ] {
+            assert!(table.contains(needle), "missing {needle:?} in:\n{table}");
+        }
+    }
+
+    #[test]
+    fn list_cells_fall_back_to_a_dash_when_a_field_is_absent() {
+        let table = format_paper_list(&list_response(json!([{}]), Some(1), false));
+        // Borders are drawn with box-drawing characters, so the only
+        // ASCII hyphens in the render are the fallback cells.
+        let row = table
+            .lines()
+            .find(|line| line.contains('-'))
+            .expect("one body row");
+        assert_eq!(
+            row.matches('-').count(),
+            5,
+            "every absent field should read as a dash in:\n{table}"
+        );
+    }
+
+    #[test]
+    fn an_empty_page_is_one_sentence_and_no_table() {
+        for papers in [json!([]), Value::Null] {
+            let out = format_paper_list(&list_response(papers, Some(0), false));
+            assert_eq!(out, "no papers match");
+        }
+    }
+
+    #[test]
+    fn a_truncated_page_names_the_full_total() {
+        let out = format_paper_list(&list_response(one_paper(), Some(9), true));
+        assert!(
+            out.ends_with("\n(showing 1 of 9; pass --limit to see more)"),
+            "missing the truncation hint in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_partial_page_reports_its_share_of_the_total() {
+        let out = format_paper_list(&list_response(one_paper(), Some(9), false));
+        assert!(
+            out.ends_with("\n(1 of 9)"),
+            "missing the share line in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_page_that_covers_the_result_set_has_no_count_line() {
+        let out = format_paper_list(&list_response(one_paper(), Some(1), false));
+        assert!(!out.contains('('), "unexpected count line in:\n{out}");
+    }
+
+    #[test]
+    fn a_page_without_a_total_has_no_count_line() {
+        for truncated in [false, true] {
+            let out = format_paper_list(&list_response(one_paper(), None, truncated));
+            assert!(
+                !out.contains('('),
+                "a missing total should print no count line, got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_card_pairs_the_verdict_with_the_confidence_and_the_profile() {
+        let mut response = detail_response();
+        response["audit"] = json!({
+            "verdict": "needs_work",
+            "confidence": "low",
+            "profile_name": "default",
+            "profile_fingerprint": "9f2c1a",
+        });
+        let card = format_paper_detail(&response);
+        assert!(card.contains("needs_work (low)"), "in:\n{card}");
+        assert!(card.contains("default @ 9f2c1a"), "in:\n{card}");
+    }
+
+    #[test]
+    fn detail_card_names_the_profile_alone_without_a_fingerprint() {
+        let mut response = detail_response();
+        response["audit"] = json!({
+            "verdict": "clean",
+            "confidence": "high",
+            "profile_name": "trust-source",
+        });
+        let card = format_paper_detail(&response);
+        assert!(card.contains("clean (high)"), "in:\n{card}");
+        assert!(card.contains("trust-source"), "in:\n{card}");
+        assert!(!card.contains(" @ "), "in:\n{card}");
+    }
+
+    #[test]
+    fn detail_card_counts_contributors_and_overrides() {
+        let mut response = detail_response();
+        response["contributors"] = json!([{ "name": "Rivera" }, { "name": "Okonkwo" }]);
+        response["overrides"] = json!([{ "field": "year" }]);
+        let card = format_paper_detail(&response);
+        for (key, count) in [("contributors", '2'), ("overrides", '1')] {
+            let row = card
+                .lines()
+                .find(|line| line.contains(key))
+                .unwrap_or_else(|| panic!("no {key} row in:\n{card}"));
+            assert!(row.contains(count), "{key} row reads {row:?} in:\n{card}");
+        }
+    }
+
+    #[test]
+    fn detail_card_carries_the_abstract_once_and_truncated() {
+        let card = format_paper_detail(&detail_response());
+        assert!(
+            !card.contains(ABSTRACT),
+            "the abstract body reached the card verbatim:\n{card}"
+        );
+        assert!(
+            !card.contains("biblio.abstract_text"),
+            "the abstract has its own row already:\n{card}"
+        );
+        assert!(
+            card.contains(
+                "We revisit the sampler and show that the bound is tight for every admissible in…"
+            ),
+            "missing the truncated abstract row:\n{card}"
+        );
+    }
+
+    #[test]
+    fn detail_card_names_the_title_once() {
+        let card = format_paper_detail(&detail_response());
+        assert!(
+            !card.contains("biblio.title"),
+            "the title has its own row already:\n{card}"
+        );
+        assert_eq!(
+            card.matches("On Tight Bounds").count(),
+            1,
+            "the title is rendered more than once:\n{card}"
+        );
+    }
+
+    #[test]
+    fn detail_card_keeps_the_remaining_biblio_fields() {
+        let card = format_paper_detail(&detail_response());
+        for needle in [
+            "biblio.year",
+            "2020",
+            "biblio.container_title",
+            "Proceedings of Nothing",
+        ] {
+            assert!(card.contains(needle), "missing {needle:?} in:\n{card}");
+        }
+    }
 }

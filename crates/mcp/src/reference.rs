@@ -38,6 +38,12 @@ pub struct ReferenceLookupArgs {
     /// severity drop out. Recognised values: `ok`, `info`, `warn`,
     /// `error` (mother doc §5.11).
     pub min_severity: Option<String>,
+    /// Book slugs whose entries must not be returned. Only meaningful
+    /// with `book = "*"`, where the lookup spans every registered
+    /// book; passing it alongside a single-book scope is an error
+    /// rather than a no-op. An excluded book is also skipped as a
+    /// redirect target, so it cannot re-enter the result that way.
+    pub exclude_books: Option<Vec<String>>,
 }
 
 /// Argument shape for the `reference.overlay_set` tool. Mirrors
@@ -117,7 +123,15 @@ pub(crate) fn reference_lookup_logic(
         Some(args.book.as_str())
     };
 
-    let mut result = refs.lookup(book, &args.entry_key)?;
+    let exclude = args.exclude_books.as_deref().unwrap_or(&[]);
+    if !exclude.is_empty() && book.is_some() {
+        return Err(ReferenceError::InvalidArgument(format!(
+            "`exclude_books` only applies with book=\"*\"; got book={:?}",
+            args.book
+        )));
+    }
+
+    let mut result = refs.lookup(book, &args.entry_key, exclude)?;
 
     if let Some(min_severity) = args.min_severity.as_deref() {
         let min = severity_level(min_severity).ok_or_else(|| {
@@ -261,6 +275,15 @@ mod tests {
             entry_key: entry_key.to_string(),
             fields: None,
             min_severity: None,
+            exclude_books: None,
+        }
+    }
+
+    /// [`lookup`] with an exclusion list attached.
+    fn lookup_excluding(book: &str, entry_key: &str, exclude: &[&str]) -> ReferenceLookupArgs {
+        ReferenceLookupArgs {
+            exclude_books: Some(exclude.iter().map(|s| s.to_string()).collect()),
+            ..lookup(book, entry_key)
         }
     }
 
@@ -321,6 +344,76 @@ mod tests {
         assert_eq!(result.redirect_followed.as_deref(), Some("redirect_source"));
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].entry_key, "target");
+    }
+
+    #[test]
+    fn an_empty_book_is_rejected_rather_than_read_as_a_wildcard() {
+        let refs = Refs::open_in_memory().expect("refs");
+        let cats = Catalogs::load_all().unwrap();
+        let err = reference_lookup_logic(&refs, &cats, &lookup("", "smith"))
+            .expect_err("an empty book scope is refused");
+        assert!(
+            matches!(&err, ReferenceError::InvalidArgument(m) if m.contains("empty string")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn wildcard_lookup_drops_the_excluded_books() {
+        let refs = Refs::open_in_memory().expect("refs");
+        refs.upsert_book(&book("high_authority", 10, "2026-06-25T00:00:00Z"))
+            .unwrap();
+        refs.upsert_book(&book("low_authority", 3, "2026-06-25T00:01:00Z"))
+            .unwrap();
+        refs.upsert_entry(&entry(
+            "high_authority",
+            "smith",
+            json!({"country": "USA"}),
+            vec![],
+        ))
+        .unwrap();
+        refs.upsert_entry(&entry(
+            "low_authority",
+            "smith",
+            json!({"country": "UK"}),
+            vec![],
+        ))
+        .unwrap();
+
+        let cats = Catalogs::load_all().unwrap();
+        // Excluding the top-ranked book leaves the other one, and the
+        // primary index follows it rather than pointing past the end.
+        let result = reference_lookup_logic(
+            &refs,
+            &cats,
+            &lookup_excluding("*", "smith", &["high_authority"]),
+        )
+        .unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].book_slug, "low_authority");
+        assert_eq!(result.primary_by_authority, Some(0));
+    }
+
+    #[test]
+    fn exclude_books_is_refused_outside_the_wildcard_scope() {
+        let refs = Refs::open_in_memory().expect("refs");
+        let cats = Catalogs::load_all().unwrap();
+        let err = reference_lookup_logic(
+            &refs,
+            &cats,
+            &lookup_excluding("book_a", "smith", &["book_b"]),
+        )
+        .expect_err("a single-book scope has nothing to exclude");
+        assert!(
+            matches!(&err, ReferenceError::InvalidArgument(m) if m.contains("exclude_books")),
+            "got {err:?}"
+        );
+
+        // An empty list is not a request to exclude anything, so it is
+        // admissible in either scope.
+        assert!(
+            reference_lookup_logic(&refs, &cats, &lookup_excluding("book_a", "smith", &[])).is_ok()
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use bookrack_core::{Explain, Problem};
 use serde::{Deserialize, Serialize};
 
 /// Why a rerank request failed. Callers branch on the variant, not the
@@ -64,6 +65,36 @@ impl RerankError {
     /// at once so the caller can decide.
     pub fn is_transient(&self) -> bool {
         matches!(self, RerankError::Unreachable(_))
+    }
+}
+
+impl Explain for RerankError {
+    fn explain(&self) -> Problem {
+        match self {
+            // 503 also covers the window in which a supervised server is
+            // still loading its model, so this stays past tense and
+            // retryable even though the same status can mean saturation.
+            RerankError::Overloaded { status, body } => {
+                Problem::new("could not rerank: the reranker is overloaded or still loading")
+                    .detail(format!("The reranker answered HTTP {status}: {body}."))
+                    .hint("Wait for the model to finish loading, then retry.")
+                    .retryable(true)
+            }
+
+            RerankError::Unreachable(reason) => Problem::new("could not reach the reranker")
+                .detail(format!(
+                    "The request failed before a response arrived: {reason}."
+                ))
+                .hint(
+                    "The supervised server may still be starting or restarting. \
+                     Run `bookrack doctor` to check the reranker backend.",
+                )
+                .retryable(true),
+
+            // No wording written for these yet, so the flattening
+            // fallback applies rather than a guessed hint.
+            other => Problem::from_error_chain(other),
+        }
     }
 }
 
@@ -230,6 +261,12 @@ impl RerankClient {
                     score: entry.relevance_score,
                 });
             }
+            // The ordering and length contract is enforced here rather
+            // than trusted to the server: a stable sort on the total
+            // f32 order keeps the server's relative order between
+            // equal scores, then the list is cut to `top_n`.
+            ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
+            ranked.truncate(top_n);
             Ok(ranked)
         } else {
             let code = status.as_u16();
@@ -354,6 +391,49 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Spawn a counting mock: the first `failures` connections are
+    /// dropped after the request is read (a transient transport
+    /// failure), every later request is answered with `status_line`
+    /// and `body`. Returns the base URL and the connection counter.
+    async fn counting_mock(
+        failures: usize,
+        status_line: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0u8; 8192];
+                let _ = socket.read(&mut scratch).await;
+                if attempt < failures {
+                    // Close without a response: the client sees the
+                    // connection die mid-request, a transient failure.
+                    continue;
+                }
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
     fn docs(n: usize) -> Vec<String> {
         (0..n).map(|i| format!("doc {i}")).collect()
     }
@@ -455,6 +535,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_shuffled_overlong_response_is_sorted_and_truncated() {
+        // A backend that ignores `top_n` and returns ascending scores:
+        // the client enforces the ordering and length contract itself
+        // instead of trusting the server.
+        let url = mock_once(
+            "200 OK",
+            r#"{"results":[{"index":0,"relevance_score":0.1},
+                           {"index":2,"relevance_score":0.9},
+                           {"index":1,"relevance_score":0.5}]}"#,
+        )
+        .await;
+        let ranked = test_client(&url)
+            .rerank("q", &docs(3), 2)
+            .await
+            .expect("ok");
+        assert_eq!(
+            ranked,
+            vec![
+                RankedDocument {
+                    index: 2,
+                    score: 0.9
+                },
+                RankedDocument {
+                    index: 1,
+                    score: 0.5
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn empty_documents_return_empty_without_a_call() {
         // Pointing at a dead address proves no HTTP request is made.
         let ranked = test_client(&dead_address().await)
@@ -506,6 +617,86 @@ mod tests {
         assert!(
             matches!(health, ServerHealth::Unreachable(_)),
             "got {health:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_until_the_server_recovers() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(
+            2,
+            "200 OK",
+            r#"{"results":[{"index":0,"relevance_score":0.7}]}"#,
+        )
+        .await;
+        let client = RerankClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let ranked = client
+            .rerank("q", &docs(1), 1)
+            .await
+            .expect("recovers inside the retry budget");
+        assert_eq!(
+            ranked,
+            vec![RankedDocument {
+                index: 0,
+                score: 0.7
+            }]
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "two dropped attempts plus the success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_max_retries_attempts() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(usize::MAX, "200 OK", "{}").await;
+        let client = RerankClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            2,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.rerank("q", &docs(1), 1).await.unwrap_err();
+        assert!(matches!(err, RerankError::Unreachable(_)), "got {err:?}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "the initial attempt plus exactly max_retries retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_transient_failure_does_not_consume_the_retry_budget() {
+        use std::sync::atomic::Ordering;
+        let (url, hits) = counting_mock(0, "400 Bad Request", r#"{"error":"bad"}"#).await;
+        let client = RerankClient::new(
+            &url,
+            "test-model",
+            Duration::from_secs(5),
+            3,
+            Duration::from_millis(1),
+        )
+        .expect("client builds");
+        let err = client.rerank("q", &docs(1), 1).await.unwrap_err();
+        assert!(
+            matches!(err, RerankError::BadRequest { status: 400, .. }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a 4xx fails fast instead of retrying"
         );
     }
 

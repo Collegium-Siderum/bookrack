@@ -12,6 +12,7 @@
 use std::path::Path;
 
 use bookrack_catalog::{Catalog, NewRetrievalCall};
+use bookrack_core::PartitionIdx;
 use bookrack_embed::Embedder;
 use bookrack_query::{Citation, Library, SearchOptions};
 
@@ -19,6 +20,59 @@ use crate::Ops;
 use crate::OpsError;
 use crate::Result;
 use crate::recorder::{Recorder, record_call_async};
+
+/// An exclusion list that names the wrong side of the library for the
+/// requested `kind`. Both control surfaces render it as an
+/// invalid-params rejection, so a caller that mixed the two id name
+/// spaces up learns it instead of being silently ignored.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "library.search: {field} does not apply to kind={kind:?}; \
+     pass it with kind=\"{owning_kind}\" or kind=\"all\", or drop it"
+)]
+pub struct ExclusionKindMismatch {
+    /// The kind the caller asked for.
+    pub kind: String,
+    /// The exclusion field that does not belong to that kind.
+    pub field: String,
+    /// The kind the field does belong to.
+    pub owning_kind: String,
+}
+
+/// Check the two exclusion lists against the requested `kind`: `"book"`
+/// admits only book exclusions, `"paper"` only paper exclusions, and
+/// `"all"` admits both. Empty lists are always admissible.
+///
+/// A `kind` outside the three known values is accepted here — this
+/// function decides only whether the *fields* apply, and the caller's
+/// own dispatch rejects the unknown kind with its own message.
+pub fn validate_exclusions(
+    kind: &str,
+    book_ids: &[i64],
+    paper_ids: &[i64],
+) -> std::result::Result<(), ExclusionKindMismatch> {
+    let offender = match kind {
+        "book" if !paper_ids.is_empty() => Some(("exclude_paper_intake_ids", "paper")),
+        "paper" if !book_ids.is_empty() => Some(("exclude_book_intake_ids", "book")),
+        _ => None,
+    };
+    match offender {
+        None => Ok(()),
+        Some((field, owning_kind)) => Err(ExclusionKindMismatch {
+            kind: kind.to_string(),
+            field: field.to_string(),
+            owning_kind: owning_kind.to_string(),
+        }),
+    }
+}
+
+/// Project intake ids onto the id partitions a search excludes. The two
+/// are the same number by construction, so this is a rewrap: ids that
+/// name no stored book yield partitions no row falls in, which is
+/// exactly "nothing was excluded".
+pub fn exclusions_to_partitions(ids: &[i64]) -> Vec<PartitionIdx> {
+    ids.iter().copied().map(PartitionIdx::new).collect()
+}
 
 /// Search the library and return cited passages, nearest first.
 ///
@@ -206,6 +260,10 @@ pub async fn search_in_paper<E: Embedder>(
 /// nearest-first results. The result list carries each hit's
 /// originating pipeline through `Citation.kind`.
 ///
+/// Each store gets its own [`SearchOptions`]: the two id name spaces
+/// are disjoint, so an exclusion list only means something on the side
+/// it was addressed to. The ANN knobs are normally identical on both.
+///
 /// Returns [`OpsError::SearchUnavailable`] when the book-side library
 /// is absent and [`OpsError::PapersBackendNotConfigured`] when the
 /// paper-side is absent.
@@ -217,7 +275,8 @@ pub async fn search_in_paper<E: Embedder>(
 pub async fn search_unified<E: Embedder>(
     ops: &Ops<E>,
     query: &str,
-    overrides: SearchOptions,
+    book_overrides: SearchOptions,
+    paper_overrides: SearchOptions,
     top_k: Option<usize>,
 ) -> Result<Vec<Citation>> {
     record_call_async!(
@@ -226,7 +285,10 @@ pub async fn search_unified<E: Embedder>(
         serde_json::json!({
             "query": query,
             "top_k": top_k,
-            "overrides": overrides_to_json(&overrides),
+            "overrides": {
+                "books": overrides_to_json(&book_overrides),
+                "papers": overrides_to_json(&paper_overrides),
+            },
         }),
         {
             let books = ops.library().ok_or(OpsError::SearchUnavailable)?;
@@ -244,9 +306,11 @@ pub async fn search_unified<E: Embedder>(
                 None => effective_k,
             };
             let mut combined = books
-                .search_with(query, overrides.clone(), Some(recall_k))
+                .search_with(query, book_overrides, Some(recall_k))
                 .await?;
-            let paper_hits = papers.search_with(query, overrides, Some(recall_k)).await?;
+            let paper_hits = papers
+                .search_with(query, paper_overrides, Some(recall_k))
+                .await?;
             combined.extend(paper_hits);
             combined.sort_by(|a, b| {
                 a.distance
@@ -421,6 +485,13 @@ fn overrides_to_json(o: &SearchOptions) -> serde_json::Value {
     if let Some(r) = o.refine_factor {
         map.insert("refine_factor".to_string(), serde_json::json!(r));
     }
+    if !o.exclude_partitions.is_empty() {
+        let excluded: Vec<i64> = o.exclude_partitions.iter().map(|p| p.get()).collect();
+        map.insert(
+            "exclude_partitions".to_string(),
+            serde_json::json!(excluded),
+        );
+    }
     serde_json::Value::Object(map)
 }
 
@@ -538,6 +609,87 @@ mod tests {
         assert_eq!(reranked[1].rerank_score, Some(0.4));
         // The ANN distance survives alongside the stage score.
         assert!((reranked[0].distance - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn exclusion_validation_covers_every_kind_and_side() {
+        // kind="book": book exclusions apply, paper exclusions do not.
+        assert!(validate_exclusions("book", &[1, 2], &[]).is_ok());
+        let err = validate_exclusions("book", &[], &[7]).expect_err("paper ids under kind=book");
+        assert_eq!(err.field, "exclude_paper_intake_ids");
+        assert_eq!(err.owning_kind, "paper");
+        assert!(
+            err.to_string().contains("exclude_paper_intake_ids")
+                && err.to_string().contains("book"),
+            "the message must name both the field and the kind: {err}"
+        );
+
+        // kind="paper": the mirror image.
+        assert!(validate_exclusions("paper", &[], &[7]).is_ok());
+        let err = validate_exclusions("paper", &[1], &[]).expect_err("book ids under kind=paper");
+        assert_eq!(err.field, "exclude_book_intake_ids");
+        assert_eq!(err.owning_kind, "book");
+
+        // kind="all": both sides apply at once.
+        assert!(validate_exclusions("all", &[1], &[7]).is_ok());
+        assert!(validate_exclusions("all", &[], &[]).is_ok());
+
+        // An unknown kind is not this function's business; the caller's
+        // dispatch rejects it with its own message.
+        assert!(validate_exclusions("sideways", &[1], &[7]).is_ok());
+    }
+
+    #[test]
+    fn intake_ids_project_onto_the_partitions_of_the_same_number() {
+        use bookrack_core::PartitionIdx;
+        assert!(exclusions_to_partitions(&[]).is_empty());
+        assert_eq!(
+            exclusions_to_partitions(&[3, 1, 4]),
+            vec![
+                PartitionIdx::new(3),
+                PartitionIdx::new(1),
+                PartitionIdx::new(4)
+            ],
+            "order is preserved and the id is the partition index",
+        );
+        // Ids that name no stored book are projected unchecked; they
+        // simply exclude a range no row falls in.
+        assert_eq!(
+            exclusions_to_partitions(&[0, -5]),
+            vec![PartitionIdx::new(0), PartitionIdx::new(-5)]
+        );
+    }
+
+    #[test]
+    fn overrides_render_only_what_the_caller_set() {
+        // Nothing overridden: an empty object, not a object full of
+        // nulls and defaults.
+        let empty = overrides_to_json(&SearchOptions::default());
+        assert_eq!(empty, serde_json::json!({}));
+
+        let full = overrides_to_json(&SearchOptions {
+            bypass_index: true,
+            nprobes: Some(32),
+            refine_factor: Some(2),
+            exclude_partitions: exclusions_to_partitions(&[4, 9]),
+        });
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "bypass_index": true,
+                "nprobes": 32,
+                "refine_factor": 2,
+                "exclude_partitions": [4, 9],
+            })
+        );
+
+        // An empty exclusion list omits the key, like the other knobs
+        // at their default.
+        let no_exclusions = overrides_to_json(&SearchOptions {
+            nprobes: Some(8),
+            ..SearchOptions::default()
+        });
+        assert_eq!(no_exclusions, serde_json::json!({"nprobes": 8}));
     }
 
     #[test]

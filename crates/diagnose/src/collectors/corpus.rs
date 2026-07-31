@@ -13,18 +13,24 @@ use bookrack_corpus::{
 
 use crate::Result;
 
-/// Write `<bundle>/corpus/index-meta.json`. A corpus.db that fails to
-/// open is reported as a missing file: the manifest still references
-/// the directory, but the JSON itself is omitted.
+/// Write `<bundle>/corpus/index-meta.json`. The corpus is opened
+/// through the read-only door, so collecting neither materialises a
+/// missing corpus.db nor takes the write lock. A corpus.db that is
+/// missing or fails to open writes `open-error.json` in place of the
+/// payload, keeping the two states distinguishable in the bundle.
 pub fn collect(cfg: &Config, bundle_dir: &Path) -> Result<()> {
     let dst = bundle_dir.join("corpus");
     std::fs::create_dir_all(&dst)?;
 
-    let corpus = match Corpus::open(&cfg.corpus_db()) {
+    let corpus_db = cfg.corpus_db();
+    if !corpus_db.exists() {
+        return super::write_open_error(&dst, &corpus_db, None);
+    }
+    let corpus = match Corpus::open_read_only(&corpus_db) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(error = %e, "diagnose: could not open corpus");
-            return Ok(());
+            tracing::warn!(error = %e, "diagnose: could not open corpus read-only");
+            return super::write_open_error(&dst, &corpus_db, Some(&e.to_string()));
         }
     };
     let payload = serde_json::json!({

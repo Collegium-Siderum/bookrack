@@ -336,4 +336,146 @@ mod tests {
             "expected 2 distinct sites, got {runs}",
         );
     }
+
+    // --- verdict-ladder arms, one discriminating input per arm --------
+    //
+    // Each input trips exactly one condition under the default
+    // thresholds (chars/page OCR gate 50, doubt gate 200; replacement
+    // 5%, PUA OCR 10% / doubt 1%, control 2%, dual-layer 50%, CJK-space
+    // 2%) while staying clear of every arm above it in the ladder.
+
+    fn verdict(pages: &[String], image_pages: usize) -> QualityDecision {
+        assess(pages, image_pages, &default_thresholds()).verdict
+    }
+
+    /// `n` chars of clean ASCII prose, no signal characters.
+    fn prose(n: usize) -> String {
+        "lorem ipsum dolor sit amet consectetur adipiscing elit sed do "
+            .chars()
+            .cycle()
+            .take(n)
+            .collect()
+    }
+
+    fn expect_route(decision: &QualityDecision, needle: &str) {
+        match decision {
+            QualityDecision::RouteToOcr { reason } => assert!(
+                reason.contains(needle),
+                "reason {reason:?} does not mention {needle:?}"
+            ),
+            other => panic!("expected RouteToOcr({needle:?}), got {other:?}"),
+        }
+    }
+
+    fn expect_doubtful(decision: &QualityDecision, needle: &str) {
+        match decision {
+            QualityDecision::Keep { grade, reason } => {
+                assert_eq!(*grade, TextLayerQuality::Doubtful, "reason {reason:?}");
+                assert!(
+                    reason.contains(needle),
+                    "reason {reason:?} does not mention {needle:?}"
+                );
+            }
+            other => panic!("expected Keep(Doubtful, {needle:?}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_text_layer_routes_to_ocr() {
+        let decision = verdict(&[String::new()], 0);
+        expect_route(&decision, "no extractable text");
+    }
+
+    #[test]
+    fn a_near_empty_text_layer_routes_to_ocr_as_a_scan() {
+        // 30 chars/page: above zero, below the 50 chars/page OCR gate.
+        let decision = verdict(&[prose(30)], 0);
+        expect_route(&decision, "scan with no text layer");
+    }
+
+    #[test]
+    fn heavy_replacement_corruption_routes_to_ocr() {
+        // 140 isolated FFFD sites over 420 chars: 33% of sites, far
+        // over the 5% gate, with real text between runs so every site
+        // counts separately.
+        let page = "ab\u{FFFD}".repeat(140);
+        let decision = verdict(&[page], 0);
+        expect_route(&decision, "encoding corruption");
+    }
+
+    #[test]
+    fn a_broken_font_cmap_routes_to_ocr() {
+        // 60 PUA glyphs over 500 chars: 12%, over the 10% OCR gate,
+        // with no replacement characters at all.
+        let page = format!("{}{}", prose(440), "\u{E000}".repeat(60));
+        let decision = verdict(&[page], 0);
+        expect_route(&decision, "broken font cmap");
+    }
+
+    #[test]
+    fn control_character_soup_routes_to_ocr() {
+        // 15 control chars over 500 chars: 3%, over the 2% gate.
+        // Newlines and tabs must not count, so include some.
+        let page = format!("{}\n\t{}", prose(483), "\u{0001}".repeat(15));
+        let decision = verdict(&[page], 0);
+        expect_route(&decision, "control characters");
+    }
+
+    #[test]
+    fn a_dual_layer_scan_is_kept_but_doubtful() {
+        // Every page carries an image: 100% >= the 50% dual-layer cut,
+        // while the text itself is long and clean.
+        let pages = vec![prose(600), prose(600)];
+        let decision = verdict(&pages, 2);
+        expect_doubtful(&decision, "dual-layer scan");
+    }
+
+    #[test]
+    fn space_split_ideographs_are_kept_but_doubtful() {
+        // 6 wedged spaces over ~206 ideographs: ~2.9% of CJK glyphs,
+        // over the 2% gate; the page is long enough to clear both
+        // chars/page arms and carries no image pages.
+        let cjk_run: String = "\u{4E00}\u{4E8C}\u{4E09}\u{56DB}".repeat(50);
+        let page = format!("{cjk_run}{}", "\u{4E94} \u{516D}".repeat(6));
+        let decision = verdict(&[page], 0);
+        expect_doubtful(&decision, "split by spaces");
+    }
+
+    #[test]
+    fn sparse_text_is_kept_but_doubtful() {
+        // 100 chars/page: above the 50 chars/page OCR gate, below the
+        // 200 chars/page doubt gate.
+        let decision = verdict(&[prose(100)], 0);
+        expect_doubtful(&decision, "sparse text");
+    }
+
+    #[test]
+    fn a_trace_of_pua_glyphs_is_kept_but_doubtful() {
+        // 10 PUA glyphs over 500 chars: 2%, between the 1% doubt gate
+        // and the 10% OCR gate.
+        let page = format!("{}{}", prose(490), "\u{E000}".repeat(10));
+        let decision = verdict(&[page], 0);
+        expect_doubtful(&decision, "minor encoding anomalies");
+    }
+
+    #[test]
+    fn a_single_replacement_site_is_kept_but_doubtful() {
+        // One FFFD over 500 chars: 0.2%, under the 5% OCR gate but the
+        // doubt arm fires on any replacement at all.
+        let page = format!("{}\u{FFFD}", prose(499));
+        let decision = verdict(&[page], 0);
+        expect_doubtful(&decision, "minor encoding anomalies");
+    }
+
+    #[test]
+    fn clean_dense_text_is_kept_as_usable() {
+        let decision = verdict(&[prose(600)], 0);
+        match decision {
+            QualityDecision::Keep { grade, reason } => {
+                assert_eq!(grade, TextLayerQuality::Usable, "reason {reason:?}");
+                assert!(reason.contains("clean born-digital"), "reason {reason:?}");
+            }
+            other => panic!("expected Keep(Usable), got {other:?}"),
+        }
+    }
 }

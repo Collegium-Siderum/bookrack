@@ -579,6 +579,50 @@ mod tests {
     }
 
     #[test]
+    fn update_audit_rollup_touches_only_the_rollup_pair() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .upsert_publication_attrs(&fully_populated(1, KIND))
+            .expect("seed");
+
+        catalog
+            .update_audit_rollup(1, KIND, "low", "needs_work")
+            .expect("rollup");
+
+        let read = catalog
+            .publication_attrs(1, KIND)
+            .expect("read")
+            .expect("present");
+        assert_eq!(read.confidence.as_deref(), Some("low"));
+        assert_eq!(read.audit_verdict.as_deref(), Some("needs_work"));
+        // Every bibliographic column survives the targeted update; a
+        // rollup routed through the full upsert would clear these.
+        assert_eq!(read.title.as_deref(), Some("Title"));
+        assert_eq!(read.publisher.as_deref(), Some("Publisher"));
+        assert_eq!(read.isbn.as_deref(), Some("978-0-00-000000-0"));
+        assert_eq!(
+            read.extras_json.as_deref(),
+            Some("{\"note\":\"synthetic\"}")
+        );
+    }
+
+    #[test]
+    fn update_audit_rollup_inserts_a_bare_pair_when_the_base_row_is_missing() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        catalog
+            .update_audit_rollup(2, KIND, "medium", "needs_work")
+            .expect("rollup on an unseeded node");
+
+        let read = catalog
+            .publication_attrs(2, KIND)
+            .expect("read")
+            .expect("a row must have been inserted");
+        assert_eq!(read.confidence.as_deref(), Some("medium"));
+        assert_eq!(read.audit_verdict.as_deref(), Some("needs_work"));
+        assert_eq!(read.title, None, "the inserted row carries only the pair");
+    }
+
+    #[test]
     fn publication_attrs_for_intakes_empty_input_skips_the_query() {
         let catalog = Catalog::open_in_memory().expect("open");
         let map = catalog

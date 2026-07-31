@@ -14,17 +14,20 @@ mod contract;
 mod detect;
 pub mod envelope;
 mod epub;
+pub mod gate;
 mod headings;
 mod html;
 mod html_parse;
 pub mod ocr;
 mod pdf;
 pub mod pdf_paper;
+pub mod pdfium_gate;
 pub mod pdfium_pin;
 mod quality;
 mod txt;
 
 pub use contract::*;
+pub use detect::SUPPORTED_EXTENSIONS;
 pub use envelope::{
     ENVELOPE_FILE_SUFFIX, ENVELOPE_SCHEMA_VERSION, EnvelopeError, ExtractionEnvelope,
     envelope_filename, envelope_filename_legacy, read_envelope, read_envelope_with_fallback,

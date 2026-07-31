@@ -12,18 +12,33 @@ use crate::render;
 #[derive(clap::Subcommand, Debug)]
 pub enum AuditProfileAction {
     /// Print every built-in profile name, one per line.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "audit-profile list",
+        "audit-profile list --json",
+    ])]
     List {
         /// Emit machine-readable JSON instead of the plain listing.
         #[arg(long)]
         json: bool,
     },
     /// Pretty-print the effective toggle settings for a named profile.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "audit-profile show default",
+        "audit-profile show strict --json",
+    ])]
     Show {
         /// Built-in profile name (`default`, `trust-source`, `strict`).
         name: String,
     },
-    /// List the sub-section names that differ between two named profiles
-    /// and pretty-print each side's settings for those sections.
+    /// List the sub-section names that differ between two named
+    /// profiles.
+    ///
+    /// Each side's settings for those sections are pretty-printed below
+    /// the list.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "audit-profile diff default strict",
+        "audit-profile diff default trust-source --json",
+    ])]
     Diff {
         /// First profile name.
         a: String,

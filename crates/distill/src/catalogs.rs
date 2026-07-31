@@ -531,6 +531,19 @@ stages = [
         assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// The flag summary is stamped verbatim into
+    /// `book_distill_audit.profile_toggle_summary`, so its byte shape
+    /// is an audit-row API surface: name-sorted objects, compact JSON.
+    /// Editing quality_flags.toml is expected to move this pin — update
+    /// the literal alongside the catalog change, deliberately.
+    #[test]
+    fn embedded_flag_summary_is_byte_stable_and_name_sorted() {
+        assert_eq!(
+            Catalogs::embedded_flag_summary(),
+            r#"[{"name":"anchor_glued_with_body","severity":"warn"},{"name":"low_ocr_confidence","severity":"warn"},{"name":"pair_mismatch","severity":"warn"},{"name":"redirect_loop","severity":"error"},{"name":"spliced_from_orphan","severity":"info"},{"name":"verified_by_user","severity":"ok"}]"#,
+        );
+    }
+
     #[test]
     fn a_well_formed_book_toml_validates_clean() {
         let cats = Catalogs::load_all().expect("load_all");

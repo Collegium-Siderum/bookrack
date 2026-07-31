@@ -8,74 +8,6 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
-### Changed
-
-- **refs: a lookup miss now retries with the latin key form.** An
-  exact `reference_lookup` query that yields no hit is retried once
-  with the query lower-cased and stripped of non-alphanumeric
-  characters — the same projection distill uses to build latin entry
-  keys — so `Objet a` finds the entry keyed `objeta`. The reply still
-  echoes the original query; CJK keys stay exact-match.
-
-- **distill: book slugs are validated against `[a-z0-9_-]+`.** A
-  `book.toml` whose `book_slug` is empty or steps outside the closed
-  lower-case character set is rejected at validation time. The slug
-  is the authority segment of `refs://` URIs, whose parser splits at
-  the first `#`; the closed set keeps that split unambiguous.
-
-- **runtime: the queue snapshot moves into a daemon state
-  directory.** The persistent ingest queue used to live as
-  `.bookrack-queue.json` under the served library's data root; a
-  queue that spans libraries does not belong to any one of them. It
-  now lives as `queue.json` under a daemon state directory —
-  `BOOKRACK_DAEMON_STATE_DIR` when set, the platform per-user data
-  directory (`bookrack/daemon`) otherwise. A snapshot found at the
-  old location is migrated on daemon start; the job schema is
-  unchanged.
-
-- **embed, query: the dimension probe is cached per model and
-  URL.** Opening several libraries (or the books and papers sides of
-  one) against the same embedding model used to pay one probe
-  round-trip per open; the first successful response now records the
-  model's dimension process-wide and later probes for the same
-  `(model, url)` answer locally.
-
-- **obs, runtime: daemon logs move into the daemon state
-  directory.** The rolling JSON log and crash reports used to land
-  under the served library's data root (`<data_root>/logs/`); they
-  now land under `logs/` in the daemon state directory, so a daemon
-  process has one log stream regardless of which library it serves.
-  Logs already written under a data root stay where they are;
-  `bookrack diagnose` collects from both locations.
-
-### Fixed
-
-- **runtime: a shutdown fired before the drain begins is no longer
-  lost.** `DaemonRuntime::run_until_shutdown` subscribed to the
-  shutdown broadcast only when it started draining, so a shutdown
-  sent in the window between bring-up and the drain — a fast signal,
-  an early `daemon.shutdown`, or an embedding caller's direct send —
-  was silently dropped and the daemon waited forever. The receiver is
-  now subscribed when the channel is created, so a pre-drain shutdown
-  is buffered and honoured.
-
-- **obs: a second tracing-subscriber install no longer panics.**
-  `bookrack_obs::init` called the panicking `init()`, so a process
-  that already carries a global subscriber — an embedding host with
-  its own tracing setup, or a test booting two runtimes back to back
-  — aborted at bring-up. It now keeps the first subscriber and prints
-  a notice; a process that owns its subscriber is unaffected.
-
-- **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's
-  finalize step resolved the registry through the platform-default-only
-  path helper, so with `BOOKRACK_REGISTRY` set the new library's
-  `default` entry still landed in the platform-default file — and a
-  follow-up `--library`, which reads the env-named registry, could not
-  find the library init had just created. The wizard now resolves the
-  registry through the same helper as every other write verb: the
-  env-named file when the variable is set, the platform default
-  otherwise.
-
 ### Added
 
 - **translate: new crate with the `translate.db` schema.** The
@@ -91,6 +23,208 @@ release workflow extracts the matching section verbatim from this file.
 - **config: `translate.db` path helper.** The data-root layout gains
   the translation store's canonical location beside the other
   per-library databases; no new environment knob.
+
+- **cli: leaf commands start carrying an `Examples:` block in `--help`.**
+  Each covered leaf's long help ends with at least two copy-pasteable
+  invocations — one minimal, one non-trivial — rendered after the
+  options. The block lives in `after_long_help`, so `-h` is unchanged: a
+  gate in `bookrack-cli-grammar`'s `help_gate` module holds every leaf
+  to the format, keeps the example values inside a fixed synthetic
+  corpus, and a companion test in the binary crate re-parses every
+  example so one that names a dropped command or flag fails the build.
+
+- **runtime: `bookrack run` refuses to start when the embed backend
+  cannot serve.** Before any library is opened — and before the
+  reranker backend is started, which is the most expensive step in
+  bring-up — every mounted library's `(Ollama URL, embed model)` pair
+  is checked against the daemon's model list. An unusable backend
+  ends the run with one sentence, one command to fix it, and exit 2,
+  instead of failing several seconds later inside library warm-up.
+  The check runs per mount, so a registry whose libraries name
+  different models or different Ollama hosts is covered for all of
+  them. `bookrack doctor` and the refusal now share one judgement, so
+  the two can no longer disagree about whether the backend is usable.
+  The desktop shell goes through the same bring-up and gains the same
+  refusal.
+
+- **embed: `EmbedError::ModelNotFound`.** A 404 carrying Ollama's
+  error envelope is now its own variant, naming the model this
+  process is configured with, rather than a generic `BadRequest`
+  holding a raw response body. The judgement is the status code plus
+  the envelope shape — Ollama's wording for this case differs between
+  its own call sites, so matching on the text was never sound, and
+  requiring the envelope keeps an unrelated service's 404 page from
+  being reported as a missing model.
+
+- **query, mcp: the book reads finish reporting the source file.**
+  `library.list_books` / `library.find_books` rows carry
+  `source_filename`, the basename of the path recorded at intake, so a
+  book whose title is missing or is an export-tool placeholder can be
+  identified without a second call; the full path and the source hash
+  stay in the detail read, which a list row reaches by `intake_id`.
+  `library.show_book` adds `page_count` and `byte_size` alongside the
+  source path and identity it already carried, completing the intake
+  record it reports. Both project from the `Intake` row the reads
+  already load, so neither issues an extra query. `library.show_book`'s
+  tool description now lists the source-side fields, which it had not
+  since they landed, and the book block that
+  `library.show_metadata_audit` and `metadata show` embed widens with
+  the detail read.
+
+### Changed
+
+- **cli: a session lock that cannot be read is reported instead of
+  skipped.** The library pre-flight treats two very different states
+  the same way — nobody holds the lock, which is every machine without
+  a daemon, and the lock could not be examined at all, which means the
+  check did not run. The first stays silent; the second now says so on
+  stderr. The command still runs either way: a lock that cannot be
+  read is no evidence that a daemon is serving a different library.
+
+- **index-profile: a resolved profile says which file defined it.**
+  `index-profile current` reports `defined by: user` or `defined by:
+  built-in` alongside the reference source it already showed, and
+  `--json` carries the same under `profile.defined_by`. A user profile
+  and a built-in of the same name resolved identically before, so
+  "the profile I wrote is not being used" and "the profile I wrote is
+  being used" produced the same output.
+
+  With it, the per-user profile directory is no longer stood in for by
+  a path relative to the working directory when no config location can
+  be found. A run started in a directory that happened to contain an
+  `index-profiles/` folder used to pick those files up; an
+  unlocatable directory is now stated as such and only built-ins
+  resolve.
+
+- **`.env` is loaded by the binaries, not by the configuration
+  library.** `bookrack`, `bookrack-mcp`, and the desktop shell each
+  load it as their first statement; `Config::resolve` no longer does.
+  Two things change. Every variable a process reads is now read against
+  one environment — previously anything that ran before the first
+  `Config::resolve`, including the log-filter setup, the PDFium lookup,
+  and the runtime-directory resolution, saw a world the file had not
+  been applied to, so one variable could hold two values in one
+  process. And a caller that embeds a bookrack crate as a library no
+  longer gets a `.env` out of its own working directory: taking a file
+  from there is a program's decision to make about itself.
+
+  `BOOKRACK_NO_DOTENV` turns the load off. Non-blank is on, with `0`,
+  `false`, `no`, and `off` turning it back off, matching
+  `BOOKRACK_REQUIRE_PDFIUM`. It has to be set in the real environment,
+  since a value inside `.env` is only read once the file has been
+  loaded.
+
+- **config: `BOOKRACK_REGISTRY` names the only registry that is
+  consulted.** Setting it to a non-blank value now suppresses the
+  platform-default registry at `<config_dir>/bookrack/registry.toml`
+  entirely: it is not read, so its `default` cannot win the last rung
+  of the resolution ladder and its entries cannot annotate a
+  resolution that a pinned registry had already answered. This makes
+  the resolver agree with the two readers that were already env-wins,
+  `libraries list` and the registry write path. Observable where a
+  machine has both: a run that pins a registry no longer reports a
+  shadowed default, or a library name claimed, out of the other file.
+
+- **config: an unreadable registry no longer vetoes a resolution that
+  does not need one.** A data root fixed by `--data-dir`,
+  `BOOKRACK_DATA_DIR`, or the portable layout consults no registry, so
+  a missing or malformed registry file now leaves it alone: the
+  resolution succeeds and only the annotations that would have come
+  from the registry are absent. `bookrack doctor` consequently reports
+  a resolved data root — and runs the catalog, corpus, and reranker
+  checks that were being skipped behind an unresolved one — where it
+  previously failed the whole row. A selection that *does* need the
+  registry (`--library`, or falling through to a registry `default`)
+  still fails, and it now names the registry rather than reporting
+  that no library is configured.
+
+  One signal is lost with it: a `BOOKRACK_REGISTRY` pointing at a file
+  that does not exist used to be reported through that failing
+  data-root row, and nothing reports it yet in the resolved case. A
+  registry that exists but does not parse is still reported by
+  `doctor`'s own registry probe.
+
+- **errors now say what to do next, and stop losing their root
+  cause.** Operator-facing failures are split three ways — a one-line
+  summary of what failed, the implementation-level detail behind it,
+  and a suggested next step — following PostgreSQL's message style.
+  The CLI stacks the three on stderr, with the suggestion last;
+  `--json` gains a structured failure path, so a scripted caller no
+  longer has to parse JSON on success and prose on failure; the
+  control plane and the MCP server carry the parts in the `data` slot
+  their error envelopes always had and never filled, alongside a
+  `retryable` flag an agent can branch on without reading the
+  wording. `data` is additive: a client that ignores it sees what it
+  saw before.
+
+  Separately, every error crossing those two wire boundaries is now
+  flattened first. A wrapper error's own text is its module's name, so
+  a failure that used to arrive as `"query error"` — root cause gone —
+  now arrives naming the thing that actually broke. A repository gate
+  (`scripts/error-boundary-check.sh`, run in CI) holds the boundary
+  files to it.
+
+- **cli: the root help trailer points at `doctor` for the prerequisite
+  check.** The block `bookrack --help` prints after the options used to
+  restate the Ollama setup, embed-model name included, and spelled out
+  the `exec library.<tool>` form for library reads. It now hands the
+  runtime check to `bookrack doctor`, which knows the configured model,
+  and points at `bookrack run` / `bookrack exec tools` — the two entry
+  points that stay correct as the control-plane surface evolves. The
+  environment-variable listing is unchanged.
+
+- **cli: `-h` prints a one-line summary and `--help` the full text.**
+  Nineteen command summaries and the `--data-dir` / `--library` /
+  `--audit-profile` global flags used to print their whole description
+  in the short help, where clap does not wrap the `Commands` column —
+  the longest ran to 379 characters on a single line. Each is now split
+  at a sentence boundary, so `-h` prints the summary and `--help` prints
+  the full text, unchanged and complete. `--audit-profile` keeps the
+  three built-in names — `default`, `trust-source`, `strict` — in the
+  summary, since they are what an operator needs at the prompt.
+  `bookrack init --data-dir`, which shadows the global flag on the page
+  a new install opens first, splits the same way.
+
+## [0.10.0] - 2026-07-27
+
+### Added
+
+- **retrieval: `show` flags a recall set that is entirely weak.**
+  `bookrack retrieval show <call-id>` now closes its hit table with one
+  advisory line when every recorded hit of the call sits at or above the
+  weak-match distance threshold, naming the threshold that made the
+  verdict so the line can be checked against the library's
+  configuration. The verdict is over the whole set — a single strong hit
+  vetoes it, and a call with no hits draws no line, because an absence is
+  not a weak result. This is the first consumer of
+  `search.weak_threshold` / `BOOKRACK_SEARCH_WEAK_THRESHOLD`: the knob
+  resolved through the full precedence chain but nothing read the
+  resolved value. The threshold comes from the library `retrieval show`
+  was pointed at, under the usual environment override. Nothing grades
+  an individual hit, and the search responses are unchanged.
+
+- **search: recall can exclude named books and papers.** `library.search`
+  accepts `exclude_book_intake_ids` and `exclude_paper_intake_ids` on
+  both the MCP and control-plane surfaces, dropping the named items'
+  passages server-side instead of leaving the caller to filter a result
+  set it has already paid for. The exclusion is a predicate on the ANN
+  query, so a caller that has read a dominant book can push it out of
+  the way and see what the rest of the library says. The two id name
+  spaces are unrelated, so each list applies only to its own side and
+  naming the side the call does not search is rejected rather than
+  ignored; an omitted or empty list filters nothing. `kind="all"`
+  carries both lists at once and applies each to its own store.
+  `library.search_in_book` and `library.search_in_paper` take no
+  exclusions — recall there is already confined to one item. The
+  recorder logs a non-empty exclusion set alongside the ANN knobs.
+
+- **reference: wildcard lookup can exclude books.** `reference.lookup`
+  accepts `exclude_books`, a list of book slugs dropped from the
+  result when `book="*"` spans every registered reference book. The
+  exclusion holds across the whole resolution chain, including the
+  latin-key fallback retry and the redirect hop, so an excluded book
+  cannot re-enter as a redirect target. Passing the list with a
+  single-book scope is an error rather than a silent no-op.
 
 - **runtime: the daemon mounts every registered library.** With the
   primary root selected through the registry (`--library` or the
@@ -136,6 +270,260 @@ release workflow extracts the matching section verbatim from this file.
   hands them the old file or the new one. The lock file carries no
   content and can be deleted at any time.
 
+### Changed
+
+- **config: `mcp_addr` and `log_directive` are retired `config.toml`
+  keys.** Neither ever resolved. Both are process-level knobs, read
+  before any data root is known — the log subscriber is installed and
+  the MCP listen address is chosen by the binary that then goes looking
+  for a library — so a value written into a library's `config.toml` was
+  accepted, stored, and never consulted: the write succeeded, a daemon
+  restart changed nothing, and no surface said so. The two keys now join
+  `embed_model` and `index_profile` as retired: a file carrying either is
+  refused by name on every command that resolves a data root, and the
+  error gives the knob's real home (`BOOKRACK_MCP_ADDR` or `bookrack run
+  --mcp-addr`; `BOOKRACK_LOG` and `BOOKRACK_LOG_CONSOLE`) alongside the
+  `libraries config <name> --unset <key>` that deletes the line. Both
+  environment variables are unchanged. `libraries config <name>` also
+  annotates a retired line when it prints a file verbatim — the one read
+  surface such a line used to pass through unremarked. Upgrading a
+  library that still carries either line requires the unset; see
+  [`docs/UPGRADE.md`](docs/UPGRADE.md).
+
+- **cli: a caller without a terminal is asked to confirm, not
+  refused.** `vectors drop`, `vectors reset`, their two `papers`
+  peers, `index-profile apply`, and the `libraries add` uuid-clash
+  resolution refused outright when stdin was not a TTY. That predicate
+  answers "is a human at a terminal", not "can an answer arrive", and
+  the two differ often enough to matter: this repository's own
+  end-to-end tests drive the strongest gate in the product — retyping
+  a library name before `libraries remove --purge` — over a pipe, and
+  `ssh host …` without `-t`, `docker exec` without `-t`, and Git Bash
+  on Windows all put a human behind one. Refusing them pushed
+  operators to `--yes`, which skips the retype entirely. All three now
+  prompt like every other destructive verb, under the answer window
+  `BOOKRACK_CONFIRM_TIMEOUT_SECS` bounds (see Fixed). A caller that
+  supplies no answer still fails with the same
+  directed message and the same exit `2`; what changed is that a
+  caller that does supply one is now heard. `DestructiveGate` is gone:
+  its stdin axis moved to `render::confirm`'s `answer_window`, and
+  keeping it would have been a second copy of one rule.
+
+- **extract: a fullwidth References heading terminates the paper
+  metadata-scan window.** `extract_paper_metadata_text` documented its
+  References-heading match as running against the fullwidth-folded
+  page text, but the fold was applied only after the window was cut,
+  so a heading printed in fullwidth forms (U+FF01..U+FF5E) never
+  closed the window and bibliography text leaked into the DOI / venue
+  scan. Each page is now folded before the heading match, making the
+  documented order the real one.
+
+- **glean, catalog: three paper-audit grade columns no longer stuck
+  at `missing`.** The audit's per-field reports and the
+  `node_paper_audit` projection disagreed on field-key names:
+  `GRADE_COLUMNS` looked up `arxiv` and `container` where the graders
+  record `arxiv_id` and `container_title`, so `grade_arxiv` and
+  `grade_container` wrote `missing` regardless of the paper; and the
+  abstract grader read the nonexistent effective key `abstract` where
+  the effective view names it `abstract_text`, so `grade_abstract`
+  always graded `missing` and the `abstract_too_short` signal could
+  never fire. The keys are now unified on the effective-attrs names
+  end to end (graders, roll-up candidates, CSL requirement matrix,
+  projection). Audit rows written before the fix carry the stuck
+  `missing` grades until their papers are re-audited
+  (`papers.metadata.reaudit`).
+
+- **glean: a thesis with its institution can audit clean.** The CSL
+  requirement matrix marks `publisher` (the institution, in CSL
+  terms) as required for a thesis, but no grader produced that field,
+  so the roll-up saw it as missing on every thesis and floored the
+  verdict to `needs_work` with low confidence regardless of the
+  actual metadata. A presence-only publisher grader now feeds the
+  roll-up; the grade travels in the report JSON and has no dedicated
+  `grade_*` column on `node_paper_audit`. Thesis rows audited before
+  the fix stay `needs_work` until re-audited
+  (`papers.metadata.reaudit`).
+
+- **distill: the `splits` coverage counter is actually written.** The
+  `Coverage` doc promised its counters were written by the matching
+  stages, but neither splitter stage touched `splits`, so every
+  `book_distill_audit` row stored `splits = 0` regardless of the run.
+  Both splitters now record their output count; audit rows written
+  before the fix keep the zero until their book is re-distilled.
+
+- **glean: `venue_aliases` is actually consulted.** The paper-audit
+  data set documented `venue_aliases` as a map of informal-to-canonical
+  venue spellings, but no grader read it: `grade_container` checked
+  the whitelist against the raw value only, so an aliased spelling of
+  a whitelisted venue was still flagged `venue_not_in_list`. The
+  container grader now canonicalizes the value through the alias map
+  (case-insensitively) before the whitelist membership check. The
+  shipped default alias map is empty, so behaviour changes only for
+  libraries whose data overlay sets aliases.
+
+- **ingest, glean, runtime: the vectors-reset `--resume` hint prints
+  when a reset actually fails.** Both reset reports carried a
+  `failed_intake` field documented as "returned to the caller
+  alongside this report", but every failure path dropped the report
+  while returning the error, so the field was `None` in every report
+  a caller could observe — and the `vectors reset` / `papers vectors
+  reset` commands checked it on the success path, leaving their
+  resume guidance unreachable. The dead field and branches are gone;
+  the commands now print the resume hint on the actual failure path.
+  The failing intake remains identifiable on disk: it keeps its
+  `Extracted` status and the pipeline audit records the failure.
+
+- **runtime: the `mcp.availability` snapshot reports the real write
+  state.** `events.snapshot` and the `events.subscribe` burst
+  hardcoded `paused: false` for the `mcp.availability` channel, so a
+  client connecting while a write command held the runtime-wide write
+  mutex saw the opposite of the truth — in the same bundle whose
+  `daemon.state` said `writing`. The snapshot now derives `paused`
+  from the RPC write source that the live events already track.
+
+- **rerank: the client enforces `top_n` and descending-score order
+  itself.** The rerank client passed the server's result list through
+  unchanged apart from an index bounds check, so a backend that
+  ignored `top_n` or answered out of order silently broke the
+  documented "at most `top_n`, descending relevance" contract that
+  the search pipeline's rerank stage builds on. The client now sorts
+  by descending score (stable, total order) and truncates to `top_n`
+  after parsing; a mock test feeds a shuffled, overlong response to
+  pin the enforcement. The supervised llama-server backend already
+  conformed, so searches against it are unaffected.
+
+- **runtime: `papers.metadata.set` names the abstract field
+  `abstract_text`.** The paper write surface accepted `abstract`, a
+  field name the effective view never produces — an override stored
+  under it was invisible to every effective-view consumer, including
+  the audit. The editable set now uses the effective-attrs name
+  (`abstract_text`), matching the book-side surface; `abstract` is
+  rejected with the usual not-editable error. Any override row
+  already stored under `abstract` should be re-set under
+  `abstract_text`.
+
+- **extract, runtime: one format allowlist, enforced before
+  enqueueing.** The queue's directory-walk allowlist had drifted from
+  the extractor's adapter surface: it admitted `mobi`/`azw3`, which
+  have no adapter and always failed later at EXTRACT as a `failed`
+  queue job with a buried error, and it silently skipped
+  `html`/`htm`/`xhtml`, which extract fine. Explicitly submitted
+  single files bypassed the list entirely. The allowlist now lives in
+  `bookrack_extract` next to the format detector (EPUB / PDF / TXT /
+  HTML), the walk consumes it from there, and `ingest.submit`,
+  `glean.submit`, and the direct single-file ingest command check it
+  up front — an unsupported file is refused with an actionable
+  message (mobi/azw3 point to EPUB conversion) instead of becoming a
+  job that cannot succeed.
+
+- **ops: `library.info` distinguishes broken stores from missing
+  ones.** Every failure used to collapse into the same absent values
+  a fresh library shows: an unopenable corpus fell back to blank
+  stamps, a catalog with a newer schema showed an empty on-disk
+  version next to the expected one, and a vector store refused for
+  reader age looked identical to one never built. The card gains
+  `catalog_error` / `corpus_error` / `vectors_error` fields (papers
+  side included) carrying the open failure's reason; a missing store
+  stays a plain absence, and count-class fields keep their
+  best-effort behaviour.
+
+- **diagnose: bundles record why a store section is absent.** The
+  corpus collector opened corpus.db through the writable door —
+  creating it on a bare root and taking the write lock on a live one
+  — and both database collectors reduced an open failure to a log
+  line, leaving the bundle section silently missing. Collectors now
+  open read-only, and a store that is missing or unopenable writes
+  `<section>/open-error.json` distinguishing the two states (file
+  name only, never the full path). A vectors sidecar that exists but
+  fails to load is recorded the same way.
+
+- **refs, corpus, ops, query: read paths no longer materialize
+  database files.** `Refs::open` and `Corpus::open` create the
+  database when it is absent, so a read reaching for them left an
+  empty schema behind as a side effect of a query — and a later
+  "does this library have reference data?" check on file existence
+  read the wrong answer. `refs` gains `Refs::open_read_only`
+  (strict read-only flags, no migration, a `user_version` past the
+  target refused as `SchemaTooNew`), and every corpus read path in
+  `ops` and `query` moves to the existing `Corpus::open_read_only`.
+  The read connections now block writes outright and skip the
+  schema-apply and version-reconciliation writers. MCP
+  `reference.lookup` against a library that has never run `distill`
+  now reports an open error instead of silently creating
+  `reference.db`; `reference.overlay_set` keeps the writable door.
+
+- **refs: a lookup miss now retries with the latin key form.** An
+  exact `reference_lookup` query that yields no hit is retried once
+  with the query lower-cased and stripped of non-alphanumeric
+  characters — the same projection distill uses to build latin entry
+  keys — so `Objet a` finds the entry keyed `objeta`. The reply still
+  echoes the original query; CJK keys stay exact-match.
+
+- **distill: book slugs are validated against `[a-z0-9_-]+`.** A
+  `book.toml` whose `book_slug` is empty or steps outside the closed
+  lower-case character set is rejected at validation time. The slug
+  is the authority segment of `refs://` URIs, whose parser splits at
+  the first `#`; the closed set keeps that split unambiguous.
+
+- **runtime: the queue snapshot moves into a daemon state
+  directory.** The persistent ingest queue used to live as
+  `.bookrack-queue.json` under the served library's data root; a
+  queue that spans libraries does not belong to any one of them. It
+  now lives as `queue.json` under a daemon state directory —
+  `BOOKRACK_DAEMON_STATE_DIR` when set, the platform per-user data
+  directory (`bookrack/daemon`) otherwise. A snapshot found at the
+  old location is migrated on daemon start; the job schema is
+  unchanged.
+
+- **embed, query: the dimension probe is cached per model and
+  URL.** Opening several libraries (or the books and papers sides of
+  one) against the same embedding model used to pay one probe
+  round-trip per open; the first successful response now records the
+  model's dimension process-wide and later probes for the same
+  `(model, url)` answer locally.
+
+- **obs, runtime: daemon logs move into the daemon state
+  directory.** The rolling JSON log and crash reports used to land
+  under the served library's data root (`<data_root>/logs/`); they
+  now land under `logs/` in the daemon state directory, so a daemon
+  process has one log stream regardless of which library it serves.
+  Logs already written under a data root stay where they are;
+  `bookrack diagnose` collects from both locations.
+
+- **runtime: `library.set_default` persists the default to the registry;
+  the in-memory pointer becomes a cache.** The RPC previously flipped a
+  daemon-local pointer that evaporated on restart, leaving the registry
+  file as a second, divergent home for the default. It now writes the
+  on-disk registry first, then refreshes the in-memory pointer — a cache
+  of that on-disk value — so the change survives a restart and the
+  daemon's routing follows immediately. An external registry write
+  (another process, the offline CLI) is not pushed into the cache; a
+  restart re-seeds it. An unknown name is reported as `-32010` (invalid
+  library) rather than `-32602`, aligning the in-memory check with the
+  on-disk one and with the code the method already documented.
+
+- **config: a library's profile reference resolves from the manifest,
+  then the registry cache.** The `config.toml` layer between them is
+  gone with the field, so `config.toml` is no longer a reported origin
+  for a profile reference (`index-profile current --json` and `doctor`
+  emit `manifest` or `registry`).
+
+- **cli: `libraries config` accepts a narrower key set.** `embed_model`,
+  `mcp_addr`, and `log_directive` are refused as unknown keys — the set
+  path has no entry for a retired key at all, while the by-name refusal
+  that names the way out is what *loading* a file carrying one gives
+  you. `--unset` still accepts them, since deleting the line is the
+  cure. `index_profile` is the exception among the retired four: the
+  verb intercepts it before the `config.toml` path and declares it into
+  the library manifest instead.
+
+- **cli: `bookrack init` writes only `ollama_url` into a new root's
+  `config.toml`.** It previously wrote `embed_model` too, which would
+  have produced a root the very next command refused to load.
+
+- **cli: `libraries fork` and `vectors reset` guidance points at the
+  index profile** rather than at the removed environment variable.
+
 ### Removed
 
 - **config, runtime, cli: `BOOKRACK_EMBED_MODEL` and the `config.toml`
@@ -157,36 +545,270 @@ release workflow extracts the matching section verbatim from this file.
   it: the `index-profile apply` masking refusal and the profile/field
   model-conflict error no longer exist, because neither is reachable.
 
-### Changed
+### Fixed
 
-- **runtime: `library.set_default` persists the default to the registry;
-  the in-memory pointer becomes a cache.** The RPC previously flipped a
-  daemon-local pointer that evaporated on restart, leaving the registry
-  file as a second, divergent home for the default. It now writes the
-  on-disk registry first, then refreshes the in-memory pointer — a cache
-  of that on-disk value — so the change survives a restart and the
-  daemon's routing follows immediately. An external registry write
-  (another process, the offline CLI) is not pushed into the cache; a
-  restart re-seeds it. An unknown name is reported as `-32010` (invalid
-  library) rather than `-32602`, aligning the in-memory check with the
-  on-disk one and with the code the method already documented.
+- **index-profile: `current` and `apply` select their library through
+  the shared resolver.** Both verbs read the registry alone: they
+  honoured `--library`, ignored `--data-dir` after accepting it, never
+  looked at `BOOKRACK_DATA_DIR`, and could not name a data root the
+  registry did not carry. A `--data-dir` or data-root-variable
+  invocation therefore reported on — or derived a plan for — whatever
+  library the registry's `default` pointed at, silently, and on a
+  machine with no registry both verbs failed outright even with the
+  data root set in the environment. They now resolve through
+  `Config::resolve`, so the whole precedence ladder applies
+  (`--data-dir`, `--library`, the data-root variable, the portable
+  layout, then a registry `default`), and a path-class root claims its
+  registry name by manifest uuid or by path the way every other command
+  does. Two consequences: an unregistered root is a valid target —
+  `apply` writes the declaration the manifest owns and reports that
+  there is no registry entry to refresh, instead of minting one — and
+  the executing `apply` asserts the running daemon against the resolved
+  root, not against a registry name derived separately from it. The
+  subcommand-local `--library` flags are gone; the global flag of the
+  same name, accepted on either side of the subcommand, replaces them.
+  `current --json` gains a `registered` field, and its `library` field
+  now carries the registry name, else the manifest's birth name, else
+  the root's directory basename.
 
-- **config: a library's profile reference resolves from the manifest,
-  then the registry cache.** The `config.toml` layer between them is
-  gone with the field, so `config.toml` is no longer a reported origin
-  for a profile reference (`index-profile current --json` and `doctor`
-  emit `manifest` or `registry`).
+- **doctor: the index-profile summary counts the libraries it
+  checked.** The coherence pass selects libraries by their effective
+  profile reference — the manifest first, the registry's cached copy
+  second — while its clean summary counted only entries whose registry
+  cache was populated. A library that declares its profile in the
+  manifest alone was inspected and then left out of the total, so the
+  row could read `0 referenced` after checking one. The summary now
+  counts the set the pass actually walked.
 
-- **cli: `libraries config` accepts a narrower key set.** `embed_model`
-  is refused as an unknown key. `index_profile` remains accepted and
-  still declares into the library manifest.
+- **doctor: a registry that cannot be read is reported instead of
+  passing for no registry at all.** Both registry-backed sections
+  resolved the library registry with a pattern that folded a read or
+  parse failure into the "no registry is configured" case, so a corrupt
+  `registry.toml` produced exactly the output of a machine that never
+  had one: the registry-consistency and index-profile-coherence
+  sections disappeared without a word, and the report a user pasted
+  into a bug looked healthy. The two sections now share one resolution
+  of the registry. A registry that exists but cannot be read raises a
+  `registry` WARN row naming the file and the reason, and the
+  index-profile section states that its check was skipped rather than
+  leaving an absent section to be read as a clean one. A registry path
+  that does not exist yet stays silent as before — the write verbs
+  create the file on first use.
 
-- **cli: `bookrack init` writes only `ollama_url` into a new root's
-  `config.toml`.** It previously wrote `embed_model` too, which would
-  have produced a root the very next command refused to load.
+- **cli: the `papers list` / `papers find` footer keeps quiet about a
+  total it was not given.** A response without a `total` was read as
+  a total of zero, so a page of three rows footed itself `(3 of 0)`.
+  The count line is now printed only when the response carries the
+  size of the result set.
 
-- **cli: `libraries fork` and `vectors reset` guidance points at the
-  index profile** rather than at the removed environment variable.
+- **cli: the `papers metadata` writes honour `--json` and `--quiet`.**
+  All ten verbs — `reaudit`, `set`, `clear`, `void`, `ack`,
+  `approve`, `reject`, `reopen`, `contributor_add`,
+  `contributor_remove` — printed their one-line summary
+  unconditionally, so `--json` produced an English sentence instead
+  of a payload and `--quiet` produced one instead of silence. They
+  now settle like the book-side peers: nothing under `--quiet`, the
+  server's response object under `--json`, the same summary line in
+  human mode.
+
+- **cli: `papers show` no longer prints the abstract body inside its
+  key-value card.** The card renders the effective biblio section
+  key by key, and `effective_biblio` carries `title` and
+  `abstract_text` alongside every other field — both of which the
+  card already rows separately. The title therefore appeared twice,
+  and the abstract appeared once truncated to its first 80 characters
+  and once in full: on a piped stdout, where the table has no
+  terminal width to wrap against, a 2000-character abstract rendered
+  as a single 2000-column line. The biblio section now skips the two
+  keys it duplicates. The `--json` payload is unchanged — both fields
+  stay in `effective_biblio` for scripted consumers.
+
+- **cli: a confirmation that could not be asked is a user error, not a
+  decline.** Every destructive prompt read an end-of-file stdin as
+  "the operator said no", printed `aborted`, and returned exit `0`.
+  On a caller whose stdin is `/dev/null` — cron, systemd, most CI
+  runners — that made `bookrack corpus rebuild`, `vectors reembed`,
+  `remove`, their three `papers` peers, `libraries remove --purge`,
+  `libraries add`/`register`, and `libraries fork` report success for
+  a run that changed nothing. `docs/UPGRADE.md` names `corpus rebuild`
+  as the refresh command after a corpus schema bump, so a scripted
+  upgrade could carry on against a tree it never rebuilt.
+  Confirmations now settle on three outcomes rather than two: an
+  answer that agrees, an answer that declines (still exit `0`, still
+  `aborted; no changes written`), and a stream that carries no answer
+  at all, which is the new `ConfirmationUnanswerable` error — exit `2`
+  with a message naming the action, the reason, and `--yes`. An empty
+  *line* is still a decline; only an empty *stream* is unanswerable.
+  The abort notice moves from stdout to stderr on the two shared
+  helpers, so `--json` output is no longer interleaved with it.
+
+- **cli: a confirmation read on a non-terminal stdin is bounded.** A
+  pipe that stayed open but never carried an answer parked
+  `read_line` forever. `libraries remove --purge` takes the data
+  root's exclusive lock *before* it prompts, so a stuck run held the
+  library against the daemon until someone killed the process. A
+  terminal is still waited on indefinitely — there is a human reading
+  the prompt — but any other stdin now gets an answer window, after
+  which the run is a user error and the lock is released.
+  `BOOKRACK_CONFIRM_TIMEOUT_SECS` sets the window (default `120`, `0`
+  to wait indefinitely). The bound keys on silence, never on the
+  absence of a TTY, so `echo shelf | bookrack …`, `ssh host …`
+  without `-t`, and Git Bash on Windows — where `is_terminal` is
+  false with a human at the keyboard — can all still answer.
+
+- **runtime: a queue tick is published only once the state it describes
+  is on disk.** Every `queue.tick` promises values derivable from the
+  on-disk queue document, but the worker loop published its
+  crash-recovery, pull, and outcome ticks even when the atomic save
+  failed — so a subscriber could act on state a crash recovery would
+  never replay. All three publishes are now gated on the persist
+  result; a failed save logs the error, and the next successful save
+  carries the full state forward.
+
+- **runtime: `daemon.shutdown` no longer swallows the `stopping`
+  transition.** The dispatcher published `daemon.state = stopping`
+  only after the connection tasks had already exited on the shutdown
+  broadcast, so an attached `events.subscribe` client never saw the
+  notification the channel documents — the daemon simply went quiet.
+  The transition is now published before the broadcast fires, and a
+  connection task flushes the events queued on its subscription on the
+  way out, so a client watching a daemon stop is told that it is
+  stopping.
+
+- **runtime: the book-side `metadata.*` methods report a bad id, field,
+  role, or contributor row as invalid params again.** Rewording the
+  operator-facing failures with a bare bail formatted the typed
+  `OpsError` into a string, dropping it out of the error chain that
+  the control plane classifies by downcasting. Unknown intake, unknown
+  metadata field, unknown contributor role, and unknown contributor row
+  therefore all answered `-32603 internal error` instead of `-32602
+  invalid params` — telling a caller that had merely mistyped an id to
+  escalate rather than to fix the request. All fourteen affected arms
+  across the nine verbs now keep the typed error in the chain, under
+  the operator-facing context line where one applies. The `papers.*`
+  peers were never affected.
+
+- **audit-profile: an out-of-range page-count overlay is refused
+  instead of silently clamped.** `chars_per_page_ocr` and
+  `chars_per_page_doubt` in an `audit-rules/` overlay went through a
+  bare cast, so a negative or non-finite count became `0` and an
+  oversized one became `u32::MAX` — a mistyped threshold quietly became
+  a different threshold. Non-finite, negative, and out-of-range values
+  are now rejected at load time by name; fractional counts still
+  truncate as before.
+
+- **corpus: a read-only open checks the schema-version stamp.** The
+  stamp is documented as checked on every subsequent open, but
+  `open_read_only` ran only the table-spec conformance check, so a
+  corpus a different revision built opened read-only as long as its
+  table shapes still conformed. The read-only path now reads and
+  classifies the stamp, refusing a differing revision; a missing stamp
+  is still accepted without writing one. This matters more than it used
+  to: this release moves most read paths onto the read-only door.
+
+- **config: a blank `BOOKRACK_REGISTRY` falls through to the platform
+  default on the write side too.** The write verbs read the variable
+  raw, so `BOOKRACK_REGISTRY=` — an empty export, common in scripts and
+  CI — resolved to an empty path rather than to no value. The read side
+  and `libraries list` already trimmed it and treated blank as unset;
+  the write side now agrees.
+
+- **dbkit, catalog: the catalog read-only door no longer creates
+  catalog.db.** `Catalog::open_read_only` opened with default flags,
+  so any catalog read on a fresh root — `library.stats`,
+  `library.info`, and every other consumer — left a zero-byte
+  database behind and then failed schema verification on it. The
+  door now uses the strict read-only flags, a missing file is
+  refused at open, and the default-flags helper is deleted: its
+  recorded rationale (readers need default flags to create the WAL
+  sidecars) does not hold on the pinned SQLite, where a strict
+  read-only connection creates the sidecars itself.
+
+- **runtime: `bookrack verify` no longer creates the corpus it
+  reports on.** The not-initialised guard checked only catalog.db
+  while the corpus was opened through the writable door, so a root
+  mid-ingest — catalog present, corpus not yet — had corpus.db
+  created, schema-stamped, and reported `ok` by a read-only
+  diagnostic, which also took the daemon's exclusive write lock.
+  Each store is now probed independently and opened read-only; an
+  absent store renders as missing.
+
+- **runtime: doctor no longer calls an unopenable corpus coherent.**
+  A corpus.db that exists but cannot be opened — corrupt, newer
+  schema, locked — collapsed into the same state as "no index built",
+  and the index-profile coherence check printed a green "coherent
+  with their built indexes". The unreadable state now surfaces as a
+  WARN row carrying the reason, `index-profile apply` planning
+  refuses instead of planning against it, and `index-profile status`
+  reports it.
+
+- **ops: `library.vectors_status` no longer materialises an empty
+  lance layout.** With a `vector_dim` stamp present but the lancedb
+  store deleted or never built, the status query created the
+  directory and an empty chunks table as a side effect; it now
+  attaches through the non-creating open and reports the empty
+  status.
+
+- **cli, runtime: read-shaped commands stop opening the catalog
+  writable.** `bookrack retrieval` and the book side of `bookrack
+  runs` materialised and migrated catalog.db on a fresh root just to
+  read from it; the dryrun previews created and migrated a library to
+  record a single lifecycle row. All of them probe for the file
+  first, the readers open read-only, and a missing catalog renders
+  as an explicit zero.
+
+- **cli: `remove --purge` no longer trusts two file names.** The
+  purge gate accepted a probable root on the existence of
+  `catalog.db` and `corpus.db` alone, so two empty files created by
+  hand authorised deleting a directory's bytes. A probable root must
+  now show the SQLite magic behind at least one of the two names —
+  deliberately not a schema-validating open, so roots from older or
+  newer binaries stay purgeable — and an unreadable root refuses
+  with its reason.
+
+- **runtime: a shutdown fired before the drain begins is no longer
+  lost.** `DaemonRuntime::run_until_shutdown` subscribed to the
+  shutdown broadcast only when it started draining, so a shutdown
+  sent in the window between bring-up and the drain — a fast signal,
+  an early `daemon.shutdown`, or an embedding caller's direct send —
+  was silently dropped and the daemon waited forever. The receiver is
+  now subscribed when the channel is created, so a pre-drain shutdown
+  is buffered and honoured.
+
+- **obs: a second tracing-subscriber install no longer panics.**
+  `bookrack_obs::init` called the panicking `init()`, so a process
+  that already carries a global subscriber — an embedding host with
+  its own tracing setup, or a test booting two runtimes back to back
+  — aborted at bring-up. It now keeps the first subscriber and prints
+  a notice; a process that owns its subscriber is unaffected.
+
+- **runtime: `bookrack init` honors `BOOKRACK_REGISTRY`.** The wizard's
+  finalize step resolved the registry through the platform-default-only
+  path helper, so with `BOOKRACK_REGISTRY` set the new library's
+  `default` entry still landed in the platform-default file — and a
+  follow-up `--library`, which reads the env-named registry, could not
+  find the library init had just created. The wizard now resolves the
+  registry through the same helper as every other write verb: the
+  env-named file when the variable is set, the platform default
+  otherwise.
+
+### Security
+
+- **deps: `quinn-proto` moves to 0.11.16, clearing GHSA-4w2j-m93h-cj5j.**
+  The advisory (high) is remote memory exhaustion from unbounded
+  out-of-order stream reassembly in QUIC. `quinn-proto` enters the
+  lockfile only through `reqwest`'s optional QUIC path, which this
+  workspace does not enable — `reqwest` is taken with
+  `default-features = false` and a narrow feature set — so the crate
+  resolves but never compiles into a binary. This clears a lockfile
+  advisory rather than fixing anything reachable in bookrack.
+
+- **deps: `postcss` moves to 8.5.22, clearing GHSA-r28c-9q8g-f849.**
+  The advisory (high) is a path traversal in the previous-source-map
+  auto-loader that discloses arbitrary `.map` files. `postcss` is a
+  build-time dependency of the desktop shell's web assets, reached
+  transitively through `vite`; it runs only during `pnpm build` and
+  ships nothing into the released bundle.
 
 ## [0.9.0] - 2026-07-17
 
@@ -1727,10 +2349,11 @@ release workflow extracts the matching section verbatim from this file.
   full-width-folded raw PDFium page text plus the source filename,
   rather than the structured Body block stream. Filename-encoded
   DOIs (`10.XXX_YYY.pdf`, `arxiv-NNNN.NNNNN.pdf`) and publisher
-  templates (`N19-1423`, `RJ-2016-007`) are folded to canonical
+  templates (`A00-0000`, `RJ-0000-000`) are folded to canonical
   identifiers and used in preference to text scans, since curator
-  naming is more reliable than character-level recovery for ACL
-  Anthology / R Journal / Acta Petrologica Sinica fullwidth glyphs.
+  naming is more reliable than character-level recovery for the few
+  publishers that drop, split, or render identifiers in fullwidth
+  glyphs.
   `detect_doi` adds a permissive variant that collapses internal
   kerning whitespace and rejects ACM camera-ready placeholders
   (`10.1145/nnnnnnn.nnnnnnn`); `detect_arxiv_id` requires an
@@ -2323,7 +2946,8 @@ is finalised; small-batch testing precedes a stable v0.1.0 cut.
   per-platform SHA-256 checksums (Linux x86_64, Windows x86_64, macOS
   arm64, macOS x86_64).
 
-[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.6.1...v0.7.0

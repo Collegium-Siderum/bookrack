@@ -9,14 +9,14 @@
 //! Two classes of catalog tables hold per-book rows:
 //!
 //! - Seven tables keyed by `intake_id` (the metadata and lifecycle
-//!   layers): `book_state`, `node_publication_attrs`, `node_overrides`,
+//!   layers): `item_state`, `node_publication_attrs`, `node_overrides`,
 //!   `node_contributors`, `node_categories`, `node_reviews`,
 //!   `node_role_takeovers`.
 //! - One table keyed by `book_root_id` (the manual TOC overlay):
 //!   `toc_edits`.
 //!
-//! The audit tables `metadata_audit` and `book_pipeline_audit` are
-//! denormalized by design — `book_pipeline_audit` even carries
+//! The audit tables `metadata_audit` and `item_pipeline_audit` are
+//! denormalized by design — `item_pipeline_audit` even carries
 //! `source_sha256` — and are intentionally **not** cascaded. They
 //! remain as a forensic record of a removed book's pipeline history.
 //!
@@ -31,7 +31,7 @@ use crate::{Catalog, Result, count_as_u64};
 /// returned by [`Catalog::delete_book_derived`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ItemRemovalCounts {
-    /// Rows in `book_state` keyed by `intake_id`.
+    /// Rows in `item_state` keyed by `intake_id`.
     pub book_state: u64,
     /// Rows in `node_publication_attrs` keyed by `intake_id`.
     pub node_publication_attrs: u64,
@@ -128,7 +128,7 @@ impl Catalog {
     /// Delete every per-book row in the cascaded catalog tables within
     /// one transaction. Returns the per-table tallies. Idempotent — a
     /// second call after a successful one returns all-zero counts.
-    /// `metadata_audit` and `book_pipeline_audit` are preserved by
+    /// `metadata_audit` and `item_pipeline_audit` are preserved by
     /// design, see module docs.
     pub fn delete_book_derived(
         &mut self,
@@ -199,8 +199,8 @@ mod tests {
     use bookrack_core::ItemKind;
 
     use crate::{
-        ActorKind, NewContributor, NewIntake, NewItemState, NewMetadataAudit, NewOverride,
-        NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
+        ActorKind, NewContributor, NewIntake, NewItemPipelineAudit, NewItemState, NewMetadataAudit,
+        NewOverride, NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
     };
 
     fn book_root_id_of(intake_id: i64) -> i64 {
@@ -289,12 +289,33 @@ mod tests {
             ))
             .expect("role takeover");
 
+        // toc edit — the one cascaded table keyed by book_root_id
+        catalog
+            .conn
+            .execute(
+                "INSERT INTO toc_edits \
+                 (book_root_id, seq, verb, args, actor_kind, edited_at) \
+                 VALUES (:book_root_id, 1, 'rename', '{}', 'human', \
+                         '2026-06-04T00:00:00Z')",
+                named_params! { ":book_root_id": book_root_id },
+            )
+            .expect("toc edit");
+
         // metadata audit row (must survive removal)
         let mut audit = NewMetadataAudit::new("node_publication_attrs", "seed", ActorKind::System);
         audit.node_id = Some(book_root_id);
         catalog
             .record_metadata_audit(&audit)
             .expect("metadata audit");
+
+        // pipeline audit row (must survive removal)
+        let mut pipeline =
+            NewItemPipelineAudit::new("extract", "parse", "ok", "run-seed", ActorKind::Pipeline);
+        pipeline.book_root_id = Some(book_root_id);
+        pipeline.source_sha256 = Some(sha.to_string());
+        catalog
+            .record_pipeline_audit(&pipeline)
+            .expect("pipeline audit");
 
         intake_id
     }
@@ -313,8 +334,8 @@ mod tests {
         assert_eq!(counts.node_categories, 1);
         assert_eq!(counts.node_reviews, 1);
         assert_eq!(counts.node_role_takeovers, 1);
-        assert_eq!(counts.toc_edits, 0);
-        assert_eq!(counts.total(), 7);
+        assert_eq!(counts.toc_edits, 1);
+        assert_eq!(counts.total(), 8);
     }
 
     #[test]
@@ -328,6 +349,7 @@ mod tests {
             .expect("delete");
         assert_eq!(counts.book_state, 1);
         assert_eq!(counts.node_contributors, 1);
+        assert_eq!(counts.toc_edits, 1);
 
         // The target's derived rows are gone.
         let after = catalog
@@ -335,12 +357,14 @@ mod tests {
             .expect("count");
         assert_eq!(after.total(), 0);
 
-        // The other book is untouched.
+        // The other book is untouched — the toc_edits leg deletes by
+        // book_root_id, so a wrong or missing predicate shows up here.
         let other = catalog
             .count_book_derived(kept, book_root_id_of(kept))
             .expect("count");
         assert_eq!(other.book_state, 1);
         assert_eq!(other.node_contributors, 1);
+        assert_eq!(other.toc_edits, 1);
     }
 
     #[test]
@@ -369,17 +393,28 @@ mod tests {
             !audit_before.is_empty(),
             "seeded fixture must include a metadata_audit row",
         );
+        let pipeline_before = catalog
+            .pipeline_audit_for_book(book_root_id)
+            .expect("pipeline audit before");
+        assert!(
+            !pipeline_before.is_empty(),
+            "seeded fixture must include an item_pipeline_audit row",
+        );
 
         catalog
             .delete_book_derived(intake_id, book_root_id)
             .expect("cascade");
         catalog.delete_intake(intake_id).expect("delete intake");
 
-        // The forensic audit row survives an intake-row delete.
+        // Both forensic audit trails survive an intake-row delete.
         let audit_after = catalog
             .metadata_audit_for_node(book_root_id)
             .expect("audit after");
         assert_eq!(audit_after.len(), audit_before.len());
+        let pipeline_after = catalog
+            .pipeline_audit_for_book(book_root_id)
+            .expect("pipeline audit after");
+        assert_eq!(pipeline_after.len(), pipeline_before.len());
     }
 
     #[test]

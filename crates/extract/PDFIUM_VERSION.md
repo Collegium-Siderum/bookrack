@@ -77,3 +77,8 @@ re-extract on. Update, in lockstep:
 Bumping the `pdfium-render` crate version itself also flips the
 behaviour-sensitive deps hash that `crates/extract/tests/dep_hash.rs`
 anchors, forcing `bookrack_extract::EXTRACTOR_VERSION` to bump.
+
+Parity across the copies is held mechanically: the inline tests in
+`src/pdfium_pin.rs` compare this file, the workspace manifest's
+`pdfium_NNNN` feature, and both workflow files against the pin table,
+so a one-sided bump fails the extract test suite.

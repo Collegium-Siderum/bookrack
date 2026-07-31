@@ -42,9 +42,12 @@ impl Fixture {
         let lancedb_dir = tmp.path().join("lancedb");
         let books_dir = tmp.path().join("books");
         let backup_dir = tmp.path().join("backup");
-        // Create the catalog once so the schema is migrated before the
-        // first op runs.
+        // Create both stores once so their schemas are migrated before
+        // the first op runs. The read ops open `corpus.db` through the
+        // read-only door, which refuses a missing file, so the fixture
+        // materializes it the way ingest does in a real library.
         Catalog::open(&catalog_db).expect("seed catalog");
+        bookrack_corpus::Corpus::open(&corpus_db).expect("seed corpus");
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
             corpus_db.clone(),
             catalog_db.clone(),

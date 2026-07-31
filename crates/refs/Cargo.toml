@@ -16,3 +16,8 @@ rusqlite_migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# On-disk fixtures for the read-only open path, which by contract
+# refuses a missing file and so cannot use the in-memory handle.
+tempfile.workspace = true

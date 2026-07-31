@@ -44,13 +44,28 @@ pub struct LibraryInfo {
     /// if no row has been written yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_schema_version_on_disk: Option<String>,
+    /// Why the catalog could not be read: the file exists but this
+    /// binary cannot open it (corrupt, newer schema, locked). Absent
+    /// when the catalog is missing entirely or healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
     /// Stamps the corpus carries about the index it was built with.
     pub corpus_stamps: CorpusStamps,
+    /// Why the corpus stamps could not be read: the file exists but
+    /// this binary cannot open it. Absent when the corpus is missing
+    /// entirely or healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corpus_error: Option<String>,
     /// Persisted vector-store metadata (ANN configuration, snapshot at
     /// build time); absent on a library that has never been indexed.
     pub vectors_meta: Option<VectorsMeta>,
     /// Live row count of the vector store, when readable.
     pub current_chunks: Option<usize>,
+    /// Why the vector store or its sidecar could not be read (e.g. a
+    /// store written by a newer binary). Absent when the store is
+    /// missing entirely or healthy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vectors_error: Option<String>,
     /// Total intake rows recorded in the catalog, when readable.
     pub intake_count: Option<u64>,
     /// Books that have reached the `ready` lifecycle stage, when
@@ -72,13 +87,25 @@ pub struct PapersInfo {
     /// Stamps the paper corpus carries about the index it was built
     /// with.
     pub corpus_stamps: CorpusStamps,
+    /// Why the paper corpus stamps could not be read; see
+    /// [`LibraryInfo::corpus_error`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corpus_error: Option<String>,
     /// Persisted paper vector-store metadata, when present.
     pub vectors_meta: Option<VectorsMeta>,
     /// Live row count of the paper vector store, when readable.
     pub current_chunks: Option<usize>,
+    /// Why the paper vector store could not be read; see
+    /// [`LibraryInfo::vectors_error`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vectors_error: Option<String>,
     /// Total paper intake rows recorded in the paper catalog, when
     /// readable.
     pub intake_count: Option<u64>,
+    /// Why the paper catalog could not be read; see
+    /// [`LibraryInfo::catalog_error`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
     /// Rough byte sizes of the three on-disk paper stores.
     pub disk: DiskUsage,
 }

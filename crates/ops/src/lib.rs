@@ -154,6 +154,18 @@ pub enum OpsError {
     Other(eyre::Report),
 }
 
+impl bookrack_core::Explain for OpsError {
+    fn explain(&self) -> bookrack_core::Problem {
+        match self {
+            // Delegate to whichever layer wrote wording for itself; the
+            // remaining variants are leaves or have none yet.
+            OpsError::Query(e) => e.explain(),
+            OpsError::Rerank(e) => e.explain(),
+            other => bookrack_core::Problem::from_error_chain(other),
+        }
+    }
+}
+
 /// A fallible op.
 pub type Result<T> = std::result::Result<T, OpsError>;
 
@@ -374,10 +386,8 @@ impl<E: Embedder> Ops<E> {
     /// `distill build / verify` invocation; no warm handle is held
     /// here because both call paths are stateless across requests.
     pub fn reference_db_path(&self) -> PathBuf {
-        self.catalog_db
-            .parent()
-            .map(|p| p.join("reference.db"))
-            .unwrap_or_else(|| PathBuf::from("reference.db"))
+        let data_root = self.catalog_db.parent().unwrap_or_else(|| Path::new(""));
+        bookrack_config::reference_db_in(data_root)
     }
 
     /// Borrow the warm embedder, if this `Ops` was built with a library.
@@ -443,5 +453,37 @@ impl Caller {
             session_id: None,
             reason: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use bookrack_core::Explain;
+    use bookrack_embed::EmbedError;
+    use bookrack_query::QueryError;
+
+    use super::OpsError;
+
+    /// One assertion through all three layers: the ops wrapper, the
+    /// query wrapper, and the embed leaf that actually knows what to
+    /// suggest. A wrapper that stops delegating drops the hint, and
+    /// this is what notices.
+    #[test]
+    fn ops_delegates_through_query_to_the_embed_leaf() {
+        let e = OpsError::Query(QueryError::Embed(EmbedError::ModelNotFound {
+            model: "test-model".into(),
+            reason: "model not found".into(),
+        }));
+        let p = e.explain();
+        let hint = p
+            .data
+            .hint
+            .expect("the leaf's hint must survive two wrappers");
+        assert!(hint.contains("ollama pull test-model"), "{hint}");
+        assert!(
+            !p.summary.contains("query error"),
+            "the wrapper's placeholder Display must not reach the summary: {}",
+            p.summary
+        );
     }
 }

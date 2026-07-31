@@ -227,7 +227,7 @@ where
         }
     }
 
-    let report = bookrack_ingest::reset::reset_and_rechunk(
+    let report = match bookrack_ingest::reset::reset_and_rechunk(
         &catalog,
         &corpus,
         &lancedb_dir,
@@ -236,7 +236,19 @@ where
         resume,
     )
     .await
-    .context("reset_and_rechunk")?;
+    {
+        Ok(report) => report,
+        Err(e) => {
+            // A mid-build failure leaves finished intakes at Embedded
+            // and the failing one at Extracted, so a resume continues
+            // where this run stopped.
+            eprintln!(
+                "reset did not finish; rerun with `bookrack vectors reset --resume` \
+                 once the cause is addressed"
+            );
+            return Err(e).context("reset_and_rechunk");
+        }
+    };
 
     println!(
         "reset complete: {} intake(s) re-embedded, {} chunk row(s) written",
@@ -245,12 +257,6 @@ where
     if !report.skipped_empty.is_empty() {
         println!("skipped (no prose leaves): {:?}", report.skipped_empty);
     }
-    if let Some(failed) = report.failed_intake {
-        println!(
-            "intake {failed} failed; rerun with `bookrack vectors reset --resume` once the cause is addressed",
-        );
-    } else {
-        println!("restart the daemon so the new model takes effect.");
-    }
+    println!("restart the daemon so the new model takes effect.");
     Ok(())
 }

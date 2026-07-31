@@ -18,36 +18,46 @@ pub fn run(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Collect verifiable findings for every store under `cfg`. A data
-/// directory whose `catalog.db` does not yet exist is reported as
-/// `not_initialised` and no stores are opened, so verify stays
-/// side-effect-free on a freshly created directory.
+/// Collect verifiable findings for every store under `cfg`. Each
+/// database is probed by file presence first and opened through its
+/// read-only door only when present, so verify neither materialises a
+/// missing store nor takes the write lock a live daemon holds. A data
+/// directory with neither `catalog.db` nor `corpus.db` is reported as
+/// `not_initialised`; one store present without the other reports the
+/// absent one as missing instead of inventing it.
 pub fn build_verify_report(cfg: &Config) -> render::VerifyReport {
-    let mut report = render::VerifyReport::default();
-
-    if !cfg.catalog_db().exists() {
+    let mut report = render::VerifyReport {
+        catalog_missing: !cfg.catalog_db().exists(),
+        corpus_missing: !cfg.corpus_db().exists(),
+        ..Default::default()
+    };
+    if report.catalog_missing && report.corpus_missing {
         report.not_initialised = true;
         return report;
     }
 
     // Schema verification happens inside the open paths; surface success
     // as a one-liner per database, and any failure as a multi-line block.
-    match Catalog::open_read_only(&cfg.catalog_db()) {
-        Ok(catalog) => {
-            report.catalog_schema_ok = true;
-            report.intake_count = catalog.count_intakes().ok();
-            report.missing_intake_files = scan_intake_files(cfg, &catalog).ok();
-        }
-        Err(e) => {
-            report.catalog_schema_error = Some(format!("{e:#}"));
+    if !report.catalog_missing {
+        match Catalog::open_read_only(&cfg.catalog_db()) {
+            Ok(catalog) => {
+                report.catalog_schema_ok = true;
+                report.intake_count = catalog.count_intakes().ok();
+                report.missing_intake_files = scan_intake_files(cfg, &catalog).ok();
+            }
+            Err(e) => {
+                report.catalog_schema_error = Some(format!("{e:#}"));
+            }
         }
     }
-    match Corpus::open(&cfg.corpus_db()) {
-        Ok(_) => {
-            report.corpus_schema_ok = true;
-        }
-        Err(e) => {
-            report.corpus_schema_error = Some(format!("{e:#}"));
+    if !report.corpus_missing {
+        match Corpus::open_read_only(&cfg.corpus_db()) {
+            Ok(_) => {
+                report.corpus_schema_ok = true;
+            }
+            Err(e) => {
+                report.corpus_schema_error = Some(format!("{e:#}"));
+            }
         }
     }
     let vectors_meta = bookrack_vectors::meta::load(&cfg.lancedb_dir())
@@ -79,4 +89,69 @@ fn scan_intake_files(cfg: &Config, catalog: &Catalog) -> Result<Vec<i64>> {
         }
     }
     Ok(missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn config_for(data_dir: &Path) -> Config {
+        Config::new(data_dir.to_path_buf(), "http://localhost:11434".to_string())
+    }
+
+    /// Database files under `dir`. Sidecar `-shm` / `-wal` files are
+    /// excluded: a read-only connection to an existing WAL database
+    /// may create them, so the no-materialisation contract is about
+    /// `.db` files, not about the directory being byte-identical.
+    fn db_files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read data dir")
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.ends_with(".db"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_fresh_data_root_reports_not_initialised_and_stays_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let report = build_verify_report(&config_for(dir.path()));
+        assert!(report.not_initialised);
+        assert!(report.catalog_missing);
+        assert!(report.corpus_missing);
+        assert!(
+            std::fs::read_dir(dir.path())
+                .expect("read data dir")
+                .next()
+                .is_none(),
+            "verify must not create files"
+        );
+    }
+
+    #[test]
+    fn a_catalog_only_root_reports_the_corpus_missing_without_creating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = config_for(dir.path());
+        drop(Catalog::open(&cfg.catalog_db()).expect("create catalog"));
+        let before = db_files(dir.path());
+
+        let report = build_verify_report(&cfg);
+        assert!(!report.not_initialised);
+        assert!(report.catalog_schema_ok);
+        assert!(report.corpus_missing);
+        assert!(!report.corpus_schema_ok);
+        assert!(report.corpus_schema_error.is_none());
+        assert_eq!(
+            db_files(dir.path()),
+            before,
+            "verify must not materialise corpus.db"
+        );
+    }
 }

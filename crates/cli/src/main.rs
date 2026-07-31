@@ -31,9 +31,9 @@ use bookrack_runtime::cmd::libraries::CopyMode;
 use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
-/// variables that select the library and the embed backend, and the
-/// runtime prerequisite a fresh install most often trips over: Ollama
-/// must be reachable for any command that embeds text.
+/// variables that select the library and the embed backend, points at
+/// the session as the way to reach library reads, and hands the
+/// runtime prerequisite check to `doctor` rather than restating it.
 const TOP_AFTER_HELP: &str = "\
 Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
@@ -41,13 +41,12 @@ Environment:
   BOOKRACK_OLLAMA_URL   Ollama endpoint (default http://localhost:11434)
   BOOKRACK_LOG          tracing filter directive (default info; debug for verbose)
 
-Library reads (search, browse, metadata, status) live behind `bookrack exec
-library.<tool>`. Run `bookrack run` to start a session, then enumerate the
-live control-plane surface with `bookrack exec tools`.
+Library reads (search, browse, metadata, status) are served by a running
+session: start one with `bookrack run`, then list the live control-plane
+surface with `bookrack exec tools`.
 
 Prerequisites:
-  Start Ollama and pull the embed model before running the session, e.g.:
-      ollama pull qwen3-embedding:0.6b";
+  Run `bookrack doctor` to check Ollama and the embed model.";
 
 #[derive(clap::Parser)]
 #[command(
@@ -58,12 +57,14 @@ Prerequisites:
 )]
 struct Cli {
     /// Select the library at this data root, overriding the
-    /// environment. On local commands (`run`, `init`, `doctor`,
-    /// `audit-profile`, `distill`, `runs`) this switches the data
-    /// root for the invocation. On commands that route through a
-    /// running daemon, the daemon must already be serving this root;
-    /// a mismatch aborts the command without acting. Mutually
-    /// exclusive with `--library`.
+    /// environment.
+    ///
+    /// On local commands (`run`, `init`, `doctor`, `audit-profile`,
+    /// `index-profile`, `distill`, `runs`) this switches the data root
+    /// for the invocation. On commands that route through a running
+    /// daemon, the daemon must already be serving this root; a mismatch
+    /// aborts the command without acting. Mutually exclusive with
+    /// `--library`.
     #[arg(
         long,
         global = true,
@@ -71,15 +72,18 @@ struct Cli {
         help_heading = "Common Options"
     )]
     data_dir: Option<PathBuf>,
-    /// Select the named library from the registry — the
-    /// BOOKRACK_REGISTRY file when set, else the platform-default
-    /// registry. Behaves like `--data-dir`: a switch on
-    /// local commands, an assertion against the running daemon on
-    /// routed commands. Mutually exclusive with `--data-dir`.
+    /// Select the named library from the registry.
+    ///
+    /// The registry is the BOOKRACK_REGISTRY file when set, else the
+    /// platform-default registry. Behaves like `--data-dir`: a switch on
+    /// local commands, an assertion against the running daemon on routed
+    /// commands. Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
-    /// Select an audit profile by name. Built-in names are
-    /// `default`, `trust-source`, and `strict`. Without this flag the
+    /// Select an audit profile by name: the built-ins are `default`,
+    /// `trust-source`, and `strict`.
+    ///
+    /// Without this flag the
     /// `<data_root>/audit-rules/audit_profile.local.toml` overlay is
     /// merged onto the shipped default; with it the overlay is
     /// bypassed and the named preset wins. Applies to `ingest`,
@@ -149,6 +153,10 @@ enum Command {
     /// Compare the catalog and corpus schemas against the binary's
     /// TableSpecs and tally the cross-store counts: catalog intakes,
     /// vectors-meta chunk count, and intake-file existence on disk.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "verify",
+        "verify --library demo",
+    ])]
     Verify,
     /// Inspect the library registry.
     ///
@@ -164,6 +172,10 @@ enum Command {
     /// Collects the data root's crash reports, recent logs, and a small
     /// catalog snapshot. The bundle is suitable for attaching to a bug
     /// report.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "diagnose",
+        "diagnose --days 20",
+    ])]
     Diagnose {
         /// Output path for the bundle. Defaults to
         /// `<data_dir>/diagnostics/diagnose-<unix_ms>.tar.gz`.
@@ -183,6 +195,10 @@ enum Command {
     /// and serve MCP over streamable HTTP. The foreground task idles
     /// until a shutdown signal arrives (Ctrl-C, SIGTERM, SIGHUP, or the
     /// control-plane `daemon.shutdown` RPC).
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "run",
+        "run --library demo",
+    ])]
     Run {
         /// Override the MCP listener address. Defaults to the value
         /// from `BOOKRACK_MCP_ADDR` (and falls back to the built-in
@@ -230,6 +246,10 @@ enum Command {
     /// presence, Ollama daemon reachability, and whether the configured
     /// embed model is pulled. Exits with a non-zero status when any row
     /// fails, so a script can branch on the result.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "doctor",
+        "doctor --install-pdfium",
+    ])]
     Doctor {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
@@ -271,6 +291,10 @@ enum Command {
     ///
     /// Requires a running bookrack daemon; the command exits with code
     /// 2 if no daemon is found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "ingest /path/to/book.epub",
+        "ingest /path/to/book.epub --hold-for-metadata",
+    ])]
     Ingest(IngestArgs),
     /// Drive an intake from a derived source manifestation (OCR-only).
     ///
@@ -294,7 +318,7 @@ enum Command {
         #[command(subcommand)]
         action: WriteMetadataAction,
     },
-    /// Vector-store writes: rebuild, reembed, reset, or drop.
+    /// Write to the book-side vector store: rebuild, reembed, reset, or drop.
     ///
     /// Prefer `bookrack index-profile apply`; this namespace is the
     /// low-level escape hatch.
@@ -316,8 +340,12 @@ enum Command {
         action: StampsAction,
     },
     /// Drop a book from every store.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "remove 12",
+        "remove --sha a1b2c3d4 --yes",
+    ])]
     Remove(RemoveArgs),
-    /// Paper-side surface: ingest, browse, and export papers.
+    /// Ingest, browse, and export papers on the paper-side surface.
     ///
     /// Ingest a paper file, browse the paper catalog, or export one
     /// paper's bibliographic record as CSL-JSON. The book-side
@@ -328,10 +356,18 @@ enum Command {
         action: PapersAction,
     },
     /// Simulate an ingest without writing the live stores.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "dryrun /path/to/book.epub",
+        "dryrun /path/to/book.epub --stdout",
+    ])]
     Dryrun(DryrunArgs),
     /// Ask the running bookrack daemon to shut down.
     ///
     /// Exits with code 0 whether or not a daemon was found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "quit",
+        "quit --library demo",
+    ])]
     Quit,
     /// Run the interactive install wizard.
     ///
@@ -340,9 +376,15 @@ enum Command {
     /// ingest → embed → query pipeline end-to-end in a tempdir, and
     /// finally write `<data_root>/config.toml` plus a pointer in the
     /// platform-default registry. Run after a fresh tarball install.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "init",
+        "init --data-dir /path/to/library --non-interactive",
+    ])]
     Init {
-        /// Where the library's data root should live. Required in
-        /// `--non-interactive` mode; otherwise the wizard prompts.
+        /// Where the library's data root should live.
+        ///
+        /// Required in `--non-interactive` mode; otherwise the wizard
+        /// prompts.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
         /// Skip every prompt. Requires `--data-dir`.
@@ -369,14 +411,18 @@ enum Command {
         action: DistillAction,
     },
     /// Inspect `pipeline_runs` — the registry of every top-level
-    /// operator invocation, with its `pipeline_run_summary` rollup.
+    /// operator invocation.
+    ///
+    /// Each row carries its `pipeline_run_summary` rollup.
     Runs {
         #[command(subcommand)]
         action: bookrack_cli_grammar::RunsAction,
     },
-    /// Inspect `retrieval_calls` — the sidecar recording every
-    /// single-store search invocation with the corpus fingerprint that
-    /// served it and its per-hit detail.
+    /// Inspect `retrieval_calls` — the sidecar over single-store search
+    /// invocations.
+    ///
+    /// Every call is recorded with the corpus fingerprint that served it
+    /// and its per-hit detail.
     Retrieval {
         #[command(subcommand)]
         action: bookrack_cli_grammar::RetrievalAction,
@@ -390,6 +436,10 @@ enum Command {
     /// semantics. Human mode renders each event as
     /// `HH:MM:SS LEVEL target | message`; `--json` emits the
     /// underlying `LogEvent` payload as newline-delimited JSON.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "logs",
+        "logs --tail 20",
+    ])]
     Logs(LogsArgs),
     /// Print a one-screen status card: daemon, served library, queue.
     ///
@@ -397,6 +447,10 @@ enum Command {
     /// it busy" in one call. Exits 0 when a daemon answers or none is
     /// running, 3 when the session lock is stale (a held lock whose
     /// daemon stopped answering).
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "status",
+        "status --json",
+    ])]
     Status,
 }
 
@@ -405,6 +459,10 @@ pub(crate) enum LibrariesAction {
     /// List every entry in the registry.
     ///
     /// Marks the `default = "..."` fallback when one is set.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries list",
+        "libraries list --json",
+    ])]
     List {
         /// Deprecated: use the top-level `--json` instead.
         #[arg(long, hide = true)]
@@ -415,6 +473,10 @@ pub(crate) enum LibrariesAction {
     /// The card is what the daemon serves over `library.info`:
     /// configured paths, embed model, vector-store shape, and catalog
     /// counts.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries info",
+        "libraries info --name demo",
+    ])]
     Info {
         /// Library short name. When omitted, the daemon picks the
         /// registry's current default.
@@ -426,6 +488,10 @@ pub(crate) enum LibrariesAction {
     /// Writes straight to the on-disk registry, so it needs no running
     /// daemon and the change persists across restarts. Errors if the
     /// registry does not define `name`.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries default demo",
+        "libraries default demo --json",
+    ])]
     Default {
         /// Library short name to record as the registry default.
         name: String,
@@ -436,6 +502,10 @@ pub(crate) enum LibrariesAction {
     /// and registers the new library so `--library <name>` resolves it.
     /// The new library has no vector store; run `vectors reset` against
     /// it to rebuild under whatever model the env points at.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries fork demo-fork --data-dir /path/to/library",
+        "libraries fork demo-fork --data-dir /path/to/library --yes",
+    ])]
     Fork {
         /// Short name to register in the library registry.
         new_name: String,
@@ -457,6 +527,10 @@ pub(crate) enum LibrariesAction {
     /// confirmed or probable data root, 1 when it is not (or its
     /// manifest is unreadable), and 2 for a missing or non-directory
     /// path.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries detect /path/to/library",
+        "libraries detect /path/to/library --json",
+    ])]
     Detect {
         /// Path to probe.
         path: std::path::PathBuf,
@@ -467,6 +541,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon and always exits 0. Give exactly
     /// one of a parent directory or `--volumes`.
     #[command(group(clap::ArgGroup::new("scan_target").required(true).args(["parent", "volumes"])))]
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries scan /path/to/library",
+        "libraries scan --volumes",
+    ])]
     Scan {
         /// Parent directory whose immediate subdirectories are probed.
         parent: Option<std::path::PathBuf>,
@@ -487,6 +565,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon. Writes an identity manifest to
     /// the root when it has none (previewed and confirmed first, unless
     /// `--yes`), then records the registry entry.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries add demo /path/to/library",
+        "libraries add demo /path/to/library --yes",
+    ])]
     Add {
         /// Registry name to record the root under. Wins over the
         /// manifest's birth name; a mismatch is a legal alias.
@@ -507,11 +589,17 @@ pub(crate) enum LibrariesAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Register an existing data root; the name is taken from its
-    /// manifest (or directory name when it has no manifest).
+    /// Register an existing data root under its own name.
+    ///
+    /// The name is taken from the root's manifest, or from the directory
+    /// name when it has no manifest.
     ///
     /// Resolves locally with no daemon. Give `--name` to register under
     /// an alias when the derived name is already taken.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries register /path/to/library",
+        "libraries register /path/to/library --name demo",
+    ])]
     Register {
         /// Data root to register.
         path: std::path::PathBuf,
@@ -537,6 +625,10 @@ pub(crate) enum LibrariesAction {
     /// Resolves locally with no daemon. `--purge` additionally deletes
     /// the data root, gated on a confirmed/probable detect verdict and a
     /// typed confirmation.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries remove demo",
+        "libraries remove demo --yes",
+    ])]
     Remove {
         /// Registry name to forget.
         name: String,
@@ -558,13 +650,16 @@ pub(crate) enum LibrariesAction {
     /// `index_profile` is the exception: it is a data contract rather
     /// than a per-machine preference, so it is written to the library
     /// manifest and only cached in the registry entry.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries config demo",
+        "libraries config demo search.top_k=8",
+    ])]
     Config {
         /// Registry name whose config is read or edited.
         name: String,
         /// `KEY=VALUE` pairs to set. Accepted keys: `ollama_url`,
-        /// `mcp_addr`, `log_directive`, `index_profile`,
-        /// `search.top_k`, `search.weak_threshold`, `reranker.url`,
-        /// `reranker.ctx`, `reranker.threads`.
+        /// `index_profile`, `search.top_k`, `search.weak_threshold`,
+        /// `reranker.url`, `reranker.ctx`, `reranker.threads`.
         #[arg(value_parser = parse_key_val, value_name = "KEY=VALUE")]
         sets: Vec<(String, String)>,
         /// Key to remove from the file; accepts the same keys.
@@ -710,6 +805,10 @@ async fn offer_init_or_exit(err: ConfigError) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    // First, before anything reads a variable: every later read then
+    // sees one environment, whether it goes through `Config::resolve`
+    // or straight to `std::env`.
+    bookrack_config::load_dotenv();
     // Install the color-eyre report and panic hooks. The hooks render
     // `eyre::Report` cause chains and panics with rustc-style colored
     // prefixes when stderr is a TTY, and as plain text when it is not.
@@ -744,7 +843,7 @@ async fn main() -> std::process::ExitCode {
             if let Some(cause) = bookrack_cli::error::classify_eyre(&err) {
                 let cli_err = cause.as_cli();
                 if !cli_err.is_self_reported() {
-                    eprintln!("bookrack: {cli_err}");
+                    report_cli_error(cli_err);
                 }
                 std::process::ExitCode::from(cli_err.exit_code())
             } else {
@@ -752,6 +851,44 @@ async fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         }
+    }
+}
+
+/// Print a classified failure on stderr.
+///
+/// Under `--json` the whole `Problem` goes out as one object, so a
+/// scripted caller gets structured output on the failure path too.
+/// Otherwise the parts are stacked: the summary on the `bookrack:`
+/// line, the detail indented under it, and the hint last — the place
+/// a reader's eye lands, and where the next step belongs.
+///
+/// Errors that carry no `data` print exactly the single line they did
+/// before, so nothing gains a blank second line it did not need.
+fn report_cli_error(cli_err: &bookrack_cli::error::BookrackCliError) {
+    let problem = cli_err.problem_data();
+    if bookrack_cli::render::ctx().output().is_json() {
+        let rendered = bookrack_core::Problem {
+            summary: cli_err.to_string(),
+            data: problem.unwrap_or(bookrack_core::ProblemData {
+                detail: None,
+                hint: None,
+                retryable: false,
+            }),
+        };
+        match serde_json::to_string_pretty(&rendered) {
+            Ok(json) => eprintln!("{json}"),
+            Err(e) => eprintln!("bookrack: {cli_err} (error object unrenderable: {e})"),
+        }
+        return;
+    }
+
+    eprintln!("bookrack: {cli_err}");
+    let Some(problem) = problem else { return };
+    if let Some(detail) = problem.detail {
+        eprintln!("  {detail}");
+    }
+    if let Some(hint) = problem.hint {
+        eprintln!("  hint: {hint}");
     }
 }
 
@@ -793,11 +930,14 @@ async fn run() -> Result<()> {
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
     // daemon is serving. Skipped for commands that resolve a data
-    // root locally (`run`, `init`, `audit-profile`, the `index-profile`
-    // verbs other than an executing `apply`,
-    // `distill`, `runs`, and the offline `libraries` verbs): the flag is a real
-    // switch there, not an assertion. Silent when no daemon is running,
-    // when no
+    // root locally through `Config::resolve` (`run`, `init`,
+    // `audit-profile`, the `index-profile` verbs other than an executing
+    // `apply`, `distill`, `runs`, `retrieval`, and the offline
+    // `libraries` verbs): the flag is a real switch there, not an
+    // assertion. `doctor` is not exempt — it
+    // resolves on its own below, but only after this check keeps a
+    // running daemon from being diagnosed under the wrong library.
+    // Silent when no daemon is running, when no
     // selection was given, or when the lock predates the identity
     // fields that make the comparison possible.
     let index_profile_is_local = match &cli.command {
@@ -943,43 +1083,28 @@ async fn run() -> Result<()> {
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
             match &mut action {
-                IndexProfileAction::Current { library, json } => {
-                    // The global `--library` selects the same library the
-                    // subcommand-local flag does; the local one wins when
-                    // both are given.
-                    if library.is_none() {
-                        *library = selection.library.clone();
-                    }
-                    *json = *json || json_global;
-                }
+                IndexProfileAction::Current { json } => *json = *json || json_global,
                 IndexProfileAction::Diff { json, .. } => *json = *json || json_global,
-                IndexProfileAction::Apply { library, .. } if library.is_none() => {
-                    *library = selection.library.clone();
-                }
                 _ => {}
             }
+            // Both library-selecting verbs resolve the data root through
+            // the shared resolver, so the global selection reaches them
+            // whole — no per-field bridging.
+            //
             // `apply` orchestrates control-plane calls (planning offline
             // under `--dry-run`), so it dispatches to the daemon client;
             // every other verb resolves locally.
             if let IndexProfileAction::Apply {
                 name,
-                library,
                 pipeline,
                 dry_run,
                 yes,
             } = action
             {
-                cmd::cli_client::index_profile::run(
-                    &name,
-                    library.as_deref(),
-                    pipeline,
-                    dry_run,
-                    yes,
-                    None,
-                )
-                .await
+                cmd::cli_client::index_profile::run(&name, &selection, pipeline, dry_run, yes, None)
+                    .await
             } else {
-                bookrack_runtime::cmd::index_profile::run(action)
+                bookrack_runtime::cmd::index_profile::run(action, &selection)
             }
         }
         Command::Verify => cmd::cli_client::verify::run(None).await,
@@ -1214,6 +1339,10 @@ fn env_data_dir_shadows_default(env: Option<String>, default_root: Option<&Path>
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use bookrack_cli_grammar::help_gate;
+
     use super::*;
     use clap::Parser;
 
@@ -1375,12 +1504,12 @@ mod tests {
             "libraries",
             "config",
             "prod",
-            "log_directive=debug",
+            "search.top_k=7",
             "ollama_url=http://host:11434",
             "--unset",
-            "mcp_addr",
+            "reranker.url",
             "--unset",
-            "log_directive",
+            "search.weak_threshold",
         ])
         .expect("`libraries config` parses");
         match cli.command {
@@ -1391,13 +1520,16 @@ mod tests {
                 assert_eq!(
                     sets,
                     vec![
-                        ("log_directive".to_string(), "debug".to_string()),
+                        ("search.top_k".to_string(), "7".to_string()),
                         ("ollama_url".to_string(), "http://host:11434".to_string()),
                     ]
                 );
                 assert_eq!(
                     unset,
-                    vec!["mcp_addr".to_string(), "log_directive".to_string()]
+                    vec![
+                        "reranker.url".to_string(),
+                        "search.weak_threshold".to_string()
+                    ]
                 );
             }
             _ => panic!("expected `libraries config`"),
@@ -1423,9 +1555,9 @@ mod tests {
     #[test]
     fn libraries_config_rejects_a_pair_without_equals() {
         for argv in [
-            vec!["bookrack", "libraries", "config", "prod", "log_directive"],
+            vec!["bookrack", "libraries", "config", "prod", "ollama_url"],
             vec!["bookrack", "libraries", "config", "prod", "=value"],
-            vec!["bookrack", "libraries", "config", "prod", "log_directive="],
+            vec!["bookrack", "libraries", "config", "prod", "ollama_url="],
         ] {
             let Err(err) = Cli::try_parse_from(argv.iter().copied()) else {
                 panic!("a malformed pair must error: {argv:?}");
@@ -1473,22 +1605,78 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
+    /// The library selectors on the two library-selecting verbs are the
+    /// global flags, accepted after the subcommand as well as before it,
+    /// and they reach the verb as a [`LibrarySelection`] rather than as a
+    /// subcommand-local field. The bare form is legal too: resolution
+    /// then falls through to the data-root variable and the registry
+    /// default.
     #[test]
-    fn index_profile_current_parses_with_and_without_library() {
-        // Without --library the handler falls back to the registry
-        // default; the grammar must accept the bare form.
+    fn index_profile_selection_comes_from_the_global_flags() {
         for argv in [
             vec!["bookrack", "index-profile", "current"],
             vec!["bookrack", "index-profile", "current", "--json"],
-            vec!["bookrack", "index-profile", "current", "--library", "x"],
         ] {
             let cli = Cli::try_parse_from(argv.iter().copied())
                 .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert!(cli.data_dir.is_none() && cli.library.is_none());
             let Command::IndexProfile { action } = cli.command else {
                 panic!("must parse as index-profile");
             };
             assert!(matches!(action, IndexProfileAction::Current { .. }));
         }
+
+        // Either selector, on either verb, on either side of the
+        // subcommand, lands in the same selection.
+        for argv in [
+            vec!["bookrack", "index-profile", "current", "--library", "x"],
+            vec!["bookrack", "--library", "x", "index-profile", "current"],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert_eq!(cli.selection().library.as_deref(), Some("x"));
+            assert!(cli.selection().data_dir.is_none());
+        }
+        for argv in [
+            vec![
+                "bookrack",
+                "index-profile",
+                "apply",
+                "p",
+                "--data-dir",
+                "/roots/x",
+            ],
+            vec![
+                "bookrack",
+                "--data-dir",
+                "/roots/x",
+                "index-profile",
+                "apply",
+                "p",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|_| panic!("argv must parse: {argv:?}"));
+            assert_eq!(
+                cli.selection().data_dir.as_deref(),
+                Some(std::path::Path::new("/roots/x"))
+            );
+            assert!(cli.selection().library.is_none());
+        }
+
+        // The two selectors stay mutually exclusive here as everywhere.
+        let Err(err) = Cli::try_parse_from([
+            "bookrack",
+            "index-profile",
+            "current",
+            "--library",
+            "x",
+            "--data-dir",
+            "/roots/x",
+        ]) else {
+            panic!("--library and --data-dir must conflict");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -1529,7 +1717,6 @@ mod tests {
             action:
                 IndexProfileAction::Apply {
                     name,
-                    library,
                     pipeline,
                     dry_run,
                     yes,
@@ -1539,12 +1726,11 @@ mod tests {
             panic!("must parse as apply");
         };
         assert_eq!(name, "some-profile");
-        assert!(library.is_none());
         assert_eq!(pipeline, PipelineFilter::All);
         assert!(!dry_run);
         assert!(!yes);
 
-        // Full form with every flag set.
+        // Full form with every flag set, the library selector included.
         let cli = Cli::try_parse_from([
             "bookrack",
             "index-profile",
@@ -1558,10 +1744,10 @@ mod tests {
             "--yes",
         ])
         .expect("full apply parses");
+        assert_eq!(cli.selection().library.as_deref(), Some("x"));
         let Command::IndexProfile {
             action:
                 IndexProfileAction::Apply {
-                    library,
                     pipeline,
                     dry_run,
                     yes,
@@ -1571,7 +1757,6 @@ mod tests {
         else {
             panic!("must parse as apply");
         };
-        assert_eq!(library.as_deref(), Some("x"));
         assert_eq!(pipeline, PipelineFilter::Papers);
         assert!(dry_run);
         assert!(yes);
@@ -1925,5 +2110,240 @@ mod tests {
                 "libraries config help does not list accepted key {key:?}: {help}",
             );
         }
+    }
+
+    /// Top-level command names the surface's own classification accounts
+    /// for: process lifecycle, configuration, a pipeline verb, a namespace,
+    /// or an observation command.
+    const TOP_LEVEL_BY_DESIGN: &[&str] = &[
+        "audit-profile",
+        "corpus",
+        "diagnose",
+        "distill",
+        "doctor",
+        "dryrun",
+        "exec",
+        "ingest",
+        "init",
+        "intake",
+        "libraries",
+        "logs",
+        "metadata",
+        "papers",
+        "queue",
+        "quit",
+        "remove",
+        "run",
+        "runs",
+        "stamps",
+        "status",
+        "vectors",
+        "verify",
+    ];
+
+    /// Top-level command names that entered the surface without a place in
+    /// that classification. Filing a name here records that the surface
+    /// grew ahead of its own shape; it is not an approval, and the bucket
+    /// is meant to shrink.
+    const TOP_LEVEL_BY_ACCRETION: &[&str] = &["index-profile", "retrieval"];
+
+    /// Every command that owns subcommands, keyed by the full invocation
+    /// path, with the number of subcommands it owns directly. A new leaf
+    /// is a new help page, and a help page is a surface commitment, so the
+    /// tree's shape is pinned here rather than left to grow silently.
+    const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
+        ("bookrack", 25),
+        ("bookrack audit-profile", 3),
+        ("bookrack corpus", 1),
+        ("bookrack distill", 4),
+        ("bookrack index-profile", 6),
+        ("bookrack intake", 2),
+        ("bookrack libraries", 10),
+        ("bookrack metadata", 10),
+        ("bookrack papers", 13),
+        ("bookrack papers corpus", 1),
+        ("bookrack papers metadata", 10),
+        ("bookrack papers stamps", 1),
+        ("bookrack papers vectors", 4),
+        ("bookrack queue", 5),
+        ("bookrack retrieval", 2),
+        ("bookrack runs", 2),
+        ("bookrack stamps", 1),
+        ("bookrack vectors", 4),
+    ];
+
+    /// Collects `(invocation path, direct subcommand count)` for every
+    /// command in the tree that owns subcommands. clap's generated `help`
+    /// pseudo-subcommand is skipped: it is inserted by `Command::build`,
+    /// so whether it is present depends on how the tree was obtained
+    /// rather than on the command surface. Hidden commands are kept —
+    /// hiding a command must not be a way past the gate.
+    fn subcommand_counts(cmd: &clap::Command, path: &str, out: &mut Vec<(String, usize)>) {
+        let children: Vec<&clap::Command> = cmd
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help")
+            .collect();
+        if children.is_empty() {
+            return;
+        }
+        out.push((path.to_string(), children.len()));
+        for child in children {
+            subcommand_counts(child, &format!("{path} {}", child.get_name()), out);
+        }
+    }
+
+    /// The top-level command names are a compatibility surface: adding one
+    /// widens what an operator is offered, and every name has to be
+    /// answerable for.
+    #[test]
+    fn the_top_level_command_set_is_exactly_the_two_recorded_buckets() {
+        use clap::CommandFactory;
+
+        let by_design: BTreeSet<&str> = TOP_LEVEL_BY_DESIGN.iter().copied().collect();
+        let by_accretion: BTreeSet<&str> = TOP_LEVEL_BY_ACCRETION.iter().copied().collect();
+        assert_eq!(
+            by_design.len(),
+            TOP_LEVEL_BY_DESIGN.len(),
+            "TOP_LEVEL_BY_DESIGN holds a duplicate name"
+        );
+        assert_eq!(
+            by_accretion.len(),
+            TOP_LEVEL_BY_ACCRETION.len(),
+            "TOP_LEVEL_BY_ACCRETION holds a duplicate name"
+        );
+        let both: Vec<&&str> = by_design.intersection(&by_accretion).collect();
+        assert!(
+            both.is_empty(),
+            "a command is filed in both buckets: {both:?}"
+        );
+
+        let expected: BTreeSet<&str> = by_design.union(&by_accretion).copied().collect();
+        let cli = Cli::command();
+        let actual: BTreeSet<&str> = cli
+            .get_subcommands()
+            .map(|sub| sub.get_name())
+            .filter(|name| *name != "help")
+            .collect();
+        let added: Vec<&&str> = actual.difference(&expected).collect();
+        let removed: Vec<&&str> = expected.difference(&actual).collect();
+        assert!(
+            added.is_empty() && removed.is_empty(),
+            "the top-level command set changed — this is a minor version bump, \
+             and a top-level name is a surface decision rather than an \
+             implementation detail. File each new name into TOP_LEVEL_BY_DESIGN \
+             when the surface's existing classification has a place for it, or \
+             into TOP_LEVEL_BY_ACCRETION when it does not, and record the change \
+             in CHANGELOG.md. Added: {added:?}; no longer present: {removed:?}"
+        );
+    }
+
+    /// A new subcommand is a new help page, and every help page carries the
+    /// same obligations as the ones already there.
+    #[test]
+    fn every_namespace_owns_the_recorded_number_of_subcommands() {
+        use clap::CommandFactory;
+
+        let recorded: BTreeMap<&str, usize> = SUBCOMMAND_COUNTS.iter().copied().collect();
+        assert_eq!(
+            recorded.len(),
+            SUBCOMMAND_COUNTS.len(),
+            "SUBCOMMAND_COUNTS holds a duplicate path"
+        );
+
+        let cli = Cli::command();
+        let mut walked = Vec::new();
+        subcommand_counts(&cli, cli.get_name(), &mut walked);
+        let live: BTreeMap<&str, usize> = walked.iter().map(|(p, n)| (p.as_str(), *n)).collect();
+
+        let diff: Vec<(&str, Option<usize>, Option<usize>)> = recorded
+            .keys()
+            .chain(live.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| (*path, recorded.get(path).copied(), live.get(path).copied()))
+            .filter(|(_, want, got)| want != got)
+            .collect();
+        assert!(
+            diff.is_empty(),
+            "the subcommand tree changed shape, reported as \
+             (path, recorded, live): {diff:?}. Update SUBCOMMAND_COUNTS to \
+             match, and record the new or removed commands in CHANGELOG.md"
+        );
+    }
+
+    /// The gate's rules live in `bookrack_cli_grammar::help_gate` so
+    /// that this crate, the grammar crate, and the runtime crate can
+    /// each run them under the daily narrowed gate. This entry point
+    /// is the only one that sees the whole tree: the summary and
+    /// example rules run here over every command the binary offers,
+    /// including the ones defined in this crate that no mirror mounts.
+    #[test]
+    fn the_command_surface_obeys_the_help_gate() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        let violations = help_gate::audit_tree(&cli, help_gate::Scope::WholeBinary);
+        assert!(
+            violations.is_empty(),
+            "the help gate rejected the command surface:{}",
+            help_gate::report(&violations)
+        );
+        let defects = help_gate::policy_defects();
+        assert!(
+            defects.is_empty(),
+            "the help gate's own constants are malformed: {defects:?}"
+        );
+        let unclaimed = help_gate::unclaimed_debt(&cli);
+        assert!(
+            unclaimed.is_empty(),
+            "these paths are filed as owing examples but no command answers to \
+             them — a rename left the list behind: {unclaimed:?}"
+        );
+        let recorded: Vec<String> = help_gate::GLOBAL_ARG_IDS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+        assert_eq!(
+            help_gate::declared_global_ids(&cli),
+            recorded,
+            "the binary's global flags and GLOBAL_ARG_IDS have diverged. The two \
+             mirrored gate points cannot read `is_global_set()`, so they measure \
+             the shadowing rule against that constant; a global it does not name \
+             is unenforced everywhere but here"
+        );
+    }
+
+    /// An example is a string until something parses it. Without this
+    /// the gate accepts `$ bookrack books search "sample"` — a command
+    /// that does not exist — and the drift it exists to prevent simply
+    /// moves into the examples. Only this crate can run the check: the
+    /// parser is the binary's own `Cli`, which the grammar crate
+    /// cannot reach. Parsing is all it proves: the example is a legal
+    /// invocation today, not one that succeeds against a library.
+    #[test]
+    fn every_example_is_a_command_the_binary_still_accepts() {
+        use clap::CommandFactory;
+
+        let cli = Cli::command();
+        let mut rejected: Vec<String> = Vec::new();
+        for (path, invocation) in help_gate::examples_in_tree(&cli) {
+            if help_gate::is_parse_exempt(&path) {
+                continue;
+            }
+            let Ok(tokens) = help_gate::split_example(&invocation) else {
+                rejected.push(format!("{invocation} (unbalanced quotes)"));
+                continue;
+            };
+            let argv = std::iter::once("bookrack".to_string()).chain(tokens);
+            if let Err(err) = Cli::try_parse_from(argv) {
+                rejected.push(format!("{invocation} ({})", err.kind()));
+            }
+        }
+        assert!(
+            rejected.is_empty(),
+            "these examples no longer parse. An example that names a command or \
+             a flag the surface has dropped documents something that does not \
+             exist: {rejected:?}"
+        );
     }
 }

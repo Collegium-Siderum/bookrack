@@ -4,7 +4,10 @@ The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
 alongside its MCP HTTP listener. Operator tooling — one-shot CLI
 subcommands, `bookrack exec` for ad-hoc RPCs, and the desktop tray —
 reaches the running daemon through this surface; the MCP listener
-stays read-only and tool-scoped.
+stays tool-scoped — agent clients see a fixed tool set rather than the
+full method registry, and the bulk, queue-bound, and library-lifecycle
+operations are reachable only over the control plane. The tool set is
+not read-only: see *MCP tool surface* below.
 
 ## Transport
 
@@ -97,7 +100,11 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
 - `-32010` invalid library (bookrack-specific; a `library` param does
-  not exist in the registry)
+  not exist in the registry). Raised by the write-class handlers and by
+  `library.set_default`. The `library.*` read proxies resolve their
+  `library` param one layer earlier and report an unknown name as
+  `-32602` instead, so a client that branches on `-32010` alone must
+  treat `-32602` as the same condition on a read.
 - `-32011` job not found (bookrack-specific; `ingest.cancel` named a
   job id no longer in the queue document)
 - `-32012` confirmation required (bookrack-specific; a destructive
@@ -113,6 +120,47 @@ systems. bookrack is a local-first system and does not probe for it.
   resolves to a plan minted for a different destructive method)
 - `-32015` plan library mismatch (bookrack-specific; the `plan_id`
   resolves to a plan minted against a different library)
+
+#### Error data
+
+Every error the control plane raises through its typed mapping layer
+fills the JSON-RPC `error.data` slot with a three-part diagnostic,
+modelled on PostgreSQL's primary / detail / hint split:
+
+```json
+{ "code": -32603,
+  "message": "cannot embed: the model \"…\" is not available on the Ollama daemon",
+  "data": { "detail": "Ollama answered HTTP 404: …",
+            "hint": "Pull it first: ollama pull ….",
+            "retryable": false } }
+```
+
+- **`message`** is the diagnostic's summary line: one line stating what
+  failed, with no module, function, or variant name in it. Present
+  tense (`cannot`) marks a permanent failure, past tense (`could not`)
+  one that may clear on its own.
+- **`data.detail`** carries the implementation-level evidence — HTTP
+  status and body, a path, a syscall. Optional; omitted when there is
+  none.
+- **`data.hint`** says what to do next. Optional, and *allowed to be
+  wrong*: being its own field is what lets it hold a likely cause
+  without weakening the summary's factual claim.
+- **`data.retryable`** is always present. It means: **the same call,
+  resent unchanged, may succeed without anyone intervening.**
+
+`retryable` exists so a client never has to infer intent from wording.
+Note that it is deliberately *not* the same question as
+`EmbedError::is_transient()`, which asks whether the client should
+transparently resend the identical batch: an overloaded server is
+`retryable: true` here (its state is momentary) and `is_transient()`
+`false` there (resending the same batch is what overloaded it). The
+two are expected to disagree.
+
+`message` is guaranteed self-sufficient: a client that reads only that
+field learns what failed. An error type that has not written its own
+wording falls back to a flattened cause chain as the summary and sends
+`data` with `retryable` alone. `data` is additive — a client that
+ignores it sees exactly what it saw before the slot was filled.
 
 #### Write-class error mapping
 
@@ -156,7 +204,7 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32015` plan-id mismatches; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate) |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32015` plan-id mismatches; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
 | `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
@@ -337,7 +385,7 @@ the exit-code bucket does not distinguish the two.
   library? }`. Writes an override on one paper field. `field` must
   belong to the editable set
   (`title`, `subtitle`, `publisher`, `year`, `language`, `series`,
-  `doi`, `arxiv_id`, `issn`, `container_title`, `abstract`,
+  `doi`, `arxiv_id`, `issn`, `container_title`, `abstract_text`,
   `csl_type`). `confirmed` marks the override as having been checked
   against the source.
 - `papers.metadata.clear` — `{ intake_id, field, library? }`.
@@ -393,6 +441,10 @@ socket reaches the same code path agents exercise over MCP HTTP. None
 of these methods take the write mutex; they read straight from the
 catalog and corpus handles the daemon already holds.
 
+All of them accept an optional `library` param naming a mounted
+library. Unlike the write-class handlers, a name the registry does not
+carry is reported as `-32602 invalid params`, not `-32010`.
+
 - `library.stats` — aggregate counts over the library.
 - `library.list_books` / `library.find_books` — paginated registry
   browse and filter. `library.find_books` accepts a `categories`
@@ -420,11 +472,63 @@ catalog and corpus handles the daemon already holds.
   mutex.
 - `library.search` / `library.search_in_book` / `library.search_in_paper`
   — cited passage search across the library, a single book, or a
-  single paper.
+  single paper. `library.search` takes two exclusion lists,
+  `exclude_book_intake_ids` and `exclude_paper_intake_ids`, that drop
+  the named items' passages from recall. The two id name spaces are
+  unrelated, so each list applies only to its own side: the book list
+  needs `kind` `"book"` (the default) or `"all"`, the paper list needs
+  `"paper"` or `"all"`, and naming the side the call does not search is
+  rejected with `INVALID_PARAMS` rather than ignored. Omitting a list —
+  or passing it empty — filters nothing, and ids that name no stored
+  item simply exclude nothing. Two constraints run against the obvious
+  expectation: `library.search_in_book` and `library.search_in_paper`
+  take **no** exclusion fields, since recall there is already confined
+  to one item; and `reference.lookup`'s `exclude_books` (a list of book
+  slugs, not intake ids) applies only with `book="*"`, the scope that
+  spans more than one reference book.
 - `library.vectors_status` — vector-store snapshot for the library.
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product
   derived from it. Peer of the CLI `bookrack intake list-ocr-pending`.
+
+## MCP tool surface
+
+The MCP listener publishes a fixed tool set, enumerated at daemon
+start-up by `bookrack_mcp::list_tools()` and answered over the control
+plane by `daemon.mcp_tools`. The full name list is pinned by
+`crates/mcp/tests/tool_surface.rs`, split into the read and write
+buckets below; adding, renaming, or removing a tool fails that test
+until the list is updated, which is the point at which the version
+discipline (a tool-surface change is a minor bump) applies.
+
+Eleven of the tools write:
+
+- `library.metadata.set` / `library.metadata.clear` — add or remove an
+  override on one bibliographic field.
+- `library.metadata.void` — suppress an extracted field value.
+- `library.metadata.contributor_add` /
+  `library.metadata.contributor_remove` — edit the contributor list.
+- `library.metadata.reaudit` — recompute and store the audit verdict.
+- `library.metadata.ack` / `library.metadata.approve` /
+  `library.metadata.reject` — move the review row.
+- `reference.overlay_set` — layer a user edit on a reference entry.
+- `session.shutdown` — stop the daemon.
+
+Every write tool runs attributed to `Caller::mcp()`, so its audit rows
+carry `actor_kind=llm` / `actor_detail=mcp` regardless of the surface
+that launched the daemon. The metadata write tools all require a
+`reason`, which lands on the audit row.
+
+Two properties the tool set deliberately does *not* have:
+
+- **The read tools are not side-effect free.** The four search tools
+  append a `retrieval_calls` row (and its hits) per call, so a
+  read-only data root cannot serve them.
+- **Write tools do not take the runtime write mutex.** That mutex is
+  held by control-plane write methods only (`run_write`), and
+  `mcp.availability` is an advisory broadcast, not enforcement — the
+  daemon does not reject an MCP write tool issued while an RPC write
+  session is open.
 
 ## Events (Phase 2)
 
@@ -462,9 +566,11 @@ catalog and corpus handles the daemon already holds.
 - `library.changed` — `{ library }` published after every successful
   write command finishes.
 - `mcp.availability` — `{ paused }` published `true` at the start of
-  every write command and `false` after it returns, so subscribers
-  can advertise the MCP write surface as temporarily paused even
-  though the runtime currently does not expose any MCP write tools.
+  every control-plane write command and `false` after it returns, so
+  subscribers can advertise the MCP write surface as temporarily
+  paused. The signal is advisory: it reports the state of the runtime
+  write mutex, which the MCP write tools do not take, so a client that
+  ignores it can still issue one mid-session.
 
 ## Phase log
 
@@ -479,9 +585,11 @@ catalog and corpus handles the daemon already holds.
   `vectors.{rebuild,reembed,reset,drop}`, `corpus.rebuild`,
   `stamps.reconcile`, `remove`, `dryrun`. New events: `queue.tick`,
   `worker.progress`, `library.changed`, `mcp.availability`. New error
-  codes: `-32010 invalid_library`, `-32011 job_not_found`. The MCP
-  tool set is still read-only and unchanged; the REPL still runs
-  in-process; the on-disk queue document keeps its v1 schema.
+  codes: `-32010 invalid_library`, `-32011 job_not_found`. At this
+  phase the MCP tool set was still read-only and unchanged; the metadata
+  and reference write tools (see *MCP tool surface*) landed later. The
+  REPL still runs in-process; the on-disk queue document keeps its v1
+  schema.
 - **Phase 3 (superseded)** — split the REPL into a standalone
   client and stood up the `bookrack-control-client` transport.
   The REPL surface was later removed entirely in 0.7.0; see
@@ -527,8 +635,11 @@ catalog and corpus handles the daemon already holds.
   `bookrack_runtime::doctor::run`; when a daemon is running it
   calls `doctor.gather` and renders the same report.
   Daemon-not-running exits with code 2 from every one-shot
-  client, matching the REPL client's contract; `bookrack doctor`
-  and `bookrack quit` are the documented exceptions. The MCP
+  client that routes through the control plane, matching the REPL
+  client's contract. The exceptions are the clients that can answer
+  without a daemon: `bookrack doctor` falls back to the local probe,
+  `bookrack status` and `bookrack exec info` report the absence and
+  exit 0, and `bookrack quit` has nothing to stop. The MCP
   tool set, the session-lock schema, the on-disk queue schema,
   and the REPL client are unchanged.
 - **Phase 5** — second-launch semantics and `bookrack-mcp`

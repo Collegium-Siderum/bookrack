@@ -186,10 +186,10 @@ pub const GRADE_COLUMNS: &[(&str, &str)] = &[
     ("grade_title", "title"),
     ("grade_year", "year"),
     ("grade_doi", "doi"),
-    ("grade_arxiv", "arxiv"),
+    ("grade_arxiv", "arxiv_id"),
     ("grade_issn", "issn"),
-    ("grade_container", "container"),
-    ("grade_abstract", "abstract"),
+    ("grade_container", "container_title"),
+    ("grade_abstract", "abstract_text"),
     ("grade_author", "author"),
     ("grade_language", "language"),
 ];

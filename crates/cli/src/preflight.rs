@@ -28,14 +28,21 @@
 //!   * the side of the comparison the intent expresses (path vs name)
 //!     is the side the lock lacks
 //!
-//! Local-resolves commands (`run`, `init`, `doctor`, `audit-profile`,
-//! the `index-profile` verbs other than an executing `apply` (its
-//! `--dry-run` form stays offline and keeps the exemption),
-//! `distill`, `runs`, and the offline `libraries` verbs —
+//! Local-resolves commands (`run`, `init`, `audit-profile`, the
+//! `index-profile` verbs other than an executing `apply` (its
+//! `--dry-run` form stays offline and keeps the exemption), `distill`,
+//! `runs`, `retrieval`, and the offline `libraries` verbs —
 //! `default`/`detect`/`scan`/`add`/`register`/`remove`/`config`) bypass
 //! this check entirely — for them the flag is a real switch into a
 //! different data root, or an offline registry read/write, not an
 //! assertion about the running daemon.
+//!
+//! `doctor` is deliberately *not* exempt. When a daemon is running it
+//! routes through the control plane and reports on the daemon's
+//! library, so a selection naming a different one must refuse rather
+//! than silently diagnose the served library; when no daemon is
+//! running the check falls through (no held lock) and `doctor`'s own
+//! data-root probe takes over.
 
 use std::path::{Path, PathBuf};
 
@@ -91,12 +98,31 @@ fn resolve_intent(selection: &LibrarySelection, env_data_dir: Option<&str>) -> O
     None
 }
 
+/// Read the session lock, or `None` when there is nothing to compare
+/// against.
+///
+/// The two `None` cases are not the same thing and are no longer
+/// spelled the same way. `Ok(false)` — nobody holds the flock — is the
+/// ordinary state on a machine with no daemon, and stays silent.
+/// `Err` — the lock could not be examined at all — means the check did
+/// not run, which is the outcome this whole module exists to prevent
+/// happening quietly, so it says so on stderr before waving the command
+/// through. Waving it through is still right: a lock that cannot be
+/// read is no evidence that a daemon is serving a different library.
 fn read_lock_info() -> Option<LockInfo> {
     let runtime_dir = resolve_runtime_dir(None).ok()?;
     let lock_path = runtime_dir.join(tty_lock_name());
     match lock_is_held(&lock_path) {
         Ok(true) => peek_lock(&lock_path).ok().flatten(),
-        Ok(false) | Err(_) => None,
+        Ok(false) => None,
+        Err(e) => {
+            eprintln!(
+                "bookrack: could not read the session lock at {} ({e}); \
+                 skipping the library check",
+                lock_path.display(),
+            );
+            None
+        }
     }
 }
 

@@ -211,11 +211,7 @@ pub async fn retrieve_with<E: Embedder>(
     );
 
     let base = options_from_meta(store, lancedb_dir)?;
-    let opts = SearchOptions {
-        nprobes: overrides.nprobes.or(base.nprobes),
-        refine_factor: overrides.refine_factor.or(base.refine_factor),
-        bypass_index: overrides.bypass_index || base.bypass_index,
-    };
+    let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
     let hits = store.search_with(query_vector, top_k, opts).await?;
     tracing::debug!(
@@ -254,11 +250,7 @@ pub async fn retrieve_with_partition<E: Embedder>(
     );
 
     let base = options_from_meta(store, lancedb_dir)?;
-    let opts = SearchOptions {
-        nprobes: overrides.nprobes.or(base.nprobes),
-        refine_factor: overrides.refine_factor.or(base.refine_factor),
-        bypass_index: overrides.bypass_index || base.bypass_index,
-    };
+    let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
     let hits = store
         .search_partition_with(query_vector, partition, top_k, opts)
@@ -285,19 +277,38 @@ pub async fn retrieve_with_partition<E: Embedder>(
 /// * `BOOKRACK_VECTORS_REFINE_FACTOR` — integer; sets
 ///   `refine_factor`.
 pub fn env_overrides() -> SearchOptions {
-    let bypass_index = std::env::var("BOOKRACK_VECTORS_BYPASS_ANN")
+    env_overrides_from(|name| std::env::var(name).ok())
+}
+
+/// Pure core of [`env_overrides`]: reads the three variables through
+/// the injected `get`, so the parsing rules are testable without
+/// mutating the process environment.
+fn env_overrides_from(get: impl Fn(&str) -> Option<String>) -> SearchOptions {
+    let bypass_index = get("BOOKRACK_VECTORS_BYPASS_ANN")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    let nprobes = std::env::var("BOOKRACK_VECTORS_NPROBES")
-        .ok()
-        .and_then(|v| v.trim().parse().ok());
-    let refine_factor = std::env::var("BOOKRACK_VECTORS_REFINE_FACTOR")
-        .ok()
-        .and_then(|v| v.trim().parse().ok());
+    let nprobes = get("BOOKRACK_VECTORS_NPROBES").and_then(|v| v.trim().parse().ok());
+    let refine_factor = get("BOOKRACK_VECTORS_REFINE_FACTOR").and_then(|v| v.trim().parse().ok());
     SearchOptions {
         nprobes,
         refine_factor,
         bypass_index,
+        exclude_partitions: Vec::new(),
+    }
+}
+
+/// Layer per-call overrides over the persisted meta defaults:
+/// `nprobes` / `refine_factor` win when the override sets them and
+/// fall back to the meta value otherwise, while `bypass_index = true`
+/// from either side is sticky. `exclude_partitions` is taken from the
+/// override side alone — the persisted meta describes the index, and
+/// never carries an exclusion set to fall back to.
+fn merge_options(overrides: SearchOptions, base: SearchOptions) -> SearchOptions {
+    SearchOptions {
+        nprobes: overrides.nprobes.or(base.nprobes),
+        refine_factor: overrides.refine_factor.or(base.refine_factor),
+        bypass_index: overrides.bypass_index || base.bypass_index,
+        exclude_partitions: overrides.exclude_partitions,
     }
 }
 
@@ -315,6 +326,7 @@ fn options_from_meta(store: &ChunkStore, lancedb_dir: &Path) -> Result<SearchOpt
         nprobes: Some(cfg.nprobes as usize),
         refine_factor: cfg.refine_factor,
         bypass_index: false,
+        exclude_partitions: Vec::new(),
     })
 }
 
@@ -496,77 +508,6 @@ fn paper_context(corpus: &Corpus, catalog: &Catalog, start_node_id: NodeId) -> R
         toc_position,
         enclosing_node_id,
     })
-}
-
-/// One side of a [`search_unified`] call: the four read handles a
-/// store needs to embed-recall a hit and resolve its breadcrumb. The
-/// caller borrows from a warm [`bookrack_query::Library`] for the
-/// books side and another for the papers side.
-#[derive(Clone, Copy)]
-pub struct UnifiedSide<'a> {
-    pub corpus: &'a Corpus,
-    pub catalog: &'a Catalog,
-    pub store: &'a ChunkStore,
-    pub lancedb_dir: &'a Path,
-}
-
-/// Retrieve from both the books and papers stores and merge the top-k
-/// passages by ascending distance, resolving each hit's breadcrumb on
-/// the store it came from.
-///
-/// Each side runs an independent [`retrieve_with`] at `top_k`, so the
-/// merge sees up to `2 * top_k` candidates before truncation; the
-/// final list is `top_k` long.
-pub async fn search_unified<E: Embedder>(
-    query: &str,
-    books: UnifiedSide<'_>,
-    papers: UnifiedSide<'_>,
-    embedder: &E,
-    overrides: SearchOptions,
-    top_k: usize,
-) -> Result<Vec<Citation>> {
-    let book_hits = retrieve_with(
-        query,
-        books.store,
-        embedder,
-        books.lancedb_dir,
-        overrides.clone(),
-        top_k,
-    )
-    .await?;
-    let paper_hits = retrieve_with(
-        query,
-        papers.store,
-        embedder,
-        papers.lancedb_dir,
-        overrides,
-        top_k,
-    )
-    .await?;
-    let mut tagged: Vec<(ItemKind, SearchHit)> =
-        Vec::with_capacity(book_hits.len() + paper_hits.len());
-    tagged.extend(book_hits.into_iter().map(|h| (ItemKind::Book, h)));
-    tagged.extend(paper_hits.into_iter().map(|h| (ItemKind::Paper, h)));
-    tagged.sort_by(|a, b| {
-        a.1.distance
-            .partial_cmp(&b.1.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    tagged.truncate(top_k);
-    let mut citations = Vec::with_capacity(tagged.len());
-    for (kind, hit) in tagged {
-        let (corpus, catalog) = match kind {
-            ItemKind::Book => (books.corpus, books.catalog),
-            ItemKind::Paper => (papers.corpus, papers.catalog),
-            ItemKind::Reference => unreachable!(
-                "unified vector search never returns reference items; \
-                 the distill pipeline owns its own lookup path",
-            ),
-        };
-        let mut single = cite(corpus, catalog, vec![hit], kind)?;
-        citations.append(&mut single);
-    }
-    Ok(citations)
 }
 
 /// Look up the intake's filename stem from `original_path`, returning
@@ -1162,51 +1103,94 @@ mod tests {
         assert_eq!(citations[0].breadcrumb, "paper #7");
     }
 
+    #[test]
+    fn merge_options_lets_overrides_win_and_meta_fill_the_gaps() {
+        let base = SearchOptions {
+            nprobes: Some(8),
+            refine_factor: Some(2),
+            bypass_index: false,
+            exclude_partitions: Vec::new(),
+        };
+        // An override that sets a knob wins over the meta default.
+        let merged = merge_options(
+            SearchOptions {
+                nprobes: Some(32),
+                refine_factor: None,
+                bypass_index: false,
+                exclude_partitions: vec![PartitionIdx::new(4), PartitionIdx::new(9)],
+            },
+            base.clone(),
+        );
+        assert_eq!(merged.nprobes, Some(32));
+        // A knob the override leaves unset falls back to meta.
+        assert_eq!(merged.refine_factor, Some(2));
+        assert!(!merged.bypass_index);
+        // The exclusion set has no meta counterpart and passes through
+        // from the override side verbatim, order included.
+        assert_eq!(
+            merged.exclude_partitions,
+            vec![PartitionIdx::new(4), PartitionIdx::new(9)]
+        );
+    }
+
+    #[test]
+    fn merge_options_bypass_is_sticky_from_either_side() {
+        let bypassing = SearchOptions {
+            nprobes: None,
+            refine_factor: None,
+            bypass_index: true,
+            exclude_partitions: Vec::new(),
+        };
+        let plain = SearchOptions::default();
+        assert!(merge_options(bypassing.clone(), plain.clone()).bypass_index);
+        assert!(merge_options(plain.clone(), bypassing).bypass_index);
+        assert!(!merge_options(plain.clone(), plain).bypass_index);
+    }
+
+    #[test]
+    fn env_overrides_parse_the_three_documented_variables() {
+        let opts = env_overrides_from(|name| match name {
+            "BOOKRACK_VECTORS_BYPASS_ANN" => Some(" TRUE ".to_string()),
+            "BOOKRACK_VECTORS_NPROBES" => Some(" 24 ".to_string()),
+            "BOOKRACK_VECTORS_REFINE_FACTOR" => Some("3".to_string()),
+            _ => None,
+        });
+        assert!(opts.bypass_index);
+        assert_eq!(opts.nprobes, Some(24));
+        assert_eq!(opts.refine_factor, Some(3));
+    }
+
+    #[test]
+    fn env_overrides_ignore_unset_and_unparseable_values() {
+        let unset = env_overrides_from(|_| None);
+        assert!(!unset.bypass_index);
+        assert_eq!(unset.nprobes, None);
+        assert_eq!(unset.refine_factor, None);
+
+        let garbage = env_overrides_from(|name| match name {
+            "BOOKRACK_VECTORS_BYPASS_ANN" => Some("maybe".to_string()),
+            "BOOKRACK_VECTORS_NPROBES" => Some("many".to_string()),
+            "BOOKRACK_VECTORS_REFINE_FACTOR" => Some("-1".to_string()),
+            _ => None,
+        });
+        assert!(!garbage.bypass_index);
+        assert_eq!(garbage.nprobes, None);
+        assert_eq!(garbage.refine_factor, None);
+    }
+
     #[tokio::test]
-    async fn search_unified_merges_book_and_paper_hits_with_kind() {
-        let (book_dir, book_corpus, book_catalog, book_store, _) =
-            fixture(Some("A Test Book"), true).await;
-        let (paper_dir, paper_corpus, paper_catalog, paper_store, _) =
-            paper_fixture(1, Some("Synthetic Journal"), Some("On Test Spaces")).await;
+    async fn breadcrumb_does_not_repeat_a_book_title_that_matches_the_first_chapter() {
+        // The book title and the leading organizing title coincide:
+        // the leading segment is inserted only when it differs, so the
+        // trail reads "Chapter One", not "Chapter One › Chapter One".
+        let (dir, corpus, catalog, store, _leaf) = fixture(Some("Chapter One"), true).await;
         let query = FixedQuery {
             vector: vec![1.0, 0.0, 0.0, 0.0],
         };
-        let citations = search_unified(
-            "anything",
-            UnifiedSide {
-                corpus: &book_corpus,
-                catalog: &book_catalog,
-                store: &book_store,
-                lancedb_dir: book_dir.path(),
-            },
-            UnifiedSide {
-                corpus: &paper_corpus,
-                catalog: &paper_catalog,
-                store: &paper_store,
-                lancedb_dir: paper_dir.path(),
-            },
-            &query,
-            Default::default(),
-            5,
-        )
-        .await
-        .expect("search_unified");
-        assert_eq!(citations.len(), 2, "one hit per store");
-        let kinds: Vec<ItemKind> = citations.iter().map(|c| c.kind).collect();
-        assert!(kinds.contains(&ItemKind::Book));
-        assert!(kinds.contains(&ItemKind::Paper));
-        let paper = citations
-            .iter()
-            .find(|c| c.kind == ItemKind::Paper)
-            .expect("paper hit");
-        assert_eq!(
-            paper.breadcrumb,
-            "Synthetic Journal \u{203a} On Test Spaces"
-        );
-        let book = citations
-            .iter()
-            .find(|c| c.kind == ItemKind::Book)
-            .expect("book hit");
-        assert!(book.breadcrumb.contains("A Test Book"));
+        let hits = search("anything", &corpus, &catalog, &store, &query, dir.path(), 5)
+            .await
+            .expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].breadcrumb, "Chapter One");
     }
 }

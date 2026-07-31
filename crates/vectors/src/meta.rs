@@ -212,14 +212,29 @@ mod tests {
     }
 
     #[test]
-    fn store_writes_pretty_json_with_a_trailing_newline_or_not() {
-        // Documents what's on disk so a future reader is not surprised
-        // by the formatting choice.
+    fn store_writes_indented_json_without_a_trailing_newline() {
+        // Pins what is on disk, byte for byte at the edges: the sidecar
+        // is hand-inspected during triage, and a formatting change is a
+        // decision rather than a detail to discover from a diff.
         let dir = TempDir::new().expect("temp dir");
         store(dir.path(), &sample_meta()).expect("store");
         let bytes = std::fs::read(dir.path().join(META_FILENAME)).expect("read raw");
         let s = std::str::from_utf8(&bytes).expect("utf8");
-        assert!(s.contains("\"kind\": \"ivf-flat\""), "got {s}");
-        assert!(s.contains("\"num_partitions\": 64"), "got {s}");
+
+        assert!(s.starts_with("{\n"), "pretty, not compact: {s:?}");
+        assert!(
+            s.contains("\n  \"kind\": \"ivf-flat\""),
+            "two-space indent per level: {s}",
+        );
+        assert!(s.contains("\n  \"num_partitions\": 64"), "got {s}");
+        assert!(
+            s.ends_with('}'),
+            "the file ends at the closing brace, with no trailing newline: {:?}",
+            s.get(s.len().saturating_sub(16)..),
+        );
+
+        // The shape is not just cosmetic: it is what `load` reads back.
+        let back = load(dir.path()).expect("load").expect("present");
+        assert_eq!(back, sample_meta());
     }
 }
