@@ -11,14 +11,11 @@
 
 #![cfg(unix)]
 
-mod common;
-
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+use bookrack_test_support::{Sandbox, bookrack_cmd};
 use tokio::process::Command;
-
-use crate::common::bookrack_bin;
 
 /// A loopback stand-in for Ollama that is up and answering but holds
 /// no models — the state an operator lands in after a fresh install,
@@ -47,22 +44,19 @@ fn spawn_empty_ollama() -> String {
 }
 
 async fn run_against_empty_ollama(extra: &[&str]) -> (Option<i32>, String) {
-    let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
-    let data_dir = tempfile::tempdir().expect("data tempdir");
-    let registry = runtime_dir.path().join("registry.toml");
-    std::fs::write(&registry, b"").expect("write registry");
+    let sandbox = Sandbox::new();
 
     let mut args: Vec<&str> = extra.to_vec();
     args.push("run");
-    let output = Command::new(bookrack_bin())
-        .args(&args)
-        .env("BOOKRACK_RUNTIME_DIR", runtime_dir.path())
-        .env("BOOKRACK_DATA_DIR", data_dir.path())
-        .env("BOOKRACK_REGISTRY", &registry)
-        .env("BOOKRACK_OLLAMA_URL", spawn_empty_ollama())
-        .output()
-        .await
-        .expect("run bookrack run");
+    let output = Command::from(
+        bookrack_cmd!(&sandbox)
+            .ollama_url(spawn_empty_ollama())
+            .build(),
+    )
+    .args(&args)
+    .output()
+    .await
+    .expect("run bookrack run");
 
     (
         output.status.code(),
