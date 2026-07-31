@@ -10,18 +10,22 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use bookrack_catalog::{Catalog, NewMcpToolCall, NewRetrievalCall};
+use bookrack_test_support::{Sandbox, bookrack_cmd};
 use eyre::Result;
 
-fn bookrack_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_bookrack")
-}
-
 /// Run `retrieval show <call_id>` against `data_dir`, returning stdout.
-fn show(data_dir: &std::path::Path, registry: &std::path::Path, call_id: i64) -> Result<String> {
-    let out = Command::new(bookrack_bin())
+///
+/// The threshold variable needs no explicit removal: the builder sweeps
+/// every `BOOKRACK_*` name it did not set, so a knob invented after
+/// this test was written is cut off without anyone remembering to
+/// name it.
+fn show(sandbox: &Sandbox, data_dir: &std::path::Path, call_id: i64) -> Result<String> {
+    let out = bookrack_cmd!(sandbox)
+        .without_data_dir()
+        .build()
         .args([
             "--data-dir",
             &data_dir.display().to_string(),
@@ -29,9 +33,6 @@ fn show(data_dir: &std::path::Path, registry: &std::path::Path, call_id: i64) ->
             "show",
             &call_id.to_string(),
         ])
-        .env("BOOKRACK_REGISTRY", registry)
-        .env_remove("BOOKRACK_DATA_DIR")
-        .env_remove("BOOKRACK_SEARCH_WEAK_THRESHOLD")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -47,13 +48,11 @@ fn show(data_dir: &std::path::Path, registry: &std::path::Path, call_id: i64) ->
 
 #[test]
 fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<()> {
+    let sandbox = Sandbox::new();
     let root = tempfile::tempdir()?;
-    let registry_dir = tempfile::tempdir()?;
-    let registry = registry_dir.path().join("registry.toml");
     // An empty registry the resolver can read: `--data-dir` names the
     // root, but resolution still consults the registry, and the host's
-    // must stay out of it.
-    std::fs::write(&registry, "[libraries]\n")?;
+    // must stay out of it. The sandbox already carries one.
     let config = root.path().join("config.toml");
 
     // One recorded call, one hit at 0.62 -- between the two thresholds
@@ -73,7 +72,7 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
 
     // A threshold above the hit: the recall set is not weak.
     std::fs::write(&config, "[search]\nweak_threshold = 0.9\n")?;
-    let lenient = show(root.path(), &registry, call_id)?;
+    let lenient = show(&sandbox, root.path(), call_id)?;
     assert!(
         lenient.contains("0.6200"),
         "the hit should render: {lenient}"
@@ -86,7 +85,7 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
     // The same call, the same hit, a stricter threshold in the same
     // file: now the whole set is weak, and the line names 0.5000.
     std::fs::write(&config, "[search]\nweak_threshold = 0.5\n")?;
-    let strict = show(root.path(), &registry, call_id)?;
+    let strict = show(&sandbox, root.path(), call_id)?;
     assert!(
         strict.contains("weak recall:") && strict.contains("0.5000"),
         "0.62 is at or above a 0.5 threshold: {strict}"
@@ -94,7 +93,10 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
 
     // The environment layer still wins over the file, which is the
     // documented precedence for this knob.
-    let overridden = Command::new(bookrack_bin())
+    let overridden = bookrack_cmd!(&sandbox)
+        .without_data_dir()
+        .extra_env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
+        .build()
         .args([
             "--data-dir",
             &root.path().display().to_string(),
@@ -102,9 +104,6 @@ fn retrieval_show_reads_the_weak_threshold_from_the_target_library() -> Result<(
             "show",
             &call_id.to_string(),
         ])
-        .env("BOOKRACK_REGISTRY", &registry)
-        .env("BOOKRACK_SEARCH_WEAK_THRESHOLD", "0.9")
-        .env_remove("BOOKRACK_DATA_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

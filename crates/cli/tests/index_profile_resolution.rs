@@ -16,53 +16,46 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
-/// One test's isolated world: a registry file, a runtime directory, and
-/// two data roots with stable basenames (`alpha`, `beta`) so an assertion
-/// can name the root it expects. `beta` exists only as a registry target,
-/// reached through the `{beta}` placeholder in the registry body.
+use bookrack_test_support::{Sandbox, bookrack_cmd};
+
+/// One test's isolated world: a sandbox whose registry the test writes,
+/// and two data roots with stable basenames (`alpha`, `beta`) so an
+/// assertion can name the root it expects. `beta` exists only as a
+/// registry target, reached through the `{beta}` placeholder in the
+/// registry body.
 struct World {
-    _root: tempfile::TempDir,
+    sandbox: Sandbox,
     registry: PathBuf,
-    runtime: PathBuf,
     alpha: PathBuf,
 }
 
 impl World {
     fn new(registry_body: &str) -> World {
-        let root = tempfile::tempdir().expect("tempdir");
-        let alpha = root.path().join("alpha");
-        let beta = root.path().join("beta");
-        let runtime = root.path().join("runtime");
-        for dir in [&alpha, &beta, &runtime] {
-            std::fs::create_dir_all(dir).expect("create dir");
-        }
-        let registry = root.path().join("registry.toml");
+        let sandbox = Sandbox::new();
+        let alpha = sandbox.data_root("alpha");
+        let beta = sandbox.data_root("beta");
         let body = registry_body
             .replace("{alpha}", alpha.to_str().expect("utf-8 path"))
             .replace("{beta}", beta.to_str().expect("utf-8 path"));
-        std::fs::write(&registry, body).expect("write registry");
+        let registry = sandbox.write_registry(&body);
         World {
-            _root: root,
+            sandbox,
             registry,
-            runtime,
             alpha,
         }
     }
 
-    /// Run the binary with this world's registry and runtime directory.
-    /// `data_dir_env` sets the data-root variable; `None` removes it.
+    /// Run the binary against this world's registry. `data_dir_env` sets
+    /// the data-root variable; `None` leaves it unset.
     fn run(&self, args: &[&str], data_dir_env: Option<&Path>) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bookrack"));
-        cmd.args(args)
-            .env("BOOKRACK_REGISTRY", &self.registry)
-            .env("BOOKRACK_RUNTIME_DIR", &self.runtime);
-        match data_dir_env {
-            Some(dir) => cmd.env("BOOKRACK_DATA_DIR", dir),
-            None => cmd.env_remove("BOOKRACK_DATA_DIR"),
+        let spawn = bookrack_cmd!(&self.sandbox);
+        let spawn = match data_dir_env {
+            Some(dir) => spawn.data_dir(dir),
+            None => spawn.without_data_dir(),
         };
-        cmd.output().expect("spawn bookrack")
+        spawn.build().args(args).output().expect("spawn bookrack")
     }
 
     fn registry_text(&self) -> String {
