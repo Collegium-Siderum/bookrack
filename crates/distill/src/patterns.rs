@@ -94,40 +94,61 @@ pub struct PatternMatch {
 ///
 /// [`ParseError::InvalidPattern`]: crate::error::ParseError::InvalidPattern
 pub fn match_pattern(pattern: &PatternRef, text: &str) -> Option<PatternMatch> {
+    match_pattern_skipping(pattern, text, &[])
+}
+
+/// [`match_pattern`], ignoring any match whose inner capture equals one
+/// of `skip_inner`.
+///
+/// A book can spell two kinds of tag with one bracket shape — a country
+/// marker and a name-type marker both in angle brackets. Naming the
+/// values that are not the wanted tag lets the leftmost-match rule walk
+/// past them; with every candidate skipped the result is `None`, the
+/// same as no match at all.
+pub fn match_pattern_skipping(
+    pattern: &PatternRef,
+    text: &str,
+    skip_inner: &[String],
+) -> Option<PatternMatch> {
+    let wanted = |cap: &regex::Captures<'_>, whole_on_empty: bool| -> Option<PatternMatch> {
+        let m = cap.get(0)?;
+        let inner = match cap.get(1) {
+            Some(g) => g.as_str().to_string(),
+            None if whole_on_empty => m.as_str().to_string(),
+            None => String::new(),
+        };
+        if skip_inner.contains(&inner) {
+            return None;
+        }
+        Some(PatternMatch {
+            start: m.start(),
+            end: m.end(),
+            inner,
+        })
+    };
+
     match pattern {
         PatternRef::BracketedTag { brackets } => {
             let mut best: Option<PatternMatch> = None;
             for kind in brackets {
-                let re = kind.regex();
-                if let Some(cap) = re.captures(text) {
-                    let m = cap.get(0)?;
-                    let candidate = PatternMatch {
-                        start: m.start(),
-                        end: m.end(),
-                        inner: cap
-                            .get(1)
-                            .map(|g| g.as_str().to_string())
-                            .unwrap_or_default(),
-                    };
-                    best = match best {
-                        Some(b) if b.start <= candidate.start => Some(b),
-                        _ => Some(candidate),
-                    };
-                }
+                // Each shape contributes its own leftmost non-skipped
+                // match; the leftmost across shapes wins, as it does
+                // without a skip list.
+                let Some(candidate) = kind
+                    .regex()
+                    .captures_iter(text)
+                    .find_map(|cap| wanted(&cap, false))
+                else {
+                    continue;
+                };
+                best = match best {
+                    Some(b) if b.start <= candidate.start => Some(b),
+                    _ => Some(candidate),
+                };
             }
             best
         }
-        PatternRef::Regex(re) => re.captures(text).and_then(|cap| {
-            let m = cap.get(0)?;
-            Some(PatternMatch {
-                start: m.start(),
-                end: m.end(),
-                inner: cap
-                    .get(1)
-                    .map(|g| g.as_str().to_string())
-                    .unwrap_or_else(|| m.as_str().to_string()),
-            })
-        }),
+        PatternRef::Regex(re) => re.captures_iter(text).find_map(|cap| wanted(&cap, true)),
     }
 }
 

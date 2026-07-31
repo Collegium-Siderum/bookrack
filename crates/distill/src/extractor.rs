@@ -14,7 +14,7 @@ use serde_json::{Value as JsonValue, json};
 
 use crate::core::{Ctx, SplitEntry, StageData};
 use crate::error::ParseError;
-use crate::patterns::{PatternRef, match_pattern};
+use crate::patterns::{PatternRef, match_pattern, match_pattern_skipping};
 use crate::pipeline::Stage;
 
 // --- public stage constructors ----------------------------------------------
@@ -69,6 +69,7 @@ pub fn partition_body_around_match(
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
+    skip_inner: Vec<String>,
 ) -> Result<Box<dyn Stage>, ParseError> {
     let head_split_by = match head_split_by.as_deref().filter(|p| !p.is_empty()) {
         Some(p) => Some(Regex::new(p).map_err(|e| {
@@ -85,6 +86,7 @@ pub fn partition_body_around_match(
         first_to,
         rest_to,
         tail_to,
+        skip_inner,
     }))
 }
 
@@ -146,6 +148,7 @@ struct PartitionBodyAroundMatch {
     first_to: Option<String>,
     rest_to: Option<String>,
     tail_to: Option<String>,
+    skip_inner: Vec<String>,
 }
 struct UnpackPairedBody {
     head_marker: String,
@@ -392,7 +395,7 @@ impl Stage for PartitionBodyAroundMatch {
     fn run(&self, data: StageData, _ctx: &mut Ctx) -> Result<StageData, ParseError> {
         let splits = data.expect_splits(self.name())?;
         let out = map_splits(splits, |mut s| {
-            if let Some(m) = match_pattern(&self.pattern, &s.body) {
+            if let Some(m) = match_pattern_skipping(&self.pattern, &s.body, &self.skip_inner) {
                 let head = s.body[..m.start].trim().to_string();
                 let tail = s.body[m.end..].trim().to_string();
 
@@ -781,6 +784,7 @@ mod tests {
                 Some("chinese_name".to_string()),
                 Some("variants".to_string()),
                 Some("bio_annotation".to_string()),
+                vec![],
             )
             .expect("compile head_split_by"),
             inputs,
@@ -812,12 +816,93 @@ mod tests {
                 None,
                 None,
                 None,
+                vec![],
             )
             .expect("compile head_split_by"),
             inputs,
         );
         assert!(out[0].payload.is_empty());
         assert_eq!(out[0].body, "no brackets here");
+    }
+
+    /// A book may spell more than one kind of tag with the same bracket
+    /// shape — a country marker and a name-type marker both in angle
+    /// brackets. `skip_inner` names the values that are not the tag this
+    /// stage is after, so the leftmost-match rule walks past them
+    /// instead of writing a name-type marker into the country key.
+    #[test]
+    fn partition_body_around_match_walks_past_a_skipped_inner_value() {
+        // "<surname>" precedes "[Japanese]"; only the latter is a
+        // country tag.
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let stage = || {
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle, BracketKind::Square],
+                },
+                "country".to_string(),
+                None,
+                Some("chinese_name".to_string()),
+                None,
+                None,
+                vec!["\u{59D3}".to_string(), "\u{540D}".to_string()],
+            )
+            .expect("compile head_split_by")
+        };
+        let out = run(stage(), vec![split("Chiura", body)]);
+        assert_eq!(out[0].payload.get("country").unwrap(), "\u{65E5}");
+        assert_eq!(
+            out[0].payload.get("chinese_name").unwrap(),
+            "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}",
+            "the skipped tag stays in the head rather than being cut out"
+        );
+    }
+
+    /// Without the list the leftmost match still wins, so the skip is a
+    /// declared opt-in and not a change of the default rule.
+    #[test]
+    fn partition_body_around_match_takes_the_leftmost_match_without_a_skip_list() {
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]";
+        let out = run(
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle, BracketKind::Square],
+                },
+                "country".to_string(),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )
+            .expect("compile head_split_by"),
+            vec![split("Chiura", body)],
+        );
+        assert_eq!(out[0].payload.get("country").unwrap(), "\u{59D3}");
+    }
+
+    /// Every candidate being skipped is the same as no match at all: the
+    /// entry passes through with its body intact.
+    #[test]
+    fn partition_body_around_match_skipping_every_candidate_is_no_match() {
+        let body = "\u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}";
+        let out = run(
+            partition_body_around_match(
+                PatternRef::BracketedTag {
+                    brackets: vec![BracketKind::Angle],
+                },
+                "country".to_string(),
+                None,
+                None,
+                None,
+                None,
+                vec!["\u{59D3}".to_string()],
+            )
+            .expect("compile head_split_by"),
+            vec![split("Chiura", body)],
+        );
+        assert!(out[0].payload.is_empty());
+        assert_eq!(out[0].body, body);
     }
 
     #[test]
@@ -831,6 +916,7 @@ mod tests {
             None,
             None,
             None,
+            vec![],
         );
         match result {
             Err(ParseError::CatalogViolation(msg)) => {

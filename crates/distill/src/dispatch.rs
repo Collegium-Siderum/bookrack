@@ -128,6 +128,7 @@ pub fn dispatch_stage(
             let first_to = get_string(params, "first_to", false)?;
             let rest_to = get_string(params, "rest_to", false)?;
             let tail_to = get_string(params, "tail_to", false)?;
+            let skip_inner = get_string_array(params, "skip_inner")?.unwrap_or_default();
             partition_body_around_match(
                 pattern,
                 head_key,
@@ -135,6 +136,7 @@ pub fn dispatch_stage(
                 first_to,
                 rest_to,
                 tail_to,
+                skip_inner,
             )
         }
         "unpack_paired_body" => {

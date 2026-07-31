@@ -192,6 +192,32 @@ field = "year_span.birth"
         assert_eq!(book.indexes[1].kind, "btree");
     }
 
+    /// `skip_inner` has to survive the book.toml decode to be worth
+    /// anything, so drive it through the real entry point: a body whose
+    /// leftmost tag is a name-type marker must still yield the country
+    /// tag that follows it.
+    #[test]
+    fn skip_inner_reaches_partition_body_around_match_from_book_toml() {
+        let toml = LEGAL_BOOK.replace(
+            "tail_to  = \"bio_annotation\" }",
+            "tail_to  = \"bio_annotation\",\n    \
+             skip_inner = [\"\u{59D3}\", \"\u{540D}\"] }",
+        );
+        assert!(toml.contains("skip_inner"), "fixture edit must apply");
+        let pipeline = BookToml::parse_str(&toml)
+            .expect("parse")
+            .into_pipeline(&catalogs())
+            .expect("into_pipeline");
+        // A headword, a gloss, an angle tag holding a name-type marker
+        // and a square tag holding the country. The angle tag is
+        // leftmost, so only the skip list yields the country.
+        let source = "<!-- page 1 (sheet 1) -->\n\
+             Chiura \u{5343}\u{6D66}\u{3008}\u{59D3}\u{3009}[\u{65E5}]\n";
+        let (drafts, _) = pipeline.run(source.to_string()).expect("run");
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].payload.get("country").unwrap(), "\u{65E5}");
+    }
+
     #[test]
     fn unknown_stage_in_book_toml_raises_stage_not_found() {
         let toml = LEGAL_BOOK.replace("\"split_pages\"", "\"non_existent_stage\"");

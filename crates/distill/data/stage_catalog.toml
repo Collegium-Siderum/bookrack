@@ -129,7 +129,7 @@ params = [
 [partition_body_around_match]
 input = "splits"
 output = "splits"
-description = "Partition the body around a pattern match; head goes to one payload key, tail to another, optionally splitting the head further by a regex."
+description = "Partition the body around a pattern match; head goes to one payload key, tail to another, optionally splitting the head further by a regex. `skip_inner` names captured values that do not count as a match, for a book whose tag shape carries more than one kind of tag."
 writes_properties = ["country", "chinese_name", "variants", "bio_annotation"]
 params = [
   { name = "pattern", type = "pattern_ref", required = true },
@@ -138,6 +138,7 @@ params = [
   { name = "first_to", type = "property_name", required = false },
   { name = "rest_to", type = "property_name", required = false },
   { name = "tail_to", type = "property_name", required = false },
+  { name = "skip_inner", type = "string[]", required = false, default = [] },
 ]
 
 [unpack_paired_body]
