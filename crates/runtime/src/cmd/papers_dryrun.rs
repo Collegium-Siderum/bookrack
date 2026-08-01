@@ -48,20 +48,23 @@ pub fn run(
     result
 }
 
-/// Open the papers dryrun's `pipeline_runs` row. A missing catalog
-/// skips tracking — a preview must not materialise a database for one
-/// lifecycle row — and an open failure demotes to a NULL run id.
+/// Open the papers dryrun's `pipeline_runs` row on the paper catalog,
+/// where the paper-side audit rows a rollup would aggregate live: the
+/// `pipeline_run_summary` foreign key does not cross databases. A
+/// missing catalog skips tracking — a preview must not materialise a
+/// database for one lifecycle row — and an open failure demotes to a
+/// NULL run id.
 fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<String> {
-    if !cfg.catalog_db().exists() {
+    if !cfg.papers_catalog_db().exists() {
         return None;
     }
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.papers_catalog_db()) {
         Ok(c) => c,
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                path = %cfg.catalog_db().display(),
-                "papers_dryrun: failed to open catalog.db for pipeline_run lifecycle",
+                path = %cfg.papers_catalog_db().display(),
+                "papers_dryrun: failed to open papers_catalog.db for pipeline_run lifecycle",
             );
             return None;
         }
@@ -75,7 +78,7 @@ fn close_papers_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>,
     let Some(id) = pipeline_run_id else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
+    let catalog = match bookrack_catalog::Catalog::open(&cfg.papers_catalog_db()) {
         Ok(c) => c,
         Err(err) => {
             tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close path catalog open failed");
@@ -310,4 +313,74 @@ fn prune_old_papers_dryruns(dir: &Path) -> Result<()> {
         let _ = fs::remove_file(sidecar_summary_path(jsonl));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bookrack_catalog::Catalog;
+
+    fn temp_cfg() -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        (dir, cfg)
+    }
+
+    fn run_commands(db: &Path) -> Vec<String> {
+        let catalog = Catalog::open_read_only(db).expect("open catalog read-only");
+        catalog
+            .list_pipeline_runs(None, None)
+            .expect("list pipeline_runs")
+            .into_iter()
+            .map(|run| run.command)
+            .collect()
+    }
+
+    /// The run row belongs to the catalog that holds the paper-side
+    /// audit rows: registering it on the book catalog would leave a
+    /// future rollup on the far side of the cross-database foreign
+    /// key. Both catalogs exist here, so the assertion discriminates
+    /// between the two rather than between "registered" and "not".
+    #[test]
+    fn run_registers_its_pipeline_run_on_the_paper_catalog() {
+        let (tmp, cfg) = temp_cfg();
+        drop(Catalog::open(&cfg.catalog_db()).expect("seed book catalog"));
+        drop(Catalog::open(&cfg.papers_catalog_db()).expect("seed paper catalog"));
+
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+        // No supported files under the input path: `run_inner` fails,
+        // and the run row still closes with a terminal status.
+        let _ = run(&cfg, &empty, None, false);
+
+        assert_eq!(
+            run_commands(&cfg.papers_catalog_db()),
+            vec!["papers_dryrun".to_string()],
+            "the paper catalog carries the run row",
+        );
+        assert!(
+            run_commands(&cfg.catalog_db()).is_empty(),
+            "the book catalog carries no paper-side run row",
+        );
+    }
+
+    /// A data root whose paper catalog does not exist yet keeps the
+    /// preview side-effect-free: no database is materialised for one
+    /// lifecycle row.
+    #[test]
+    fn a_missing_paper_catalog_skips_tracking_without_creating_one() {
+        let (tmp, cfg) = temp_cfg();
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+
+        let _ = run(&cfg, &empty, None, false);
+
+        assert!(
+            !cfg.papers_catalog_db().exists(),
+            "preview must not materialise papers_catalog.db",
+        );
+    }
 }

@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **runtime: `papers dryrun` registers its run on the paper catalog.**
+  The `pipeline_runs` row went to `catalog.db` while every paper-side
+  audit row a rollup would aggregate lives in `papers_catalog.db`, and
+  `pipeline_run_summary`'s foreign key does not cross databases. The
+  row now opens on `papers_catalog.db`, and the existence guard that
+  keeps a preview from materialising a database moved with it. Rows
+  written before this change stay where they are; `bookrack runs
+  list` reads both catalogs and merges, so nothing disappears from the
+  listing.
+
 ### Changed
 
 - **cli: `bookrack rpc call` usage failures print the three-part
