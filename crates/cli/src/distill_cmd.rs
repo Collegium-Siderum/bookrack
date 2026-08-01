@@ -23,7 +23,10 @@
 //! These commands open `Refs` directly rather than going through the
 //! daemon's control plane. SQLite's WAL mode makes the local handle
 //! safe alongside the daemon's reads; the daemon itself does not
-//! write to `reference.db` today.
+//! write to `reference.db` today. `build` takes the writable door,
+//! which migrates the database to the current revision; `verify` and
+//! `list` take the read-only one, which refuses a database at any
+//! other revision instead of migrating it on a read command's behalf.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -751,13 +754,10 @@ fn draft_to_new_entry(draft: &EntryDraft) -> NewEntry {
 fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<Vec<BookDiff>> {
     let books = resolve_paths(&args.paths, args.recursive)?;
 
-    // Guard the `reference.db` location at the entry point rather than
-    // letting `Refs::open` create an empty SQLite file at any path it
-    // is handed: a typo or wrong directory would otherwise produce a
-    // brand-new empty database, the diff would compare every drafted
-    // entry against an empty `reference_entries` table, and the report
-    // would mislabel the whole book as `added`. Mirrors the no-DB
-    // branch in `list`.
+    // Guard the `reference.db` location at the entry point so a typo or
+    // wrong directory is named as such: the read-only door below would
+    // refuse it too, but as a SQLite open failure that does not say
+    // which path was wrong. Mirrors the no-DB branch in `list`.
     if !paths.refs_path.exists() {
         bail!(
             "verify: reference.db not found at {}",
@@ -771,7 +771,10 @@ fn verify(paths: &DistillPaths, args: DistillVerifyArgs) -> Result<Vec<BookDiff>
         );
     }
 
-    let prod_refs = Refs::open(&paths.refs_path)
+    // Read-only: verify diffs the drafted entries against the live ones
+    // and mutates neither side, which includes not migrating a database
+    // a read command happened to open.
+    let prod_refs = Refs::open_read_only(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
 
     let distill_run_id = chrono::Utc::now().to_rfc3339();
@@ -904,7 +907,7 @@ fn list(paths: &DistillPaths, _args: DistillListArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let refs = Refs::open(&paths.refs_path)
+    let refs = Refs::open_read_only(&paths.refs_path)
         .with_context(|| format!("open {}", paths.refs_path.display()))?;
     let rows = read_list_rows(&refs)?;
 
@@ -1039,6 +1042,12 @@ stages = [
         book_dir
     }
 
+    /// Byte length of `path`, the coarsest observable that separates a
+    /// database a command only read from one it migrated.
+    fn file_len(path: &Path) -> u64 {
+        fs::metadata(path).expect("stat reference.db").len()
+    }
+
     fn make_paths(root: &Path) -> DistillPaths {
         DistillPaths {
             refs_path: bookrack_config::reference_db_in(root),
@@ -1088,6 +1097,43 @@ stages = [
             recursive: false,
             sample_lines,
         }
+    }
+
+    /// `list` and `verify` report the state of `reference.db`; they do
+    /// not repair it. A file that exists but has never been migrated
+    /// must come back as an error with the database untouched, not as
+    /// a silently migrated empty catalogue.
+    #[test]
+    fn list_and_verify_do_not_migrate_reference_db() {
+        let tmp = TempDir::new().expect("tmp");
+        let book_dir = seed_book_dir(tmp.path(), "tiny");
+        let paths = make_paths(tmp.path());
+        if let Some(parent) = paths.refs_path.parent() {
+            fs::create_dir_all(parent).expect("mkdir refs parent");
+        }
+        fs::File::create(&paths.refs_path).expect("create an unmigrated reference.db");
+
+        let listed = list(&paths, DistillListArgs {});
+        assert!(
+            listed.is_err(),
+            "list must refuse an unmigrated reference.db",
+        );
+        assert_eq!(
+            file_len(&paths.refs_path),
+            0,
+            "list migrated reference.db instead of reporting it",
+        );
+
+        let verified = verify(&paths, verify_args(vec![book_dir]));
+        assert!(
+            verified.is_err(),
+            "verify must refuse an unmigrated reference.db",
+        );
+        assert_eq!(
+            file_len(&paths.refs_path),
+            0,
+            "verify migrated reference.db instead of reporting it",
+        );
     }
 
     #[test]

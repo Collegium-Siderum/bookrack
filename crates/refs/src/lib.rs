@@ -51,6 +51,16 @@ pub enum RefsError {
     )]
     SchemaTooNew { found: i64, supported: i64 },
 
+    /// A read-only open found a `user_version` short of
+    /// [`TARGET_VERSION`]: the file exists but the migrations that
+    /// build the tables the read path queries have not run. The
+    /// writable [`Refs::open`] would migrate it forward; the read path
+    /// refuses rather than write to a database a read command opened.
+    #[error(
+        "reference.db schema is behind this build: found user_version {found}, expects {supported}"
+    )]
+    SchemaTooOld { found: i64, supported: i64 },
+
     /// A slug or field path failed identifier validation before being
     /// interpolated into a DDL statement.
     #[error("invalid identifier: {0}")]
@@ -86,15 +96,24 @@ impl Refs {
     ///
     /// Mirrors the corpus read-only door in intent: the strict read-only
     /// flags block writes and refuse a missing file rather than
-    /// materialize an empty schema, no migration runs, and a
-    /// `user_version` past [`TARGET_VERSION`] is refused with
-    /// [`RefsError::SchemaTooNew`]. A file at or below the target reads as
-    /// is — the writable [`Refs::open`] is the only path that migrates.
+    /// materialize an empty schema, and no migration runs. Both
+    /// directions of a `user_version` that is not [`TARGET_VERSION`] are
+    /// refused — [`RefsError::SchemaTooNew`] for a file this build
+    /// cannot read, [`RefsError::SchemaTooOld`] for one whose tables
+    /// have not been built yet — because the alternative is a query
+    /// against a schema the caller was not promised. The writable
+    /// [`Refs::open`] is the only path that migrates.
     pub fn open_read_only(path: &Path) -> RefsResult<Self> {
         let conn = bookrack_dbkit::open_production_strict_read_only(path)?;
         let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if found > TARGET_VERSION {
             return Err(RefsError::SchemaTooNew {
+                found,
+                supported: TARGET_VERSION,
+            });
+        }
+        if found < TARGET_VERSION {
+            return Err(RefsError::SchemaTooOld {
                 found,
                 supported: TARGET_VERSION,
             });
@@ -1206,6 +1225,31 @@ mod read_only_tests {
         assert!(
             format!("{err}").to_lowercase().contains("readonly"),
             "expected a readonly rejection, got {err}"
+        );
+    }
+
+    /// A `user_version` short of the target is refused: the file
+    /// exists but holds none of the tables the read path queries, and
+    /// migrating it is the writable door's job.
+    #[test]
+    fn open_read_only_refuses_older_schema() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("reference.db");
+        // A half-created database: present, empty, `user_version` 0.
+        std::fs::File::create(&path).expect("create an unmigrated reference.db");
+
+        let Err(err) = Refs::open_read_only(&path) else {
+            panic!("a schema behind the target must be refused");
+        };
+        assert!(
+            matches!(
+                err,
+                RefsError::SchemaTooOld {
+                    found,
+                    supported,
+                } if found == 0 && supported == TARGET_VERSION
+            ),
+            "expected SchemaTooOld, got {err}"
         );
     }
 

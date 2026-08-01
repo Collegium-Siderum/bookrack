@@ -40,6 +40,17 @@ release workflow extracts the matching section verbatim from this file.
   dry run no longer migrates a catalog whose schema is behind — run
   any write command to migrate it, as elsewhere on the read side.
 
+- **cli: `distill verify` and `distill list` no longer migrate
+  `reference.db`.** Both are read commands — `verify` documents itself
+  as diffing the two sides "without mutating either" — yet both took
+  the writable door, which holds a write lock and applies any pending
+  migration. They now take the read-only door, which additionally
+  refuses a database whose `user_version` is short of the target
+  (`SchemaTooOld`) rather than reading tables that may not exist yet:
+  run `distill build` to migrate. The same door backs the MCP
+  `reference.lookup` tool, so a half-created `reference.db` there now
+  reports the schema instead of failing on a missing table.
+
 - **runtime: `papers dryrun` registers its run on the paper catalog.**
   The `pipeline_runs` row went to `catalog.db` while every paper-side
   audit row a rollup would aggregate lives in `papers_catalog.db`, and
