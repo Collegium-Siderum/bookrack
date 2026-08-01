@@ -351,6 +351,8 @@ mod tests {
 
     use super::*;
     use crate::control::events::{DaemonState, DaemonStateFlag, EventStreamHandle};
+    use crate::control::jsonrpc::Request;
+    use crate::control::methods::DispatchOutcome;
     use crate::control::plan_registry::PlanRegistry;
 
     /// Build a [`MethodContext`] over a catalog-only ops handle rooted
@@ -459,6 +461,31 @@ mod tests {
             "a path-selected root has no registry name: {value}"
         );
         assert_eq!(value["data_dir"], dir.path().display().to_string());
+    }
+
+    /// Route one parameterless method through the real router and
+    /// return its result value.
+    async fn dispatch_result(method: &str, ctx: &MethodContext) -> Value {
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: method.to_string(),
+            params: None,
+        };
+        match crate::control::methods::dispatch(&req, ctx).await.unwrap() {
+            DispatchOutcome::Result(value) => value,
+            DispatchOutcome::Shutdown(value) => value,
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_status_answers_the_same_body_as_the_status_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = method_context(dir.path(), Some("main"));
+        assert_eq!(
+            dispatch_result("daemon.status", &ctx).await,
+            dispatch_result("status", &ctx).await,
+        );
     }
 
     #[test]

@@ -220,8 +220,10 @@ the exit-code bucket does not distinguish the two.
 - `daemon.version` — `{ version, started_at }`.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
-- `status` — `{ state, queue_pending, queue_running,
-  queue_worker_enabled, library, data_dir }`. `state` is one of
+- `daemon.status` — `{ state, queue_pending, queue_running,
+  queue_worker_enabled, library, data_dir }`. The canonical name;
+  `status` is a compatibility alias answered by the same handler.
+  `state` is one of
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
   `queue_worker_enabled` is `false` on a headless entry point without

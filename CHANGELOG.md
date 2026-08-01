@@ -10,6 +10,13 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: `daemon.status`, the canonical name for the `status`
+  RPC.** The daemon-wide snapshot now answers under the same
+  `daemon.*` namespace as `daemon.version`, `daemon.methods`, and
+  `daemon.shutdown`, so every control-plane method name carries a
+  namespace. The bare `status` name stays live as an alias on the same
+  handler; both appear in `daemon.methods`.
+
 - **cli: leaf commands start carrying an `Examples:` block in `--help`.**
   Each covered leaf's long help ends with at least two copy-pasteable
   invocations — one minimal, one non-trivial — rendered after the

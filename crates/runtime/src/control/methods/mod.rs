@@ -198,6 +198,7 @@ methods! {
     read   no_queue sync    "daemon.version"     => reads::daemon_version_rpc,
     write  no_queue sidebar "daemon.shutdown",
     read   no_queue sync    "status"             => reads::status_rpc,
+    read   no_queue sync    "daemon.status"      => reads::status_rpc,
     read   no_queue async   "doctor.gather"      => reads::doctor_gather_rpc,
     read   no_queue sync    "daemon.methods"     => meta::methods_rpc,
     read   no_queue sync    "daemon.mcp_tools"   => meta::mcp_tools_rpc,
