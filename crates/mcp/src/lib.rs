@@ -1001,7 +1001,10 @@ impl BookrackServer {
         name = "library.list_papers",
         description = "List papers known to the library, paginated. Mirrors \
                        library.list_books for the paper pipeline. Returns paper \
-                       summaries plus the total matching count and a truncated flag."
+                       summaries plus the total matching count and a truncated flag. \
+                       Each summary carries source_filename, the basename of the file \
+                       the paper was ingested from, which identifies a paper whose \
+                       title the identify pass did not extract."
     )]
     async fn library_list_papers(
         &self,
@@ -1026,7 +1029,8 @@ impl BookrackServer {
         description = "Search the paper registry by title substring (fuzzy), \
                        contributor name (exact), year (exact), venue substring \
                        (matched against container title), or DOI (exact). Mirrors \
-                       library.find_books for the paper pipeline."
+                       library.find_books for the paper pipeline; rows carry \
+                       source_filename like library.list_papers."
     )]
     async fn library_find_papers(
         &self,
@@ -1058,7 +1062,12 @@ impl BookrackServer {
         description = "Fetch the full bibliographic record for one paper by intake \
                        id. Mirrors library.show_book for the paper pipeline, \
                        toc_stats included; the abstract text is in the detail \
-                       response, not in list summaries. Returns null when no such \
+                       response, not in list summaries. Also returns the source-side \
+                       record of the ingested file (source_path / source_filename / \
+                       source_sha256 / intake_at / page_count / byte_size; \
+                       source_path is recorded verbatim at intake, so it may be \
+                       relative or no longer exist on disk — papers.fetch_source \
+                       locates the archived copy instead). Returns null when no such \
                        paper is registered."
     )]
     async fn library_show_paper(
@@ -2359,6 +2368,7 @@ mod tests {
             arxiv_id: Some("0000.00001".to_string()),
             container_title: Some("Synthetic Journal".to_string()),
             year: Some("2020".to_string()),
+            source_filename: Some("paper.pdf".to_string()),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value["intake_id"], 1);
@@ -2366,6 +2376,7 @@ mod tests {
         assert_eq!(value["arxiv_id"], "0000.00001");
         assert_eq!(value["container_title"], "Synthetic Journal");
         assert_eq!(value["year"], "2020");
+        assert_eq!(value["source_filename"], "paper.pdf");
     }
 
     #[test]

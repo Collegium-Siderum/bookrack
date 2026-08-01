@@ -663,6 +663,11 @@ pub struct PaperSummary {
     pub container_title: Option<String>,
     /// Year string as carried by the publication-attrs row.
     pub year: Option<String>,
+    /// Basename of the path recorded at intake time, which identifies
+    /// the file a row came from when [`Self::title`] is absent. The full
+    /// path and the source hash are in [`PaperDetail`]: a list page
+    /// carries the basename only.
+    pub source_filename: Option<String>,
 }
 
 /// One `library.show_paper` response. Mirrors [`BookDetail`] for the
@@ -679,6 +684,23 @@ pub struct PaperDetail {
     pub format: Option<String>,
     /// Coarse lifecycle status.
     pub status: String,
+    /// Path as recorded at intake time. May be relative or no longer
+    /// exist on disk — bookrack stores it verbatim from the original
+    /// submission and never re-canonicalises it. Unlike
+    /// [`PaperSource::path`], which locates the archived copy, this is
+    /// the file the operator submitted.
+    pub source_path: Option<String>,
+    /// Basename derived from [`Self::source_path`], if any.
+    pub source_filename: Option<String>,
+    /// Whole-file SHA-256 of the original source.
+    pub source_sha256: String,
+    /// When the file was first registered, ISO-8601 UTC.
+    pub intake_at: String,
+    /// Physical sheet count of the source PDF. `None` for rows
+    /// registered before the column existed.
+    pub page_count: Option<i64>,
+    /// Size of the source file in bytes, as recorded at intake.
+    pub byte_size: Option<i64>,
     /// Effective bibliographic attributes (paper scope), merged with
     /// any human override.
     pub effective_biblio: BTreeMap<String, String>,
@@ -796,6 +818,7 @@ impl PaperSummary {
             arxiv_id,
             container_title,
             year,
+            source_filename: source_filename(intake.original_path.as_deref()),
         }
     }
 }
@@ -817,11 +840,18 @@ impl PaperDetail {
         }
         let title = effective_biblio.get("title").cloned();
         let abstract_text = effective_biblio.get("abstract_text").cloned();
+        let source_filename = source_filename(intake.original_path.as_deref());
         PaperDetail {
             intake_id: intake.intake_id,
             title,
             format: intake.format,
             status: intake.status.as_str().to_string(),
+            source_path: intake.original_path,
+            source_filename,
+            source_sha256: intake.source_sha256,
+            intake_at: intake.intake_at,
+            page_count: intake.page_count,
+            byte_size: intake.byte_size,
             effective_biblio,
             overrides: overrides.into_iter().map(OverrideEntry::from_row).collect(),
             contributors: contributors

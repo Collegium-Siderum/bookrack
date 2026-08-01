@@ -57,6 +57,21 @@ release workflow extracts the matching section verbatim from this file.
   `library.show_metadata_audit` and `metadata show` embed widens with
   the detail read.
 
+- **query, cli, mcp: the paper reads report the source file too.**
+  `library.list_papers` / `library.find_papers` rows carry
+  `source_filename` and `library.show_paper` the full source-side
+  record — `source_path`, `source_filename`, `source_sha256`,
+  `intake_at`, `page_count`, `byte_size` — the same six fields
+  `library.show_book` reports. A paper whose title the identify pass
+  did not extract is now identifiable from a list page, and a paper
+  whose source copy was not archived, which `papers.fetch_source`
+  cannot reach at all, still reports where it came from. Both project
+  from the `Intake` row the reads already load, so neither issues an
+  extra query. `bookrack papers show` gains one `source_filename` row;
+  the rest of the record stays in `--json`, and a `bookrack papers
+  list` / `find` row without a title shows its source filename in the
+  title cell instead of a dash.
+
 ### Fixed
 
 - **search: a `kind=all` search runs both stores at once and embeds the
