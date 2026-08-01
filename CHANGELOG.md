@@ -34,6 +34,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack glean`, the top-level paper ingest verb.**
+  Equivalent to `bookrack papers ingest` — same arguments, same
+  pipeline — promoted to the top level so the paper side has a
+  pipeline verb symmetric with the book side's `bookrack ingest`.
+  `papers ingest` keeps working.
+
 - **cli: `bookrack rpc`, the typed control-plane escape hatch.**
   `bookrack rpc list` prints the method table the running daemon
   answers alongside its MCP endpoint tools; `bookrack rpc call

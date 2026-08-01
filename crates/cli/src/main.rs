@@ -285,6 +285,17 @@ enum Command {
         "ingest /path/to/book.epub --hold-for-metadata",
     ])]
     Ingest(IngestArgs),
+    /// Submit one or more papers for ingest.
+    ///
+    /// The paper-side pipeline verb, equivalent to `papers ingest` and
+    /// symmetric with the book-side `ingest`. Requires a running
+    /// bookrack daemon; the command exits with code 2 if no daemon is
+    /// found.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "glean /path/to/paper.pdf",
+        "glean /path/to/papers-dir/ --recursive",
+    ])]
+    Glean(bookrack_cli_grammar::PapersIngestArgs),
     /// Drive an intake from a derived source manifestation (OCR-only).
     ///
     /// The job is enqueued onto the persistent ingest queue and
@@ -1246,6 +1257,9 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
+        Command::Glean(args) => {
+            cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
+        }
         Command::Dryrun(args) => cmd::cli_client::dryrun::run(args, None, audit_profile).await,
         Command::Distill { action } => bookrack_cli::distill_cmd::run(&selection, action).await,
         Command::Runs { action } => bookrack_cli::runs_cmd::run(&selection, action),
@@ -1274,6 +1288,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
     };
     match command {
         Command::Ingest(_) => true,
+        Command::Glean(_) => true,
         Command::Intake { action } => matches!(action, IntakeAction::Ocr { .. }),
         Command::Dryrun(_) => true,
         Command::Metadata { action } => matches!(
@@ -1977,6 +1992,36 @@ mod tests {
         assert!(rendered.contains("list"), "{rendered}");
     }
 
+    /// The top-level alias is the same grammar as the namespaced verb,
+    /// so the two parse into equal argument bundles. Comparing the
+    /// parse products — rather than asserting both dispatch to the same
+    /// function — is what keeps the flags from drifting apart.
+    #[test]
+    fn glean_parses_into_the_same_args_as_papers_ingest() {
+        let Command::Glean(direct) =
+            Cli::try_parse_from(["bookrack", "glean", "/x/paper.pdf", "--recursive"])
+                .expect("the alias parses")
+                .command
+        else {
+            panic!("`glean` must parse into Command::Glean");
+        };
+        let Command::Papers {
+            action: PapersAction::Ingest(namespaced),
+        } = Cli::try_parse_from([
+            "bookrack",
+            "papers",
+            "ingest",
+            "/x/paper.pdf",
+            "--recursive",
+        ])
+        .expect("the namespaced verb parses")
+        .command
+        else {
+            panic!("`papers ingest` must parse into PapersAction::Ingest");
+        };
+        assert_eq!(direct, namespaced);
+    }
+
     #[test]
     fn remove_subcommand_parses() {
         for argv in [
@@ -2156,6 +2201,7 @@ mod tests {
         "distill",
         "doctor",
         "dryrun",
+        "glean",
         "ingest",
         "init",
         "intake",
@@ -2186,7 +2232,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 25),
+        ("bookrack", 26),
         ("bookrack audit-profile", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
