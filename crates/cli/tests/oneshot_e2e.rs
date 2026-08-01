@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 4 end-to-end coverage for the one-shot CLI subcommands.
+//! End-to-end coverage for the one-shot CLI subcommands.
 //!
 //! Asserts the daemon-not-running invariant: a one-shot subcommand
 //! that routes through the control plane exits with the documented
@@ -10,10 +10,10 @@
 //! `bookrack status` and `bookrack exec info` report the absence and
 //! exit 0 — plus `bookrack quit`, which has nothing to stop.
 //!
-//! The daemon-running path needs an Ollama-backed library bootstrap
-//! and lives behind `#[ignore]` in `control_writes`; Phase 4 adds
-//! nothing new there, so this test stays focused on the cheap-to-verify
-//! exit-code contract.
+//! The daemon-running path is covered by the control-plane integration
+//! tests in `bookrack-runtime`, which answer the daemon's embedder
+//! probe with `bookrack_test_support::EmbedStub` and so need no Ollama
+//! daemon. This test stays on the exit-code contract.
 
 #![cfg(unix)]
 
