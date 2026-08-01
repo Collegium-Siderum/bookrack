@@ -26,8 +26,8 @@ pub use migrate::TARGET_VERSION;
 pub use types::{IndexKind, IndexSpec, LookupResult, NewBook, NewEntry, NewOverlay, ResolvedEntry};
 
 /// Quality flag stamped on the hits of a self-cancelling redirect
-/// chain. Mirrors the catalog flag of the same name in mother doc
-/// §5.11.
+/// chain. Mirrors the flag of the same name in the distill quality-flag
+/// catalog (`crates/distill/data/quality_flags.toml`).
 pub const REDIRECT_LOOP_FLAG: &str = "redirect_loop";
 
 /// Errors from opening, migrating, or querying `reference.db`.
@@ -274,7 +274,7 @@ impl Refs {
     /// with one redirect hop, the `primary_by_authority` index, and a
     /// latin-key fallback retry.
     ///
-    /// Redirect rules (mother doc §5.5):
+    /// Redirect rules:
     /// - If the query yields exactly one hit and that hit's payload
     ///   carries `redirect_to`, the target is looked up under the same
     ///   `book_slug` scope; on success the result reports the target's

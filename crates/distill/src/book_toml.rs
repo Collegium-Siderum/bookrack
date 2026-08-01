@@ -229,7 +229,7 @@ field = "year_span.birth"
     }
 
     #[test]
-    fn script_escape_hatch_raises_script_ref_forbidden_with_manual_citation() {
+    fn script_escape_hatch_raises_script_ref_forbidden_stating_the_reservation() {
         let toml = LEGAL_BOOK.replace("\"split_pages\"", "\"@script::foo\"");
         let book = BookToml::parse_str(&toml).unwrap();
         let err = book.into_pipeline(&catalogs()).unwrap_err();
@@ -239,13 +239,13 @@ field = "year_span.birth"
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("§1.4"),
-            "ScriptRefForbidden must cite manual §1.4, got: {msg}"
+            msg.contains("reserved for a future embedded scripting engine"),
+            "ScriptRefForbidden must say why the hatch is closed, got: {msg}"
         );
     }
 
     #[test]
-    fn llm_hook_reference_raises_llm_hook_not_implemented_with_section_citation() {
+    fn llm_hook_reference_raises_llm_hook_not_implemented_stating_the_deferral() {
         let toml = LEGAL_BOOK.replace("\"split_pages\"", "\"@llm::bar\"");
         let book = BookToml::parse_str(&toml).unwrap();
         let err = book.into_pipeline(&catalogs()).unwrap_err();
@@ -255,8 +255,8 @@ field = "year_span.birth"
         }
         let msg = err.to_string();
         assert!(
-            msg.contains("§8.1"),
-            "LlmHookNotImplemented must cite mother doc §8.1, got: {msg}"
+            msg.contains("deferred past v1"),
+            "LlmHookNotImplemented must say the hook is deferred, got: {msg}"
         );
     }
 

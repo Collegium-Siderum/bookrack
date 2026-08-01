@@ -1,11 +1,9 @@
 # Stage catalog: the public surface of every distill builtin.
 #
 # Each table declares one stage that a book.toml's `parser.stages`
-# may reference. Mother doc §5.2 enumerates the canonical set; the
-# three `(c)`-tier inline stages from the spike were promoted to
-# declarative builtins (§1.4 of the execution manual). `partition_body_around_match`,
-# `walk_anchors_per_lang`, and `unpack_paired_body` are the §1.4
-# additions.
+# may reference. `partition_body_around_match`,
+# `walk_anchors_per_lang`, and `unpack_paired_body` were promoted from
+# inline spike code into declarative builtins.
 #
 # `input` and `output` name a `StageData` variant (source / pages /
 # blocks / raws / splits / drafts). `writes_properties` declares the

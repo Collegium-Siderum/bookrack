@@ -59,9 +59,9 @@ impl AnchorRule {
     }
 }
 
-/// Per-language anchor configuration used by
-/// `walk_anchors_per_lang` (§1.4 of the execution manual). One rule
-/// is selected per block based on the block's `lang` tag.
+/// Per-language anchor configuration used by the
+/// `walk_anchors_per_lang` stage. One rule is selected per block
+/// based on the block's `lang` tag.
 #[derive(Debug, Clone)]
 pub struct LangAnchorRule {
     pub lang: String,

@@ -1765,8 +1765,8 @@ impl BookrackServer {
     // ----- reference-book surface (v2 distill phase 9) -----
 
     /// Polymorphic reference-book lookup. Returns the
-    /// disambiguation array shape from mother doc §5.10 even for a
-    /// single-hit query, so callers do not branch on cardinality.
+    /// disambiguation array shape even for a single-hit query, so
+    /// callers do not branch on cardinality.
     #[tool(
         name = "reference.lookup",
         description = "Look up a reference-book entry by its normalized key. \
@@ -1799,7 +1799,7 @@ impl BookrackServer {
         name = "reference.overlay_set",
         description = "Layer a user edit on top of one reference entry. Every key \
                        in `overlay` must be in property_catalog.toml. `reason` is \
-                       recorded on the overlay row (mother doc §5.8). The \
+                       a free-text edit summary recorded on the overlay row. The \
                        `edited_at` stamp is set to the daemon's current UTC time."
     )]
     async fn reference_overlay_set(

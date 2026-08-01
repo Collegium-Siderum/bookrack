@@ -114,6 +114,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **distill, mcp: the reference-book surface states its own reasons.**
+  The `reference.overlay_set` tool description, the `min_severity`
+  argument description, and the two loader errors for `@script::` /
+  `@llm::` stage references each pointed at a section number of a
+  document that is not in the repository, so nothing they cited could
+  be looked up. Each now carries the fact itself: `reason` is a
+  free-text edit summary recorded on the overlay row, the `@script::`
+  hatch is reserved for a future embedded scripting engine, and the
+  `@llm::` hook is deferred past v1. The three distill catalog TOMLs
+  lose the same pointers, which moves
+  `Catalogs::embedded_fingerprint()` — audit rows written from here on
+  carry a new `profile_ref`, and existing rows group under the old one.
+
 - **cli: a session lock that cannot be read is reported instead of
   skipped.** The library pre-flight treats two very different states
   the same way — nobody holds the lock, which is every machine without

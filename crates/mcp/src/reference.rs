@@ -2,9 +2,9 @@
 
 //! Reference-book MCP surface.
 //!
-//! Mirrors mother doc §5.6 (`reference.lookup`) and §5.8
-//! (`reference.overlay_set`). The two `pub(super)` logic helpers run
-//! the actual queries against an open [`Refs`] handle; the
+//! Backs the `reference.lookup` and `reference.overlay_set` tools.
+//! The two `pub(super)` logic helpers run the actual queries against
+//! an open [`Refs`] handle; the
 //! [`crate::BookrackServer`] tool methods are thin shims that open
 //! [`Refs`], read [`Catalogs`] from the process-wide cache, dispatch
 //! to one of these helpers, and serialize the result.
@@ -18,9 +18,9 @@ use rmcp::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-/// Argument shape for the `reference.lookup` tool. Mirrors mother doc
-/// §5.6 / §5.10. `library` is `Option<String>` to honour the same
-/// default-or-explicit semantics used by every other read tool.
+/// Argument shape for the `reference.lookup` tool. `library` is
+/// `Option<String>` to honour the same default-or-explicit semantics
+/// used by every other read tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ReferenceLookupArgs {
     pub library: Option<String>,
@@ -36,7 +36,7 @@ pub struct ReferenceLookupArgs {
     /// Optional quality_flag-severity floor. When set, hits whose
     /// flags do not include at least one flag at or above this
     /// severity drop out. Recognised values: `ok`, `info`, `warn`,
-    /// `error` (mother doc §5.11).
+    /// `error`.
     pub min_severity: Option<String>,
     /// Book slugs whose entries must not be returned. Only meaningful
     /// with `book = "*"`, where the lookup spans every registered
@@ -46,9 +46,9 @@ pub struct ReferenceLookupArgs {
     pub exclude_books: Option<Vec<String>>,
 }
 
-/// Argument shape for the `reference.overlay_set` tool. Mirrors
-/// mother doc §5.8. `library` is required for write tools, so this
-/// carries a bare `String` rather than `Option<String>`.
+/// Argument shape for the `reference.overlay_set` tool. `library` is
+/// required for write tools, so this carries a bare `String` rather
+/// than `Option<String>`.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ReferenceOverlaySetArgs {
     pub library: String,
@@ -57,8 +57,7 @@ pub struct ReferenceOverlaySetArgs {
     /// JSON object whose keys must be present in the property
     /// catalog (`crates/distill/data/property_catalog.toml`).
     pub overlay: JsonValue,
-    /// Free-text edit reason recorded on the overlay row (mother
-    /// doc §5.8 borrowed from MediaWiki edit summary).
+    /// Free-text edit summary recorded on the overlay row.
     pub reason: String,
 }
 
