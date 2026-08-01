@@ -268,6 +268,16 @@ pub async fn search_in_paper<E: Embedder>(
 /// is absent and [`OpsError::PapersBackendNotConfigured`] when the
 /// paper-side is absent.
 ///
+/// The two stores are recalled concurrently. When both libraries serve
+/// the same embedding model — the shape a daemon builds, since one
+/// embed configuration drives both — the query is embedded once and the
+/// vector is recalled against each store; libraries reporting different
+/// models fall back to embedding per store, still concurrently, because
+/// their vectors live in different spaces. The shared embed happens
+/// before either store is consulted, so a unified search over two empty
+/// stores pays one embed round trip that the per-store ops would have
+/// skipped.
+///
 /// No retrieval sidecar is recorded here: the merged result spans two
 /// stores with two distinct corpus fingerprints, which the
 /// single-fingerprint `retrieval_calls` row cannot represent. The
@@ -305,12 +315,19 @@ pub async fn search_unified<E: Embedder>(
                 Some(stage) => stage.top_k_in,
                 None => effective_k,
             };
-            let mut combined = books
-                .search_with(query, book_overrides, Some(recall_k))
-                .await?;
-            let paper_hits = papers
-                .search_with(query, paper_overrides, Some(recall_k))
-                .await?;
+            let (book_hits, paper_hits) = if books.embed_model() == papers.embed_model() {
+                let query_vector = books.embed_query(query).await?;
+                tokio::try_join!(
+                    books.search_with_vector(&query_vector, book_overrides, Some(recall_k)),
+                    papers.search_with_vector(&query_vector, paper_overrides, Some(recall_k)),
+                )?
+            } else {
+                tokio::try_join!(
+                    books.search_with(query, book_overrides, Some(recall_k)),
+                    papers.search_with(query, paper_overrides, Some(recall_k)),
+                )?
+            };
+            let mut combined = book_hits;
             combined.extend(paper_hits);
             combined.sort_by(|a, b| {
                 a.distance

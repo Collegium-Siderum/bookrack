@@ -59,6 +59,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **search: a `kind=all` search runs both stores at once and embeds the
+  query once.** The unified search recalled the book side to completion
+  before it started the paper side, and each side embedded the query
+  through its own client, so one search paid two embed round trips and
+  two recalls end to end. It now embeds once — both stores are served by
+  one embed configuration, so the vector is the same — and recalls the
+  two stores as a single join. A profile with a reranker gains the most:
+  each side recalls the full candidate window there, which is the widest
+  the serial half was. Results, ordering, and the per-side backend
+  errors are unchanged. Libraries that report different embedding models
+  keep a round trip each, since their vectors are not interchangeable,
+  and are still searched as one join.
+
 - **diagnose: a host without `HOME` still redacts its home directory.**
   The scrubber's home-directory rule read `HOME` and nothing else, so a
   process started without that variable — a container, a service

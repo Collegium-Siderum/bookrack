@@ -13,6 +13,7 @@ use std::future::Future;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bookrack_catalog::{Catalog, NewIntake};
@@ -59,6 +60,84 @@ impl Embedder for Fixed {
     }
 }
 
+/// How many scheduler turns an in-flight [`Recording::embed_batch`]
+/// gives a second call to join it. One turn is enough for a
+/// `try_join!` to poll its other branch; the slack absorbs any extra
+/// pending step either branch takes on the way to its embedder.
+const RENDEZVOUS_TURNS: usize = 64;
+
+/// A [`Fixed`] that records how it was called: `calls` counts every
+/// `embed_batch`, and `peak` is the high-water mark of calls in flight
+/// at once. Every clone shares both counters, so two libraries built
+/// from one embedder are observed together — the daemon's shape, where
+/// each library holds its own client against the same model.
+///
+/// Each call waits [`RENDEZVOUS_TURNS`] scheduler turns for a second
+/// one to arrive before answering, which is what makes `peak`
+/// discriminate a concurrent join from two awaits in sequence: awaits in
+/// sequence never overlap, so `peak` stays 1.
+#[derive(Clone)]
+struct Recording {
+    vector: Vec<f32>,
+    calls: Arc<AtomicUsize>,
+    in_flight: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+}
+
+impl Recording {
+    fn new(vector: Vec<f32>) -> Recording {
+        Recording {
+            vector,
+            calls: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Zero the counters. Called after the libraries are open, because
+    /// `Library::open` embeds a dimension probe per library and the
+    /// assertions are about the search that follows.
+    fn rearm(&self) {
+        self.calls.store(0, Ordering::SeqCst);
+        self.in_flight.store(0, Ordering::SeqCst);
+        self.peak.store(0, Ordering::SeqCst);
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+impl Embedder for Recording {
+    fn embed_batch(
+        &self,
+        texts: &[String],
+    ) -> impl Future<Output = EmbedResult<Vec<Vec<f32>>>> + Send {
+        let vector = self.vector.clone();
+        let n = texts.len();
+        let calls = Arc::clone(&self.calls);
+        let in_flight = Arc::clone(&self.in_flight);
+        let peak = Arc::clone(&self.peak);
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            for _ in 0..RENDEZVOUS_TURNS {
+                if in_flight.load(Ordering::SeqCst) >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![vector; n])
+        }
+    }
+}
+
 /// A one-leaf extraction whose body is `text`.
 fn extraction(text: &str) -> Extraction {
     Extraction {
@@ -95,6 +174,17 @@ struct StorePaths {
 }
 
 async fn seed_store(root: &Path, name: &str, chunks: &[(&str, Vec<f32>)]) -> StorePaths {
+    seed_store_with_model(root, name, chunks, MODEL).await
+}
+
+/// Like [`seed_store`] but stamps the corpus with `model`, so the store
+/// can be opened by a library serving a model other than [`MODEL`].
+async fn seed_store_with_model(
+    root: &Path,
+    name: &str,
+    chunks: &[(&str, Vec<f32>)],
+    model: &str,
+) -> StorePaths {
     let corpus_db = root.join(format!("{name}-corpus.db"));
     let catalog_db = root.join(format!("{name}-catalog.db"));
     let lancedb_dir = root.join(format!("{name}-lancedb"));
@@ -115,7 +205,7 @@ async fn seed_store(root: &Path, name: &str, chunks: &[(&str, Vec<f32>)]) -> Sto
     )
     .expect("structure");
     corpus
-        .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
+        .reconcile_index_stamps(&current_index_stamps(model, DIM as u32))
         .expect("stamp");
     let leaf = corpus
         .book_nodes(report.book_root_id)
@@ -226,13 +316,23 @@ async fn seed_multi_book_store(
     }
 }
 
-async fn open_library(paths: &StorePaths, embedder: Fixed) -> Library<Fixed> {
+async fn open_library<E: Embedder>(paths: &StorePaths, embedder: E) -> Library<E> {
+    open_library_with_model(paths, embedder, MODEL).await
+}
+
+/// Like [`open_library`] but declares `model` as the library's served
+/// embedding model. The corpus must carry the matching stamp.
+async fn open_library_with_model<E: Embedder>(
+    paths: &StorePaths,
+    embedder: E,
+    model: &str,
+) -> Library<E> {
     Library::open(
         paths.corpus_db.clone(),
         paths.catalog_db.clone(),
         &paths.lancedb_dir,
         embedder,
-        MODEL.to_string(),
+        model.to_string(),
         5,
         bookrack_ingest::CHUNK_VERSION,
     )
@@ -240,7 +340,7 @@ async fn open_library(paths: &StorePaths, embedder: Fixed) -> Library<Fixed> {
     .expect("open library")
 }
 
-fn ops_over(tmp: &TempDir, paths: &StorePaths, library: Library<Fixed>) -> Ops<Fixed> {
+fn ops_over<E: Embedder>(tmp: &TempDir, paths: &StorePaths, library: Library<E>) -> Ops<E> {
     Ops::with_library(
         library,
         paths.corpus_db.clone(),
@@ -252,12 +352,12 @@ fn ops_over(tmp: &TempDir, paths: &StorePaths, library: Library<Fixed>) -> Ops<F
     )
 }
 
-fn attach_papers(
-    ops: Ops<Fixed>,
+fn attach_papers<E: Embedder>(
+    ops: Ops<E>,
     tmp: &TempDir,
     paths: &StorePaths,
-    library: Library<Fixed>,
-) -> Ops<Fixed> {
+    library: Library<E>,
+) -> Ops<E> {
     ops.with_papers(
         library,
         PapersPaths {
@@ -507,6 +607,111 @@ async fn search_unified_orders_across_stores_and_truncates_to_top_k() {
         citations[0].distance,
         citations[1].distance
     );
+}
+
+/// Both stores are served by the same model, so the query is embedded
+/// once and the one vector is recalled against each store.
+#[tokio::test]
+async fn search_unified_embeds_the_query_once_when_both_stores_share_a_model() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let book_paths = seed_store(
+        tmp.path(),
+        "books",
+        &[("book near", vec![0.1, 0.9, 0.0, 0.0])],
+    )
+    .await;
+    let paper_paths = seed_store(
+        tmp.path(),
+        "papers",
+        &[("paper near", vec![0.5, 0.5, 0.0, 0.0])],
+    )
+    .await;
+    let embedder = Recording::new(vec![0.0, 1.0, 0.0, 0.0]);
+    let book_library = open_library(&book_paths, embedder.clone()).await;
+    let paper_library = open_library(&paper_paths, embedder.clone())
+        .await
+        .with_kind(ItemKind::Paper);
+    let ops = attach_papers(
+        ops_over(&tmp, &book_paths, book_library),
+        &tmp,
+        &paper_paths,
+        paper_library,
+    );
+    embedder.rearm();
+
+    let citations = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .expect("unified search");
+
+    assert_eq!(
+        embedder.calls(),
+        1,
+        "one query, one embed round trip for both stores",
+    );
+    // The shared vector must still reach both stores: a hit from each
+    // side, in distance order.
+    assert_eq!(citations.len(), 2);
+    assert_eq!(citations[0].kind, ItemKind::Book);
+    assert_eq!(citations[1].kind, ItemKind::Paper);
+}
+
+/// Libraries serving different models embed into different spaces, so
+/// the shared vector is off the table — but the two searches still run
+/// as one join, which `peak` observes.
+#[tokio::test]
+async fn search_unified_embeds_per_store_when_the_models_differ() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let book_paths = seed_store(
+        tmp.path(),
+        "books",
+        &[("book near", vec![0.1, 0.9, 0.0, 0.0])],
+    )
+    .await;
+    let paper_paths = seed_store_with_model(
+        tmp.path(),
+        "papers",
+        &[("paper near", vec![0.5, 0.5, 0.0, 0.0])],
+        "other-model",
+    )
+    .await;
+    let embedder = Recording::new(vec![0.0, 1.0, 0.0, 0.0]);
+    let book_library = open_library(&book_paths, embedder.clone()).await;
+    let paper_library = open_library_with_model(&paper_paths, embedder.clone(), "other-model")
+        .await
+        .with_kind(ItemKind::Paper);
+    let ops = attach_papers(
+        ops_over(&tmp, &book_paths, book_library),
+        &tmp,
+        &paper_paths,
+        paper_library,
+    );
+    embedder.rearm();
+
+    let citations = search_unified(
+        &ops,
+        "q",
+        SearchOptions::default(),
+        SearchOptions::default(),
+        None,
+    )
+    .await
+    .expect("unified search");
+
+    assert_eq!(embedder.calls(), 2, "each store embeds under its own model",);
+    assert_eq!(
+        embedder.peak(),
+        2,
+        "both stores are searched as one join, not one after the other",
+    );
+    assert_eq!(citations.len(), 2);
+    assert_eq!(citations[0].kind, ItemKind::Book);
+    assert_eq!(citations[1].kind, ItemKind::Paper);
 }
 
 #[tokio::test]

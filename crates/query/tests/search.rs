@@ -326,6 +326,40 @@ async fn excluding_a_book_removes_its_hits_from_whole_library_search() {
 }
 
 #[tokio::test]
+async fn searching_with_a_prepared_vector_matches_the_embedding_path() {
+    let (_dir, library) = two_book_library().await;
+
+    let overrides = SearchOptions {
+        exclude_partitions: vec![PartitionIdx::new(1)],
+        ..SearchOptions::default()
+    };
+    let embedded = library
+        .search_with("anything", overrides.clone(), None)
+        .await
+        .expect("search");
+
+    // The same query, embedded by the caller instead of by the library:
+    // same hits, same order, same citation shape, overrides included.
+    let vector = library
+        .embed_query("anything")
+        .await
+        .expect("embed the query");
+    let prepared = library
+        .search_with_vector(&vector, overrides, None)
+        .await
+        .expect("search with a prepared vector");
+
+    assert!(!embedded.is_empty(), "the fixture must answer the query");
+    // `Citation` is not `PartialEq`; its `Debug` covers every field, so
+    // comparing the rendered forms holds the two paths to the whole
+    // struct rather than to a hand-picked subset.
+    let rendered = |cs: &[bookrack_query::Citation]| -> Vec<String> {
+        cs.iter().map(|c| format!("{c:?}")).collect()
+    };
+    assert_eq!(rendered(&prepared), rendered(&embedded));
+}
+
+#[tokio::test]
 async fn search_in_book_ignores_exclusions() {
     let (_dir, library) = two_book_library().await;
 

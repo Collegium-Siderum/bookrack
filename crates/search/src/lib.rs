@@ -198,18 +198,49 @@ pub async fn retrieve_with<E: Embedder>(
     overrides: SearchOptions,
     top_k: usize,
 ) -> Result<Vec<SearchHit>> {
+    let query_vector = embed_query(query, embedder).await?;
+    recall_with(&query_vector, store, lancedb_dir, overrides, top_k).await
+}
+
+/// Embed `query` for retrieval: wrap it in the model's query prompt and
+/// return the single vector the embedder answers with.
+///
+/// The embedding half of [`retrieve_with`], separated so a caller that
+/// queries several stores built under the same model pays one embed
+/// round trip instead of one per store. An empty or whitespace-only
+/// query is [`SearchError::EmptyQuery`]; an embedder that answers with
+/// no vector is [`SearchError::EmptyEmbedding`].
+pub async fn embed_query<E: Embedder>(query: &str, embedder: &E) -> Result<Vec<f32>> {
     if query.trim().is_empty() {
         return Err(SearchError::EmptyQuery);
     }
     let input = build_query_input(query);
     let embed_started = Instant::now();
-    let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
-    let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
+    let mut vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
+    if vectors.is_empty() {
+        return Err(SearchError::EmptyEmbedding);
+    }
     tracing::debug!(
         elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
         "embedded query"
     );
+    Ok(vectors.swap_remove(0))
+}
 
+/// Recall the `top_k` nearest passages to an already-embedded query.
+///
+/// The recall half of [`retrieve_with`], with the same overrides /
+/// meta-default merge order. `query_vector` must come from an embedder
+/// serving the model this store was built under — the store checks the
+/// width, not the model, so a vector from a different model of equal
+/// width recalls silently wrong passages.
+pub async fn recall_with(
+    query_vector: &[f32],
+    store: &ChunkStore,
+    lancedb_dir: &Path,
+    overrides: SearchOptions,
+    top_k: usize,
+) -> Result<Vec<SearchHit>> {
     let base = options_from_meta(store, lancedb_dir)?;
     let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
@@ -237,23 +268,12 @@ pub async fn retrieve_with_partition<E: Embedder>(
     top_k: usize,
     partition: PartitionIdx,
 ) -> Result<Vec<SearchHit>> {
-    if query.trim().is_empty() {
-        return Err(SearchError::EmptyQuery);
-    }
-    let input = build_query_input(query);
-    let embed_started = Instant::now();
-    let vectors = embedder.embed_batch(std::slice::from_ref(&input)).await?;
-    let query_vector = vectors.first().ok_or(SearchError::EmptyEmbedding)?;
-    tracing::debug!(
-        elapsed_ms = embed_started.elapsed().as_secs_f64() * 1e3,
-        "embedded query"
-    );
-
+    let query_vector = embed_query(query, embedder).await?;
     let base = options_from_meta(store, lancedb_dir)?;
     let opts = merge_options(overrides, base);
     let recall_started = Instant::now();
     let hits = store
-        .search_partition_with(query_vector, partition, top_k, opts)
+        .search_partition_with(&query_vector, partition, top_k, opts)
         .await?;
     tracing::debug!(
         hits = hits.len(),

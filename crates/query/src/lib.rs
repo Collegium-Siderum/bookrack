@@ -18,7 +18,9 @@ use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_embed::Embedder;
 use bookrack_normalize::NORMALIZE_VERSION;
-use bookrack_search::{cite, env_overrides, retrieve_with, retrieve_with_partition};
+use bookrack_search::{
+    cite, embed_query, env_overrides, recall_with, retrieve_with, retrieve_with_partition,
+};
 use bookrack_vectors::ChunkStore;
 pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
@@ -239,6 +241,15 @@ impl<E: Embedder> Library<E> {
         self.default_top_k
     }
 
+    /// The embedding model this library serves, as passed to
+    /// [`Self::open`]. Two libraries reporting the same model embed a
+    /// query into the same vector space, which is what lets a caller
+    /// searching both of them embed once and recall twice through
+    /// [`Self::search_with_vector`].
+    pub fn embed_model(&self) -> &str {
+        &self.embed_model
+    }
+
     /// Search the library for passages matching `query`, nearest first.
     /// `top_k` falls back to the configured default when `None`.
     ///
@@ -278,6 +289,44 @@ impl<E: Embedder> Library<E> {
             top_k,
         )
         .await?;
+        let corpus = Corpus::open_read_only(&self.corpus_db)?;
+        let catalog = Catalog::open_read_only(&self.catalog_db)?;
+        let citations = cite(&corpus, &catalog, hits, self.kind)?;
+        Ok(citations)
+    }
+
+    /// Embed `query` with this library's warm embedder, producing the
+    /// vector [`Self::search_with_vector`] recalls with.
+    ///
+    /// Split out of [`Self::search_with`] so a caller searching several
+    /// libraries that report the same [`Self::embed_model`] pays one
+    /// embed round trip for the whole fan-out.
+    pub async fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        Ok(embed_query(query, &self.embedder).await?)
+    }
+
+    /// Variant of [`Self::search_with`] that recalls with a query vector
+    /// the caller already holds, skipping this library's embedder.
+    ///
+    /// `query_vector` must come from an embedder serving this library's
+    /// [`Self::embed_model`] — the store checks only the width, so a
+    /// vector embedded under a different model of equal width recalls
+    /// silently wrong passages. Everything after recall is identical to
+    /// [`Self::search_with`]: the same override merge, the same
+    /// citation step, the same `kind` stamped on each hit.
+    pub async fn search_with_vector(
+        &self,
+        query_vector: &[f32],
+        overrides: SearchOptions,
+        top_k: Option<usize>,
+    ) -> Result<Vec<Citation>> {
+        self.ensure_store().await?;
+        let guard = self.store.read().await;
+        let Some(store) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let top_k = top_k.unwrap_or(self.default_top_k);
+        let hits = recall_with(query_vector, store, &self.lancedb_dir, overrides, top_k).await?;
         let corpus = Corpus::open_read_only(&self.corpus_db)?;
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits, self.kind)?;
