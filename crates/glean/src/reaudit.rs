@@ -169,6 +169,11 @@ fn report_for_intake(
 /// together. The `glean-{op}-` prefix distinguishes paper-side
 /// reaudit rows from ingest's `ingest-{op}-` prefix when a mixed log
 /// is inspected.
+///
+/// This is `item_pipeline_audit`'s own namespace, not the
+/// `pipeline_runs` registry: a per-item reaudit recomputes one
+/// rollup for one intake and stays out of `bookrack runs list`,
+/// which registers whole-library passes.
 fn maintenance_run_id(op: &str) -> String {
     let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     format!("glean-{op}-{nanos}")

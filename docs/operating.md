@@ -257,13 +257,22 @@ snapshots the last N events and exits, and `--level` drops everything
 below a severity. `--json` emits newline-delimited `LogEvent` records.
 
 `bookrack runs` reports the pipeline-run registry — one row per
-top-level pipeline command (ingest, dryrun, distill build, glean),
-grouped with the audit rows it wrote:
+top-level command that drives a pipeline over a set of items, grouped
+with the audit rows it wrote:
 
 ```
 bookrack runs list [--last N] [--command <name>]
 bookrack runs show <run-id>       # verdict / flag / coverage histograms
 ```
+
+The registered command names are `ingest`, `dryrun`, `papers_dryrun`,
+`distill_build`, `glean`, and the whole-library maintenance passes
+`reembed`, `reset`, `papers_reembed`, and `papers_reset`; any of them
+is a valid `--command` filter. The passes write no audit rows, so
+`runs show` renders them without the histograms. Per-item verbs such
+as `metadata reaudit` are deliberately not registered — they
+recompute one intake's rollup, and their trail lives on the
+`item_pipeline_audit` chain instead.
 
 `bookrack retrieval` inspects the `retrieval_calls` sidecar — one row
 per single-store search invocation, stamped with the 16-hex corpus

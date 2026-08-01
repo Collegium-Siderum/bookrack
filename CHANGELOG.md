@@ -8,6 +8,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Added
+
+- **runtime: the whole-library maintenance passes register in
+  `pipeline_runs`.** `vectors reset`, `vectors reembed`, and their
+  paper-side peers each open a run row at entry and close it with a
+  terminal status, so `bookrack runs list` shows that a pass happened
+  and `--command reset` (or `reembed` / `papers_reset` /
+  `papers_reembed`) filters to it. A reset declined at the
+  confirmation prompt registers nothing, and the reembed plan leg —
+  a dry run — stays out of the registry. These passes write no
+  `book_distill_audit` / `node_paper_audit` rows, so they carry no
+  rollup and `runs show` renders them header-only, the same way it
+  already does for `ingest` and `dryrun`. Per-item verbs such as
+  `metadata reaudit` remain outside the registry by design; their
+  trail stays on `item_pipeline_audit`.
+
 ### Fixed
 
 - **runtime: `papers dryrun` registers its run on the paper catalog.**

@@ -21,6 +21,7 @@ pub mod doctor;
 pub mod embed_helpers;
 pub mod ops_helpers;
 pub mod pdfium_install;
+pub mod pipeline_run_helpers;
 pub mod profile;
 pub mod queue;
 pub mod render;

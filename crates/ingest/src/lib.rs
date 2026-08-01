@@ -994,6 +994,10 @@ pub(crate) fn audit_as(
 /// entry-point prefix plus a nanosecond timestamp. All books touched by
 /// one invocation share the id, so `pipeline_audit_for_run` groups the
 /// whole pass.
+///
+/// This id lives in `item_pipeline_audit`'s namespace and is separate
+/// from the `pipeline_runs` registry the `reembed` / `reset` commands
+/// open at their entry point; the two are not expected to match.
 pub(crate) fn maintenance_run_id(prefix: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
