@@ -54,15 +54,13 @@ pub const GLOBAL_ARG_IDS: &[&str] = &[
 pub const EXAMPLES_OWED: &[&str] = &[];
 
 /// Leaves whose examples are deliberately deferred behind a rename
-/// that is already decided: `exec` is being folded into a typed
-/// surface, and the four book-side write namespaces move under a
-/// `books` namespace. Writing examples against a form that is on its
-/// way out buys nothing. Same discipline as `EXAMPLES_OWED`: the list
-/// only shrinks, and the rename that empties it strikes out its own
-/// lines.
+/// that is already decided: the four book-side write namespaces move
+/// under a `books` namespace. Writing examples against a form that is
+/// on its way out buys nothing. Same discipline as `EXAMPLES_OWED`:
+/// the list only shrinks, and the rename that empties it strikes out
+/// its own lines.
 pub const EXAMPLES_DEFERRED: &[&str] = &[
     "corpus rebuild",
-    "exec",
     "metadata ack",
     "metadata advance",
     "metadata approve",
@@ -81,11 +79,12 @@ pub const EXAMPLES_DEFERRED: &[&str] = &[
 ];
 
 /// Commands whose grammar accepts any token sequence, so parsing an
-/// example proves nothing about it. `exec` forwards a trailing var-arg
-/// to the control plane; an `external_subcommand` fallback would join
-/// it. The list only shrinks, and a command on it says so in the
-/// failure message rather than silently passing.
-pub const PARSE_EXEMPT: &[&str] = &["exec"];
+/// example proves nothing about it. There is no such command today —
+/// the control-plane escape hatch is fully typed — and an
+/// `external_subcommand` fallback would be one. The list only shrinks,
+/// and a command on it says so in the failure message rather than
+/// silently passing.
+pub const PARSE_EXEMPT: &[&str] = &[];
 
 /// Every double-quoted value an example is allowed to carry. Examples
 /// are the largest batch of new literals in the repository and a real
@@ -940,7 +939,7 @@ mod tests {
             "the mounted path must read as claimed"
         );
         assert!(
-            unclaimed.contains(&"exec"),
+            unclaimed.contains(&"corpus rebuild"),
             "an entry no command answers to must stay in the result"
         );
     }

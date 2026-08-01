@@ -172,7 +172,7 @@ pub struct DaemonRuntime {
     /// `TtyLock` keeps a second daemon from coming up at all.
     pub write_guard: Arc<tokio::sync::Mutex<()>>,
     /// Discovered path of the control-plane listener, used by callers
-    /// (e.g. `bookrack exec`) that read the session lock and want to
+    /// (e.g. `bookrack rpc`) that read the session lock and want to
     /// reach the control plane.
     pub control_sock: ControlSocketPath,
     /// Set by the platform signal aggregator before forwarding the
@@ -267,7 +267,7 @@ impl DaemonRuntime {
 
         // 3. TtyLock acquire (control_sock added in step 3b once the
         //    socket is bound; recording the path before the listener
-        //    actually came up would let `bookrack exec` reach for a
+        //    actually came up would let `bookrack rpc` reach for a
         //    socket that never existed).
         let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label, None)?;
         let started_at = Instant::now();

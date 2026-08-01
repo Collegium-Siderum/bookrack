@@ -60,26 +60,33 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
         // A daemon that exits between the probe and the connect
         // surfaces as `DaemonNotRunning` (exit 2); no second short
         // card for that race.
-        HealthProbe::Healthy(..) => full_card(runtime_dir.as_deref(), &info).await,
+        HealthProbe::Healthy(..) => full_card(runtime_dir.as_deref(), &lock_path, &info).await,
     }
 }
 
-async fn full_card(runtime_dir: Option<&Path>, info: &LockInfo) -> Result<()> {
+async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo) -> Result<()> {
     let client = helpers::connect(runtime_dir).await?;
     let version = helpers::dispatch(&client, "daemon.version", Value::Null).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
     let library = helpers::dispatch(&client, "library.info", Value::Null).await?;
-    let card = compose_card(info, &version, &status, &library);
+    let card = compose_card(lock_path, info, &version, &status, &library);
     emit_card(&card, "run 'bookrack doctor' for health checks")
 }
 
 /// Assemble the full card from the lock snapshot and the three RPC
-/// responses. Endpoint rows (`pid`, `mcp`, `control`) come from the
-/// lock; everything else comes from the daemon.
-fn compose_card(info: &LockInfo, version: &Value, status: &Value, library: &Value) -> Value {
+/// responses. Endpoint rows (`lock`, `pid`, `mcp`, `control`) come from
+/// the lock; everything else comes from the daemon.
+fn compose_card(
+    lock_path: &Path,
+    info: &LockInfo,
+    version: &Value,
+    status: &Value,
+    library: &Value,
+) -> Value {
     json!({
         "daemon": {
             "version": version.get("version").cloned().unwrap_or(Value::Null),
+            "lock": lock_path.display().to_string(),
             "pid": info.pid,
             "uptime": version
                 .get("started_at")
@@ -211,6 +218,7 @@ mod tests {
             "disk": { "catalog_db": 1024, "corpus_db": 1024, "lancedb_dir": 2048 },
         });
         let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
             &lock_info(Some("/run/control.sock")),
             &version,
             &status,
@@ -218,6 +226,9 @@ mod tests {
         );
         assert_eq!(card["daemon"]["version"], "0.1.0");
         assert_eq!(card["daemon"]["pid"], 4242);
+        // The lock path is on every card shape: the full card is the
+        // only place a running daemon's lock file can be looked up.
+        assert_eq!(card["daemon"]["lock"], "/run/bookrack.tty.lock");
         assert_eq!(card["daemon"]["state"], "idle");
         assert_eq!(card["daemon"]["mcp"], "127.0.0.1:8391");
         assert_eq!(card["daemon"]["control"], "/run/control.sock");
@@ -236,7 +247,13 @@ mod tests {
     fn compose_card_keeps_a_path_selected_root_null_named() {
         let version = json!({ "version": "0.1.0" });
         let status = json!({ "library": Value::Null, "data_dir": "/data/anon" });
-        let card = compose_card(&lock_info(None), &version, &status, &json!({}));
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &version,
+            &status,
+            &json!({}),
+        );
         assert!(card["library"]["name"].is_null());
         assert_eq!(card["library"]["data_dir"], "/data/anon");
         assert!(card["daemon"]["control"].is_null());

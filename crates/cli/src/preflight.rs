@@ -6,7 +6,7 @@
 //!
 //! The control-plane architecture is "one daemon owns one library":
 //! once a daemon is up, every CLI command that routes through it
-//! (`verify`, `exec`, `library.*` reads, ingest, ...) acts on the
+//! (`verify`, `rpc`, `library.*` reads, ingest, ...) acts on the
 //! daemon's library, not on whatever `--data-dir` / `--library` /
 //! `BOOKRACK_DATA_DIR` the per-invocation environment expresses. The
 //! pre-flight makes that takeover non-silent: it compares the

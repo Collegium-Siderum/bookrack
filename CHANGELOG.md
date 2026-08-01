@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **cli: `bookrack exec` is gone; `bookrack rpc` replaces it.** No
+  alias, no forwarding shim, no deprecation window. Each of its four
+  actions has a destination: `exec info` → `bookrack status`, whose
+  full card now carries the `lock` row it was the only source of;
+  `exec tools` → `bookrack rpc list`; `exec logs follow` /
+  `exec logs tail [<n>]` → `bookrack logs` / `bookrack logs --tail
+  <n>`, which additionally take `--level` and warn on a lagged
+  subscription; `exec <method> [<json>]` → `bookrack rpc call
+  <method> [<json>]`.
+
 ### Added
 
 - **cli: `bookrack rpc`, the typed control-plane escape hatch.**
@@ -267,7 +279,7 @@ release workflow extracts the matching section verbatim from this file.
   restate the Ollama setup, embed-model name included, and spelled out
   the `exec library.<tool>` form for library reads. It now hands the
   runtime check to `bookrack doctor`, which knows the configured model,
-  and points at `bookrack run` / `bookrack exec tools` — the two entry
+  and points at `bookrack run` / `bookrack rpc list` — the two entry
   points that stay correct as the control-plane surface evolves. The
   environment-variable listing is unchanged.
 

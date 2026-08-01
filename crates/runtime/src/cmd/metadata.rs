@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! REPL-side metadata edits and the `advance` resume-from-CHUNK path.
-//! Reads have moved to `bookrack exec library.show_metadata_audit` and
-//! siblings; this module covers only the write surface.
+//! Reads have moved to `bookrack rpc call library.show_metadata_audit`
+//! and its siblings; this module covers only the write surface.
 
 use bookrack_catalog::Catalog;
 use bookrack_config::Config;

@@ -88,7 +88,7 @@ pub fn ocr_intake(report: &OcrIngestReport) {
         let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
         println!(
             "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
-             Run `bookrack exec library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
+             Run `bookrack rpc call library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
             report.ocr_intake_id,
         );
     }
@@ -103,7 +103,7 @@ fn print_audit_warning(report: &IngestReport) {
         let confidence = report.audit_confidence.as_deref().unwrap_or("unknown");
         println!(
             "  \u{26a0} metadata audit: needs_work (confidence {confidence}). \
-             Run `bookrack exec library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
+             Run `bookrack rpc call library.show_metadata_audit '{{\"intake_id\":{}}}'` to inspect.",
             report.intake_id,
         );
     }

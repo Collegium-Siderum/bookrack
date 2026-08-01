@@ -11,7 +11,7 @@
 //!   `bookrack run` and the headless `bookrack-mcp` compete for it, so
 //!   the operator cannot accidentally point two writers at the same
 //!   on-disk catalog or corpus. Readers that go through the MCP HTTP
-//!   surface (`bookrack exec`) never take it.
+//!   surface (`bookrack rpc`) never take it.
 //! - [`RootLock`] at `<data_root>/.bookrack.lock` — one writer per data
 //!   root, whether that writer is a daemon serving the root or an
 //!   offline command about to destroy it. Its contents are display-only
@@ -39,7 +39,7 @@ const ROOT_LOCK_NAME_STR: &str = ".bookrack.lock";
 
 /// File name of the session-scoped lock under the runtime directory.
 /// Exposed so siblings (the `cli` REPL, the headless `mcp` binary,
-/// `bookrack exec`) discover the active session through the same path.
+/// `bookrack rpc`) discover the active session through the same path.
 pub fn tty_lock_name() -> &'static str {
     TTY_LOCK_NAME_STR
 }
@@ -122,7 +122,7 @@ impl TtyLock {
     /// Acquire the session lock at `path`, writing the running pid,
     /// the chosen MCP address (or `disabled`), and optionally the
     /// control-plane socket path into it so other tools —
-    /// `bookrack exec`, `bookrack doctor` — can find the live session
+    /// `bookrack rpc`, `bookrack doctor` — can find the live session
     /// and reach its control plane.
     ///
     /// The `control_sock` argument is `None` when the caller does not

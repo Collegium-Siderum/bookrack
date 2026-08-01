@@ -7,8 +7,8 @@
 //! "not running" code (2) and names `bookrack run` on stderr, whether
 //! it reads or writes. The exceptions are the clients that can answer
 //! without a daemon — `bookrack doctor` falls back to the local probe,
-//! `bookrack status` and `bookrack exec info` report the absence and
-//! exit 0 — plus `bookrack quit`, which has nothing to stop.
+//! `bookrack status` reports the absence and exits 0 — plus
+//! `bookrack quit`, which has nothing to stop.
 //!
 //! The daemon-running path is covered by the control-plane integration
 //! tests in `bookrack-runtime`, which answer the daemon's embedder
@@ -52,8 +52,6 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["logs"], CaseExpect::NotRunning),
         (&["papers", "list"], CaseExpect::NotRunning),
         (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
-        (&["exec", "library.info", "{}"], CaseExpect::NotRunning),
-        (&["exec", "tools"], CaseExpect::NotRunning),
         (&["rpc", "list"], CaseExpect::NotRunning),
         (
             &["rpc", "call", "library.info", "{}"],
@@ -64,11 +62,10 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         // is declared offline without the daemon being reached at all.
         // `index_profile_resolution.rs` pins that path.
         //
-        // The exceptions. `bookrack status` has the same shape as
-        // `exec info` and is pinned separately by
+        // The exception. `bookrack status` answers offline instead of
+        // failing, and is pinned separately by
         // `status_without_daemon_prints_a_short_card_and_exits_zero`.
         (&["quit"], CaseExpect::Quit),
-        (&["exec", "info"], CaseExpect::LocalFallback),
     ];
     for (argv, expect) in cases {
         let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
@@ -110,22 +107,6 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
                     "{:?} stderr missing nothing-to-stop tip: {}",
                     argv,
                     stderr,
-                );
-            }
-            CaseExpect::LocalFallback => {
-                assert_eq!(
-                    output.status.code(),
-                    Some(0),
-                    "{:?} expected exit 0 from a client that answers offline, stderr={:?}",
-                    argv,
-                    String::from_utf8_lossy(&output.stderr),
-                );
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                assert!(
-                    stdout.contains("no running daemon"),
-                    "{:?} stdout missing the absence it reports: {}",
-                    argv,
-                    stdout,
                 );
             }
         }
@@ -1863,7 +1844,4 @@ enum CaseExpect {
     NotRunning,
     /// `bookrack quit` has nothing to stop: exit 0, said on stderr.
     Quit,
-    /// A client with an offline answer — it reports the absence and
-    /// exits 0, on stdout, because the absence *is* the answer.
-    LocalFallback,
 }

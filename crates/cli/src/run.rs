@@ -11,8 +11,9 @@
 //!
 //! The daemon owns no stdin and runs headless. Operators reach it through
 //! the control-plane JSON-RPC socket: one-shot subcommands (`bookrack
-//! ingest`, `bookrack metadata set`, ...), `bookrack exec <method>` for
-//! ad-hoc calls, the desktop tray, and the MCP server for agent clients.
+//! ingest`, `bookrack metadata set`, ...), `bookrack rpc call <method>`
+//! for ad-hoc calls, the desktop tray, and the MCP server for agent
+//! clients.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

@@ -4,7 +4,7 @@
 //!
 //! Hosts the local IPC listener — a Unix domain socket on Unix-likes,
 //! a named pipe on Windows — that the desktop tray, REPL extraction,
-//! and future MCP/`bookrack exec` clients reach the daemon through.
+//! and future MCP/`bookrack rpc` clients reach the daemon through.
 //!
 //! Wire format is newline-delimited JSON-RPC 2.0 (one frame per line);
 //! see [`jsonrpc`] for the encoder/decoder, [`methods`] for the method

@@ -103,7 +103,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # only, alongside tracing-subscriber.
 tracing-appender = "0.2"
 # MCP protocol SDK. The `mcp` entry-point crate hosts the streamable-HTTP
-# server; the client-side features exist for `bookrack exec` and the mcp
+# server; the client-side features exist for `bookrack rpc` and the mcp
 # crate's own transport-level tests, which drive the server through a real
 # client session. No auth features. The `server` feature pulls schemars
 # (re-exported, used for tool input schemas) and chrono transitively.

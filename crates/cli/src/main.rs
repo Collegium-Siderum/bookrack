@@ -12,7 +12,6 @@
 //! truth for every default.
 
 mod cmd;
-mod exec;
 mod init;
 mod preflight;
 mod run;
@@ -43,7 +42,7 @@ Environment:
 
 Library reads (search, browse, metadata, status) are served by a running
 session: start one with `bookrack run`, then list the live control-plane
-surface with `bookrack exec tools`.
+surface with `bookrack rpc list`.
 
 Prerequisites:
   Run `bookrack doctor` to check Ollama and the embed model.";
@@ -214,31 +213,6 @@ enum Command {
         /// `BOOKRACK_RUNTIME_DIR` or the platform default.
         #[arg(long, value_name = "PATH")]
         runtime_dir: Option<PathBuf>,
-    },
-    /// Call control-plane RPCs against the running session.
-    ///
-    /// Subcommands:
-    ///   `info` (default)          — print the session pid, MCP
-    ///                               address, and control socket path.
-    ///                               Pure file read of the session
-    ///                               lock; never opens the control
-    ///                               socket.
-    ///   `tools`                   — list the control-plane methods
-    ///                               the daemon answers, alongside the
-    ///                               daemon's MCP endpoint tools for
-    ///                               visibility. Only the control-plane
-    ///                               methods are reachable from `exec`.
-    ///   `<method> [<json>]`       — call the named control-plane
-    ///                               method (e.g. `library.show_book`),
-    ///                               with the second positional token
-    ///                               forwarded verbatim as JSON params.
-    ///
-    /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
-    /// the session; never opens a catalog, corpus, or vector store.
-    Exec {
-        /// Subcommand and its positional arguments.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
     },
     /// Call control-plane methods on the running session directly.
     ///
@@ -767,15 +741,15 @@ fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
 /// the table — those fall through to clap's own similarity tip.
 ///
 /// Library reads moved off the external CLI surface: the hints below
-/// point at the `bookrack exec library.<tool>` proxy that talks to
+/// point at the `bookrack rpc call library.<tool>` proxy that talks to
 /// the running daemon session.
 fn natural_name_hint(typed: &str) -> Option<String> {
     let suggestions: &[&str] = match typed {
-        "list" | "ls" => &["`bookrack exec library.list_books`"],
-        "find" => &["`bookrack exec library.find_books`"],
-        "show" => &["`bookrack exec library.show_book`"],
-        "stats" => &["`bookrack exec library.stats`"],
-        "search" => &["`bookrack exec library.search`"],
+        "list" | "ls" => &["`bookrack rpc call library.list_books`"],
+        "find" => &["`bookrack rpc call library.find_books`"],
+        "show" => &["`bookrack rpc call library.show_book`"],
+        "stats" => &["`bookrack rpc call library.stats`"],
+        "search" => &["`bookrack rpc call library.search`"],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -1071,14 +1045,10 @@ async fn run() -> Result<()> {
         .await;
     }
 
-    // `exec` and `rpc` are the discovery surfaces for an already-running
-    // daemon. They must NOT open a database — the "no DB handle outside
-    // the scheduler" invariant is what gives the daemon-REPL session its
-    // single-writer guarantee — so they dispatch before Config::resolve
-    // as well.
-    if let Command::Exec { args } = &cli.command {
-        return exec::run(args, None).await;
-    }
+    // `rpc` is the escape hatch onto an already-running daemon. It must
+    // NOT open a database — the "no DB handle outside the scheduler"
+    // invariant is what gives the daemon-REPL session its single-writer
+    // guarantee — so it dispatches before Config::resolve as well.
     if let Command::Rpc { action } = &cli.command {
         return cmd::cli_client::rpc::run(action, None).await;
     }
@@ -1286,7 +1256,6 @@ async fn run() -> Result<()> {
         Command::Doctor { .. } => unreachable!("Doctor is dispatched above"),
         Command::Init { .. } => unreachable!("Init is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
-        Command::Exec { .. } => unreachable!("Exec is dispatched above"),
         Command::Rpc { .. } => unreachable!("Rpc is dispatched above"),
     }
 }
@@ -1336,7 +1305,6 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Doctor { .. }
         | Command::Init { .. }
         | Command::Run { .. }
-        | Command::Exec { .. }
         | Command::Rpc { .. } => false,
     }
 }
@@ -1947,12 +1915,12 @@ mod tests {
     #[test]
     fn natural_name_hints_cover_the_common_typos_from_the_test_report() {
         for (typed, expected) in [
-            ("list", "`bookrack exec library.list_books`"),
-            ("ls", "`bookrack exec library.list_books`"),
-            ("find", "`bookrack exec library.find_books`"),
-            ("show", "`bookrack exec library.show_book`"),
-            ("stats", "`bookrack exec library.stats`"),
-            ("search", "`bookrack exec library.search`"),
+            ("list", "`bookrack rpc call library.list_books`"),
+            ("ls", "`bookrack rpc call library.list_books`"),
+            ("find", "`bookrack rpc call library.find_books`"),
+            ("show", "`bookrack rpc call library.show_book`"),
+            ("stats", "`bookrack rpc call library.stats`"),
+            ("search", "`bookrack rpc call library.search`"),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
@@ -2188,7 +2156,6 @@ mod tests {
         "distill",
         "doctor",
         "dryrun",
-        "exec",
         "ingest",
         "init",
         "intake",
@@ -2219,7 +2186,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 26),
+        ("bookrack", 25),
         ("bookrack audit-profile", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),

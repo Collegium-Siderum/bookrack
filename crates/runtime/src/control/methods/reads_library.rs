@@ -4,7 +4,7 @@
 //! read tools. Each method accepts the same JSON shape as its MCP
 //! counterpart, runs the same `bookrack_ops::reads::*` call, and
 //! returns the same body. Together they form the operator-side read
-//! pathway: `bookrack exec <method> '<json>'` over the control socket
+//! pathway: `bookrack rpc call <method> '<json>'` over the control socket
 //! reaches the same code path agents exercise over MCP HTTP.
 
 use std::sync::Arc;

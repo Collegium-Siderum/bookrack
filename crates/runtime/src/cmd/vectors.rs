@@ -2,7 +2,7 @@
 
 //! REPL-side vector-store writes: ANN rebuild, brute-force drop, and
 //! re-embed against the active model. Status reads live at
-//! `bookrack exec library.vectors_status`.
+//! `bookrack rpc call library.vectors_status`.
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;

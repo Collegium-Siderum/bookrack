@@ -2,7 +2,7 @@
 
 The bookrack daemon exposes a local-only JSON-RPC 2.0 control plane
 alongside its MCP HTTP listener. Operator tooling — one-shot CLI
-subcommands, `bookrack exec` for ad-hoc RPCs, and the desktop tray —
+subcommands, `bookrack rpc` for ad-hoc RPCs, and the desktop tray —
 reaches the running daemon through this surface; the MCP listener
 stays tool-scoped — agent clients see a fixed tool set rather than the
 full method registry, and the bulk, queue-bound, and library-lifecycle
@@ -210,7 +210,7 @@ the kind of failure without parsing stderr.
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
 
 `-32601 method not found` is grouped with the user-input bucket so
-the common case — `bookrack exec <typo>` — exits with the same code
+the common case — `bookrack rpc call <typo>` — exits with the same code
 as any other CLI usage mistake. The same code is also raised when a
 CLI version targets a daemon that has not yet shipped the method;
 the exit-code bucket does not distinguish the two.
@@ -442,7 +442,7 @@ must carry `yes = true`.
 Operator-facing read pathway: each method below mirrors the MCP
 `library.*` read tool of the same name. The JSON params shape, the
 returned body, and the underlying `bookrack_ops::reads::*` call are
-identical, so `bookrack exec <method> '<json>'` over the control
+identical, so `bookrack rpc call <method> '<json>'` over the control
 socket reaches the same code path agents exercise over MCP HTTP. None
 of these methods take the write mutex; they read straight from the
 catalog and corpus handles the daemon already holds.

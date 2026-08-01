@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `daemon.methods` and `daemon.mcp_tools` — runtime reflection for
-//! `bookrack exec tools` and any future GUI surface that wants to
+//! `bookrack rpc list` and any future GUI surface that wants to
 //! enumerate what is callable on this daemon.
 
 use serde::{Deserialize, Serialize};

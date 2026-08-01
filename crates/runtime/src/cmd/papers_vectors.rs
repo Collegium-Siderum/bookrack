@@ -4,7 +4,7 @@
 //! rebuild, brute-force drop, re-embed under the active embedder, and
 //! reset+rechunk. Peer of [`crate::cmd::vectors`] for the paper
 //! pipeline; status reads live at
-//! `bookrack exec library.vectors_status`.
+//! `bookrack rpc call library.vectors_status`.
 
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;

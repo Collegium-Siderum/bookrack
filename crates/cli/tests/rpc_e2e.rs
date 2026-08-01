@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end round-trip for `bookrack exec library.info` against a
+//! End-to-end round-trip for `bookrack rpc call library.info` against a
 //! live `bookrack run` daemon.
 //!
 //! The embedder probe on the daemon's startup path is answered by
@@ -31,16 +31,17 @@ async fn library_info_round_trips_through_running_daemon() {
     );
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
-        .arg("exec")
+        .arg("rpc")
+        .arg("call")
         .arg("library.info")
         .arg("{}")
         .output()
         .await
-        .expect("run bookrack exec");
+        .expect("run bookrack rpc call");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
         output.status.success(),
-        "bookrack exec failed: status={:?}, stderr={}",
+        "bookrack rpc call failed: status={:?}, stderr={}",
         output.status,
         String::from_utf8_lossy(&output.stderr),
     );

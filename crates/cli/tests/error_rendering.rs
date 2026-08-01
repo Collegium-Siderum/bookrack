@@ -67,7 +67,7 @@ const REJECTED_SEARCH: &str = r#"{"query":"x","kind":"book","exclude_paper_intak
 #[tokio::test]
 async fn a_rejected_call_reports_one_line_and_exits_two() {
     let (code, stderr) =
-        client_stderr_against_daemon(&["exec", "library.search", REJECTED_SEARCH]).await;
+        client_stderr_against_daemon(&["rpc", "call", "library.search", REJECTED_SEARCH]).await;
 
     assert_eq!(code, Some(2), "a caller-input rejection exits 2: {stderr}");
     assert!(stderr.starts_with("bookrack: "), "{stderr}");
@@ -88,7 +88,8 @@ async fn a_rejected_call_reports_one_line_and_exits_two() {
 #[tokio::test]
 async fn a_json_run_reports_the_failure_as_one_parseable_object() {
     let (code, stderr) =
-        client_stderr_against_daemon(&["--json", "exec", "library.search", REJECTED_SEARCH]).await;
+        client_stderr_against_daemon(&["--json", "rpc", "call", "library.search", REJECTED_SEARCH])
+            .await;
 
     let parsed: serde_json::Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|e| panic!("stderr is not JSON ({e}): {stderr}"));
@@ -172,10 +173,10 @@ async fn a_failure_without_a_diagnostic_stays_a_single_line() {
     let sandbox = Sandbox::new();
 
     let output = Command::from(bookrack_cmd!(&sandbox).build())
-        .args(["exec", "library.info", "{}"])
+        .args(["rpc", "call", "library.info", "{}"])
         .output()
         .await
-        .expect("run bookrack exec");
+        .expect("run bookrack rpc call");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(
