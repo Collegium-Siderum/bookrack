@@ -8,6 +8,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **cli: `bookrack rpc call` usage failures print the three-part
+  diagnostic.** Bad params JSON used to be one long line that mixed
+  the fact, the example, and serde's own message; it is now a summary
+  (`` `<method>`: params are not valid JSON ``) with the parser's
+  message as detail and the fix as hint, so `--json` carries them as
+  separate fields and a terse renderer prints a true line. A method
+  name with no namespace is refused locally with the same shape
+  instead of being spent on a round trip that could only answer
+  `-32601`.
+
 ### Removed
 
 - **cli: `bookrack exec` is gone; `bookrack rpc` replaces it.** No

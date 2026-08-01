@@ -40,6 +40,16 @@ pub async fn run(action: &RpcAction, runtime_dir: Option<&Path>) -> Result<()> {
 }
 
 async fn call(method: &str, params: Option<&str>, runtime_dir: Option<&Path>) -> Result<()> {
+    // A name without a namespace cannot be a method, so it is refused
+    // here rather than spent on a round trip: the daemon's `-32601`
+    // can only report the name back, while this side knows the shape
+    // that was expected and where the live list is.
+    if !method.contains('.') {
+        return Err(BookrackCliError::RpcMethodNotNamespaced {
+            method: method.to_string(),
+        }
+        .into());
+    }
     let payload = match params {
         Some(raw) => {
             serde_json::from_str::<Value>(raw).map_err(|e| BookrackCliError::RpcParamsInvalid {

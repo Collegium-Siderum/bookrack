@@ -118,11 +118,17 @@ pub enum BookrackCliError {
     /// daemon's own
     /// `-32602 invalid params` rather than falling through to the
     /// exit-1 internal-error path.
-    #[error(
-        "`{method}`: params must be a valid JSON object, e.g. `{{}}` — or omit the \
-         argument entirely for tools that take no arguments. invalid JSON: {detail}"
-    )]
+    #[error("`{method}`: params are not valid JSON")]
     RpcParamsInvalid { method: String, detail: String },
+
+    /// `bookrack rpc call` was handed a name that cannot be a
+    /// control-plane method: every method is namespaced
+    /// (`<namespace>.<verb>`). Judged locally, before the call is
+    /// sent — the daemon would answer `-32601`, but only after a
+    /// round trip and without being able to say what shape was
+    /// expected. Shares the exit-2 user-error bucket.
+    #[error("`{method}` is not a control-plane method name")]
+    RpcMethodNotNamespaced { method: String },
 
     /// A locally-resolved command (one that acts on the registry or a
     /// data root without a daemon, e.g. `libraries default <name>`
@@ -174,7 +180,7 @@ impl BookrackCliError {
             Self::RpcBusy { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
-            Self::RpcParamsInvalid { .. } => 2,
+            Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
             Self::PreflightRefused { .. } => 2,
@@ -235,6 +241,32 @@ impl BookrackCliError {
         let data = match self {
             Self::RpcUserError { data, .. } | Self::RpcInternal { data, .. } => data.as_ref()?,
             Self::PreflightRefused { problem } => return Some(problem.data.clone()),
+            Self::RpcParamsInvalid { detail, .. } => {
+                return Some(ProblemData {
+                    detail: Some(detail.clone()),
+                    hint: Some(
+                        "Pass a JSON object, e.g. `{}`, or omit the argument entirely to \
+                         send `null`."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
+            Self::RpcMethodNotNamespaced { .. } => {
+                return Some(ProblemData {
+                    detail: Some(
+                        "A control-plane method name carries a namespace: \
+                         `<namespace>.<verb>`, for example `library.show_book`."
+                            .to_string(),
+                    ),
+                    hint: Some(
+                        "Run `bookrack rpc list` to see the method names the running \
+                         daemon answers."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                });
+            }
             _ => return None,
         };
         serde_json::from_value(data.clone()).ok()
@@ -398,11 +430,49 @@ mod tests {
         };
         assert_eq!(err.exit_code(), 2);
         assert!(!err.is_self_reported());
+        // The summary states the fact and nothing else; the evidence
+        // and the next step live in their own fields, so a terse
+        // renderer that drops them still prints a true line.
         let s = err.to_string();
         assert!(s.contains("library.stats"), "{s}");
-        assert!(s.contains("{}"), "{s}");
-        assert!(s.contains("omit"), "{s}");
-        assert!(s.contains("invalid number at line 1 column 2"), "{s}");
+        assert!(!s.contains("omit"), "the summary gives no advice: {s}");
+        assert!(
+            !s.contains("invalid number at line 1 column 2"),
+            "the summary carries no serde evidence: {s}"
+        );
+
+        let data = err.problem_data().expect("a usage failure is explained");
+        assert_eq!(
+            data.detail.as_deref(),
+            Some("invalid number at line 1 column 2"),
+        );
+        let hint = data.hint.expect("a usage failure says what to do next");
+        assert!(hint.contains("{}"), "{hint}");
+        assert!(hint.contains("omit"), "{hint}");
+        assert!(!data.retryable, "the same bad JSON fails again");
+    }
+
+    #[test]
+    fn rpc_method_not_namespaced_uses_exit_two_and_points_at_the_method_list() {
+        let err = BookrackCliError::RpcMethodNotNamespaced {
+            method: "info".into(),
+        };
+        assert_eq!(err.exit_code(), 2);
+        assert!(!err.is_self_reported());
+        let s = err.to_string();
+        assert!(s.contains("info"), "{s}");
+        assert!(!s.contains("rpc list"), "the summary gives no advice: {s}");
+
+        let data = err.problem_data().expect("a usage failure is explained");
+        assert!(
+            data.detail
+                .as_deref()
+                .is_some_and(|d| d.contains("namespace")),
+            "{data:?}"
+        );
+        let hint = data.hint.expect("a usage failure says what to do next");
+        assert!(hint.contains("rpc list"), "{hint}");
+        assert!(!data.retryable, "the same name fails again");
     }
 
     #[test]
