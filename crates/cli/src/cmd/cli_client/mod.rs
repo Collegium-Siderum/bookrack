@@ -29,6 +29,7 @@ pub mod papers;
 pub mod queue;
 pub mod quit;
 pub mod remove;
+pub mod rpc;
 pub mod stamps;
 pub mod status;
 pub mod vectors;

@@ -10,6 +10,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack rpc`, the typed control-plane escape hatch.**
+  `bookrack rpc list` prints the method table the running daemon
+  answers alongside its MCP endpoint tools; `bookrack rpc call
+  <method> [<json>]` sends one method by name, with the optional
+  second token as the JSON params object (`null` when omitted). Both
+  are ordinary clap subcommands, so `--help` carries examples and a
+  mistyped action gets clap's own did-you-mean tip instead of being
+  forwarded to the daemon as a method name.
+
 - **runtime: `daemon.status`, the canonical name for the `status`
   RPC.** The daemon-wide snapshot now answers under the same
   `daemon.*` namespace as `daemon.version`, `daemon.methods`, and

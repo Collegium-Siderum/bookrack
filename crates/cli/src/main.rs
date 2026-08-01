@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
     CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction,
-    QueueAction, RemoveArgs, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -239,6 +239,21 @@ enum Command {
         /// Subcommand and its positional arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Call control-plane methods on the running session directly.
+    ///
+    /// The escape hatch under the typed commands: `rpc list` prints
+    /// the method table the running daemon answers, `rpc call` sends
+    /// one method by name with a JSON params object. Ordinary use does
+    /// not need it — every routine operation has a typed command —
+    /// and `docs/control-plane.md` documents each method's params and
+    /// response shape.
+    ///
+    /// Reads `${BOOKRACK_RUNTIME_DIR}/bookrack.tty.lock` to discover
+    /// the session; never opens a catalog, corpus, or vector store.
+    Rpc {
+        #[command(subcommand)]
+        action: RpcAction,
     },
     /// Run a one-screen health check.
     ///
@@ -1056,13 +1071,16 @@ async fn run() -> Result<()> {
         .await;
     }
 
-    // `exec` is the discovery surface for an already-running daemon.
-    // It must NOT open a database — the "no DB handle outside the
-    // scheduler" invariant is what gives the daemon-REPL session its
-    // single-writer guarantee — so it dispatches before Config::resolve
+    // `exec` and `rpc` are the discovery surfaces for an already-running
+    // daemon. They must NOT open a database — the "no DB handle outside
+    // the scheduler" invariant is what gives the daemon-REPL session its
+    // single-writer guarantee — so they dispatch before Config::resolve
     // as well.
     if let Command::Exec { args } = &cli.command {
         return exec::run(args, None).await;
+    }
+    if let Command::Rpc { action } = &cli.command {
+        return cmd::cli_client::rpc::run(action, None).await;
     }
 
     // Every remaining write/read subcommand reaches the daemon
@@ -1269,6 +1287,7 @@ async fn run() -> Result<()> {
         Command::Init { .. } => unreachable!("Init is dispatched above"),
         Command::Run { .. } => unreachable!("Run is dispatched above"),
         Command::Exec { .. } => unreachable!("Exec is dispatched above"),
+        Command::Rpc { .. } => unreachable!("Rpc is dispatched above"),
     }
 }
 
@@ -1317,7 +1336,8 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Doctor { .. }
         | Command::Init { .. }
         | Command::Run { .. }
-        | Command::Exec { .. } => false,
+        | Command::Exec { .. }
+        | Command::Rpc { .. } => false,
     }
 }
 
@@ -1944,6 +1964,52 @@ mod tests {
     }
 
     #[test]
+    fn rpc_call_takes_the_method_and_an_optional_params_token() {
+        let Command::Rpc { action } =
+            Cli::try_parse_from(["bookrack", "rpc", "call", "library.info", "{}"])
+                .expect("method plus params parses")
+                .command
+        else {
+            panic!("`rpc call` must parse into Command::Rpc");
+        };
+        assert_eq!(
+            action,
+            RpcAction::Call {
+                method: "library.info".to_string(),
+                params: Some("{}".to_string()),
+            }
+        );
+
+        let Command::Rpc { action } =
+            Cli::try_parse_from(["bookrack", "rpc", "call", "daemon.version"])
+                .expect("a bare method parses")
+                .command
+        else {
+            panic!("`rpc call` must parse into Command::Rpc");
+        };
+        assert_eq!(
+            action,
+            RpcAction::Call {
+                method: "daemon.version".to_string(),
+                params: None,
+            }
+        );
+    }
+
+    /// `rpc list` and `rpc call` are named subcommands rather than a
+    /// var-arg method token, so clap's own similarity tip covers a
+    /// mistyped action and the binary carries no did-you-mean table for
+    /// this surface.
+    #[test]
+    fn a_mistyped_rpc_action_is_answered_by_claps_similarity_tip() {
+        let rendered = match Cli::try_parse_from(["bookrack", "rpc", "lsit"]) {
+            Ok(_) => panic!("`lsit` is not an action"),
+            Err(err) => err.to_string(),
+        };
+        assert!(rendered.contains("list"), "{rendered}");
+    }
+
+    #[test]
     fn remove_subcommand_parses() {
         for argv in [
             vec!["bookrack", "remove", "42"],
@@ -2133,6 +2199,7 @@ mod tests {
         "queue",
         "quit",
         "remove",
+        "rpc",
         "run",
         "runs",
         "stamps",
@@ -2152,7 +2219,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 25),
+        ("bookrack", 26),
         ("bookrack audit-profile", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
@@ -2167,6 +2234,7 @@ mod tests {
         ("bookrack papers vectors", 4),
         ("bookrack queue", 5),
         ("bookrack retrieval", 2),
+        ("bookrack rpc", 2),
         ("bookrack runs", 2),
         ("bookrack stamps", 1),
         ("bookrack vectors", 4),

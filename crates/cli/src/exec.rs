@@ -70,7 +70,7 @@ pub async fn run(args: &[String], runtime_dir_override: Option<&Path>) -> Result
 async fn call_method(method: &str, params: &[String]) -> Result<()> {
     let payload = match params.first() {
         Some(raw) => {
-            serde_json::from_str::<Value>(raw).map_err(|e| BookrackCliError::ExecParamsInvalid {
+            serde_json::from_str::<Value>(raw).map_err(|e| BookrackCliError::RpcParamsInvalid {
                 method: method.to_string(),
                 detail: e.to_string(),
             })?

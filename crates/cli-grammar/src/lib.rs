@@ -680,6 +680,37 @@ pub enum CorpusAction {
     },
 }
 
+/// Actions on the control-plane escape hatch.
+#[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum RpcAction {
+    /// List the control-plane methods the running daemon answers.
+    ///
+    /// The daemon's own table, not this binary's copy of it, so it is
+    /// authoritative for the version that is actually serving. The MCP
+    /// endpoint tools are listed alongside for visibility; they are
+    /// reachable only from an MCP client.
+    #[command(after_long_help = crate::examples![
+        "rpc list",
+        "rpc list --json",
+    ])]
+    List,
+    /// Call one control-plane method by name.
+    ///
+    /// Method names are namespaced (`<namespace>.<verb>`); `rpc list`
+    /// prints the live set and `docs/control-plane.md` documents each
+    /// method's params and response.
+    #[command(after_long_help = crate::examples![
+        "rpc call daemon.version",
+        "rpc call library.info {}",
+    ])]
+    Call {
+        /// Namespaced method name, e.g. `library.show_book`.
+        method: String,
+        /// JSON params object. Defaults to `null` when omitted.
+        params: Option<String>,
+    },
+}
+
 /// Index-stamp reconciliation.
 ///
 /// Prefer `bookrack index-profile apply`; this namespace is the

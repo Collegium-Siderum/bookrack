@@ -54,6 +54,11 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
         (&["intake", "list-ocr-pending"], CaseExpect::NotRunning),
         (&["exec", "library.info", "{}"], CaseExpect::NotRunning),
         (&["exec", "tools"], CaseExpect::NotRunning),
+        (&["rpc", "list"], CaseExpect::NotRunning),
+        (
+            &["rpc", "call", "library.info", "{}"],
+            CaseExpect::NotRunning,
+        ),
         // `index-profile apply` is deliberately absent: against a data
         // root with nothing built its plan is empty, and an empty plan
         // is declared offline without the daemon being reached at all.
