@@ -26,6 +26,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: the `remove` dry run writes nothing.** `remove` and
+  `papers.remove` promise a plan computed "without writing", but the
+  dry-run leg opened every store read-write: it created `catalog.db`
+  and `corpus.db` where they were missing, applied pending migrations
+  and wrote the pre-migration catalog backup that goes with them, and
+  materialised an empty LanceDB layout for a library whose vector
+  store had been deleted. Every store the plan reads is now opened
+  read-only, and one that is not on disk is reported as empty instead
+  of being created — so a preview of a destructive command is again a
+  preview. Two consequences are visible: a dry run against a data root
+  with no catalog now fails instead of silently building one, and a
+  dry run no longer migrates a catalog whose schema is behind — run
+  any write command to migrate it, as elsewhere on the read side.
+
 - **runtime: `papers dryrun` registers its run on the paper catalog.**
   The `pipeline_runs` row went to `catalog.db` while every paper-side
   audit row a rollup would aggregate lives in `papers_catalog.db`, and
