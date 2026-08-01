@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! DTOs the read-only query facade hands back to its consumers.
+//! DTOs the read-only catalog-browse reads hand back to their consumers.
+//!
+//! The reads themselves live in `bookrack_ops::reads`, which re-exports
+//! this module as `bookrack_ops::dto`; the shapes sit here so they stay
+//! next to the search facade that shares their vocabulary.
 //!
 //! The MCP server and the CLI both serialize these directly to JSON.
 //! They are decoupled from the catalog row structs on purpose: a
@@ -58,7 +62,7 @@ pub const MAX_READ_CHARS: usize = 30_000;
 /// first, this cap bounds the row fetch when passages are tiny.
 pub const MAX_SPAN_LEAVES: usize = 2000;
 
-/// One row of [`Catalog::list_books`] / [`Catalog::find_books`]: just
+/// One row of a `library.list_books` / `library.find_books` page: just
 /// enough to render a list entry without a second fetch.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookSummary {
@@ -82,7 +86,7 @@ pub struct BookSummary {
     pub source_filename: Option<String>,
 }
 
-/// One [`Catalog::show_book`] response: the full bibliographic record
+/// One `library.show_book` response: the full bibliographic record
 /// plus all contributors.
 #[derive(Debug, Clone, Serialize)]
 pub struct BookDetail {

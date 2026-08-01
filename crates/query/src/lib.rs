@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! bookrack-query: the read-only query facade.
+//! bookrack-query: warm search state over the vector store.
 //!
-//! A single capability surface over the corpus and vector store that
-//! query consumers — the MCP server, the CLI — call without touching the
-//! database crates or their schema. Consumers depend only on this crate;
-//! the `corpus` / `vectors` / `search` handles and their field shapes stay
-//! behind it. Adding or removing a capability is adding or removing one
-//! method here.
+//! [`Library`] holds the embedder and the vector store open for the
+//! process lifetime and answers cited-passage searches against them.
+//! The `corpus` / `vectors` / `search` handles and their field shapes
+//! stay behind it, so a caller reaches retrieval without naming the
+//! database crates or their schema.
+//!
+//! [`dto`] carries the serialized shapes of the catalog-browse reads.
+//! Those reads open the catalog read-only per call and need no embedder,
+//! so they are implemented in `bookrack_ops::reads` — a catalog-only
+//! `Ops` browses without paying for a dimension probe.
 
 pub mod dto;
 
 use std::path::{Path, PathBuf};
 
-use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
+use bookrack_catalog::Catalog;
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::{Corpus, IndexStamps};
 use bookrack_embed::Embedder;
@@ -25,14 +29,8 @@ use bookrack_vectors::ChunkStore;
 pub use bookrack_vectors::SearchOptions;
 use tokio::sync::RwLock;
 
-use crate::dto::{
-    BookDetail, BookFilter, BookSummary, LibraryStats, ListBooksResult, OcrPendingItem,
-    OcrPendingResult, ShowTocArgs, Toc, TocNodes, clamp_limit,
-};
-
-// Re-exported so consumers name query results through this crate, not the
-// crates behind the facade.
-pub use bookrack_catalog::{STATUS_ACKNOWLEDGED, STATUS_APPROVED, STATUS_PENDING, STATUS_REJECTED};
+// Re-exported so consumers name search results through this crate, not
+// the crates behind it.
 pub use bookrack_core::NodeId;
 pub use bookrack_search::Citation;
 
@@ -425,190 +423,6 @@ impl<E: Embedder> Library<E> {
         let catalog = Catalog::open_read_only(&self.catalog_db)?;
         let citations = cite(&corpus, &catalog, hits, self.kind)?;
         Ok(citations)
-    }
-
-    /// Aggregate counts across the catalog: intakes by status / format,
-    /// book states by stage, retrieval issues by status. Drives the
-    /// `library.stats` MCP tool.
-    pub fn stats(&self) -> Result<LibraryStats> {
-        let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let mut intake_counts_by_status = std::collections::BTreeMap::new();
-        for status in IntakeStatus::ALL {
-            let n = catalog.count_intakes_by_status(std::slice::from_ref(&status))?;
-            intake_counts_by_status.insert(status.as_str().to_string(), n);
-        }
-        let mut intake_count_by_format = std::collections::BTreeMap::new();
-        for format in ["epub", "pdf", "mobi", "azw3", "txt"] {
-            let n = catalog.count_intakes_by_format(format)?;
-            if n > 0 {
-                intake_count_by_format.insert(format.to_string(), n);
-            }
-        }
-        let mut book_state_counts_by_stage = std::collections::BTreeMap::new();
-        for stage in [
-            "extract",
-            "structure",
-            "metadata",
-            "chunk",
-            "embed",
-            "ready",
-        ] {
-            let n = catalog.count_book_states_by_stage(stage)?;
-            if n > 0 {
-                book_state_counts_by_stage.insert(stage.to_string(), n);
-            }
-        }
-        let mut retrieval_issue_counts_by_status = std::collections::BTreeMap::new();
-        for status in ["open", "triaged", "resolved", "wontfix"] {
-            let n = catalog.count_retrieval_issues_by_status(&[status])?;
-            if n > 0 {
-                retrieval_issue_counts_by_status.insert(status.to_string(), n);
-            }
-        }
-        Ok(LibraryStats {
-            intake_counts_by_status,
-            intake_count_by_format,
-            book_state_counts_by_stage,
-            retrieval_issue_counts_by_status,
-            papers: None,
-        })
-    }
-
-    /// List books in catalog order, paginated. Equivalent to
-    /// [`Self::find_books`] with an empty filter.
-    pub fn list_books(&self, limit: u32, offset: u32) -> Result<ListBooksResult> {
-        self.find_books(BookFilter::default(), limit, offset)
-    }
-
-    /// List books matching `filter`, paginated. The limit is clamped to
-    /// [`dto::MAX_LIST_LIMIT`]; `truncated` is set when the page does
-    /// not cover the full filter result.
-    pub fn find_books(
-        &self,
-        filter: BookFilter,
-        limit: u32,
-        offset: u32,
-    ) -> Result<ListBooksResult> {
-        let (effective_limit, _) = clamp_limit(limit);
-        let catalog = Catalog::open_read_only(&self.catalog_db)?;
-
-        let catalog_filter = IntakeFilter {
-            title_substring: filter.title_substring.as_deref(),
-            contributor_name: filter.contributor_name.as_deref(),
-            contributor_role: filter.contributor_role.as_deref(),
-            statuses: filter.statuses.as_slice(),
-            format: filter.format.as_deref(),
-            ..IntakeFilter::default()
-        };
-        let (intakes, total) =
-            catalog.find_intakes_page(&catalog_filter, effective_limit, offset)?;
-        let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
-        let effective =
-            catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
-        let contributors = catalog.contributors_for_addresses(&intake_ids, ItemKind::Book)?;
-        let books: Vec<BookSummary> = intakes
-            .iter()
-            .map(|intake| {
-                let title = effective
-                    .get(&intake.intake_id)
-                    .and_then(|e| e.get("title").map(str::to_string));
-                let top_contributor = contributors
-                    .get(&intake.intake_id)
-                    .and_then(|cs| cs.first())
-                    .map(|c| c.name.clone());
-                BookSummary::from_intake(intake, title, top_contributor)
-            })
-            .collect();
-        let returned = books.len() as u64;
-        let truncated = u64::from(offset) + returned < total;
-        Ok(ListBooksResult {
-            books,
-            total,
-            truncated,
-        })
-    }
-
-    /// List scan sources still awaiting OCR, paginated. The limit is
-    /// clamped to [`dto::MAX_LIST_LIMIT`]; `truncated` is set when the
-    /// page does not cover the full result set. Each item carries the
-    /// path the operator should hand to their OCR tool, the source
-    /// hash, a best-effort page count, and the reason its text layer
-    /// was rejected — enough to drive an external OCR run and re-enter
-    /// the product through `intake ocr`.
-    pub fn list_ocr_pending(&self, limit: u32, offset: u32) -> Result<OcrPendingResult> {
-        let (effective_limit, _) = clamp_limit(limit);
-        let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let pending = catalog.list_ocr_pending(effective_limit, offset)?;
-        let total = catalog.count_ocr_pending()?;
-        let items: Vec<OcrPendingItem> = pending
-            .into_iter()
-            .map(OcrPendingItem::from_pending)
-            .collect();
-        let returned = items.len() as u64;
-        let truncated = u64::from(offset) + returned < total;
-        Ok(OcrPendingResult {
-            items,
-            total,
-            truncated,
-        })
-    }
-
-    /// Fetch the full bibliographic record of one book by intake id,
-    /// including the aggregate shape of its ingested TOC, or `None`
-    /// if no such book is registered.
-    pub fn show_book(&self, intake_id: i64) -> Result<Option<BookDetail>> {
-        let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        let Some(intake) = catalog.intake_by_id(intake_id)? else {
-            return Ok(None);
-        };
-        let effective = catalog.effective_publication_attrs(intake.intake_id, ItemKind::Book)?;
-        let overrides = catalog.overrides_for_address(intake.intake_id, ItemKind::Book)?;
-        let contributors = catalog.contributors_for_address(intake.intake_id, ItemKind::Book)?;
-        let corpus = Corpus::open_read_only(&self.corpus_db)?;
-        let toc_stats = corpus
-            .toc_stats_for_book(PartitionIdx::new(intake_id).root())?
-            .map(dto::TocStats::from);
-        Ok(Some(BookDetail::build(
-            intake,
-            effective,
-            overrides,
-            contributors,
-            toc_stats,
-        )))
-    }
-
-    /// Project the table of contents of one book — the organizing
-    /// nodes under the book root, in depth-first TOC order, paginated,
-    /// filtered, and projected by `args`. Returns `None` when no book
-    /// root exists for `intake_id` or when the request matches no TOC
-    /// entries.
-    pub fn show_toc(&self, intake_id: i64, args: &ShowTocArgs) -> Result<Option<Toc>> {
-        let catalog = Catalog::open_read_only(&self.catalog_db)?;
-        if catalog.intake_by_id(intake_id)?.is_none() {
-            return Ok(None);
-        }
-        let corpus = Corpus::open_read_only(&self.corpus_db)?;
-        let book_root_id = PartitionIdx::new(intake_id).root();
-        let q = args.to_query();
-        let total = corpus.count_toc_nodes(book_root_id, &q)?;
-        if total == 0 {
-            return Ok(None);
-        }
-        let nodes = corpus.toc_for_book(book_root_id, &q)?;
-        let projected = TocNodes::project(&nodes, args.titles_only);
-        let end = u64::from(args.offset) + projected.len() as u64;
-        let next_offset = if end < total {
-            u32::try_from(end).ok()
-        } else {
-            None
-        };
-        Ok(Some(Toc {
-            intake_id,
-            nodes: projected,
-            total,
-            truncated: next_offset.is_some(),
-            next_offset,
-        }))
     }
 }
 

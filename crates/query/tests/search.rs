@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end offline test of the query facade: build a synthetic book on
+//! End-to-end offline test of the search facade: build a synthetic book on
 //! disk, index a prose leaf in the vector store, then drive a search
 //! through [`Library`] with a stub embedder — no Ollama, no PDFium.
 
@@ -8,7 +8,7 @@ use std::future::Future;
 use std::path::Path;
 
 use bookrack_catalog::Catalog;
-use bookrack_core::{ItemKind, NodeType, PartitionIdx};
+use bookrack_core::{NodeType, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
 use bookrack_extract::{
@@ -456,151 +456,6 @@ async fn an_empty_index_is_served_without_stamps() {
     assert_eq!(library.dimension(), DIM);
     let hits = library.search("anything", None).await.expect("search");
     assert!(hits.is_empty());
-}
-
-#[tokio::test]
-async fn show_book_and_show_toc_round_trip_through_the_facade() {
-    use bookrack_catalog::{NewIntake, NewPublicationAttrs};
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let corpus_db = dir.path().join("corpus.db");
-    let catalog_db = dir.path().join("catalog.db");
-    let lancedb_dir = dir.path().join("lancedb");
-
-    // Seed an ingested book with a title, then seed the catalog
-    // separately with the matching biblio so show_book can find it.
-    {
-        let mut corpus = Corpus::open(&corpus_db).expect("open corpus");
-        ingest_structure(
-            &mut corpus,
-            1,
-            NodeType::Work,
-            &extraction(),
-            &StructureParams::default(),
-        )
-        .expect("structure");
-        corpus
-            .reconcile_index_stamps(&current_index_stamps(MODEL, DIM as u32))
-            .expect("stamp");
-    }
-    {
-        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
-        catalog
-            .register_intake(ItemKind::Book, &NewIntake::new("sha-1").format("epub"))
-            .expect("register");
-        let mut attrs = NewPublicationAttrs::new(1, ItemKind::Book);
-        attrs.title = Some("A Test Book".to_string());
-        catalog.upsert_publication_attrs(&attrs).expect("attrs");
-    }
-
-    let library = Library::open(
-        corpus_db,
-        catalog_db,
-        &lancedb_dir,
-        Fixed,
-        MODEL.to_string(),
-        5,
-        bookrack_ingest::CHUNK_VERSION,
-    )
-    .await
-    .expect("open library");
-
-    let detail = library.show_book(1).expect("show book").expect("present");
-    assert_eq!(detail.intake_id, 1);
-    assert_eq!(detail.title.as_deref(), Some("A Test Book"));
-    assert_eq!(detail.format.as_deref(), Some("epub"));
-
-    assert!(library.show_book(404).expect("missing").is_none());
-
-    let toc_args = bookrack_query::dto::ShowTocArgs::default();
-    let toc = library
-        .show_toc(1, &toc_args)
-        .expect("show toc")
-        .expect("present");
-    let bookrack_query::dto::TocNodes::Full(nodes) = &toc.nodes else {
-        panic!("default projection must carry full nodes");
-    };
-    let titles: Vec<&str> = nodes.iter().filter_map(|n| n.title.as_deref()).collect();
-    assert!(
-        titles.iter().any(|t| t.contains("Chapter")),
-        "expected the chapter in the TOC: {titles:?}"
-    );
-    assert_eq!(toc.total, nodes.len() as u64);
-    assert_eq!(toc.next_offset, None);
-    assert!(!toc.truncated);
-    let stats = detail.toc_stats.expect("toc stats present");
-    assert_eq!(stats.entry_count, toc.total);
-
-    let slim = library
-        .show_toc(
-            1,
-            &bookrack_query::dto::ShowTocArgs {
-                titles_only: true,
-                ..bookrack_query::dto::ShowTocArgs::default()
-            },
-        )
-        .expect("show slim toc")
-        .expect("present");
-    assert!(matches!(slim.nodes, bookrack_query::dto::TocNodes::Slim(_)));
-    assert_eq!(slim.total, toc.total);
-
-    assert!(library.show_toc(404, &toc_args).expect("missing").is_none());
-}
-
-#[tokio::test]
-async fn list_books_clamps_to_max_list_limit() {
-    use bookrack_catalog::NewIntake;
-    use bookrack_query::dto::MAX_LIST_LIMIT;
-
-    let dir = tempfile::tempdir().expect("temp dir");
-    let corpus_db = dir.path().join("corpus.db");
-    let catalog_db = dir.path().join("catalog.db");
-    let lancedb_dir = dir.path().join("lancedb");
-
-    {
-        let mut catalog = Catalog::open(&catalog_db).expect("open catalog");
-        // Two intakes: one row fits even under the clamp, so the clamp
-        // engaging is not enough to mark the page as truncated; another
-        // row is needed to overflow the clamped page.
-        let limit_plus_one = MAX_LIST_LIMIT as usize + 1;
-        for n in 0..limit_plus_one {
-            catalog
-                .register_intake(
-                    ItemKind::Book,
-                    &NewIntake::new(format!("sha-{n}")).format("epub"),
-                )
-                .expect("register");
-        }
-    }
-
-    let library = Library::open(
-        corpus_db,
-        catalog_db,
-        &lancedb_dir,
-        Fixed,
-        MODEL.to_string(),
-        5,
-        bookrack_ingest::CHUNK_VERSION,
-    )
-    .await
-    .expect("open library");
-    let page = library
-        .list_books(MAX_LIST_LIMIT + 100, 0)
-        .expect("list books");
-    assert_eq!(page.total, MAX_LIST_LIMIT as u64 + 1);
-    assert_eq!(page.books.len(), MAX_LIST_LIMIT as usize);
-    assert!(
-        page.truncated,
-        "the clamped page does not cover the full total"
-    );
-
-    // Second page picks up the row the clamp held back.
-    let tail = library
-        .list_books(MAX_LIST_LIMIT, MAX_LIST_LIMIT)
-        .expect("list tail");
-    assert_eq!(tail.total, MAX_LIST_LIMIT as u64 + 1);
-    assert_eq!(tail.books.len(), 1);
-    assert!(!tail.truncated, "the second page exhausts the filter");
 }
 
 /// Walk `root` and remove the first regular file under any `*.lance/data/`

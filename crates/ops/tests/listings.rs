@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, NewIntake, NewPublicationAttrs};
+use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT};
@@ -65,6 +65,18 @@ impl Fixture {
             .upsert_publication_attrs(&attrs)
             .expect("seed attrs");
         intake_id
+    }
+
+    fn tag(&self, intake_id: i64, category: &str) {
+        self.catalog()
+            .add_category(&NewCategory::new(
+                intake_id,
+                ItemKind::Book,
+                category,
+                "user",
+                "human",
+            ))
+            .expect("tag category");
     }
 }
 
@@ -122,6 +134,85 @@ fn find_books_batched_enrichment_resolves_title_per_intake() {
             .expect("row");
         assert_eq!(row.title.as_deref(), Some(expected.as_str()));
     }
+}
+
+#[test]
+fn find_books_caps_the_page_at_max_list_limit() {
+    // Seed one row past the clamp so the cap is observable: the page
+    // must stop at MAX_LIST_LIMIT and report the held-back row through
+    // `total` and `truncated`, and the next page must pick it up.
+    let fx = Fixture::build();
+    let over_the_clamp = MAX_LIST_LIMIT as usize + 1;
+    for n in 0..over_the_clamp {
+        let _ = fx.seed_book(&format!("sha-{n}"), &format!("Title {n}"));
+    }
+
+    let page = find_books(&fx.ops, BookFilter::default(), MAX_LIST_LIMIT + 100, 0).expect("find");
+    assert_eq!(page.total, over_the_clamp as u64);
+    assert_eq!(
+        page.books.len(),
+        MAX_LIST_LIMIT as usize,
+        "a request over the clamp must still return at most MAX_LIST_LIMIT rows"
+    );
+    assert!(
+        page.truncated,
+        "the clamped page does not cover the full total"
+    );
+
+    let tail = find_books(
+        &fx.ops,
+        BookFilter::default(),
+        MAX_LIST_LIMIT,
+        MAX_LIST_LIMIT,
+    )
+    .expect("find tail");
+    assert_eq!(tail.total, over_the_clamp as u64);
+    assert_eq!(tail.books.len(), 1, "the second page holds the tail row");
+    assert!(!tail.truncated, "the second page exhausts the filter");
+}
+
+#[test]
+fn find_books_narrows_the_page_to_the_requested_categories() {
+    // `BookFilter.categories` must reach the catalog's category join.
+    // A filter that is silently dropped returns every row instead of
+    // the tagged one — a wrong result set, not an error.
+    let fx = Fixture::build();
+    let philosophy = fx.seed_book("sha-philo", "Alpha");
+    let biography = fx.seed_book("sha-bio", "Bravo");
+    let untagged = fx.seed_book("sha-plain", "Charlie");
+    fx.tag(philosophy, "philosophy");
+    fx.tag(biography, "biography");
+
+    let filter = BookFilter {
+        categories: vec!["philosophy".to_string()],
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, filter, 10, 0).expect("find");
+    assert_eq!(
+        page.books.iter().map(|b| b.intake_id).collect::<Vec<_>>(),
+        vec![philosophy],
+        "only the book tagged `philosophy` matches"
+    );
+    assert_eq!(
+        page.total, 1,
+        "`total` counts the filtered set, not the shelf"
+    );
+
+    // Several categories widen the match to their union.
+    let either = BookFilter {
+        categories: vec!["philosophy".to_string(), "biography".to_string()],
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, either, 10, 0).expect("find either");
+    let mut ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+    ids.sort_unstable();
+    let mut expected = vec![philosophy, biography];
+    expected.sort_unstable();
+    assert_eq!(ids, expected);
+    assert!(
+        !ids.contains(&untagged),
+        "an untagged book must not answer a category filter"
+    );
 }
 
 #[test]
