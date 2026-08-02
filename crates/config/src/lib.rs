@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_core::knob::{
-    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, resolve_knob,
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
 };
 use fs2::FileExt;
 
@@ -2180,12 +2180,16 @@ pub(crate) fn unrooted_backup_dir_knob(
 /// Derived from the source the resolution already recorded rather than
 /// re-walking the ladder, so this row and `bookrack info` cannot
 /// disagree about which rung won.
-pub(crate) fn data_dir_knob(data_dir: &Path, source: ResolutionSource) -> KnobOrigin {
+pub(crate) fn data_dir_knob(
+    data_dir: &Path,
+    source: ResolutionSource,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
     resolve_knob(
         "data_dir",
         KnobReach::Process,
         ReadAt::DuringResolution,
-        data_dir_candidates(Some((data_dir, source))),
+        data_dir_candidates(Some((data_dir, source)), None, dotenv),
     )
 }
 
@@ -2196,16 +2200,15 @@ pub(crate) fn data_dir_knob(data_dir: &Path, source: ResolutionSource) -> KnobOr
 /// failed resolution needs to see it. Whether the resolution succeeded
 /// is a separate question, answered by the error rather than by this
 /// row.
-pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
-    let mut candidates = data_dir_candidates(None);
-    if let Some(rung) = candidates.iter_mut().find(|c| c.site == DATA_DIR_ENV) {
-        rung.value = env_trimmed(env);
-    }
+pub(crate) fn unresolved_data_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
     resolve_knob(
         "data_dir",
         KnobReach::Process,
         ReadAt::DuringResolution,
-        candidates,
+        data_dir_candidates(None, env_trimmed(env), dotenv),
     )
 }
 
@@ -2217,7 +2220,26 @@ pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
 /// rungs below the winner offer nothing: resolution short-circuits, so
 /// what they would have produced was never computed and must not be
 /// guessed at here.
-fn data_dir_candidates(resolved: Option<(&Path, ResolutionSource)>) -> Vec<Candidate> {
+///
+/// One rung of that ladder is an environment variable, and a variable
+/// the dotenv file supplied is the file's value wearing the
+/// environment's clothes — indistinguishable to whoever reads it. That
+/// rung therefore draws its layers through [`env_layers`], the same
+/// call every other variable's row goes through, so a root set in the
+/// file is credited to the file and a file line the real environment
+/// beat is reported as the losing layer it is. `env_read` carries what
+/// the variable held when resolution reached no root at all; with a
+/// root resolved the winning rung already carries it.
+///
+/// The layering applies only to a rung that speaks. A variable that
+/// lost to a flag offers nothing for the file to have supplied, and
+/// splitting silence into two silent layers would name a file that
+/// decided nothing.
+fn data_dir_candidates(
+    resolved: Option<(&Path, ResolutionSource)>,
+    env_read: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<Candidate> {
     let winner = resolved.map(|(_, source)| source);
     let value = resolved.map(|(dir, _)| dir.display().to_string());
 
@@ -2228,10 +2250,16 @@ fn data_dir_candidates(resolved: Option<(&Path, ResolutionSource)>) -> Vec<Candi
 
     ResolutionSource::LADDER
         .iter()
-        .map(|source| {
+        .flat_map(|source| {
             let (layer, site) = source.as_layer();
             let held = (Some(*source) == winner).then(|| value.clone()).flatten();
-            Candidate::of(layer, site, held)
+            match source {
+                ResolutionSource::EnvVar => match held.or_else(|| env_read.clone()) {
+                    Some(read) => env_layers(dotenv, DATA_DIR_ENV, Some(read)),
+                    None => vec![Candidate::of(layer, site, None)],
+                },
+                _ => vec![Candidate::of(layer, site, held)],
+            }
         })
         .collect()
 }

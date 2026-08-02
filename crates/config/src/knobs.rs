@@ -66,7 +66,7 @@ fn knob_origins_from(
     let mut rows = vec![
         crate::no_dotenv_knob(get(crate::NO_DOTENV_ENV)),
         crate::registry_knob(get(crate::REGISTRY_ENV), dotenv),
-        data_dir_row(&get, root),
+        data_dir_row(&get, dotenv, root),
         crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv, &root_config),
         backup_dir_row(&get, dotenv, root),
         crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV), dotenv),
@@ -229,10 +229,18 @@ fn override_site(name: &str) -> &'static str {
 /// The data-root row. Either way it carries the whole ladder, so the
 /// places a root can be selected from are named whether or not one
 /// was.
-fn data_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> KnobOrigin {
+///
+/// Takes the dotenv record like every other row here: the ladder's
+/// environment rung is a variable, and which of the file and the shell
+/// set it is a question only the record can answer.
+fn data_dir_row(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    root: Option<&Config>,
+) -> KnobOrigin {
     match root {
-        Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source()),
-        None => crate::unresolved_data_dir_knob(get(crate::DATA_DIR_ENV)),
+        Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source(), dotenv),
+        None => crate::unresolved_data_dir_knob(get(crate::DATA_DIR_ENV), dotenv),
     }
 }
 
@@ -370,7 +378,7 @@ mod tests {
 
         let mut sites = Vec::new();
         for source in all {
-            let knob = crate::data_dir_knob(std::path::Path::new("/somewhere"), source);
+            let knob = crate::data_dir_knob(std::path::Path::new("/somewhere"), source, None);
             assert_eq!(knob.key, "data_dir");
             assert_eq!(
                 knob.value.as_deref(),
@@ -699,6 +707,7 @@ mod tests {
         let knob = crate::data_dir_knob(
             std::path::Path::new("/somewhere"),
             crate::ResolutionSource::DataDirFlag,
+            None,
         );
 
         let sites: Vec<&str> = knob.chain.iter().map(|s| s.site.as_str()).collect();
@@ -709,6 +718,109 @@ mod tests {
         );
         assert_eq!(knob.value.as_deref(), Some("/somewhere"));
         assert_eq!(knob.layer, Layer::Flag);
+    }
+
+    /// A root won by the data-root variable, as the rows see it once
+    /// resolution has recorded which rung spoke.
+    fn root_won_by_the_variable(dir: &str) -> Config {
+        Config {
+            data_dir: PathBuf::from(dir),
+            ollama_url: crate::DEFAULT_OLLAMA_URL.to_string(),
+            library: None,
+            source: crate::ResolutionSource::EnvVar,
+            root_config: RootConfig::default(),
+            shadowed_default: None,
+            library_identification: None,
+            unusable_registry: None,
+        }
+    }
+
+    /// A data root the file supplied is credited to the file, the way
+    /// every other knob it supplies already is.
+    ///
+    /// The variable and the file are indistinguishable by the time
+    /// resolution reads the environment, so a row naming the variable
+    /// sends an operator hunting through a shell that set nothing —
+    /// while the line that actually decided the root sits in a file the
+    /// row never mentions.
+    #[test]
+    fn a_data_root_the_dotenv_file_supplied_is_credited_to_the_file() {
+        let load = dotenv_load("/sandbox/.env", &[crate::DATA_DIR_ENV]);
+        let root = root_won_by_the_variable("/sandbox/root");
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "/sandbox/root"),
+            Some(load.supply()),
+            Some(&root),
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(
+            data_dir.layer,
+            Layer::Dotenv,
+            "the file supplied the root but the row credits {} @ {}",
+            data_dir.layer.as_str(),
+            data_dir.site
+        );
+        assert_eq!(data_dir.site, "/sandbox/.env");
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/root"));
+        assert!(
+            data_dir.chain.iter().any(|s| s.layer == Layer::Dotenv),
+            "the ladder never names the file: {:?}",
+            data_dir.chain
+        );
+    }
+
+    /// A file line the real environment beat is a losing layer, not an
+    /// absent one — the same claim
+    /// `a_dotenv_line_the_environment_beat_is_reported_as_shadowed`
+    /// makes for the variables, held here for the one rung of the
+    /// data-root ladder that is itself a variable.
+    #[test]
+    fn a_dotenv_data_root_line_the_environment_beat_is_reported_as_shadowed() {
+        let load = dotenv_eclipsed("/sandbox/.env", crate::DATA_DIR_ENV, "/sandbox/from-file");
+        let root = root_won_by_the_variable("/sandbox/from-shell");
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
+            Some(load.supply()),
+            Some(&root),
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(data_dir.layer, Layer::Environment);
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/from-shell"));
+        assert!(
+            data_dir
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.value == "/sandbox/from-file"),
+            "the file's own root vanished from the row: {:?}",
+            data_dir.shadowed
+        );
+    }
+
+    /// The credit holds on the path where resolution failed: a root the
+    /// file pointed at and that does not exist is exactly the case an
+    /// operator is debugging, and sending them to the wrong file is
+    /// worst there.
+    #[test]
+    fn an_unresolved_data_root_the_dotenv_file_pointed_at_names_the_file() {
+        let load = dotenv_load("/sandbox/.env", &[crate::DATA_DIR_ENV]);
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "/sandbox/nope"),
+            Some(load.supply()),
+            None,
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(
+            data_dir.layer,
+            Layer::Dotenv,
+            "the failed resolution reports {} @ {}",
+            data_dir.layer.as_str(),
+            data_dir.site
+        );
+        assert_eq!(data_dir.site, "/sandbox/.env");
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/nope"));
     }
 
     /// A dependency nothing holds still reports every place that was

@@ -231,6 +231,14 @@ at all — loading a file out of the caller's working directory is a
 binary's decision, not a library's, so an embedder configures itself
 through the real environment.
 
+Which of the two set a variable is not something a reader of the
+environment can tell, so the loader records it and `config effective`
+reports it: a value the file supplied is shown at the `dotenv` layer,
+sited at the file, and a line the real environment got to first is
+shown as a layer that offered a value and lost. This holds for the data
+root as well — a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of
+the ladder above and is credited to the file.
+
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the
 file is loaded. `scripts/test-clean.sh` is why it exists: that script

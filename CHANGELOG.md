@@ -125,6 +125,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **config: a data root set in `.env` was reported as coming from the
+  real environment.** Every other knob the file supplies is credited to
+  the file — `config effective` names the path an operator would have
+  to edit — but the data-root row drew its rungs from the resolution
+  ladder alone, and that ladder knows only that a variable held the
+  value, not who wrote it. A root set in `.env` therefore pointed at
+  `BOOKRACK_DATA_DIR`, sending a reader to a shell that set nothing,
+  and a `.env` line the real environment beat vanished from the row
+  entirely — the reading that makes a line already being ignored look
+  like one that was never written. The ladder's environment rung now
+  draws its layers through the same call every other variable's row
+  goes through, on the failed-resolution path as well, where the
+  question is asked most. A rung that lost to a flag is unchanged: it
+  offers nothing, so there is nothing for the file to have supplied.
+  `config knobs` is unchanged too — it reads no `.env`, so it has no
+  record to credit.
+
 - **search, cli: the two per-query ANN knobs claimed nothing decides
   them when unset.** `BOOKRACK_VECTORS_NPROBES` and
   `BOOKRACK_VECTORS_REFINE_FACTOR` fall through to the ANN settings a
