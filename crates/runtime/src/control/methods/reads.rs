@@ -131,7 +131,14 @@ pub fn status(ctx: &MethodContext) -> Value {
 }
 
 pub async fn doctor_gather(ctx: &MethodContext) -> Value {
-    let report = doctor::gather_with(&ctx.selection, ctx.rerank_supervisor.as_deref()).await;
+    // The address this daemon bound, not the one the environment
+    // names: the report is about the surface this session is serving.
+    let report = doctor::gather_with(
+        &ctx.selection,
+        ctx.rerank_supervisor.as_deref(),
+        Some(ctx.info_context.mcp_addr.as_str()),
+    )
+    .await;
     serde_json::to_value(report).unwrap_or(Value::Null)
 }
 

@@ -1333,6 +1333,17 @@ pub const DEFAULT_MCP_ADDR: &str = "127.0.0.1:8765";
 /// Environment variable overriding the MCP server listen address.
 pub const MCP_ADDR_ENV: &str = "BOOKRACK_MCP_ADDR";
 
+/// Name the MCP server publishes as `serverInfo.name` in its
+/// `initialize` result.
+///
+/// Part of the wire surface: it is what an agent client lists the
+/// server under, and what `bookrack doctor` matches to decide whether
+/// the configured address is answered by this daemon or by a
+/// stranger. It lives here, below both the server and the health
+/// check, so the published name and the expected name cannot drift
+/// apart.
+pub const MCP_SERVER_NAME: &str = "bookrack";
+
 /// The environment variables the five configuration resolvers read.
 ///
 /// These are the knobs whose priority chain runs inside

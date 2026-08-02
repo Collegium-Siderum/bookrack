@@ -214,7 +214,13 @@ configured but cannot be read, they report that as a row apiece instead
 of dropping out of the report, which would be indistinguishable from an
 install that has no registry at all. When the effective profile enables
 a reranker, three more rows cover its backend: the `llama-server`
-binary, the reranker model, and whichever server is serving. Each row is
+binary, the reranker model, and whichever server is serving. A last row
+covers the MCP endpoint itself: it sends a real `initialize` at the
+address and checks that bookrack is what answers, so a port taken over
+by another service is reported rather than assumed healthy. With a
+daemon running the row is about the address that daemon bound; with
+none running it is about the configured address, and a free one is
+`OK`. Each row is
 `OK`, `WARN`, or `FAIL`; any `FAIL` exits non-zero so a script can branch
 on it. Pass `--json` for a machine-readable report suitable for a bug
 attachment.

@@ -1829,9 +1829,20 @@ impl BookrackServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for BookrackServer {
+    /// The published identity is this workspace's own, not the SDK's:
+    /// rmcp's default fills `serverInfo` from the environment of the
+    /// crate that compiled it, which names the SDK rather than the
+    /// server. Agent clients list what this returns, and
+    /// `bookrack doctor` matches the name to tell this daemon apart
+    /// from another service on the same address.
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Search and browse a local, offline library of books. Tools: \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(rmcp::model::Implementation::new(
+                bookrack_config::MCP_SERVER_NAME,
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "Search and browse a local, offline library of books. Tools: \
              `library.stats` (counts), `library.list_books` / `library.find_books` \
              (browse and search the registry), `library.show_book` / `library.show_toc` \
              (per-book metadata and table of contents), `library.search` (vector \
@@ -1839,8 +1850,8 @@ impl ServerHandler for BookrackServer {
              search confined to one book). Curation tools also write: the \
              `library.metadata.*` family edits a book's bibliographic record and \
              review status, and `reference.overlay_set` edits a reference entry."
-                .to_string(),
-        )
+                    .to_string(),
+            )
     }
 
     /// Override the `#[tool_handler]`-generated dispatch so every tool

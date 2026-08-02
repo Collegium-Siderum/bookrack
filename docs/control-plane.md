@@ -334,7 +334,11 @@ the exit-code bucket does not distinguish the two.
   full set) — and will become plural with the multi-library status
   surface.
 - `doctor.gather` — JSON serialisation of the same report the
-  `bookrack doctor` subcommand prints.
+  `bookrack doctor` subcommand prints. Gathered inside the daemon, so
+  the `MCP endpoint` row probes the address this session bound and not
+  the one the caller's environment names; the row is `fail` when a
+  service that is not bookrack answers there, or when nothing answers
+  at an address the daemon reports serving.
 - `daemon.methods` — the live method table: every name this daemon
   dispatches, with its read/write class. Authoritative at runtime where
   this document is authoritative at review time.

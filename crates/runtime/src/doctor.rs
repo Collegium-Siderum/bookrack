@@ -37,6 +37,7 @@ use eyre::{Context, Result};
 use serde::Serialize;
 
 use crate::backend_probe::{EmbedBackendState, check_embed_backend};
+use crate::mcp_endpoint::McpEndpointState;
 
 /// One row of the health report.
 #[derive(Debug, Clone, serde::Deserialize, Serialize)]
@@ -129,16 +130,19 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<bool> {
 /// the sense that every observation is fresh — there is no in-process
 /// cache to invalidate between successive calls.
 pub async fn gather(selection: &LibrarySelection) -> Report {
-    gather_with(selection, None).await
+    gather_with(selection, None, None).await
 }
 
-/// [`gather`] with a live daemon's supervised reranker backend, so the
-/// backend row reports the supervisor state instead of `not running`.
-/// The daemon's `doctor.gather` handler passes its handle; the offline
-/// CLI path passes `None`.
+/// [`gather`] with what only a live daemon knows: its supervised
+/// reranker backend, so that row reports the supervisor state instead
+/// of `not running`, and the MCP address it actually bound, so the
+/// endpoint row asks about the address being served rather than the
+/// one configured. The daemon's `doctor.gather` handler passes both;
+/// the offline CLI path passes neither.
 pub async fn gather_with(
     selection: &LibrarySelection,
     rerank_supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
+    served_mcp_addr: Option<&str>,
 ) -> Report {
     let mut rows = Vec::new();
 
@@ -158,6 +162,7 @@ pub async fn gather_with(
     let embed_model = embed_model_for_probe(cfg.as_ref());
     push_ollama_rows(&mut rows, &ollama_url, &embed_model).await;
     push_reranker_rows(&mut rows, cfg.as_ref(), rerank_supervisor).await;
+    push_mcp_endpoint_row(&mut rows, served_mcp_addr).await;
 
     Report { rows }
 }
@@ -1209,6 +1214,72 @@ fn url_backend_row(url: &str, health: &bookrack_rerank::ServerHealth) -> Row {
     }
 }
 
+/// Probe the MCP address and lay the answer out as one row.
+///
+/// `served` is the address the calling daemon bound, present only when
+/// the report is gathered inside a running daemon. Absent, the row
+/// reports on the *configured* address instead: with no daemon up, the
+/// operator's question is whether the address a daemon would take is
+/// free, and the answer is worth having before the start rather than
+/// after it.
+async fn push_mcp_endpoint_row(rows: &mut Vec<Row>, served: Option<&str>) {
+    let (addr, serving) = match served {
+        Some(addr) => (addr.to_string(), true),
+        None => (bookrack_config::McpConfig::from_env().addr, false),
+    };
+    // A session running without the surface has no address to probe,
+    // and no failure to report either: `--no-mcp` asked for this.
+    if addr == "disabled" {
+        rows.push(Row {
+            label: "MCP endpoint".to_string(),
+            value: "disabled".to_string(),
+            status: Status::Ok {
+                note: Some("session started with --no-mcp".to_string()),
+            },
+        });
+        return;
+    }
+    let state =
+        crate::mcp_endpoint::probe_endpoint(&addr, crate::mcp_endpoint::PROBE_TIMEOUT).await;
+    rows.push(mcp_endpoint_row(&addr, serving, state));
+}
+
+/// The pure layout half of [`push_mcp_endpoint_row`], separated so
+/// every combination can be pinned without a server.
+///
+/// `serving` says whether a daemon claims to hold this address. It
+/// decides the severity, not the facts: silence at an address nobody
+/// serves is the ordinary state of a stopped daemon, while silence at
+/// the address this daemon reports holding is a broken product
+/// surface. A stranger answering is a failure either way — that is
+/// the state in which a client following the documented URL reaches
+/// somebody else.
+fn mcp_endpoint_row(addr: &str, serving: bool, state: McpEndpointState) -> Row {
+    let status = match (&state, serving) {
+        (McpEndpointState::Serving { version }, _) => Status::Ok {
+            note: Some(format!("bookrack {version}")),
+        },
+        (McpEndpointState::Foreign { .. }, _) => Status::Fail {
+            note: "answered by another service -- an agent client here reaches it, not bookrack"
+                .to_string(),
+        },
+        (McpEndpointState::Unreachable, true) => Status::Fail {
+            note: format!(
+                "no answer within {}s from the address this daemon reports serving",
+                crate::mcp_endpoint::PROBE_TIMEOUT.as_secs()
+            ),
+        },
+        (McpEndpointState::Unreachable, false) => Status::Ok {
+            note: Some("free -- no daemon is serving it".to_string()),
+        },
+    };
+    Row {
+        label: "MCP endpoint".to_string(),
+        value: addr.to_string(),
+        status,
+    }
+}
+
 /// Lay the embed-backend judgement out as the two rows the table has
 /// always shown. The judgement itself lives in
 /// [`crate::backend_probe`]; only the layout is here, so bring-up can
@@ -1430,6 +1501,60 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// Silence means opposite things on the two sides of the
+    /// `serving` flag, and a stranger answering means the same thing
+    /// on both. Every combination is pinned, because the whole point
+    /// of the row is that it does not report a healthy endpoint when
+    /// the endpoint is somebody else's.
+    #[test]
+    fn the_mcp_endpoint_row_grades_each_state_by_whether_a_daemon_claims_the_address() {
+        let serving_ok = mcp_endpoint_row(
+            "127.0.0.1:8765",
+            true,
+            McpEndpointState::Serving {
+                version: "0.11.0-dev".to_string(),
+            },
+        );
+        assert!(
+            matches!(serving_ok.status, Status::Ok { .. }),
+            "a served endpoint answering as bookrack is the healthy row: {:?}",
+            serving_ok.status
+        );
+        assert_eq!(serving_ok.value, "127.0.0.1:8765");
+
+        for serving in [true, false] {
+            let foreign = mcp_endpoint_row(
+                "127.0.0.1:8765",
+                serving,
+                McpEndpointState::Foreign {
+                    evidence: "HTTP 200, body \"nope\"".to_string(),
+                },
+            );
+            assert!(
+                matches!(foreign.status, Status::Fail { .. }),
+                "a stranger on the address is a failure whether or not a daemon claims it \
+                 (serving={serving}): {:?}",
+                foreign.status
+            );
+        }
+
+        let silent_while_serving =
+            mcp_endpoint_row("127.0.0.1:8765", true, McpEndpointState::Unreachable);
+        assert!(
+            matches!(silent_while_serving.status, Status::Fail { .. }),
+            "an address this daemon reports serving must answer: {:?}",
+            silent_while_serving.status
+        );
+
+        let silent_with_no_daemon =
+            mcp_endpoint_row("127.0.0.1:8765", false, McpEndpointState::Unreachable);
+        assert!(
+            matches!(silent_with_no_daemon.status, Status::Ok { .. }),
+            "a free address with no daemon running is not a fault: {:?}",
+            silent_with_no_daemon.status
+        );
     }
 
     /// The table cell and the bring-up hint share the repair command,

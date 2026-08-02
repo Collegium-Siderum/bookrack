@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli, runtime: `bookrack doctor` checks the MCP endpoint.** The
+  report covered the data root, PDFium, the file-descriptor limit, the
+  databases, the registry, the index profile, the embed backend and
+  the reranker — everything except the one address agent clients
+  connect to. A new `MCP endpoint` row sends a real `initialize` at
+  it and matches the published `serverInfo.name`: `ok` when bookrack
+  answers, `fail` when another service does — the state in which a
+  client following the documented URL reaches a stranger — and, with
+  no daemon running, `ok` for an address that is simply free. Against
+  a live daemon the row reports the address that daemon bound, not the
+  one the invoking environment names.
+
+  The MCP server now publishes its own identity in `serverInfo`
+  (`bookrack`, at the workspace version) instead of the SDK's default,
+  which named the SDK. Agent clients list servers by that name.
+
 - **runtime: `BOOKRACK_MCP_ADDR` (and `bookrack run --mcp-addr`)
   accept port `0`, for a kernel-assigned free port.** The daemon
   reports which port it was given — in the success line, in `bookrack
