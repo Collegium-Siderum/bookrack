@@ -27,8 +27,10 @@ release workflow extracts the matching section verbatim from this file.
   is not a setting, and the markers and registrations are compared in
   both directions. A row renders the constant itself rather than a copy
   of it, and one key can be claimed by only one crate, so the same
-  value given two homes is a build failure. The read caps and the log
-  ring's bounds are the first crates listed.
+  value given two homes is a build failure. The read caps, the log
+  ring's bounds, and the daemon's own deadlines — the plan lifetime,
+  the reranker's request timeout, retries and restart backoff, the
+  file-descriptor target — are the first crates listed.
 
   Two values the read surfaces had been holding twice now have one
   home each: the context-window radius a `library.read_context` call

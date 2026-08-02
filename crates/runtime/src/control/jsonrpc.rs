@@ -11,6 +11,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// setting: internal -- every code below is a wire contract callers match on, listed in
+// docs/control-plane.md; none of them is a value to tune
+
 /// JSON-RPC 2.0 protocol marker. Every frame carries this verbatim.
 pub const JSONRPC_VERSION: &str = "2.0";
 

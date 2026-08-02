@@ -14,6 +14,7 @@
 /// Soft limit the daemon requests at startup. Sized for a large batch
 /// ingest: hundreds of LanceDB fragment files between compactions plus
 /// the fixed per-session descriptors, with headroom.
+// setting: daemon.nofile_target
 pub const NOFILE_TARGET: u64 = 8192;
 
 /// Raise the soft `RLIMIT_NOFILE` to `min(hard, NOFILE_TARGET)`.

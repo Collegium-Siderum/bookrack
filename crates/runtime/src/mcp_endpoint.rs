@@ -31,6 +31,7 @@ use tokio::net::TcpListener;
 /// How long the health probe waits for the endpoint to answer.
 /// Loopback and a daemon that is already up: a second is generous,
 /// and a report is not worth blocking on.
+// setting: mcp.probe_timeout
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bring-up's refusal to start without the MCP endpoint it announced.

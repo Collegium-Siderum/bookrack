@@ -22,6 +22,15 @@
 //! [`COVERED`] is what makes the exhaustive form landable: crates join
 //! it one at a time, and each one is complete when it joins. It only
 //! grows, and it disappears when it holds every crate.
+//!
+//! One relaxation: a file whose constants are all the same kind of
+//! not-a-setting states that once, above its first constant, instead of
+//! repeating one sentence down a column — the JSON-RPC code table is
+//! the case it exists for. The cost is real and worth naming: a tunable
+//! later added to such a file inherits the exemption silently. It is
+//! bounded by what the file-scoped form cannot do — it cannot name a
+//! key, so nothing reaches the inventory through it, and a constant
+//! that carries its own marker is still held to it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,7 +43,7 @@ use eyre::Result;
 /// numeric constant it declares. A crate not on it is exempt, which is
 /// why the list has to grow: the exemption is a rollout step, not a
 /// standing allowance.
-const COVERED: &[&str] = &["obs", "query"];
+const COVERED: &[&str] = &["obs", "query", "runtime"];
 
 /// Constant types the rule applies to.
 ///
@@ -117,6 +126,7 @@ fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
                 None => &text[..],
             };
             let lines: Vec<&str> = body.lines().collect();
+            let whole_file = file_scoped_marker(&lines);
             for (idx, line) in lines.iter().enumerate() {
                 let Some(name) = declares_numeric_constant(line) else {
                     continue;
@@ -124,7 +134,7 @@ fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
                 found.push(Found {
                     site: format!("{}:{}", path.display(), idx + 1),
                     name,
-                    marker: marker_above(&lines, idx),
+                    marker: marker_above(&lines, idx).or_else(|| whole_file.clone()),
                 });
             }
         }
@@ -173,6 +183,41 @@ fn marker_above(lines: &[&str], idx: usize) -> Option<String> {
         return line
             .strip_prefix(MARKER)
             .map(|payload| payload.trim().to_string());
+    }
+    None
+}
+
+/// The one opt-out a whole file may state on behalf of its constants.
+///
+/// Taken only from before the file's first constant, and only in the
+/// opt-out form: a file-scoped marker naming a key would be a
+/// registration with no constant behind it, which is the shape the
+/// key-set comparison exists to reject.
+fn file_scoped_marker(lines: &[&str]) -> Option<String> {
+    for (idx, line) in lines.iter().enumerate() {
+        if declares_numeric_constant(line).is_some() {
+            return None;
+        }
+        let Some(payload) = line.trim().strip_prefix(MARKER) else {
+            continue;
+        };
+        // A marker standing directly above a constant is that
+        // constant's, whatever it precedes in the file.
+        let attaches_to_a_constant = lines[idx + 1..]
+            .iter()
+            .find(|next| !next.trim().is_empty() && !next.trim().starts_with('#'))
+            .is_some_and(|next| declares_numeric_constant(next).is_some());
+        if attaches_to_a_constant {
+            continue;
+        }
+        let payload = payload.trim();
+        assert!(
+            payload.starts_with(NOT_A_SETTING),
+            "line {} states a file-scoped `{MARKER} {payload}`, but a whole file may \
+             only opt out, never register: a key needs the one constant it belongs to",
+            idx + 1
+        );
+        return Some(payload.to_string());
     }
     None
 }

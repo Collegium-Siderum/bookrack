@@ -1111,7 +1111,8 @@ fn migrate_queue_snapshot(legacy: &std::path::Path, target: &std::path::Path) ->
 /// restart is routine self-healing; at it, the exponential backoff
 /// has already failed twice and the outage deserves operator
 /// attention.
-const RERANK_CRASHLOOP_ATTEMPTS: u32 = 3;
+// setting: reranker.crashloop_attempts
+pub(crate) const RERANK_CRASHLOOP_ATTEMPTS: u32 = 3;
 
 /// Map a supervisor state transition onto the reranker degraded
 /// cause: `Some(true)` enters, `Some(false)` exits, `None` leaves the

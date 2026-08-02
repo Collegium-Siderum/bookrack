@@ -114,7 +114,8 @@ pub struct RerankSupervisorConfig {
 }
 
 /// Longest delay between restart attempts.
-const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
+// setting: reranker.restart_backoff_cap
+pub(crate) const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
 impl RerankSupervisorConfig {
     /// Defaults: a 60 s readiness deadline polled every 250 ms (the
@@ -274,21 +275,28 @@ pub struct RerankerRuntime {
 /// Per-request timeout for query-time rerank calls: generous enough
 /// for a full `top_k_in` window on a cold cache, far below a hung
 /// server.
-const RERANK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+// setting: reranker.request_timeout
+pub(crate) const RERANK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Transport retries for one rerank call. Two quick retries ride out
 /// a connection blip without stalling an interactive query through a
 /// whole supervisor restart window — that window surfaces as the
 /// query error the profile's atomicity demands.
-const RERANK_MAX_RETRIES: u32 = 2;
+// setting: reranker.request_retries_max
+pub(crate) const RERANK_MAX_RETRIES: u32 = 2;
 
 /// First retry backoff for a rerank call.
-const RERANK_BACKOFF_BASE: Duration = Duration::from_millis(250);
+// setting: reranker.request_backoff_base
+pub(crate) const RERANK_BACKOFF_BASE: Duration = Duration::from_millis(250);
 
 /// Candidate-window fallbacks when a profile omits the bounds. The
-/// validator requires both fields on a cross-encoder profile, so
-/// these only guard a spec that bypassed validation.
+/// validator requires both fields on a cross-encoder profile, so these
+/// only guard a spec that bypassed validation; the window a running
+/// library actually applies is the profile's, which
+/// `bookrack index-profile current` reports.
+// setting: internal -- guards a spec the profile validator rejects
 const DEFAULT_TOP_K_IN: usize = 50;
+// setting: internal -- the other half of the same guard
 const DEFAULT_TOP_K_OUT: usize = 10;
 
 /// Bring up the reranker backend a library's effective profile

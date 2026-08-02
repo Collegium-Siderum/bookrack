@@ -24,7 +24,8 @@ use crate::cmd::input_error::CmdInputError;
 /// `<data_root>/dryruns/` before pruning the oldest. Independent of
 /// the book-side retention so a heavy book sweep does not displace a
 /// recent paper dryrun.
-const PAPERS_DRYRUN_KEEP: usize = 5;
+// setting: dryrun.paper_reports_kept
+pub(crate) const PAPERS_DRYRUN_KEEP: usize = 5;
 
 /// What [`run`] produced. Mirrors [`crate::cmd::dryrun::DryrunRunOutcome`]
 /// for the paper pipeline so the caller can render its own summary

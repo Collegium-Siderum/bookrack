@@ -25,7 +25,8 @@ use crate::cmd::input_error::CmdInputError;
 /// How many dryrun JSONL artifacts to keep under `<data_root>/dryruns/`
 /// before pruning the oldest. Matches the catalog backup retention so
 /// the two operational artifact directories age out at the same cadence.
-const DRYRUN_KEEP: usize = 5;
+// setting: dryrun.reports_kept
+pub(crate) const DRYRUN_KEEP: usize = 5;
 
 /// What the dryrun produced. Returned from [`run`] so the caller can
 /// render its own summary line and decide what to stream where; the

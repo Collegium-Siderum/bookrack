@@ -390,6 +390,7 @@ fn unknown_method_message(method: &str, mcp_tools: &[meta::McpToolInfo]) -> Stri
 /// Stable: callers (`bookrack-mcp` clients, the CLI) match on it to
 /// distinguish a misconfigured headless entry from a transient busy
 /// state.
+// setting: internal -- a JSON-RPC application code callers match on, not a value to tune
 pub const QUEUE_WORKER_DISABLED: i32 = -32002;
 
 /// Returns `true` when the method routes work through the persistent

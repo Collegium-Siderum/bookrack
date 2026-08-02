@@ -34,6 +34,7 @@ use crate::render::table::RowTable;
 pub const REGISTRIES: &[&[FixedSetting]] = &[
     bookrack_obs::stream::FIXED_SETTINGS,
     bookrack_query::dto::FIXED_SETTINGS,
+    bookrack_runtime::fixed::FIXED_SETTINGS,
 ];
 
 /// One value as the JSON form carries it.
