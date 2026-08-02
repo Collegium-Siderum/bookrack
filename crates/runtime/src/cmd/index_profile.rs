@@ -379,15 +379,7 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
                 profile.ann.kind.as_str(),
                 ann_params(profile)
             );
-            match profile.reranker.kind {
-                RerankerKind::None => println!("  reranker: none"),
-                RerankerKind::CrossEncoder => println!(
-                    "  reranker: cross-encoder ({}, top {} -> {})",
-                    profile.reranker.model.as_deref().unwrap_or("<unset>"),
-                    profile.reranker.top_k_in.unwrap_or(0),
-                    profile.reranker.top_k_out.unwrap_or(0),
-                ),
-            }
+            println!("  {}", reranker_line(profile));
         }
         None => println!("profile: none (built-in default embed model)"),
     }
@@ -592,6 +584,29 @@ fn ann_params(profile: &IndexProfile) -> String {
         out.push_str(&format!(" refine={refine}"));
     }
     out
+}
+
+/// The reranker stage a summary line shows.
+///
+/// A cross-encoder stage carries a model and both candidate counts, so
+/// each `<unset>` here marks a profile validation would reject rather
+/// than a field with a default behind it.
+fn reranker_line(profile: &IndexProfile) -> String {
+    match profile.reranker.kind {
+        RerankerKind::None => "reranker: none".to_string(),
+        RerankerKind::CrossEncoder => format!(
+            "reranker: cross-encoder ({}, top {} -> {})",
+            profile.reranker.model.as_deref().unwrap_or("<unset>"),
+            top_k(profile.reranker.top_k_in),
+            top_k(profile.reranker.top_k_out),
+        ),
+    }
+}
+
+/// One candidate count for display, or `<unset>` when the profile omits
+/// it.
+fn top_k(count: Option<u32>) -> String {
+    count.map_or_else(|| "<unset>".to_string(), |k| k.to_string())
 }
 
 /// Field-level comparison rows: every dotted field path either profile
@@ -891,7 +906,7 @@ fn describe_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+    use bookrack_index_profile::{PROFILE_QWEN3_4B_QUALITY, PROFILE_QWEN3_06B_DEFAULT};
 
     #[test]
     fn pipeline_filter_selects_what_it_names() {
@@ -931,5 +946,26 @@ mod tests {
             &profile,
         );
         assert!(reconcile.contains("metadata only"));
+    }
+
+    /// A cross-encoder profile missing its candidate counts is a state
+    /// validation refuses, so nothing has a value to show for it. The
+    /// line says so rather than printing a number no stage would use —
+    /// `0` reads as a configured cap, and the supervisor's own fallback
+    /// for the same state is a different number again.
+    #[test]
+    fn a_cross_encoder_without_candidate_counts_shows_them_unset() {
+        let mut profile =
+            IndexProfile::from_named(PROFILE_QWEN3_4B_QUALITY).expect("built-in profile");
+        assert_eq!(profile.reranker.kind, RerankerKind::CrossEncoder);
+
+        let configured = reranker_line(&profile);
+        assert!(configured.contains("top 50 -> 10"), "{configured}");
+
+        profile.reranker.top_k_in = None;
+        profile.reranker.top_k_out = None;
+        let line = reranker_line(&profile);
+        assert!(line.contains("top <unset> -> <unset>"), "{line}");
+        assert!(!line.contains("top 0"), "{line}");
     }
 }
