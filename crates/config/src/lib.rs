@@ -130,15 +130,28 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
         .filter_map(|(key, _)| key.into_string().ok())
         .collect();
     let path = dotenvy::dotenv().ok()?;
-    let supplied: BTreeSet<String> = dotenvy::from_path_iter(&path)
+    let entries: Vec<(String, String)> = dotenvy::from_path_iter(&path)
         .ok()?
         .filter_map(Result::ok)
-        .map(|(key, _)| key)
-        .filter(|key| !before.contains(key))
         .collect();
+    let supplied: BTreeSet<String> = entries
+        .iter()
+        .filter(|(key, _)| !before.contains(key))
+        .map(|(key, _)| key.clone())
+        .collect();
+    let mut eclipsed: Vec<(String, String)> = entries
+        .into_iter()
+        .filter(|(key, _)| before.contains(key))
+        .collect();
+    eclipsed.sort();
+    eclipsed.dedup_by(|a, b| a.0 == b.0);
     let supplied = supplied.into_iter().collect();
 
-    let load = DotenvLoad { path, supplied };
+    let load = DotenvLoad {
+        path,
+        supplied,
+        eclipsed,
+    };
     let _ = DOTENV_LOAD.set(load.clone());
     Some(load)
 }
@@ -153,6 +166,14 @@ pub struct DotenvLoad {
     /// the real environment already carried is absent: `dotenvy` only
     /// fills gaps.
     pub supplied: Vec<String>,
+    /// The keys the file declares that the real environment already
+    /// carried, with the value the file would have given, sorted by
+    /// key.
+    ///
+    /// These were read and discarded. Without them a knob the operator
+    /// set in both places reports only the winner, and the file's line
+    /// looks like it was never written rather than like it lost.
+    pub eclipsed: Vec<(String, String)>,
 }
 
 impl DotenvLoad {
@@ -161,6 +182,7 @@ impl DotenvLoad {
         bookrack_core::knob::DotenvSupply {
             path: self.path_str(),
             supplied: &self.supplied,
+            eclipsed: &self.eclipsed,
         }
     }
 

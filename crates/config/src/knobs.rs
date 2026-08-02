@@ -340,6 +340,17 @@ mod tests {
         crate::DotenvLoad {
             path: PathBuf::from(path),
             supplied: supplied.iter().map(|k| k.to_string()).collect(),
+            eclipsed: Vec::new(),
+        }
+    }
+
+    /// A load whose file names `key` with `value`, but the real
+    /// environment already carried that key, so the file's line lost.
+    fn dotenv_eclipsed(path: &str, key: &str, value: &str) -> crate::DotenvLoad {
+        crate::DotenvLoad {
+            path: PathBuf::from(path),
+            supplied: Vec::new(),
+            eclipsed: vec![(key.to_string(), value.to_string())],
         }
     }
 
@@ -404,6 +415,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A key the file declares and the real environment already held
+    /// is reported as a losing layer, not dropped. Dropping it makes a
+    /// knob set in both places look like one the file never mentioned,
+    /// which is the reading that sends an operator to edit a line that
+    /// was already being ignored.
+    #[test]
+    fn a_dotenv_line_the_environment_beat_is_reported_as_shadowed() {
+        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
+        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
+
+        assert_eq!(layers.len(), 2, "{layers:?}");
+        assert_eq!(layers[0].layer, Layer::Environment);
+        assert_eq!(layers[0].value.as_deref(), Some("9"));
+        assert_eq!(layers[1].layer, Layer::Dotenv);
+        assert_eq!(
+            layers[1].value.as_deref(),
+            Some("7"),
+            "the file's own value is what makes it a losing layer rather than an absent one"
+        );
+
+        let knob = bookrack_core::knob::resolve_knob(
+            "search.top_k",
+            bookrack_core::knob::KnobReach::Library,
+            bookrack_core::knob::ReadAt::AfterResolution,
+            layers,
+        );
+        assert_eq!(knob.value.as_deref(), Some("9"));
+        assert!(
+            knob.shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.value == "7"),
+            "the eclipsed dotenv line is missing from shadowed: {:?}",
+            knob.shadowed
+        );
     }
 
     /// The knob that decides whether the file is read at all is read

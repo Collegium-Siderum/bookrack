@@ -217,6 +217,9 @@ pub struct DotenvSupply<'a> {
     pub path: &'a str,
     /// The keys it supplied, in whatever order the caller holds them.
     pub supplied: &'a [String],
+    /// The keys the file declares that the real environment already
+    /// carried, with the value the file would have given.
+    pub eclipsed: &'a [(String, String)],
 }
 
 impl DotenvSupply<'_> {
@@ -224,12 +227,24 @@ impl DotenvSupply<'_> {
     pub fn supplied(&self, name: &str) -> bool {
         self.supplied.iter().any(|key| key == name)
     }
+
+    /// The value the file declares for `name` when the real
+    /// environment already carried one, so the file's line was read
+    /// and discarded.
+    pub fn eclipsed(&self, name: &str) -> Option<&str> {
+        self.eclipsed
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
 }
 
 /// The environment and dotenv layers for one variable, in that order.
 ///
-/// At most one carries a value: the loader only fills gaps, so a key
-/// the real environment already held was never written by the file.
+/// At most one carries a *winning* value: the loader only fills gaps.
+/// Both can carry one when the file names a key the environment
+/// already held — the file's line lost, and saying so is what
+/// distinguishes a knob set twice from one never set in the file.
 ///
 /// With no load to consult the result is a single environment
 /// candidate rather than two with the second empty — "no dotenv layer
@@ -241,10 +256,23 @@ pub fn env_layers(
     name: &str,
     raw: Option<String>,
 ) -> Vec<Candidate> {
-    match dotenv.filter(|load| load.supplied(name)) {
-        Some(load) => vec![
+    let Some(load) = dotenv else {
+        return vec![Candidate::of(Layer::Environment, name, raw)];
+    };
+    if load.supplied(name) {
+        return vec![
             Candidate::of(Layer::Environment, name, None),
             Candidate::of(Layer::Dotenv, load.path, raw),
+        ];
+    }
+    // The file names it but the real environment got there first, so
+    // the file's line was read and thrown away. Reporting it as a
+    // losing layer is the difference between "you set this twice" and
+    // "you never set this".
+    match load.eclipsed(name) {
+        Some(value) => vec![
+            Candidate::of(Layer::Environment, name, raw),
+            Candidate::of(Layer::Dotenv, load.path, Some(value.to_string())),
         ],
         None => vec![Candidate::of(Layer::Environment, name, raw)],
     }
