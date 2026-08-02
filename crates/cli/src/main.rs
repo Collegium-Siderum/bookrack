@@ -489,6 +489,20 @@ pub(crate) enum ConfigAction {
         "config knobs --json",
     ])]
     Knobs,
+
+    /// List the values compiled into this build that no layer moves.
+    ///
+    /// The surface for a value an operator cannot set but still has to
+    /// quote: the cap a response stopped at, the timeout a call died
+    /// on, the retry count a log implies. Each row names what the
+    /// value bounds and which surface changes with it. Like `config
+    /// knobs` it reads no data root, no daemon and no `.env`, so the
+    /// answer describes the binary rather than this machine.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config fixed",
+        "config fixed --json",
+    ])]
+    Fixed,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1119,6 +1133,7 @@ async fn run() -> Result<()> {
         Command::Config { action } => match action {
             ConfigAction::Effective => bookrack_cli::config_effective::run(&selection),
             ConfigAction::Knobs => bookrack_cli::config_knobs::run(),
+            ConfigAction::Fixed => bookrack_cli::config_fixed::run(),
         },
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
@@ -2277,7 +2292,7 @@ mod tests {
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
         ("bookrack", 27),
         ("bookrack audit-profile", 3),
-        ("bookrack config", 2),
+        ("bookrack config", 3),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),

@@ -877,6 +877,7 @@ dependencies = [
  "bookrack-mcp",
  "bookrack-obs",
  "bookrack-ops",
+ "bookrack-query",
  "bookrack-refs",
  "bookrack-runtime",
  "bookrack-search",

@@ -36,31 +36,59 @@ use bookrack_corpus::{Node, TocQuery};
 /// silently clamped; the response then carries `truncated = true` if
 /// and only if the clamped page still does not cover the full filter
 /// result.
+// setting: reads.list_limit_max
 pub const MAX_LIST_LIMIT: u32 = 100;
 
 /// Default page size when the caller does not specify one.
+// setting: reads.list_limit_default
 pub const DEFAULT_LIST_LIMIT: u32 = 20;
 
 /// Maximum TOC nodes one [`Toc`] may carry. Books at the current
 /// pilot scale fit well under this; the cap is a safety net against
 /// pathological inputs and reflects in [`Toc::truncated`].
+// setting: reads.toc_nodes_max
 pub const MAX_TOC_NODES: usize = 2000;
 
 /// Maximum leaves on either side of the anchor a context-window read
 /// may request. Larger requests are clamped and the response carries
 /// `truncated = true`.
+// setting: reads.context_radius_max
 pub const MAX_CONTEXT_RADIUS: u32 = 20;
 
 /// Character budget for the passage text one read response may carry.
 /// A response stops adding passages once the budget is spent; the
 /// caller pages with the returned cursor instead of receiving an
 /// unbounded body.
+// setting: reads.read_chars_max
 pub const MAX_READ_CHARS: usize = 30_000;
 
 /// Maximum leaf rows one span read fetches from the corpus. A backstop
 /// behind [`MAX_READ_CHARS`]: the character budget normally fires
 /// first, this cap bounds the row fetch when passages are tiny.
+// setting: reads.span_leaves_max
 pub const MAX_SPAN_LEAVES: usize = 2000;
+
+bookrack_core::fixed_settings! {
+    owner = "query";
+    "reads.context_radius_max" = MAX_CONTEXT_RADIUS,
+        "leaves on either side of the anchor one context read may ask for",
+        acts on "library.read_context";
+    "reads.list_limit_default" = DEFAULT_LIST_LIMIT,
+        "rows one list page carries when the caller names no limit",
+        acts on "library.list_books, library.find_books, library.list_papers";
+    "reads.list_limit_max" = MAX_LIST_LIMIT,
+        "rows one list page carries at most, whatever limit is asked for",
+        acts on "library.list_books, library.find_books, library.list_papers";
+    "reads.read_chars_max" = MAX_READ_CHARS,
+        "characters of passage text one read response carries",
+        acts on "library.read_context, library.read_span";
+    "reads.span_leaves_max" = MAX_SPAN_LEAVES,
+        "leaf rows one span read fetches before the character budget applies",
+        acts on "library.read_span";
+    "reads.toc_nodes_max" = MAX_TOC_NODES,
+        "nodes one table of contents carries before it reports truncation",
+        acts on "library.show_toc";
+}
 
 /// One row of a `library.list_books` / `library.find_books` page: just
 /// enough to render a list entry without a second fetch.

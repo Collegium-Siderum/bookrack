@@ -21,6 +21,8 @@ bookrack-search = { path = "../search" }
 bookrack-mcp = { path = "../mcp" }
 bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
+# Registrations of compiled-in values for `config fixed`.
+bookrack-query = { path = "../query" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-runtime = { path = "../runtime" }

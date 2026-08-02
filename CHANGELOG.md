@@ -10,6 +10,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack config fixed` lists the values compiled into the
+  build.** The third configuration surface, for the values no layer
+  moves: a page cap, a retry count, a timeout on an internal call.
+  Each row gives the value, what it bounds, and the surface whose
+  behaviour changes with it, so a response that stopped short or a call
+  that died on a deadline can be checked against the number that
+  decided it — previously reachable only by reading the source. Like
+  `config knobs` it reads no data root, no daemon and no `.env`, and
+  `config knobs` now names it, so the two questions "what can I set"
+  and "what is already decided" are answered from the same place.
+
+  The listing is filled crate by crate behind a gate rather than kept
+  in step by hand: in a covered crate every numeric constant carries a
+  marker naming either the key it is registered under or the reason it
+  is not a setting, and the markers and registrations are compared in
+  both directions. A row renders the constant itself rather than a copy
+  of it, and one key can be claimed by only one crate, so the same
+  value given two homes is a build failure. `bookrack-query`'s six read
+  caps are the first crate listed.
+
 - **cli: `bookrack config knobs` lists every knob this build has.**
   The inventory beside `config effective`'s report: for each knob, the
   compiled-in default, the environment variable that moves it, every

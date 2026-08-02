@@ -248,6 +248,50 @@ Both are worth running. A difference between them is a test reading the
 machine rather than its fixtures. CI runs the scrubbed form as its own
 job.
 
+## Values compiled in: `config fixed`
+
+Not every number that shapes bookrack's behaviour is a knob. A page
+cap, a retry count, a timeout on an internal call: an operator cannot
+change one without a rebuild, and until now could not read one without
+opening the source either. `bookrack config fixed` prints them.
+
+```sh
+bookrack config fixed                  # the whole table
+bookrack config fixed | grep timeout   # or the part that explains a failure
+bookrack config fixed --json
+```
+
+Each row names the value, what it bounds, and the surface whose
+behaviour changes with it — so a response that stopped short or a call
+that died on a deadline can be checked against the number that decided
+it. Like `config knobs`, the command reads no data root, no daemon and
+no `.env`: the table describes the binary, and the same build prints
+the same table everywhere.
+
+The three configuration surfaces divide as:
+
+| Question | Command |
+|---|---|
+| What resolves on this machine, and from where? | `config effective` |
+| What can be set, and at which layer? | `config knobs` |
+| What is decided at build time? | `config fixed` |
+
+Being listed is not being settable, and the split is deliberate. Many
+of these values are ones an operator should not move even given the
+choice: raising the read-character cap overruns the context of the
+agent the passage is for. Discoverable and adjustable are separate
+properties, and only the first is claimed here.
+
+The inventory is filled crate by crate and is checked by a gate, not
+by memory: in a crate the gate covers, every numeric constant carries
+a marker naming either the key it is registered under or the reason it
+is not a setting, and the markers and the registrations are compared in
+both directions. A registered value is rendered from the constant
+itself, so a row cannot report a number the code no longer holds, and
+one key can be claimed by only one crate — which is what turns the same
+value given two homes into a build failure instead of two rows that
+happen to agree.
+
 ## Retrieval profiles: `index-profile`
 
 An index profile couples the three retrieval knobs — the embedding

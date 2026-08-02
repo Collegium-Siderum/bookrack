@@ -179,4 +179,11 @@ fn print_human(knobs: &[KnobOut<'_>], deps: &[DependencyOut<'_>]) {
         table.push_row([dep.name, dep.variable]);
     }
     println!("{}", table.render());
+
+    // A knob is a value that can be set; the values that cannot are a
+    // separate question with a separate answer, and a reader who came
+    // here looking for one of those would otherwise leave for the
+    // source.
+    println!();
+    println!("Values compiled in that no layer moves: `bookrack config fixed`.");
 }

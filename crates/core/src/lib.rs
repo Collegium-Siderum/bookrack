@@ -9,6 +9,7 @@
 //! `chrono`).
 
 mod error_chain;
+pub mod fixed;
 mod item_kind;
 mod kinded_node_id;
 pub mod knob;
