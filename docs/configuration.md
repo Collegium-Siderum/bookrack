@@ -185,6 +185,16 @@ permanent home, and `libraries config set` would then warn that a
 library-level value is "overridden by the environment" for a value the
 library never had.
 
+Leaving the latter two unset is not the same as switching them off.
+`nprobes` and `refine_factor` fall through to the ANN settings the
+build stamped beside the vector store (`vectors_meta.json`), which is
+why `config knobs` reports no default for them and names that file as
+the rung under the variable. The values in it come from the index
+profile the library ran under when the index was built, so a profile
+edited afterwards does not move them until `index-profile apply`
+rebuilds; `index-profile current` shows both sides. With no ANN index
+present nothing decides them, and the search is exhaustive anyway.
+
 The same reasoning retired `mcp_addr` and `log_directive` from
 `config.toml`: a knob read before any data root is known does not
 belong to a data root.
@@ -328,6 +338,12 @@ bookrack index-profile validate <name>      # static checks; non-zero on error
 bookrack index-profile current              # what a library runs under, vs its stamps
 bookrack index-profile diff <a> <b>         # two profiles, field by field
 ```
+
+A profile's `[ann]` and `[reranker]` fields are not knobs and have no
+priority chain of their own: they are settings a build bakes into an
+index, and `current` is where they are read back. The only ones a
+running system can still move are `nprobes` and `refine_factor`, through
+the two per-query variables above.
 
 `validate` enforces the product-quantization constraints, checks the
 cross-encoder reranker contract, and consults an offline model registry

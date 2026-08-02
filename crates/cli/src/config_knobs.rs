@@ -186,4 +186,12 @@ fn print_human(knobs: &[KnobOut<'_>], deps: &[DependencyOut<'_>]) {
     // source.
     println!();
     println!("Values compiled in that no layer moves: `bookrack config fixed`.");
+
+    // A rung on an artifact this command does not open names the file
+    // but cannot show what is in it. The vectors knobs backstop that
+    // way, and the surface that does read it is the profile one.
+    println!(
+        "Settings a built index carries, and the profile that stamped them: \
+         `bookrack index-profile current`."
+    );
 }

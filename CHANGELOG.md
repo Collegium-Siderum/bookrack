@@ -125,6 +125,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **search, cli: the two per-query ANN knobs claimed nothing decides
+  them when unset.** `BOOKRACK_VECTORS_NPROBES` and
+  `BOOKRACK_VECTORS_REFINE_FACTOR` fall through to the ANN settings a
+  build stamped beside the vector store, but both rows ended at the
+  variable itself, so `config knobs` reported no default and no rung
+  below it — which reads as "unset is off". An operator chasing probe
+  breadth would then tune the variables instead of the index profile
+  that owns the values. Each row now carries a rung naming
+  `vectors_meta.json`, and the inventory points at `bookrack
+  index-profile current` for what is in it. The rung holds no value:
+  `config knobs` still opens no data root, no daemon and no `.env`.
+
+- **runtime: `index-profile current` showed a cross-encoder stage
+  missing its candidate counts as `top 0 -> 0`.** A profile that names
+  a cross-encoder without `top_k_in` and `top_k_out` is a state
+  `index-profile validate` rejects, so there is no number to show; the
+  line rendered zero, which reads as a configured cap that would pass
+  nothing to the reranker. Both now render `<unset>`, matching the
+  model name beside them.
+
 - **config, cli: three knob rows named fewer places than the knob
   really has.** `config knobs` and `config effective` answer "where can
   I set this", so a row short of a rung is a setting an operator cannot
