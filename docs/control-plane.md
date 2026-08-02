@@ -451,6 +451,17 @@ the exit-code bucket does not distinguish the two.
 - `papers.metadata.contributor_remove` — `{ contributor_id,
   library? }`. Removes a contributor row by id; returns
   `{ removed: bool }`.
+
+  Every `papers.metadata.*` method above that takes an `intake_id`
+  checks that it names a real paper intake before writing, and answers
+  `-32602 invalid params` naming the id when it does not. The check
+  bounds new rows only: the paper override, review, and contributor
+  tables carry no foreign key onto `intakes`, so rows written against
+  a phantom id before the check existed are still present, and
+  `papers.remove` does not cascade them away. `contributor_remove` is
+  the one method with nothing to check — it carries no `intake_id`, so
+  it still reports `{ removed: false }` for a row it cannot find.
+
 - `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id? }`. Exactly
   one of `intake_id` or `sha` must be set on the dry-run leg; the
   execute leg presents the `plan_id` returned by dry-run and the

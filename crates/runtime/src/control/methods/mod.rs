@@ -27,9 +27,13 @@ use bookrack_ops::registry::LibraryRegistry;
 use serde_json::Value;
 use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard, broadcast};
 
+use super::error_map::rpc_from_problem;
 use super::events::{Event, EventStreamHandle};
-use super::jsonrpc::{BUSY, CONFIRMATION_REQUIRED, METHOD_NOT_FOUND, Request, RpcError};
+use super::jsonrpc::{
+    BUSY, CONFIRMATION_REQUIRED, INVALID_PARAMS, METHOD_NOT_FOUND, Request, RpcError,
+};
 use super::plan_registry::PlanRegistry;
+use crate::cmd::input_error::CmdInputError;
 
 pub mod corpus;
 pub mod diagnose;
@@ -58,6 +62,23 @@ pub mod verify;
 
 pub use reads::SNAPSHOT_CHANNELS;
 pub use reads::snapshot_for;
+
+/// Render a [`CmdInputError`] straight onto the wire envelope.
+///
+/// A handler that owns its own error mapping never hands an
+/// `eyre::Report` to `write_err`, so the cause-chain downcast there
+/// does not reach it. What the shared type still buys such a handler
+/// is the wording and the code the book side already produces for the
+/// same refusal — which is what keeps the two sides from drifting
+/// apart one `format!` at a time.
+///
+/// [`CmdInputError::TargetDrifted`] carries its own code and does not
+/// belong on this path; no handler that maps its own errors mints a
+/// plan.
+pub(super) fn input_err(e: CmdInputError) -> RpcError {
+    use bookrack_core::Explain;
+    rpc_from_problem(INVALID_PARAMS, e.explain())
+}
 
 /// Read-mostly handles the dispatcher reaches into. The runtime owns
 /// the originals; the dispatcher only clones cheap shared handles.

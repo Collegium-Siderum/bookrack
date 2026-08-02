@@ -64,6 +64,11 @@ uuid.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+# Read the paper catalog back after a rejected write, to assert no row
+# landed. Both are already dependencies of this crate; an integration
+# test links only against `[dev-dependencies]`, so they repeat here.
+bookrack-catalog = { path = "../catalog" }
+bookrack-core = { path = "../core" }
 bookrack-test-support.workspace = true
 tempfile.workspace = true
 ts-rs.workspace = true

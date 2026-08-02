@@ -21,8 +21,9 @@ use bookrack_core::ItemKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::MethodContext;
+use super::{MethodContext, input_err};
 use crate::audit_helpers::{load_paper_audit_data, load_paper_audit_profile};
+use crate::cmd::input_error::CmdInputError;
 use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
@@ -69,6 +70,31 @@ fn open_paper_catalog(ctx: &MethodContext, library: Option<&str>) -> Result<Cata
     handle
         .open_paper_catalog()
         .map_err(|e| write_err("papers.metadata", e))
+}
+
+/// Refuse a write addressed at an intake the paper catalog does not
+/// hold.
+///
+/// The paper side has no ops write layer, so the guard the book side
+/// gets from `ops::writes::metadata::require_intake` has to sit beside
+/// the handlers instead. Without it the write lands: the override,
+/// review, and contributor tables carry no foreign key onto
+/// `intakes`, so a phantom id becomes a row nothing ever reads and
+/// `remove` never cascades away.
+///
+/// The lookup's own failure is not folded into `UnknownIntake`.
+/// "The catalog says no" and "the catalog could not be asked" call for
+/// different next steps, and reporting a disk fault as operator error
+/// is the same mistake this guard exists to fix.
+fn require_paper_intake(catalog: &Catalog, intake_id: i64) -> Result<(), RpcError> {
+    match catalog.intake_by_id(intake_id) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(input_err(CmdInputError::UnknownIntake { intake_id })),
+        Err(e) => Err(RpcError::new(
+            INTERNAL_ERROR,
+            format!("intake lookup: {}", bookrack_core::error_chain(&e)),
+        )),
+    }
 }
 
 fn require_editable(field: &str) -> Result<(), RpcError> {
@@ -131,6 +157,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     let parsed: PapersMetadataSetParams = parse(params, "papers.metadata.set")?;
     require_editable(&parsed.field)?;
     let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
+    require_paper_intake(&catalog, parsed.intake_id)?;
     catalog
         .set_override(
             &NewOverride::new(
@@ -162,6 +189,7 @@ pub struct PapersMetadataClearParams {
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: PapersMetadataClearParams = parse(params, "papers.metadata.clear")?;
     let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
+    require_paper_intake(&catalog, parsed.intake_id)?;
     let removed = catalog
         .clear_override(parsed.intake_id, ItemKind::Paper, &parsed.field)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("clear_override: {e}")))?;
@@ -184,6 +212,7 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let parsed: PapersMetadataVoidParams = parse(params, "papers.metadata.void")?;
     require_editable(&parsed.field)?;
     let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
+    require_paper_intake(&catalog, parsed.intake_id)?;
     catalog
         .set_override(&NewOverride::new(
             parsed.intake_id,
@@ -219,6 +248,7 @@ fn write_review_status(
     status: &str,
 ) -> Result<Value, RpcError> {
     let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
+    require_paper_intake(&catalog, parsed.intake_id)?;
     let reviewer = parsed.reviewer.as_deref().unwrap_or("human");
     let mut review = NewReview::new(parsed.intake_id, ItemKind::Paper, reviewer, status);
     if let Some(notes) = parsed.notes.as_deref() {
@@ -309,6 +339,7 @@ pub async fn contributor_add(
 ) -> Result<Value, RpcError> {
     let parsed: PapersContributorAddParams = parse(params, "papers.metadata.contributor_add")?;
     let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
+    require_paper_intake(&catalog, parsed.intake_id)?;
     // Place curator-added contributors after every other row in the
     // same role. Computing `existing.len()` instead would collide on
     // the `(intake_id, scope, role, ordinal, origin)` UNIQUE key as

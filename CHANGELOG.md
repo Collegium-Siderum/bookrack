@@ -26,6 +26,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: the paper-side metadata writes refuse an intake the
+  catalog does not hold.** `papers.metadata.set`, `clear`, `void`,
+  `ack`, `approve`, `reject`, `reopen`, and `contributor_add` wrote
+  without checking that their `intake_id` names a real intake. The
+  paper override, review, and contributor tables carry no foreign key
+  onto `intakes`, so a mistyped id was accepted, reported as a
+  success, and left a row that nothing reads and that `remove` never
+  cascades away. Those eight methods now answer `-32602 invalid
+  params` naming the id, and write nothing. **This is a breaking
+  change for callers that branch on the success envelope**: a script
+  that treated `papers.metadata.set` against an unknown id as a no-op
+  now sees an error, and the CLI exits `2` instead of `0`.
+
+  Two limits worth stating. The guard stops new orphans; it does not
+  clean up rows written before it, and there is still no foreign key
+  to prevent them at the storage layer. And
+  `papers.metadata.contributor_remove` is not among the eight: its
+  parameters carry no `intake_id` to check, so it keeps reporting
+  `removed: false` for a row it cannot find.
+
 - **runtime: the `remove` dry run writes nothing.** `remove` and
   `papers.remove` promise a plan computed "without writing", but the
   dry-run leg opened every store read-write: it created `catalog.db`
