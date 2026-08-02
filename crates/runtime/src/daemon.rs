@@ -162,7 +162,14 @@ pub struct DaemonRuntime {
     /// control-plane clients through `daemon.version` so they can
     /// derive an uptime.
     pub started_at_wall: DateTime<Utc>,
+    /// Address the MCP listener bound, or `disabled` when the session
+    /// runs without one. Set from the socket's own `local_addr`, so a
+    /// `port 0` configuration reports the port the kernel assigned.
     pub mcp_label: String,
+    /// The bound MCP socket, taken by the host that spawns the
+    /// listener task ([`bookrack_mcp::spawn_listener`]). `None` once
+    /// taken, and from the start when the session runs without MCP.
+    pub mcp_listener: Option<tokio::net::TcpListener>,
     /// Broadcast handle for control-plane events.
     pub event_stream: EventStreamHandle,
     /// Process-wide write mutex held by every control-plane write
@@ -251,8 +258,10 @@ impl DaemonRuntime {
             )
         })?;
 
-        // 2. resolve MCP listener address label up front so the lock
-        //    file records it before the listener actually binds.
+        // 2. resolve the MCP listener address up front so the lock
+        //    file records a complete session record from the instant
+        //    it exists. This is the *intended* address; step 3c
+        //    replaces it with the one the listener actually bound.
         let mcp_addr = if opts.no_mcp {
             None
         } else {
@@ -263,18 +272,18 @@ impl DaemonRuntime {
             )
         };
         let lock_path = runtime_dir.join(tty_lock_name());
-        let mcp_label = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
+        let mcp_intent = mcp_addr.clone().unwrap_or_else(|| "disabled".to_string());
 
         // 3. TtyLock acquire (control_sock added in step 3b once the
         //    socket is bound; recording the path before the listener
         //    actually came up would let `bookrack rpc` reach for a
         //    socket that never existed).
-        let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_label, None)?;
+        let mut tty_lock = TtyLock::acquire(&lock_path, std::process::id(), &mcp_intent, None)?;
         let started_at = Instant::now();
         let started_at_wall = Utc::now();
         tracing::info!(
             path = %lock_path.display(),
-            mcp = %mcp_label,
+            mcp = %mcp_intent,
             "bookrack session lock acquired",
         );
 
@@ -304,6 +313,30 @@ impl DaemonRuntime {
             path = %control_sock_guard.path().display(),
             "control plane socket bound",
         );
+
+        // 3c. Bind the MCP listener, and refuse the bring-up if the
+        //     endpoint cannot be taken. Deliberately after the session
+        //     lock: a second daemon on the same runtime directory must
+        //     hear "already running", not "port in use". The bound
+        //     socket travels to the listener task through
+        //     `Self::mcp_listener`, so the address reported from here
+        //     on is one this process owns — with `port 0` it is the
+        //     port the kernel assigned, which no earlier step knows.
+        let mcp_listener = match &mcp_addr {
+            Some(addr) => Some(crate::mcp_endpoint::bind_listener(addr).await?),
+            None => None,
+        };
+        let mcp_label = match &mcp_listener {
+            Some(listener) => listener
+                .local_addr()
+                .context("read the bound MCP listener address")?
+                .to_string(),
+            None => "disabled".to_string(),
+        };
+        if mcp_listener.is_some() {
+            tty_lock.record_mcp_addr(&mcp_label)?;
+            tracing::info!(mcp = %mcp_label, "MCP listener bound");
+        }
 
         // 4. Config::resolve + obs init
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
@@ -776,6 +809,7 @@ impl DaemonRuntime {
             started_at,
             started_at_wall,
             mcp_label,
+            mcp_listener,
             event_stream,
             write_guard,
             control_sock,

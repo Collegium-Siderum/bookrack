@@ -26,7 +26,7 @@ use bookrack_core::knob::{
     Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
 };
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use eyre::{Context, Result, eyre};
@@ -164,6 +164,11 @@ pub struct TtyLock {
     file: File,
     #[allow(dead_code)]
     path: PathBuf,
+    /// In-memory copy of the file's contents. Held so a recorder that
+    /// replaces a line ([`TtyLock::record_mcp_addr`]) can rewrite the
+    /// whole payload without reading back a file it already owns, and
+    /// so every reader sees one line per key.
+    payload: String,
 }
 
 impl TtyLock {
@@ -211,17 +216,32 @@ impl TtyLock {
                 )
             }
         })?;
-        let mut owned = file;
-        owned.set_len(0).context("truncate session lock contents")?;
-        write!(owned, "pid={pid}\nmcp={mcp_addr}\n").context("write session lock contents")?;
+        let mut payload = format!("pid={pid}\nmcp={mcp_addr}\n");
         if let Some(sock) = control_sock {
-            writeln!(owned, "control_sock={}", sock.display())
-                .context("write session lock control_sock line")?;
+            payload.push_str(&format!("control_sock={}\n", sock.display()));
         }
-        Ok(TtyLock {
-            file: owned,
+        let mut lock = TtyLock {
+            file,
             path: path.to_path_buf(),
-        })
+            payload,
+        };
+        lock.flush_payload()
+            .context("write session lock contents")?;
+        Ok(lock)
+    }
+
+    /// Rewrite the lock file from [`TtyLock::payload`]. The holder owns
+    /// the file exclusively for the lock's lifetime, so truncating and
+    /// writing from offset zero races nothing.
+    fn flush_payload(&mut self) -> Result<()> {
+        self.file.set_len(0).context("truncate session lock")?;
+        self.file
+            .seek(SeekFrom::Start(0))
+            .context("rewind session lock")?;
+        self.file
+            .write_all(self.payload.as_bytes())
+            .context("write session lock")?;
+        self.file.flush().context("flush session lock")
     }
 
     /// Append a `control_sock=<path>` line to the lock file. Used by
@@ -229,8 +249,40 @@ impl TtyLock {
     /// already held, so the recorded path matches the listener that
     /// actually came up.
     pub fn record_control_sock(&mut self, control_sock: &Path) -> Result<()> {
-        writeln!(self.file, "control_sock={}", control_sock.display())
+        self.payload
+            .push_str(&format!("control_sock={}\n", control_sock.display()));
+        self.flush_payload()
             .context("append session lock control_sock line")
+    }
+
+    /// Replace the `mcp=` line with the address the MCP listener
+    /// actually bound.
+    ///
+    /// [`TtyLock::acquire`] writes the *intended* address, because the
+    /// lock has to carry a complete record from the instant it exists —
+    /// a second daemon reads it to name the session already running.
+    /// Once the listener is bound the intent is superseded: with
+    /// `port 0` the kernel picked the port, and every reader of this
+    /// file (`bookrack status`, `bookrack doctor`, an operator's
+    /// `cat`) needs the address a client can actually connect to.
+    /// Replacing rather than appending keeps one `mcp=` line, so the
+    /// lock-conflict message quotes a single address.
+    pub fn record_mcp_addr(&mut self, mcp_addr: &str) -> Result<()> {
+        let replaced: Vec<String> = self
+            .payload
+            .lines()
+            .map(|line| {
+                if line.starts_with("mcp=") {
+                    format!("mcp={mcp_addr}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        self.payload = replaced.join("\n");
+        self.payload.push('\n');
+        self.flush_payload()
+            .context("record the bound MCP address in the session lock")
     }
 
     /// Append `data_dir=` and optionally `library_name=` lines to the
@@ -574,6 +626,58 @@ mod tests {
         assert!(
             content.contains(&sock_line),
             "control_sock line missing after record: {content:?}"
+        );
+    }
+
+    /// The bound address replaces the intent instead of joining it:
+    /// a second `mcp=` line would leave every reader — `peek_lock`,
+    /// the lock-conflict message, an operator's `cat` — to guess which
+    /// of the two a client should connect to.
+    #[test]
+    fn record_mcp_addr_replaces_the_intended_address() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let sock = dir.path().join("ctrl.sock");
+        let mut lock = TtyLock::acquire(&path, 44, "127.0.0.1:0", None).unwrap();
+        lock.record_control_sock(&sock).unwrap();
+        lock.record_mcp_addr("127.0.0.1:54321").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content.lines().filter(|l| l.starts_with("mcp=")).count(),
+            1,
+            "expected exactly one mcp line: {content:?}"
+        );
+        assert!(
+            content.contains("mcp=127.0.0.1:54321"),
+            "bound address missing: {content:?}"
+        );
+        assert!(
+            !content.contains("mcp=127.0.0.1:0"),
+            "intended address survived: {content:?}"
+        );
+        assert!(content.contains("pid=44"), "pid line lost: {content:?}");
+        assert!(
+            content.contains(&format!("control_sock={}", sock.display())),
+            "control_sock line lost: {content:?}"
+        );
+
+        let info = peek_lock(&path).unwrap().expect("lock readable");
+        assert_eq!(info.mcp, "127.0.0.1:54321");
+    }
+
+    /// A later record must not leave the tail of a longer previous
+    /// payload behind: the file is rewritten, not overwritten in place.
+    #[test]
+    fn record_mcp_addr_shrinking_the_payload_leaves_no_tail() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(tty_lock_name());
+        let mut lock = TtyLock::acquire(&path, 55, "127.0.0.1:65535", None).unwrap();
+        lock.record_mcp_addr("127.0.0.1:1").unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content, "pid=55\nmcp=127.0.0.1:1\n",
+            "tail left: {content:?}"
         );
     }
 

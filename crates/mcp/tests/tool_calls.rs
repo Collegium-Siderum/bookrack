@@ -82,7 +82,6 @@ impl Fixture {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
-        drop(listener);
 
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(4);
         let info_context = LibraryInfoContext {
@@ -104,7 +103,7 @@ impl Fixture {
                 LogStreamHandle::default(),
                 Arc::new(Mutex::new(QueueState::default())),
                 serve_tx,
-                &addr.to_string(),
+                listener,
                 shutdown_rx,
             )
             .await

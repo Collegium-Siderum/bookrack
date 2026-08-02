@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use bookrack_config::{
-    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
+    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, MCP_ADDR_ENV, NO_DOTENV_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
 };
 use bookrack_session::RUNTIME_DIR_ENV;
 
@@ -134,6 +134,7 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
 
     let mut installed: Vec<&str> = vars.iter().map(|(name, _)| *name).collect();
     installed.push(NO_DOTENV_ENV);
+    installed.push(MCP_ADDR_ENV);
     installed.extend(PASSTHROUGH_ENV);
     if spec.embedder {
         installed.push(OLLAMA_URL_ENV);
@@ -162,6 +163,13 @@ fn apply(spec: &ProcessEnv, sandbox: &Sandbox) {
         if spec.embedder {
             std::env::set_var(OLLAMA_URL_ENV, EmbedStub::url());
         }
+        // An in-process daemon binds its MCP address during bring-up,
+        // so leaving the built-in default in place would make one
+        // fixed port on the host decide whether a test starts. A
+        // kernel-assigned port is contended by nobody; a test about
+        // the address sets `RuntimeOpts::mcp_addr`, which outranks
+        // this.
+        std::env::set_var(MCP_ADDR_ENV, "127.0.0.1:0");
         // Cargo runs a test binary from its package root, so dotenv's
         // upward search reaches the repository's own `.env` — and,
         // because dotenv does not overwrite what is already set, it

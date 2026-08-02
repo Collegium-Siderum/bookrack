@@ -13,7 +13,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use bookrack_config::{DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV};
+use bookrack_config::{
+    DAEMON_STATE_DIR_ENV, DATA_DIR_ENV, MCP_ADDR_ENV, OLLAMA_URL_ENV, REGISTRY_ENV,
+};
 use bookrack_session::RUNTIME_DIR_ENV;
 
 use crate::sandbox::Sandbox;
@@ -185,6 +187,14 @@ impl Spawn {
             ("XDG_CACHE_HOME".into(), self.cache_home.into()),
             (RUNTIME_DIR_ENV.into(), self.runtime_dir.into()),
             (DAEMON_STATE_DIR_ENV.into(), self.daemon_state_dir.into()),
+            // A child that serves MCP takes a kernel-assigned port.
+            // The built-in default is one fixed port on the host, and
+            // the daemon binds it during bring-up: two suites running
+            // at once, or an operator's own daemon, would otherwise
+            // decide whether a test that has nothing to do with MCP
+            // starts at all. A test about the address passes
+            // `--mcp-addr`, which outranks this.
+            (MCP_ADDR_ENV.into(), "127.0.0.1:0".into()),
         ];
         if let Some(path) = self.data_dir {
             vars.push((DATA_DIR_ENV.into(), path.into()));
@@ -328,23 +338,51 @@ mod tests {
         }
     }
 
+    /// The daemon binds its MCP address during bring-up, so a child
+    /// left on the built-in default would let one fixed host port
+    /// decide whether a test that has nothing to do with MCP starts.
+    #[test]
+    fn the_builder_pins_a_kernel_assigned_mcp_port() {
+        let sandbox = Sandbox::new();
+        let envs = envs(&spawn(&sandbox).build_from(hostile_host()));
+        assert_eq!(
+            envs.get(MCP_ADDR_ENV),
+            Some(&Some("127.0.0.1:0".to_string())),
+            "the child must ask for a kernel-assigned port",
+        );
+    }
+
     /// The invariant stated as an invariant rather than as a list, so
-    /// it holds for variables that do not exist yet: whatever the child
-    /// carries with a `BOOKRACK_` name points inside the sandbox.
+    /// it holds for variables that do not exist yet: every value the
+    /// child carries under a `BOOKRACK_` name is the builder's own and
+    /// never the parent's. A value naming a filesystem location lands
+    /// inside the sandbox; a value that names no location — the
+    /// listening address the builder pins — must at least not be one
+    /// the parent supplied.
     #[test]
     fn the_isolated_default_carries_no_bookrack_value_outside_the_sandbox() {
         let sandbox = Sandbox::new();
         let cmd = spawn(&sandbox).build_from(hostile_host());
         let root = sandbox.path().to_string_lossy().into_owned();
+        let from_parent: Vec<String> = hostile_host()
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+            .collect();
         for (key, value) in envs(&cmd) {
             let Some(value) = value else { continue };
             if !key.starts_with(BOOKRACK_PREFIX) {
                 continue;
             }
-            assert!(
-                value.starts_with(&root),
-                "{key} = {value} escapes the sandbox at {root}",
-            );
+            if Path::new(&value).is_absolute() {
+                assert!(
+                    value.starts_with(&root),
+                    "{key} = {value} escapes the sandbox at {root}",
+                );
+            } else {
+                assert!(
+                    !from_parent.contains(&value),
+                    "{key} = {value} was inherited from the parent",
+                );
+            }
         }
     }
 

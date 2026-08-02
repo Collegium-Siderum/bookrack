@@ -24,6 +24,7 @@ use bookrack_config::{LibrarySelection, LogConfig};
 use bookrack_ops::Caller;
 use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
+use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use eyre::{Context, Result};
 use serde_json::Value;
@@ -64,7 +65,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
         launch_mode: LaunchMode::Cli,
     };
 
-    let runtime = match DaemonRuntime::start(runtime_opts).await {
+    let mut runtime = match DaemonRuntime::start(runtime_opts).await {
         Ok(rt) => rt,
         Err(err) => {
             if bookrack_session::is_lock_conflict(&err) {
@@ -80,10 +81,22 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
                 }
                 .into());
             }
+            // An endpoint the daemon cannot take is the same class of
+            // failure: refuse before announcing an address, so no
+            // success line goes out for a surface that is not there.
+            if let Some(refusal) = err.downcast_ref::<McpBindRefusal>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.problem.clone(),
+                }
+                .into());
+            }
             return Err(err);
         }
     };
 
+    // The listener socket is bound by now, so `mcp_label` is the
+    // address a client can connect to — including the port the kernel
+    // assigned when the configuration asked for `port 0`.
     println!(
         "bookrack daemon running: pid={} mcp={} control_sock={}",
         std::process::id(),
@@ -92,7 +105,7 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
     );
     println!("stop with Ctrl-C or `bookrack quit`");
 
-    let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
+    let mcp_handle = bookrack_mcp::spawn_listener(&mut runtime);
 
     // Foreground task: an async future that resolves on the shutdown
     // broadcast. Mirrors the headless pattern used by the Tauri shell

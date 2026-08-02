@@ -45,7 +45,7 @@ pub fn run() -> Result<()> {
                     mcp_tools: bookrack_mcp::list_tools(),
                     launch_mode: LaunchMode::Gui,
                 };
-                let runtime = match DaemonRuntime::start(opts).await {
+                let mut runtime = match DaemonRuntime::start(opts).await {
                     Ok(rt) => rt,
                     Err(err) if bookrack_session::is_lock_conflict(&err) => {
                         handle_gui_second_launch().await;
@@ -69,7 +69,7 @@ pub fn run() -> Result<()> {
                 // CLI's headless path: an async task resolving on the
                 // shutdown broadcast, so no blocking thread outlives
                 // the drain and stalls runtime teardown.
-                let mcp_handle = bookrack_mcp::spawn_listener(&runtime);
+                let mcp_handle = bookrack_mcp::spawn_listener(&mut runtime);
                 let mut shutdown_rx = runtime.shutdown_tx.subscribe();
                 let fg_handle = tokio::spawn(async move {
                     let _ = shutdown_rx.recv().await;

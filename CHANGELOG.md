@@ -10,6 +10,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: `BOOKRACK_MCP_ADDR` (and `bookrack run --mcp-addr`)
+  accept port `0`, for a kernel-assigned free port.** The daemon
+  reports which port it was given — in the success line, in `bookrack
+  status` under `daemon.mcp`, and in the session lock — so the
+  endpoint stays discoverable. It changes on every start, so a client
+  configured with a fixed URL still wants a fixed port; `:0` is for
+  hosts where a collision matters more than a stable URL.
+
 - **cli: `bookrack config effective` reports what the configuration
   resolves to, and where each value came from.** One row per knob:
   the effective value, the layer that supplied it (a flag, the
@@ -51,6 +59,26 @@ release workflow extracts the matching section verbatim from this file.
   trail stays on `item_pipeline_audit`.
 
 ### Fixed
+
+- **runtime, mcp, cli: a daemon that cannot take the MCP address
+  refuses to start, instead of reporting success and serving
+  nothing.** The listening socket was bound inside the task that
+  serves it, so a port another process already held surfaced only as
+  that task's return value — read at shutdown, at `warn` level, on a
+  console filtered to `error`. Meanwhile `bookrack run` had already
+  printed its success line, the session lock had recorded the address,
+  and `bookrack status` reported it: three health surfaces agreeing on
+  an endpoint that answered as somebody else's service, which for
+  agent clients is the product's only entry point.
+
+  The address is now bound during bring-up, next to the session lock
+  and the control socket, and a failure refuses the start in one
+  sentence at exit `2` with the syscall as detail and a free-address
+  hint — the same shape as the embed-backend refusal. Every daemon
+  host goes through it: `bookrack run`, the headless `bookrack-mcp`,
+  and the desktop shell. What is reported afterwards is the address
+  the socket actually holds, in the success line, in the session lock,
+  and in `status`.
 
 - **runtime, cli: the write-class methods report operator input as
   operator input.** `remove`, `papers.remove`, `vectors.*`,

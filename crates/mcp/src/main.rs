@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_config::McpConfig;
+use bookrack_runtime::mcp_endpoint::McpBindRefusal;
 use bookrack_runtime::{DaemonRuntime, RuntimeOpts};
 use eyre::Result;
 
@@ -47,6 +47,20 @@ async fn main() -> std::process::ExitCode {
     let _ = bookrack_config::load_dotenv();
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        // A refused bring-up is operator input, not a bug: report the
+        // three parts stacked and exit 2, the same code and the same
+        // layout `bookrack run` gives the same refusal.
+        Err(err) if err.downcast_ref::<McpBindRefusal>().is_some() => {
+            let refusal = err.downcast_ref::<McpBindRefusal>().expect("just matched");
+            eprintln!("bookrack-mcp: {}", refusal.problem.summary);
+            if let Some(detail) = &refusal.problem.data.detail {
+                eprintln!("  {detail}");
+            }
+            if let Some(hint) = &refusal.problem.data.hint {
+                eprintln!("  hint: {hint}");
+            }
+            std::process::ExitCode::from(2)
+        }
         Err(err) => {
             eprintln!("Error: {err:#}");
             std::process::ExitCode::FAILURE
@@ -56,34 +70,14 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<()> {
     let cli = <Cli as clap::Parser>::parse();
-    let mcp_cfg = McpConfig::from_env();
     let mut runtime_opts = RuntimeOpts::headless(cli.data_dir, cli.library);
     runtime_opts.spawn_queue_worker = cli.with_queue_worker;
     runtime_opts.mcp_tools = bookrack_mcp::list_tools();
-    let runtime = DaemonRuntime::start(runtime_opts).await?;
+    // The runtime resolves and binds the MCP address itself, so the
+    // address this binary announces is the one it actually owns.
+    let mut runtime = DaemonRuntime::start(runtime_opts).await?;
 
-    let shutdown_tx = runtime.shutdown_tx.clone();
-    let shutdown_rx = shutdown_tx.subscribe();
-    let registry = runtime.registry.clone();
-    let info_context = runtime.info_context.clone();
-    let log_stream = runtime.log_stream.clone();
-    let queue_state = runtime.queue_state.clone();
-    let started_at = runtime.started_at;
-    let addr = mcp_cfg.addr.clone();
-
-    let serve_handle = tokio::spawn(async move {
-        bookrack_mcp::serve(
-            registry,
-            info_context,
-            started_at,
-            log_stream,
-            queue_state,
-            shutdown_tx,
-            &addr,
-            shutdown_rx,
-        )
-        .await
-    });
+    let serve_handle = bookrack_mcp::spawn_listener(&mut runtime);
 
     // Headless profile has no REPL; park a no-op blocking thread so
     // the shared `run_until_shutdown` join contract is satisfied.
@@ -92,7 +86,5 @@ async fn run() -> Result<()> {
         Ok(())
     });
 
-    runtime
-        .run_until_shutdown(Some(serve_handle), repl_handle)
-        .await
+    runtime.run_until_shutdown(serve_handle, repl_handle).await
 }

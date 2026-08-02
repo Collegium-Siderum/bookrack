@@ -180,6 +180,23 @@ The same reasoning retired `mcp_addr` and `log_directive` from
 `config.toml`: a knob read before any data root is known does not
 belong to a data root.
 
+### The MCP address is taken before the daemon reports success
+
+`BOOKRACK_MCP_ADDR` (or `bookrack run --mcp-addr`) is bound during
+bring-up, alongside the session lock and the control socket. An address
+another process holds refuses the start in one sentence at exit 2,
+before any success line is printed — the daemon never comes up serving
+nothing, and no health surface reports an address it does not own.
+`--no-mcp` starts a session with no MCP surface at all; the control
+plane still works.
+
+Port `0` asks the operating system for any free port. The daemon then
+reports what it was given: `bookrack run` prints it, `bookrack status`
+shows it under `daemon.mcp`, and the session lock records it. The port
+differs on every start, so an agent client configured with a fixed
+`http://…/mcp` URL wants a fixed port; `:0` is for hosts where a
+collision matters more than a stable URL.
+
 ### When `.env` is read
 
 `.env` is loaded by the binaries — `bookrack`, `bookrack-mcp`, and the

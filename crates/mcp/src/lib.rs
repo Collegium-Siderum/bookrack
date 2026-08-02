@@ -1862,8 +1862,14 @@ impl ServerHandler for BookrackServer {
     }
 }
 
-/// Bind the streamable-HTTP server at `addr` and serve until the
-/// shutdown channel fires.
+/// Serve the streamable-HTTP surface on an already-bound `listener`
+/// until the shutdown channel fires.
+///
+/// The socket arrives bound rather than as an address to bind: the
+/// daemon takes it during bring-up
+/// ([`bookrack_runtime::mcp_endpoint::bind_listener`]) so a port it
+/// cannot have refuses the whole start, instead of failing inside a
+/// task nobody observes until shutdown.
 ///
 /// Two HTTP routes are mounted:
 ///
@@ -1913,7 +1919,7 @@ pub async fn serve(
     log_stream: LogStreamHandle,
     queue_state: Arc<Mutex<QueueState>>,
     shutdown_tx: broadcast::Sender<()>,
-    addr: &str,
+    listener: tokio::net::TcpListener,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> eyre::Result<()> {
     let log_stream_for_sse = log_stream.clone();
@@ -1938,9 +1944,10 @@ pub async fn serve(
             sse_logs_handler(handle)
         }),
     );
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("bind MCP server to {addr}"))?;
+    let addr = listener
+        .local_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
     tracing::info!(%addr, "bookrack MCP server listening on /mcp");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -1980,24 +1987,36 @@ async fn sse_logs_handler(
 }
 
 /// Spawn the MCP listener as a session-scoped task against a running
-/// [`DaemonRuntime`](bookrack_runtime::DaemonRuntime). Returns `None`
-/// when the runtime came up with MCP disabled (`mcp_label ==
-/// "disabled"`), so the daemon runs without an HTTP surface. Shared by
-/// every daemon host (CLI, GUI) so the listener wiring has one source.
+/// [`DaemonRuntime`](bookrack_runtime::DaemonRuntime), taking the
+/// socket the runtime bound during bring-up. Returns `None` when the
+/// runtime came up with MCP disabled (`--no-mcp`), so the daemon runs
+/// without an HTTP surface. Shared by every daemon host (CLI, GUI,
+/// headless) so the listener wiring has one source.
+///
+/// Takes `&mut` because the bound socket moves out of the runtime and
+/// into the task: a second call finds nothing left to serve and is a
+/// caller-side bug, reported as such rather than silently leaving the
+/// session without the endpoint it announced.
 pub fn spawn_listener(
-    runtime: &bookrack_runtime::DaemonRuntime,
+    runtime: &mut bookrack_runtime::DaemonRuntime,
 ) -> Option<tokio::task::JoinHandle<eyre::Result<()>>> {
-    if runtime.mcp_label == "disabled" {
-        tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
+    let Some(listener) = runtime.mcp_listener.take() else {
+        if runtime.mcp_label == "disabled" {
+            tracing::info!("MCP listener disabled (--no-mcp); session running without /mcp");
+        } else {
+            tracing::error!(
+                mcp = %runtime.mcp_label,
+                "MCP socket already taken; session running without /mcp",
+            );
+        }
         return None;
-    }
+    };
     let registry = Arc::clone(&runtime.registry);
     let info_context = runtime.info_context.clone();
     let started_at = runtime.started_at;
     let log_stream = runtime.log_stream.clone();
     let queue_state = Arc::clone(&runtime.queue_state);
     let shutdown_tx = runtime.shutdown_tx.clone();
-    let addr = runtime.mcp_label.clone();
     let rx = runtime.shutdown_tx.subscribe();
     Some(tokio::spawn(async move {
         serve(
@@ -2007,7 +2026,7 @@ pub fn spawn_listener(
             log_stream,
             queue_state,
             shutdown_tx,
-            &addr,
+            listener,
             rx,
         )
         .await
