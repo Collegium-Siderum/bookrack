@@ -219,11 +219,11 @@ mod tests {
         std::fs::write(
             &overlay,
             "schema_version = 1\n\
-             venue_whitelist = [\"Nature\", \"Science\"]\n",
+             venue_whitelist = [\"Journal A\", \"Journal B\"]\n",
         )
         .unwrap();
         let d = PaperAuditData::load_from(dir.path()).unwrap();
-        assert_eq!(d.venue_whitelist, vec!["Nature", "Science"]);
+        assert_eq!(d.venue_whitelist, vec!["Journal A", "Journal B"]);
         // Lists not declared in the overlay keep their default value.
         assert!(d.placeholder_titles.contains(&"untitled".to_string()));
     }

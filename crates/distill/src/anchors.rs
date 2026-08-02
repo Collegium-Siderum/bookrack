@@ -210,7 +210,7 @@ mod tests {
         // running headers or sentence-shaped prose; both still get
         // suppressed because callers wire `reject = ["running_header"]`
         // on the walk_anchors stage.
-        let header = "NEW YORK TIMES";
+        let header = "QUARTERLY GAZETTE REVIEW";
         assert!(AnchorRule::LatinHeadword.matches(header));
         assert!(AnchorRule::RejectRunningHeader.matches(header));
     }
