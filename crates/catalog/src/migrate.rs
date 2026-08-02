@@ -19,6 +19,7 @@
 
 use rusqlite_migration::{M, Migrations};
 
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub(crate) const TARGET_VERSION: i64 = 16;
 
 /// `M[0]` — the frozen baseline schema (the former `schema_version` 3),

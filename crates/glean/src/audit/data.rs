@@ -17,6 +17,7 @@ use serde::Deserialize;
 pub const DATA_OVERLAY_FILE: &str = "paper_audit_data.local.toml";
 
 /// Schema version the loader accepts.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// In-repo default data source, embedded at build time.

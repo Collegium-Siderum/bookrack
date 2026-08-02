@@ -837,6 +837,7 @@ dependencies = [
 name = "bookrack-audit-profile"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -875,6 +876,7 @@ dependencies = [
  "bookrack-distill",
  "bookrack-embed",
  "bookrack-extract",
+ "bookrack-ingest",
  "bookrack-mcp",
  "bookrack-obs",
  "bookrack-ops",
@@ -904,6 +906,7 @@ dependencies = [
 name = "bookrack-cli-grammar"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "clap",
 ]
 
@@ -1002,6 +1005,7 @@ name = "bookrack-distill"
 version = "0.11.0-dev"
 dependencies = [
  "bookrack-audit-profile",
+ "bookrack-core",
  "regex",
  "serde",
  "serde_json",
@@ -1073,6 +1077,7 @@ dependencies = [
 name = "bookrack-index-profile"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -1152,6 +1157,7 @@ dependencies = [
 name = "bookrack-normalize"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "sha2 0.10.9",
  "unicode-normalization",
 ]
@@ -1221,6 +1227,7 @@ dependencies = [
 name = "bookrack-refs"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "bookrack-dbkit",
  "rusqlite",
  "rusqlite_migration",
@@ -1321,6 +1328,7 @@ name = "bookrack-test-support"
 version = "0.11.0-dev"
 dependencies = [
  "bookrack-config",
+ "bookrack-core",
  "bookrack-session",
  "serde_json",
  "tempfile",

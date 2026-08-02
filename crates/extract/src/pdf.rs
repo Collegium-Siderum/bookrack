@@ -165,8 +165,10 @@ pub fn extract(
 // --- TOC: the PDF outline ------------------------------------------------
 
 /// Guards against a pathologically deep or cyclic outline graph.
-const MAX_TOC_DEPTH: u8 = 30;
-const MAX_TOC_ENTRIES: usize = 50_000;
+// setting: extract.pdf_toc_depth_max
+pub(crate) const MAX_TOC_DEPTH: u8 = 30;
+// setting: extract.pdf_toc_entries_max
+pub(crate) const MAX_TOC_ENTRIES: usize = 50_000;
 
 /// Build the [`Toc`] from the PDF outline (`/Outline`), anchoring each
 /// entry to a block. An outline entry points at a *target page*, not at
@@ -421,10 +423,12 @@ struct Paragraph {
 /// The longest a paragraph can be and still be taken for a running
 /// header / footer. Body paragraphs are far longer, so the cap keeps a
 /// genuine paragraph that happens to recur from being mistaken for one.
+// setting: internal -- part of the running-header heuristic; moving it needs recalibration
 const RUNNING_ELEMENT_MAX_CHARS: usize = 80;
 
 /// The longest a paragraph can be and still be taken for a bare page
 /// number.
+// setting: internal -- part of the page-number heuristic; moving it needs recalibration
 const PAGE_NUMBER_MAX_CHARS: usize = 6;
 
 /// How far into the page, as a fraction of page height, the top and
@@ -432,6 +436,7 @@ const PAGE_NUMBER_MAX_CHARS: usize = 6;
 /// number only when its vertical center falls inside one of these
 /// bands; a number in the body flow (a year, a list value) sits well
 /// inside the text block and is kept.
+// setting: internal -- part of the page-number heuristic; moving it needs recalibration
 const PAGE_NUMBER_MARGIN_FRACTION: f32 = 0.15;
 
 /// Flatten per-page paragraphs into ordered body blocks, dropping the

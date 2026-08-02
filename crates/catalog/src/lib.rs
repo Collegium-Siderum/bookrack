@@ -80,6 +80,13 @@ pub use retrieval_calls::{NewRetrievalCall, RetrievalCall, RetrievalCallListing}
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
 pub use works::{NewWork, Work};
 
+bookrack_core::fixed_settings! {
+    owner = "catalog";
+    "catalog.backups_kept" = db::BACKUP_KEEP,
+        "database backups kept under the backup directory before the oldest is pruned",
+        acts on "how far back a restore can reach";
+}
+
 /// Convert a SQLite `COUNT(*)` (which the driver hands back as `i64`)
 /// into the unsigned width every catalog `count_*` API returns.
 /// `COUNT(*)` is non-negative by definition, so a negative result here

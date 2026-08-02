@@ -29,6 +29,7 @@ pub use validate::{Finding, Severity, has_errors, validate};
 
 /// Schema version every profile file must declare. Bumped only when a
 /// renamed or removed field changes an existing file's on-disk meaning.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// File extension for a user profile, appended to the profile name.

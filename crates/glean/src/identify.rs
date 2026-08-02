@@ -148,6 +148,7 @@ static VENUE_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Maximum character count of a venue line accepted by
 /// [`detect_venue`]. Above this the line is almost always a bibliography
 /// entry that swallowed the cue word.
+// setting: internal -- part of the venue heuristic; moving it needs recalibration
 const MAX_VENUE_CHARS: usize = 120;
 
 static D_DATE_RE: LazyLock<Regex> =
@@ -185,6 +186,7 @@ static TITLE_FILENAME_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// a title. Production filenames like `XYZ-2025-0000-online 1..13`
 /// land well below this cap. Pure-CJK titles score 1.0 since
 /// `char::is_alphabetic` recognises ideographs as letters.
+// setting: internal -- part of the title heuristic; moving it needs recalibration
 const TITLE_MIN_ALPHA_RATIO: f32 = 0.55;
 
 // ─── public detectors ────────────────────────────────────────────────

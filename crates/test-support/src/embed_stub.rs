@@ -70,6 +70,7 @@ pub struct EmbedStub;
 
 impl EmbedStub {
     /// Vector width the stub reports for every input.
+    // setting: internal -- the stub embedder's vector width, fixed by the fixtures reading it
     pub const DIMENSION: usize = 8;
 
     /// Make the embed arm answer `failure` from the next request on.

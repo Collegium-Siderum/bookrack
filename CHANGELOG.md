@@ -21,16 +21,20 @@ release workflow extracts the matching section verbatim from this file.
   `config knobs` now names it, so the two questions "what can I set"
   and "what is already decided" are answered from the same place.
 
-  The listing is filled crate by crate behind a gate rather than kept
-  in step by hand: in a covered crate every numeric constant carries a
-  marker naming either the key it is registered under or the reason it
-  is not a setting, and the markers and registrations are compared in
-  both directions. A row renders the constant itself rather than a copy
-  of it, and one key can be claimed by only one crate, so the same
-  value given two homes is a build failure. The read caps, the log
-  ring's bounds, and the daemon's own deadlines — the plan lifetime,
-  the reranker's request timeout, retries and restart backoff, the
-  file-descriptor target — are the first crates listed.
+  Fifty values are listed, from every crate that holds one: the read
+  caps, the log ring's bounds, the daemon's deadlines (the plan
+  lifetime, the reranker's request timeout, retries and restart
+  backoff, the file-descriptor target), the SQLite busy timeout and
+  slow-query threshold, the PDF outline and paper-abstract caps, the
+  ANN rebuild floor, the diagnose bundle's window and caps.
+
+  A gate holds the listing to the code rather than to memory, and it
+  covers the whole workspace: every numeric constant carries a marker
+  naming either the key it is registered under or the reason it is not
+  a setting, and the markers and the registrations are compared in both
+  directions. A row renders the constant itself rather than a copy of
+  it, and one key can be claimed by only one crate, so the same value
+  given two homes is a build failure.
 
   Two values the read surfaces had been holding twice now have one
   home each: the context-window radius a `library.read_context` call

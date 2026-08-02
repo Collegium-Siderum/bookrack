@@ -19,6 +19,7 @@ use crate::{CatalogError, Result};
 /// ([`TARGET_VERSION`](crate::migrate::TARGET_VERSION)), kept for audit and
 /// for any tool or human still reading the old stamp. The `user_version`,
 /// not this, decides whether a database can be opened.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = TARGET_VERSION as u32;
 
 /// `catalog_meta` key under which [`SCHEMA_VERSION`] is mirrored.
@@ -31,6 +32,7 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// older binaries could misinterpret — e.g. reinterpreting an enum
 /// value or repurposing a column. Adding a column or a table is
 /// transparent and does not require a bump.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MIN_READER_VERSION: u32 = 1;
 
 /// `catalog_meta` key under which [`MIN_READER_VERSION`] is recorded.
@@ -38,7 +40,8 @@ const MIN_READER_VERSION_KEY: &str = "min_reader_version";
 
 /// How many database backups to retain in the backup directory; older
 /// ones are pruned after a successful backup.
-const BACKUP_KEEP: usize = 5;
+// setting: catalog.backups_kept
+pub(crate) const BACKUP_KEEP: usize = 5;
 
 /// Every `catalog.db` table that has a table module of its own, in a
 /// stable order. The live schema is conformance-checked against these

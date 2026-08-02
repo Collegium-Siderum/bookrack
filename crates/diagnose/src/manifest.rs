@@ -18,6 +18,7 @@ use crate::Options;
 
 /// Bundle schema version. Bump when any file's shape changes, when a
 /// new scrub rule is added, or when the tarball layout rearranges.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MANIFEST_SCHEMA_VERSION: u32 = 3;
 
 /// The top-level `manifest.json` document.

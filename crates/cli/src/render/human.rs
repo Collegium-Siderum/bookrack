@@ -5,6 +5,7 @@
 /// Number of leading characters of a UUID kept as a memorable
 /// job-id surrogate in human output. Matches the prefix that
 /// `queue cancel <prefix>` accepts.
+// setting: internal -- how wide an id is printed, not what it identifies
 pub const SHORT_ID_LEN: usize = 8;
 
 /// Returns the first [`SHORT_ID_LEN`] characters of a UUID-like

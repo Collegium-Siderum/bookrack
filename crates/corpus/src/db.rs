@@ -17,6 +17,7 @@ use crate::{CorpusError, Result};
 /// first created, and checked against on every subsequent open. There
 /// are no migrations: a mismatch is resolved by rebuilding the corpus,
 /// which is cheap because the store is rebuildable by design.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// `index_meta` key under which [`SCHEMA_VERSION`] is recorded.
@@ -29,6 +30,7 @@ const SCHEMA_VERSION_KEY: &str = "schema_version";
 /// readers misinterpret the data — e.g. repurposing a column or changing
 /// the meaning of a stamp value. Additive changes to the node tree or
 /// new `index_meta` keys do not require a bump.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MIN_READER_VERSION: u32 = 1;
 
 /// `index_meta` key under which [`MIN_READER_VERSION`] is recorded.

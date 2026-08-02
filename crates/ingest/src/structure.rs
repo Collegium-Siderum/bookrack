@@ -40,6 +40,7 @@ use crate::{IngestError, StructureParams};
 
 /// The vec index of the book root within a plan. The root is always the
 /// first planned node and is the only one with no parent.
+// setting: internal -- the vec index the plan's root always occupies, not a choice
 const ROOT: usize = 0;
 
 /// One node staged for insertion, with its parent held as a plan index.

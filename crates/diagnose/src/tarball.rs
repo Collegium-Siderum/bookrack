@@ -20,7 +20,8 @@ use crate::DiagnoseError;
 /// Compression level for the gzip wrapper. Matches the `gzip(1)`
 /// default, which trades modestly slower writes for noticeably smaller
 /// bundles.
-const GZIP_LEVEL: u32 = 6;
+// setting: diagnose.gzip_level
+pub(crate) const GZIP_LEVEL: u32 = 6;
 
 /// Append every regular file under `staging_dir` to a `tar.gz` written
 /// at `out_path`. The output is byte-stable for a fixed input tree.

@@ -33,6 +33,7 @@ use serde::Deserialize;
 /// `<data_root>/audit-rules/`.
 pub const HEADINGS_OVERLAY_FILE: &str = "headings.toml";
 /// Schema version the loader accepts.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const HEADINGS_SCHEMA_VERSION: u32 = 1;
 
 /// In-repo default heading patterns, embedded at build time.

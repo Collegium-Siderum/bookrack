@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 # Stable fingerprint of the three embedded catalog TOMLs, stamped into
 # `book_distill_audit.profile_ref` by the build audit writer.
 bookrack-audit-profile.workspace = true

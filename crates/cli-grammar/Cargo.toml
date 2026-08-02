@@ -6,4 +6,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 clap.workspace = true

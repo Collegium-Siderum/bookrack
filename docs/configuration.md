@@ -282,15 +282,20 @@ choice: raising the read-character cap overruns the context of the
 agent the passage is for. Discoverable and adjustable are separate
 properties, and only the first is claimed here.
 
-The inventory is filled crate by crate and is checked by a gate, not
-by memory: in a crate the gate covers, every numeric constant carries
-a marker naming either the key it is registered under or the reason it
-is not a setting, and the markers and the registrations are compared in
-both directions. A registered value is rendered from the constant
-itself, so a row cannot report a number the code no longer holds, and
-one key can be claimed by only one crate — which is what turns the same
-value given two homes into a build failure instead of two rows that
-happen to agree.
+The inventory is checked by a gate rather than kept in step by hand,
+and the gate covers the whole workspace: every numeric constant in
+every crate carries a marker naming either the key it is registered
+under or the reason it is not a setting — a version stamp, a data-format
+invariant, a heuristic that would need recalibrating — and the markers
+and the registrations are compared in both directions. A registered
+value is rendered from the constant itself, so a row cannot report a
+number the code no longer holds, and one key can be claimed by only one
+crate, which turns the same value given two homes into a build failure
+instead of two rows that happen to agree.
+
+A value that is already a knob's compiled-in default is not listed
+twice: it stays in `config knobs`, where the rest of its chain is, and
+its constant carries a marker saying so.
 
 ## Retrieval profiles: `index-profile`
 

@@ -19,6 +19,7 @@ use crate::ItemKind;
 
 /// Schema version embedded in the persisted document. Bumped whenever
 /// any field shape, enum variant, or invariant changes.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const QUEUE_SCHEMA_VERSION: u32 = 6;
 
 /// Pull order hint for the worker. The first pending job at the

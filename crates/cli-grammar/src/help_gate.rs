@@ -21,10 +21,12 @@ use std::fmt;
 /// `Commands` column, an example prints verbatim in the long-help
 /// trailer, and an over-long one runs off the terminal instead of
 /// folding.
+// setting: internal -- a rule the help gate enforces on this repository's own command surface
 pub const SUMMARY_LIMIT: usize = 100;
 
 /// Lower bound on a leaf's examples: one typical invocation and one
 /// that is not.
+// setting: internal -- a rule the help gate enforces on this repository's own command surface
 pub const MIN_EXAMPLES: usize = 2;
 
 /// The prefix `examples!` renders in front of every example line.

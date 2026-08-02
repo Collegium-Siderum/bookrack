@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 # Centralised SQLite open path: WAL + busy timeout for read-write
 # handles, query-only / strict read-only variants for read consumers.
 bookrack-dbkit = { path = "../dbkit" }

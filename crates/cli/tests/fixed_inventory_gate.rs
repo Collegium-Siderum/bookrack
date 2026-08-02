@@ -19,9 +19,10 @@
 //! reads as coverage. Hence the exhaustive form, where the judgement is
 //! a line a person writes and the gate only checks that the line exists.
 //!
-//! [`COVERED`] is what makes the exhaustive form landable: crates join
-//! it one at a time, and each one is complete when it joins. It only
-//! grows, and it disappears when it holds every crate.
+//! The rule runs over every member crate. It was rolled out behind a
+//! list of the crates already accounted for; that list is gone, which
+//! is what makes a crate added later subject to the rule on the day it
+//! appears rather than on the day someone remembers to add it.
 //!
 //! One relaxation: a file whose constants are all the same kind of
 //! not-a-setting states that once, above its first constant, instead of
@@ -36,23 +37,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use eyre::Result;
-
-/// The crates whose constants are fully accounted for.
-///
-/// A crate on this list must have a `// setting:` marker on every
-/// numeric constant it declares. A crate not on it is exempt, which is
-/// why the list has to grow: the exemption is a rollout step, not a
-/// standing allowance.
-const COVERED: &[&str] = &[
-    "control-client",
-    "dbkit",
-    "embed",
-    "mcp",
-    "obs",
-    "query",
-    "rerank",
-    "runtime",
-];
 
 /// Constant types the rule applies to.
 ///
@@ -84,6 +68,26 @@ const MARKER: &str = "// setting:";
 
 /// The marker payload that opts a constant out of the inventory.
 const NOT_A_SETTING: &str = "internal";
+
+/// Every member crate, by directory name.
+///
+/// Read off the filesystem rather than held as a list: a list is a
+/// second place to remember, and the failure it produces — a crate
+/// nobody added — is silent.
+fn member_crates(root: &Path) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates"))? {
+        let path = entry?.path();
+        if !path.join("src").is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort();
+    Ok(names)
+}
 
 /// The workspace root, from this crate's manifest directory.
 fn workspace_root() -> PathBuf {
@@ -185,7 +189,9 @@ fn declares_numeric_constant(line: &str) -> Option<String> {
     let rest = line.strip_prefix("const ")?;
     let (name, rest) = rest.split_once(':')?;
     let name = name.trim();
-    if name.is_empty()
+    // `const _: T = ...` names nothing, so there is nothing to look up
+    // and no marker to demand.
+    if !name.chars().any(|c| c.is_ascii_uppercase())
         || !name
             .chars()
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
@@ -253,25 +259,20 @@ fn file_scoped_marker(lines: &[&str]) -> Option<String> {
     None
 }
 
-/// Every constant in a covered crate says what it is.
+/// Every constant in the workspace says what it is.
 ///
 /// The direction that catches an addition: a new numeric constant is
 /// either a setting someone can find or a decision someone wrote down,
 /// and this is the point at which that has to be answered.
 #[test]
-fn every_numeric_constant_in_a_covered_crate_carries_a_marker() -> Result<()> {
+fn every_numeric_constant_carries_a_marker() -> Result<()> {
     let root = workspace_root();
     let mut unmarked = Vec::new();
     let mut blank_reasons = Vec::new();
     let mut scanned = 0usize;
 
-    for name in COVERED {
-        let found = numeric_constants(&root.join("crates").join(name))?;
-        assert!(
-            !found.is_empty(),
-            "crate {name:?} is covered but the scan found no numeric constants in it, \
-             so the scanner is no longer looking where they live"
-        );
+    for name in member_crates(&root)? {
+        let found = numeric_constants(&root.join("crates").join(&name))?;
         scanned += found.len();
         for constant in found {
             match &constant.marker {
@@ -297,9 +298,9 @@ fn every_numeric_constant_in_a_covered_crate_carries_a_marker() -> Result<()> {
          of the opt-out, because it is what a later reader checks against."
     );
     assert!(
-        scanned >= COVERED.len(),
-        "the scan found only {scanned} constants across {} covered crates",
-        COVERED.len()
+        scanned > 100,
+        "the scan found only {scanned} numeric constants in the workspace, so it is no \
+         longer looking where they live"
     );
     Ok(())
 }
@@ -316,8 +317,8 @@ fn the_inventory_registers_exactly_the_keys_the_markers_name() -> Result<()> {
     let root = workspace_root();
 
     let mut marked: BTreeSet<String> = BTreeSet::new();
-    for name in COVERED {
-        for constant in numeric_constants(&root.join("crates").join(name))? {
+    for name in member_crates(&root)? {
+        for constant in numeric_constants(&root.join("crates").join(&name))? {
             match constant.marker {
                 Some(payload) if !payload.starts_with(NOT_A_SETTING) => {
                     marked.insert(payload);
@@ -327,10 +328,8 @@ fn the_inventory_registers_exactly_the_keys_the_markers_name() -> Result<()> {
         }
     }
 
-    let covered: BTreeSet<&str> = COVERED.iter().copied().collect();
     let registered: BTreeSet<String> = bookrack_cli::config_fixed::catalog()
         .iter()
-        .filter(|setting| covered.contains(setting.owner))
         .map(|setting| setting.key.to_string())
         .collect();
 
@@ -378,38 +377,54 @@ fn no_two_registrations_claim_the_same_key() {
     );
 }
 
-/// Every covered crate reaches the surface that collects it.
+/// Every covered crate that has something to say reaches the surface
+/// that collects it.
 ///
 /// The counterpart of the knob gate's collector rule, and it exists for
-/// the same reason: a registration no surface reads contributes nothing,
-/// so the key-set comparison above would pass by finding both sides
-/// empty.
+/// the same reason: a registration no surface reads contributes
+/// nothing, so the key-set comparison above would pass by finding both
+/// sides empty. Keyed on the markers rather than on membership, because
+/// a crate whose every constant is a version stamp registers nothing
+/// and is complete exactly so.
 #[test]
-fn every_covered_crate_is_collected_by_the_inventory() {
+fn every_crate_that_marks_a_key_is_collected_by_the_inventory() -> Result<()> {
+    let root = workspace_root();
     let owners: BTreeSet<&str> = bookrack_cli::config_fixed::catalog()
         .iter()
         .map(|setting| setting.owner)
         .collect();
 
-    let uncollected: Vec<&&str> = COVERED
-        .iter()
-        .filter(|name| !owners.contains(**name))
-        .collect();
+    let mut uncollected = Vec::new();
+    for name in member_crates(&root)? {
+        let names_a_key = numeric_constants(&root.join("crates").join(&name))?
+            .iter()
+            .any(|c| {
+                c.marker
+                    .as_deref()
+                    .is_some_and(|m| !m.starts_with(NOT_A_SETTING))
+            });
+        if names_a_key && !owners.contains(name.as_str()) {
+            uncollected.push(name);
+        }
+    }
     assert!(
         uncollected.is_empty(),
-        "these crates are covered but contribute nothing to the inventory: {uncollected:?}. \
-         Add each crate's `FIXED_SETTINGS` to `config_fixed::REGISTRIES`."
+        "these crates mark constants with keys but contribute nothing to the inventory: \
+         {uncollected:?}. Add each crate's `FIXED_SETTINGS` to `config_fixed::REGISTRIES`."
     );
 
-    let uncovered: Vec<&&str> = owners
+    let members = member_crates(&root)?;
+    let strays: Vec<&&str> = owners
         .iter()
-        .filter(|owner| !COVERED.contains(owner))
+        .filter(|owner| !members.iter().any(|name| name == *owner))
         .collect();
     assert!(
-        uncovered.is_empty(),
-        "these crates register values but are not covered by the source scan: {uncovered:?}. \
-         Add each to COVERED, so the crate's remaining constants are held to the rule too."
+        strays.is_empty(),
+        "these registrations name an owner that is not a member crate: {strays:?}. \
+         The owner is what ties a row back to the source the gate scans."
     );
+
+    Ok(())
 }
 
 /// Every row can be printed.

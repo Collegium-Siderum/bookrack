@@ -30,6 +30,22 @@ use bookrack_config::Config;
 pub use options::{DEFAULT_DAYS, Options};
 pub use scrub::Scrubber;
 
+bookrack_core::fixed_settings! {
+    owner = "diagnose";
+    "diagnose.days_default" = options::DEFAULT_DAYS,
+        "days of logs and audit rows a bundle covers when no window is named",
+        acts on "diagnose";
+    "diagnose.gzip_level" = tarball::GZIP_LEVEL,
+        "compression level the bundle's gzip wrapper is written at",
+        acts on "how large a diagnose bundle is and how long it takes to write";
+    "diagnose.intake_head_max" = collectors::catalog::INTAKE_HEAD_CAP,
+        "intake rows captured from the head of the table into a bundle",
+        acts on "diagnose";
+    "diagnose.recent_rows_max" = collectors::catalog::RECENT_ROW_CAP,
+        "recent rows of each observability table captured into a bundle",
+        acts on "diagnose";
+}
+
 /// Why a [`collect`] call failed. Recoverable per-collector errors are
 /// swallowed and surfaced as missing manifest entries instead — only
 /// fatal IO and serialization failures land here.

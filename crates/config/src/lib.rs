@@ -50,6 +50,13 @@ pub use profile_ref::{
 pub use registry::LibraryKind;
 use registry::{Registry, parse_registry};
 
+bookrack_core::fixed_settings! {
+    owner = "config";
+    "reranker.server_batch_size" = RERANKER_SERVER_BATCH_SIZE,
+        "tokens one physical batch of the supervised rerank server holds",
+        acts on "a rerank call, which fails outright on a pair larger than this";
+}
+
 /// Environment variable naming the data root (an absolute directory).
 pub const DATA_DIR_ENV: &str = "BOOKRACK_DATA_DIR";
 
@@ -98,6 +105,7 @@ pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 /// at 1000 characters (`ChunkParams::default` in the ingest crate),
 /// which tokenizes to ~1300 tokens in the CJK worst case; 2048 covers
 /// that with headroom to spare.
+// setting: reranker.server_batch_size
 pub const RERANKER_SERVER_BATCH_SIZE: u32 = 2048;
 
 /// `-c` context size for the supervised rerank server when
@@ -112,6 +120,7 @@ pub const RERANKER_SERVER_BATCH_SIZE: u32 = 2048;
 /// Lives here rather than beside the supervisor because it is the
 /// backstop layer of the `reranker.ctx` knob: a row that reported no
 /// default would be describing a knob that has one.
+// setting: internal -- the Default rung of `reranker.ctx`, reported by `config knobs`
 pub const DEFAULT_RERANKER_CTX: u32 = 4 * RERANKER_SERVER_BATCH_SIZE;
 
 /// Environment variable naming the directory database backups are written
@@ -1296,6 +1305,7 @@ pub const EMBED_BATCH_MIN_CHAR_BUDGET_ENV: &str = "BOOKRACK_EMBED_BATCH_MIN_CHAR
 /// Default interval, in seconds, between EMBED-progress heartbeats on
 /// stderr. Calibrated to be visible on a tiny book («47 s» small EPUB)
 /// without spamming the log on a fast embedder.
+// setting: internal -- the Default rung of `embed.progress_interval_secs`, see `config knobs`
 pub const DEFAULT_EMBED_PROGRESS_INTERVAL_SECS: u64 = 5;
 
 /// Environment variable overriding the EMBED-progress heartbeat
@@ -1340,6 +1350,7 @@ pub const DEFAULT_LOG_CONSOLE: &str = "error";
 
 /// Number of nearest passages a query returns when [`SearchConfig`] is
 /// left at its default.
+// setting: internal -- the Default rung of `search.top_k`, reported by `config knobs`
 pub const DEFAULT_SEARCH_TOP_K: usize = 5;
 
 /// Environment variable overriding the search result count.
@@ -1349,6 +1360,7 @@ pub const SEARCH_TOP_K_ENV: &str = "BOOKRACK_SEARCH_TOP_K";
 /// weak match. Calibrated against the EMBED spike's real corpus: real
 /// monolingual matches sit around 0.25, cross-language matches around
 /// 0.45, and noise / prompt-only embeddings around 0.55 and above.
+// setting: internal -- the Default rung of `search.weak_threshold`, reported by `config knobs`
 pub const DEFAULT_SEARCH_WEAK_THRESHOLD: f32 = 0.5;
 
 /// Environment variable overriding the weak-hit distance threshold.

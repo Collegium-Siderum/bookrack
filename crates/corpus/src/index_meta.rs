@@ -41,6 +41,7 @@ pub const NORMALIZE_VERSION_KEY: &str = "normalize_version";
 
 /// Number of hex characters kept from the SHA-256 digest when composing
 /// the corpus fingerprint.
+// setting: internal -- a recorded fingerprint's width; changing it invalidates every stored one
 const FINGERPRINT_HEX_LEN: usize = 16;
 
 /// The build parameters an index was created with.

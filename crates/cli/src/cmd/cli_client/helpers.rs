@@ -7,20 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Default per-RPC timeout applied to every [`ControlClient`] the CLI
-/// builds through [`connect`]. Sized generously so steady-state ops
-/// never trip it on a healthy daemon while still catching a daemon
-/// that has wedged. Adjust through the matching env knob in the next
-/// pass.
-const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Default stall timeout for [`await_jobs`]: how long the wait loop
-/// will tolerate zero events before reporting that the daemon has
-/// stopped progressing. The timer resets on every event seen, so
-/// long-running jobs that keep emitting `worker.progress` survive
-/// regardless of total elapsed time.
-const DEFAULT_AWAIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
-
+use bookrack_cli::daemon_call::{DEFAULT_AWAIT_STALL_TIMEOUT, DEFAULT_CALL_TIMEOUT};
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::ctx;

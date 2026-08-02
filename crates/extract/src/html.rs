@@ -33,6 +33,7 @@ const ADAPTER: &str = "html";
 /// Upper bound on the `<head>` scan window. Loose HTML can be huge,
 /// but the metadata sits at the start; capping the slice keeps the
 /// scan from walking the body.
+// setting: internal -- how far the charset sniff walks before it gives up
 const HEAD_WINDOW_BYTES: usize = 256 * 1024;
 
 /// Extract one standalone HTML file.

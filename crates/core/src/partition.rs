@@ -22,11 +22,13 @@ use serde::Serialize;
 /// its partition index; the remainder is its local offset.
 ///
 /// Frozen invariant I2 — changing it renumbers every node id.
+// setting: internal -- the arithmetic every stored node id is derived from
 pub const NODE_PARTITION_FACTOR: i64 = 100_000_000;
 
 /// Largest valid `local_offset`: the maximum number of nodes one book
 /// can hold. Offsets run `1..=NODE_CAPACITY`; offset 0 would alias the
 /// partition boundary and is never a real node.
+// setting: internal -- follows the partition factor above
 pub const NODE_CAPACITY: i64 = NODE_PARTITION_FACTOR - 1;
 
 /// A node's global identifier.

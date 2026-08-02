@@ -46,6 +46,7 @@ pub mod stamps;
 /// store's index_meta. Independent of `bookrack_ingest::CHUNK_VERSION`:
 /// the two pipelines have separate fleets and bump on their own
 /// cadence.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const CHUNK_VERSION: u32 = 1;
 
 /// Tuning parameters for chunking the abstract. The defaults are the
@@ -1453,7 +1454,9 @@ fn run_paper_audit_substep(
 /// Concatenate text from the first few body blocks, bounded by a
 /// character cap, for the audit's language signal.
 fn paper_body_sample(blocks: &[Block]) -> String {
+    // setting: internal -- how much of a paper the metadata sample reads, alongside SAMPLE_CHARS
     const SAMPLE_BLOCKS: usize = 10;
+    // setting: internal -- how much of a paper the metadata sample reads, alongside SAMPLE_BLOCKS
     const SAMPLE_CHARS: usize = 4096;
     let mut out = String::new();
     for block in blocks

@@ -18,6 +18,7 @@ bookrack-diagnose = { path = "../diagnose" }
 bookrack-embed = { path = "../embed" }
 # Knob-origin producers for the effective-configuration report.
 bookrack-extract = { path = "../extract" }
+bookrack-ingest = { path = "../ingest" }
 bookrack-search = { path = "../search" }
 bookrack-mcp = { path = "../mcp" }
 bookrack-obs = { path = "../obs" }

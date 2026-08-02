@@ -15,9 +15,11 @@ use crate::scrub::Scrubber;
 /// How many recent rows of each observability table to include. Larger
 /// than the default `--days` window of 7 is fine: we want some context
 /// past the cutoff if the table happens to be sparse.
-const RECENT_ROW_CAP: u32 = 1000;
+// setting: diagnose.recent_rows_max
+pub(crate) const RECENT_ROW_CAP: u32 = 1000;
 /// How many intake rows to capture at the head of the table.
-const INTAKE_HEAD_CAP: u32 = 50;
+// setting: diagnose.intake_head_max
+pub(crate) const INTAKE_HEAD_CAP: u32 = 50;
 
 /// Write `<bundle>/catalog/{intakes-head,tool-calls,pipeline-audit,
 /// metadata-audit}.json`. A catalog.db that is missing or fails to

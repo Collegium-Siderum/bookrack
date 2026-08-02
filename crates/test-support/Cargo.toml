@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 bookrack-config = { path = "../config" }
 bookrack-session = { path = "../session" }
 serde_json.workspace = true

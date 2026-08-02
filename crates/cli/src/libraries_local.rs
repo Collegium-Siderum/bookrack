@@ -27,11 +27,13 @@ use crate::render::ctx;
 
 /// Descent depth for a `scan <parent>`: probe the parent's immediate
 /// subdirectories.
-const PARENT_SCAN_DEPTH: u8 = 1;
+// setting: cli.scan_parent_depth
+pub(crate) const PARENT_SCAN_DEPTH: u8 = 1;
 
 /// Descent depth for `scan --volumes`: each mounted volume and one level
 /// within it.
-const VOLUMES_SCAN_DEPTH: u8 = 2;
+// setting: cli.scan_volumes_depth
+pub(crate) const VOLUMES_SCAN_DEPTH: u8 = 2;
 
 /// A detect verdict paired with the path it describes, for `--json`. The
 /// verdict flattens in, contributing its `verdict` tag and payload.

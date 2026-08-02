@@ -50,6 +50,7 @@ pub const CONFIRM_TIMEOUT_ENV: &str = "BOOKRACK_CONFIRM_TIMEOUT_SECS";
 /// short throws away an answer a human was halfway through typing.
 /// The ceiling is the daemon's 15-minute pinned-plan TTL, past which
 /// an answer buys a plan-expired error instead of the work.
+// setting: internal -- the Default rung of `confirm.timeout_secs`, reported by `config knobs`
 pub const DEFAULT_CONFIRM_TIMEOUT_SECS: u64 = 120;
 
 /// Resolve the answer-window bound from the environment. `None` means

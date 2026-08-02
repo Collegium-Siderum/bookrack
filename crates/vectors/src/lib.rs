@@ -154,6 +154,7 @@ pub enum VectorsError {
 /// schema would make older readers misinterpret what they load — e.g.
 /// repurposing an existing field, or changing the meaning of an
 /// `AnnKind` label. New optional JSON fields do not require a bump.
+// setting: internal -- a version stamp; docs/UPGRADE.md's runbook governs a bump
 pub const MIN_READER_VERSION: u32 = 1;
 
 /// A fallible `vectors` operation.
