@@ -166,33 +166,66 @@ ignores it sees exactly what it saw before the slot was filled.
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
 `remove`, `dryrun`, `stamps.reconcile`, and their `papers.*`
-counterparts — distinguish caller-side input failures from
-handler-side faults:
+counterparts — route their failure through one mapping layer, which
+walks the error's cause chain looking for a **typed** downstream error
+it recognises. That is where the split is drawn, and it is drawn by
+the type the failing layer raised, not by the method that was called:
+a step that folds its refusal into an untyped error is reported as a
+handler-side fault even when the refusal is plainly caller input.
 
-- **`-32602` invalid params** for typed user-input errors raised by
-  the downstream pipeline:
-  - Unknown intake id (`OpsError::IntakeNotFound`,
-    `IngestError::UnknownIntake`, `GleanError::UnknownIntake`).
-  - Unknown metadata field, contributor role, contributor row, node
-    id, or wrong-shape node addressing
-    (`OpsError::{UnknownMetadataField, UnknownContributorRole,
-    ContributorNotFound, NodeNotFound, NotALeaf, NotOrganizing,
-    SourceNotArchived}`).
-  - Validation refusals from the ingest / glean pipelines
-    (`EmptyExtraction`, `NeedsOcr`, `MissingEnvelope`,
-    `EnvelopeMismatch`, `IntakeNotEmbedded`,
-    `OcrSourceStatusMismatch`, `OcrPagesMissing`,
-    `OcrPagesExcess`, `IntakeNotRebuildable`).
-- **`-32010` invalid library** for `RegistryError::LibraryUnknown`
-  raised by any handler that resolves a `library` parameter.
-- **`-32603` internal error** is the residual: the handler tried, a
-  downstream subsystem (catalog DB, vector store, embedder, file IO)
-  failed in a way the caller cannot fix by re-submitting different
-  parameters.
+Each item below names a scenario and, in parentheses, the code the
+current implementation produces for it.
+
+- **Unknown intake id, unknown metadata field, unknown contributor
+  role or contributor row, unknown node id, or a node addressed with
+  the wrong read shape**, when the ops layer raised them (`-32602`):
+  `OpsError::{IntakeNotFound, UnknownMetadataField,
+  UnknownContributorRole, ContributorNotFound, NodeNotFound, NotALeaf,
+  NotOrganizing, SourceNotArchived}`.
+- **An unknown intake id reached through the ingest or glean
+  pipelines** (`-32602`): `IngestError::UnknownIntake`,
+  `GleanError::UnknownIntake`.
+- **A validation refusal from the ingest or glean pipelines**
+  (`-32602`): `EmptyExtraction`, `NeedsOcr`, `MissingEnvelope`,
+  `EnvelopeMismatch`, `IntakeNotEmbedded`, `OcrSourceStatusMismatch`,
+  `OcrPagesMissing`, `OcrPagesExcess`, `IntakeNotRebuildable`.
+- **A `library` parameter naming a library the registry does not
+  hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
+  handler that resolves that parameter.
+- **Everything else** (`-32603`): the handler tried and a downstream
+  subsystem — catalog DB, vector store, embedder, file IO — failed.
+
+The residual bucket is currently wider than that last line describes.
+These scenarios are caller input, and re-submitting different
+parameters is what fixes them, but the step that refuses them raises
+an untyped error, so they arrive as `-32603` and a client cannot tell
+them from a fault:
+
+- `remove` / `papers.remove` given an intake id or a `source_sha256`
+  that is not registered;
+- `remove` / `papers.remove` against a data root that holds no
+  catalog database yet;
+- `remove` / `papers.remove` on the execute leg when the target
+  drifted since the dry run — the intake is gone, or its state no
+  longer matches the fingerprint the plan pinned;
+- `vectors.*` / `papers.vectors_*` on a library with no ingested
+  chunks, and a `kind` outside the ANN set;
+- `dryrun` / `papers.dryrun` given a directory that holds no
+  supported file;
+- `metadata.advance` given an unknown intake, a book with no state
+  row, or a book whose structure pass has not run.
+
+`library.fork` is absent from the method list above for the same
+reason: its handler maps every failure to `-32603` without consulting
+the mapping layer, so its input validation — an empty name, a
+relative `data_dir`, a target that resolves onto the source library,
+a name the registry already holds, a non-empty target directory — is
+reported the way a disk fault would be.
 
 Clients distinguish "fix the request and retry" (`-32602` / `-32010`)
 from "report or escalate" (`-32603`) by the code, not by parsing the
-human-readable `error.message`.
+human-readable `error.message` — subject to the residual bucket being
+wider than that split implies.
 
 #### CLI exit codes
 
