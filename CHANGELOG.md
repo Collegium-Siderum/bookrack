@@ -26,6 +26,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: an unclassified write failure carries `error.data`.** The
+  control plane promises that every error envelope sends `data` with at
+  least `retryable`, so a client branches on that field instead of
+  reading the wording. The residual channel — a write RPC whose failure
+  the mapping layer recognised no type in — sent no `data` at all,
+  making the one class of failure a client can least interpret also the
+  one where the field it branches on went missing. It now sends
+  `{"retryable": false}`, with no `detail` and no `hint`: an
+  unclassified error has neither evidence nor a next step to offer.
+  `message` is unchanged — still labelled with the method name and
+  still carrying the flattened cause chain.
+
 - **runtime, cli: an unusable embedding backend is classified instead
   of being reported as an internal error.** A write RPC whose embed
   call failed answered `-32603 internal error` and exited `1` — "this

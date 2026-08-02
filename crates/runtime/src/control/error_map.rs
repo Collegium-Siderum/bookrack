@@ -61,6 +61,11 @@ use crate::cmd::input_error::CmdInputError;
 /// `method` is the wire-name of the failing RPC (`"metadata.set"`,
 /// `"corpus.rebuild"`, ...), used only to label the residual
 /// [`INTERNAL_ERROR`] message.
+///
+/// An error the walk recognises no type in still leaves through
+/// [`rpc_from_problem`], so `data` is on the envelope unconditionally:
+/// `retryable` alone, since such an error has neither evidence nor a
+/// next step to name.
 pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
     for cause in err.chain() {
         if let Some(e) = cause.downcast_ref::<OpsError>() {
@@ -82,7 +87,10 @@ pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
             return from_embed(e);
         }
     }
-    RpcError::new(INTERNAL_ERROR, format!("{method} failed: {err:#}"))
+    rpc_from_problem(
+        INTERNAL_ERROR,
+        Problem::new(format!("{method} failed: {err:#}")),
+    )
 }
 
 /// Map a directly-held [`OpsError`] without an `anyhow` round-trip.
@@ -606,5 +614,27 @@ mod tests {
         assert_eq!(rpc.code, INTERNAL_ERROR);
         assert!(rpc.message.contains("vectors.rebuild"));
         assert!(rpc.message.contains("disk on fire"));
+    }
+
+    /// `data` is on the envelope unconditionally: `docs/control-plane.md`
+    /// promises that a type which has written no wording of its own still
+    /// sends `data` with `retryable` alone, and the residual channel is
+    /// where those errors end up. The message is asserted here as well,
+    /// because filling the slot must not cost the method label or the
+    /// root cause that make the residual message self-sufficient.
+    #[test]
+    fn the_residual_channel_fills_the_data_slot() {
+        let err: Report = eyre::eyre!("disk on fire");
+        let rpc = write_err("vectors.rebuild", err);
+        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert!(rpc.message.contains("vectors.rebuild failed:"));
+        assert!(rpc.message.contains("disk on fire"));
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        assert!(!data.retryable);
+        assert!(
+            data.detail.is_none() && data.hint.is_none(),
+            "an unclassified error has no evidence and no next step to offer"
+        );
     }
 }
