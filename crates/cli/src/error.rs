@@ -20,7 +20,7 @@ use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
     BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
     JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
-    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND,
+    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
 };
 use serde_json::Value;
 
@@ -211,7 +211,8 @@ impl BookrackCliError {
             | CONFIRMATION_REQUIRED
             | PLAN_NOT_FOUND
             | PLAN_KIND_MISMATCH
-            | PLAN_LIBRARY_MISMATCH => Self::RpcUserError {
+            | PLAN_LIBRARY_MISMATCH
+            | PLAN_TARGET_DRIFTED => Self::RpcUserError {
                 code,
                 message,
                 data,
@@ -486,6 +487,7 @@ mod tests {
             PLAN_NOT_FOUND,
             PLAN_KIND_MISMATCH,
             PLAN_LIBRARY_MISMATCH,
+            PLAN_TARGET_DRIFTED,
         ] {
             let err = BookrackCliError::from_rpc(code, "boom".into(), None);
             assert!(
@@ -493,6 +495,24 @@ mod tests {
                 "code {code} should be RpcUserError"
             );
             assert_eq!(err.exit_code(), 2, "code {code}");
+        }
+    }
+
+    /// `docs/control-plane.md` promises the plan block `-32013..-32016`
+    /// exits 2. `from_rpc` ends in a `_` arm, so a code added inside
+    /// that block and never registered would exit 1 in silence. Walk
+    /// the range rather than the constants: the range is what the
+    /// document commits to, and a constant list would be updated by the
+    /// same edit that forgets the arm.
+    #[test]
+    fn every_code_in_the_documented_plan_block_exits_two() {
+        for code in -32016..=-32013 {
+            let err = BookrackCliError::from_rpc(code, "boom".into(), None);
+            assert_eq!(
+                err.exit_code(),
+                2,
+                "code {code} is inside the documented plan block"
+            );
         }
     }
 

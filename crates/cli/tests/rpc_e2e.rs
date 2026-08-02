@@ -132,3 +132,48 @@ async fn an_unknown_audit_profile_exits_two_from_the_cli() {
     }
     let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
 }
+
+/// `remove` against an id the library does not hold is caller input,
+/// which the exit-code table puts at `2`. It exited `1` while the
+/// refusal reached the CLI as an internal error.
+///
+/// Driven through the binary rather than through `from_rpc`, because
+/// the classification is only half of what produces the exit code.
+#[tokio::test]
+async fn a_remove_of_an_unknown_book_exits_two_from_the_cli() {
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
+
+    let mut daemon_cmd =
+        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    daemon_cmd.arg("run");
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
+
+    assert!(
+        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
+        "session lock did not appear; bookrack run may have failed to start",
+    );
+
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
+        .arg("remove")
+        .arg("999999")
+        .arg("--yes")
+        .output()
+        .await
+        .expect("run bookrack remove");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a remove the library cannot satisfy is caller input: stderr={stderr}",
+    );
+
+    if let Some(id) = daemon.id() {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(id.to_string())
+            .status()
+            .await;
+    }
+    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+}
