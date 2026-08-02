@@ -27,23 +27,51 @@ use crate::{Config, EmbedConfig, LogConfig, McpConfig, RerankerConfig, RootConfi
 /// [`effective_profile_reference`](crate::effective_profile_reference),
 /// which produces a row of the same shape.
 pub fn knob_origins(root: Option<&Config>) -> Vec<KnobOrigin> {
-    let root_config = root.map_or_else(RootConfig::default, |c| c.root_config.clone());
-    knob_origins_from(|key| std::env::var(key).ok(), &root_config)
+    knob_origins_from(|key| std::env::var(key).ok(), root)
 }
 
 /// Pure form of [`knob_origins`], factored out so a test can drive the
 /// environment layer without mutating process-global state.
 fn knob_origins_from(
     get: impl Fn(&str) -> Option<String>,
-    root_config: &RootConfig,
+    root: Option<&Config>,
 ) -> Vec<KnobOrigin> {
-    let mut rows = Vec::new();
+    let root_config = root.map_or_else(RootConfig::default, |c| c.root_config.clone());
+
+    let mut rows = vec![
+        crate::no_dotenv_knob(get(crate::NO_DOTENV_ENV)),
+        crate::registry_knob(get(crate::REGISTRY_ENV)),
+        data_dir_row(&get, root),
+        crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), &root_config),
+        backup_dir_row(&get, root),
+        crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV)),
+    ];
     rows.extend(EmbedConfig::resolve_with_origins_from(&get, None).1);
-    rows.extend(SearchConfig::resolve_with_origins_from(&get, root_config).1);
-    rows.extend(RerankerConfig::resolve_with_origins_from(&get, root_config).1);
+    rows.extend(SearchConfig::resolve_with_origins_from(&get, &root_config).1);
+    rows.extend(RerankerConfig::resolve_with_origins_from(&get, &root_config).1);
     rows.extend(McpConfig::resolve_with_origins_from(&get).1);
     rows.extend(LogConfig::resolve_with_origins_from(&get).1);
     rows
+}
+
+/// The data-root row: the rung the resolution recorded, or — with no
+/// resolution to report — what the environment asked for, so a failed
+/// resolution still says what it was pointed at.
+fn data_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> KnobOrigin {
+    match root {
+        Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source()),
+        None => crate::unresolved_data_dir_knob(get(crate::DATA_DIR_ENV)),
+    }
+}
+
+/// The backup-directory row. Its lower layer is derived from the data
+/// root, so with no root that layer has nothing to offer.
+fn backup_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> KnobOrigin {
+    let env = get(crate::BACKUP_DIR_ENV);
+    match root {
+        Some(cfg) => crate::backup_dir_knob(cfg.data_dir(), env),
+        None => crate::unrooted_backup_dir_knob(env),
+    }
 }
 
 #[cfg(test)]
@@ -129,18 +157,74 @@ mod tests {
     /// default and no variable name appears at all.
     #[test]
     fn every_resolver_env_constant_reaches_a_row() {
-        for name in crate::RESOLVER_ENV_CONSTANTS {
-            let rows = knob_origins_from(only(name, "7"), &RootConfig::default());
+        let names = crate::RESOLVER_ENV_CONSTANTS
+            .iter()
+            .chain(crate::SITE_ENV_CONSTANTS);
+        for name in names {
+            let rows = knob_origins_from(only(name, "7"), None);
             let winner = rows
                 .iter()
-                .find(|r| r.layer == Layer::Environment)
-                .unwrap_or_else(|| panic!("setting {name} moved no row to the environment layer"));
+                .find(|r| r.layer == Layer::Environment && r.value.is_some())
+                .unwrap_or_else(|| panic!("setting {name} won no row from the environment layer"));
             assert_eq!(
                 winner.site, *name,
                 "setting {name} moved a row sited at {} instead",
                 winner.site
             );
         }
+    }
+
+    /// The data-root row is derived from the rung the resolution
+    /// already recorded, so it and `bookrack info` cannot disagree
+    /// about which source won. Every variant maps, and the two registry
+    /// rungs stay distinguishable by site.
+    #[test]
+    fn every_resolution_source_maps_to_a_layer_and_a_distinct_site() {
+        use crate::ResolutionSource::*;
+        let all = [
+            DataDirFlag,
+            LibraryFlag,
+            EnvVar,
+            PortableExeNeighbor,
+            RegistryDefault,
+            DefaultRegistryDefault,
+            Explicit,
+        ];
+
+        let mut sites = Vec::new();
+        for source in all {
+            let knob = crate::data_dir_knob(std::path::Path::new("/somewhere"), source);
+            assert_eq!(knob.key, "data_dir");
+            assert_eq!(
+                knob.value.as_deref(),
+                Some("/somewhere"),
+                "{source:?} lost the resolved root"
+            );
+            let (layer, site) = source.as_layer();
+            assert_eq!(knob.layer, layer, "{source:?}");
+            assert_eq!(knob.site, site, "{source:?}");
+            sites.push(site);
+        }
+
+        assert_eq!(
+            RegistryDefault.as_layer().0,
+            DefaultRegistryDefault.as_layer().0,
+            "both registry rungs are the registry layer"
+        );
+        assert_ne!(
+            RegistryDefault.as_layer().1,
+            DefaultRegistryDefault.as_layer().1,
+            "the two registry rungs must stay distinguishable by site"
+        );
+
+        let mut unique = sites.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            sites.len(),
+            "two sources share a site, so the row cannot say which won: {sites:?}"
+        );
     }
 
     /// A blank environment value is unset, not a losing offer: it must

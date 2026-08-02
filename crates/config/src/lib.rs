@@ -123,7 +123,7 @@ pub fn load_dotenv() {
 
 /// The pure core of [`load_dotenv`]: whether the file should be read.
 fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
-    match env_trimmed(get(NO_DOTENV_ENV)) {
+    match no_dotenv_knob(get(NO_DOTENV_ENV)).value {
         Some(value) => matches!(
             value.to_ascii_lowercase().as_str(),
             "0" | "false" | "no" | "off"
@@ -218,6 +218,31 @@ pub enum ResolutionSource {
     DefaultRegistryDefault,
     /// Constructed directly via [`Config::new`], bypassing resolution.
     Explicit,
+}
+
+impl ResolutionSource {
+    /// The knob layer this rung stands for, and the site within it.
+    ///
+    /// The two registry rungs share [`Layer::Registry`] and differ by
+    /// site: the layer answers which kind of source won, the site which
+    /// particular one — the same division every other knob's row uses.
+    pub(crate) fn as_layer(self) -> (Layer, &'static str) {
+        match self {
+            ResolutionSource::DataDirFlag => (Layer::Flag, "--data-dir"),
+            ResolutionSource::LibraryFlag => (Layer::Flag, "--library"),
+            ResolutionSource::EnvVar => (Layer::Environment, DATA_DIR_ENV),
+            ResolutionSource::PortableExeNeighbor => {
+                (Layer::Platform, "bookrack-data beside the executable")
+            }
+            ResolutionSource::RegistryDefault => {
+                (Layer::Registry, "the registry named by the environment")
+            }
+            ResolutionSource::DefaultRegistryDefault => {
+                (Layer::Registry, "the platform config-directory registry")
+            }
+            ResolutionSource::Explicit => (Layer::Flag, "constructed directly"),
+        }
+    }
 }
 
 /// How a resolved [`Config`]'s library name was determined — a second
@@ -577,9 +602,10 @@ impl Config {
 /// be tested without mutating process-global environment variables. The
 /// override wins when set and non-blank; otherwise `<data_dir>/backup`.
 fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
-    env_trimmed(override_dir)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("backup"))
+    PathBuf::from(knob_value(
+        &backup_dir_knob(data_dir, override_dir),
+        String::new(),
+    ))
 }
 
 /// The reference-store database under `data_dir`. The single
@@ -608,11 +634,9 @@ pub fn daemon_state_dir() -> Result<PathBuf, ConfigError> {
 /// The pure layer of [`daemon_state_dir`], factored out so it can be
 /// tested without mutating process-global environment variables.
 fn daemon_state_dir_from(override_dir: Option<String>) -> Result<PathBuf, ConfigError> {
-    if let Some(dir) = env_trimmed(override_dir) {
-        return Ok(PathBuf::from(dir));
-    }
-    dirs::data_dir()
-        .map(|d| d.join("bookrack").join("daemon"))
+    daemon_state_dir_knob(override_dir)
+        .value
+        .map(PathBuf::from)
         .ok_or(ConfigError::DaemonStateDirUnavailable)
 }
 
@@ -1216,6 +1240,21 @@ pub const MCP_ADDR_ENV: &str = "BOOKRACK_MCP_ADDR";
 /// and [`LogConfig`]; every one of them is a row in
 /// [`knob_origins`](crate::knob_origins). The crate's remaining
 /// variables are read at their own sites and reported separately.
+/// The environment variables read at their own sites, outside the five
+/// configuration resolvers.
+///
+/// Each is a row in [`knob_origins`](crate::knob_origins) too; they are
+/// listed apart because their priority chains live with the code that
+/// reads them rather than in a resolver.
+pub const SITE_ENV_CONSTANTS: &[&str] = &[
+    NO_DOTENV_ENV,
+    REGISTRY_ENV,
+    DATA_DIR_ENV,
+    OLLAMA_URL_ENV,
+    BACKUP_DIR_ENV,
+    DAEMON_STATE_DIR_ENV,
+];
+
 pub const RESOLVER_ENV_CONSTANTS: &[&str] = &[
     EMBED_BATCH_CHAR_BUDGET_ENV,
     EMBED_BATCH_MAX_CHUNKS_ENV,
@@ -1755,6 +1794,157 @@ impl LogConfig {
 /// The `site` a compiled-in default is held at.
 const BUILT_IN_SITE: &str = "built-in";
 
+/// The Ollama endpoint, by precedence `env var > config.toml > default`.
+///
+/// The only place that order is written down: [`finish`] reads the
+/// value off this row, and [`knob_origins`](crate::knob_origins)
+/// reports the same row.
+pub(crate) fn ollama_url_knob(env: Option<String>, root_config: &RootConfig) -> KnobOrigin {
+    resolve_knob(
+        "ollama_url",
+        KnobReach::Library,
+        ReadAt::DuringResolution,
+        vec![
+            Candidate::of(Layer::Environment, OLLAMA_URL_ENV, env_trimmed(env)),
+            Candidate::of(
+                Layer::File,
+                "ollama_url",
+                env_trimmed(root_config.ollama_url.clone()),
+            ),
+            Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(DEFAULT_OLLAMA_URL.to_string()),
+            ),
+        ],
+    )
+}
+
+/// The backup directory, by precedence `env var > beside the data root`.
+///
+/// `read_at` is [`ReadAt::PerCall`] because [`Config::backup_dir`]
+/// re-reads the variable on every call rather than snapshotting it at
+/// resolution, unlike every sibling accessor.
+pub(crate) fn backup_dir_knob(data_dir: &Path, env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "backup_dir",
+        KnobReach::Machine,
+        ReadAt::PerCall,
+        vec![
+            Candidate::of(Layer::Environment, BACKUP_DIR_ENV, env_trimmed(env)),
+            Candidate::of(
+                Layer::Default,
+                "beside the data root",
+                Some(data_dir.join("backup").display().to_string()),
+            ),
+        ],
+    )
+}
+
+/// The daemon state directory, by precedence
+/// `env var > platform data directory`.
+pub(crate) fn daemon_state_dir_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "daemon_state_dir",
+        KnobReach::Machine,
+        ReadAt::BeforeResolution,
+        vec![
+            Candidate::of(Layer::Environment, DAEMON_STATE_DIR_ENV, env_trimmed(env)),
+            Candidate::of(
+                Layer::Platform,
+                "platform data directory",
+                dirs::data_dir().map(|d| d.join("bookrack").join("daemon").display().to_string()),
+            ),
+        ],
+    )
+}
+
+/// Whether the dotenv file is read at all.
+///
+/// Has no [`Layer::Dotenv`] candidate and cannot acquire one: this is
+/// the knob that decides whether that layer exists, and it is read
+/// before the file is.
+pub(crate) fn no_dotenv_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "no_dotenv",
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        vec![
+            Candidate::of(Layer::Environment, NO_DOTENV_ENV, env_trimmed(env)),
+            Candidate::of(Layer::Default, BUILT_IN_SITE, Some("0".to_string())),
+        ],
+    )
+}
+
+/// The library registry file, by precedence
+/// `env var > platform config directory`.
+pub(crate) fn registry_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "registry",
+        KnobReach::Machine,
+        ReadAt::DuringResolution,
+        vec![
+            Candidate::of(Layer::Environment, REGISTRY_ENV, env_trimmed(env)),
+            Candidate::of(
+                Layer::Platform,
+                "platform config directory",
+                default_registry_path().map(|p| p.display().to_string()),
+            ),
+        ],
+    )
+}
+
+/// The data root when resolution did not reach one: the row reports
+/// what the environment named, so a failed resolution still says what
+/// it was pointed at rather than going silent.
+pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "data_dir",
+        KnobReach::Process,
+        ReadAt::DuringResolution,
+        vec![Candidate::of(
+            Layer::Environment,
+            DATA_DIR_ENV,
+            env_trimmed(env),
+        )],
+    )
+}
+
+/// The backup directory with no data root resolved: only the override
+/// can speak, since the lower layer is derived from the root.
+pub(crate) fn unrooted_backup_dir_knob(env: Option<String>) -> KnobOrigin {
+    resolve_knob(
+        "backup_dir",
+        KnobReach::Machine,
+        ReadAt::PerCall,
+        vec![Candidate::of(
+            Layer::Environment,
+            BACKUP_DIR_ENV,
+            env_trimmed(env),
+        )],
+    )
+}
+
+/// The resolved data root, reported through the layer its existing
+/// [`ResolutionSource`] stands for.
+///
+/// Derived from the source the resolution already recorded rather than
+/// re-walking the ladder, so this row and `bookrack info` cannot
+/// disagree about which rung won.
+pub(crate) fn data_dir_knob(data_dir: &Path, source: ResolutionSource) -> KnobOrigin {
+    let (layer, site) = source.as_layer();
+    resolve_knob(
+        "data_dir",
+        KnobReach::Process,
+        ReadAt::DuringResolution,
+        vec![Candidate::of(
+            layer,
+            site,
+            Some(data_dir.display().to_string()),
+        )],
+    )
+}
+
 /// One of the two log filter directives: an environment override over a
 /// compiled-in default, read before any data root is known.
 fn log_knob(
@@ -2088,9 +2278,10 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
         return Err(ConfigError::DataDirNotFound(data_dir));
     }
     let root_config = load_root_config(&data_dir)?;
-    let ollama_url = env_trimmed(ollama_url_env)
-        .or_else(|| env_trimmed(root_config.ollama_url.clone()))
-        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    let ollama_url = knob_value(
+        &ollama_url_knob(ollama_url_env, &root_config),
+        DEFAULT_OLLAMA_URL.to_string(),
+    );
     Ok(Config {
         data_dir,
         ollama_url,
