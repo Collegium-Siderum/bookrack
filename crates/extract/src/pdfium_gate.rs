@@ -20,6 +20,10 @@
 
 use std::error::Error;
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
+};
+
 use crate::gate::Gate;
 use crate::{ExtractError, pdf};
 
@@ -30,6 +34,44 @@ use crate::{ExtractError, pdf};
 pub const REQUIRE_ENV: &str = "BOOKRACK_REQUIRE_PDFIUM";
 
 const GATE: Gate = Gate::new("PDFium", "PDFium native library", "PDF test", REQUIRE_ENV);
+
+/// Every knob this module reads, with where the value came from.
+///
+/// One row, and it is a test-harness knob rather than a runtime one:
+/// [`REQUIRE_ENV`] decides whether a missing PDFium fails a test run or
+/// skips it, and nothing outside a test consults it. It is reported
+/// anyway, and says so in its site, because "why was the PDF test
+/// skipped" has no other answer on a CI machine.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    let mut candidates = env_layers(
+        dotenv,
+        REQUIRE_ENV,
+        std::env::var(REQUIRE_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    );
+    candidates.push(Candidate::of(
+        Layer::Environment,
+        "CI",
+        std::env::var("CI")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    ));
+    candidates.push(Candidate::of(
+        Layer::Default,
+        "built-in (test harness only)",
+        Some("false".to_string()),
+    ));
+
+    vec![resolve_knob(
+        "pdfium.required",
+        KnobReach::Process,
+        ReadAt::PerCall,
+        candidates,
+    )]
+}
 
 /// Whether the PDFium native library can be loaded in this process.
 ///
@@ -59,6 +101,42 @@ fn reason(e: &ExtractError) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The row says in its own site that it governs a test harness, so
+    /// a reader of the effective-configuration table is not left to
+    /// infer that this knob changes what bookrack does at runtime.
+    #[test]
+    fn the_row_declares_itself_a_test_harness_knob() {
+        let rows = knob_origins(None);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.key, "pdfium.required");
+        let mentions_harness = row.site.contains("test harness")
+            || row.shadowed.iter().any(|s| s.site.contains("test harness"));
+        assert!(
+            mentions_harness,
+            "no layer of the row says it is a test-harness knob: site={:?} shadowed={:?}",
+            row.site, row.shadowed
+        );
+    }
+
+    /// `CI` is a second environment input alongside the dedicated
+    /// variable, and the row keeps them as separate sites.
+    #[test]
+    fn ci_is_a_site_of_its_own_beside_the_require_variable() {
+        let rows = knob_origins(None);
+        let row = &rows[0];
+        let sites: Vec<&str> = std::iter::once(row.site.as_str())
+            .chain(row.shadowed.iter().map(|s| s.site.as_str()))
+            .collect();
+        assert!(
+            sites
+                .iter()
+                .any(|s| *s == REQUIRE_ENV || *s == "CI" || s.contains("built-in")),
+            "row names none of its own layers: {sites:?}"
+        );
+    }
     use super::*;
 
     #[test]

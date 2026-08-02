@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The knob-origin vocabulary the runtime-directory row is reported
+# through.
+bookrack-core = { path = "../core" }
 eyre.workspace = true
 dirs.workspace = true
 fs2.workspace = true

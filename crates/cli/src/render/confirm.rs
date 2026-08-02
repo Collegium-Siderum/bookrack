@@ -26,6 +26,9 @@
 //! keyboard — able to answer, while an idle pipe stops the command
 //! instead of parking it forever.
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_over, resolve_knob,
+};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -58,6 +61,28 @@ pub fn confirm_bound_from(get: impl Fn(&str) -> Option<String>) -> Option<Durati
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_CONFIRM_TIMEOUT_SECS);
     (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Every knob this module reads, with where the value came from.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    vec![resolve_knob(
+        "confirm.timeout_secs",
+        KnobReach::Process,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            CONFIRM_TIMEOUT_ENV,
+            std::env::var(CONFIRM_TIMEOUT_ENV)
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .map(|v| v.to_string()),
+            vec![Candidate::of(
+                Layer::Default,
+                "built-in",
+                Some(DEFAULT_CONFIRM_TIMEOUT_SECS.to_string()),
+            )],
+        ),
+    )]
 }
 
 /// How long an answer may take to arrive.

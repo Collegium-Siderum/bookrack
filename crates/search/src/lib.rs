@@ -18,6 +18,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use bookrack_catalog::Catalog;
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, env_over,
+    resolve_knob,
+};
 use bookrack_core::{ItemKind, NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, build_query_input};
@@ -304,17 +308,110 @@ pub fn env_overrides() -> SearchOptions {
 /// the injected `get`, so the parsing rules are testable without
 /// mutating the process environment.
 fn env_overrides_from(get: impl Fn(&str) -> Option<String>) -> SearchOptions {
-    let bypass_index = get("BOOKRACK_VECTORS_BYPASS_ANN")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    let nprobes = get("BOOKRACK_VECTORS_NPROBES").and_then(|v| v.trim().parse().ok());
-    let refine_factor = get("BOOKRACK_VECTORS_REFINE_FACTOR").and_then(|v| v.trim().parse().ok());
-    SearchOptions {
-        nprobes,
-        refine_factor,
-        bypass_index,
+    env_overrides_with_origins_from(get, None).0
+}
+
+/// Environment variable forcing brute-force search over the ANN index.
+pub const VECTORS_BYPASS_ANN_ENV: &str = "BOOKRACK_VECTORS_BYPASS_ANN";
+
+/// Environment variable overriding the ANN probe count.
+pub const VECTORS_NPROBES_ENV: &str = "BOOKRACK_VECTORS_NPROBES";
+
+/// Environment variable overriding the ANN refine factor.
+pub const VECTORS_REFINE_FACTOR_ENV: &str = "BOOKRACK_VECTORS_REFINE_FACTOR";
+
+/// Every knob this crate reads, with where each value came from.
+///
+/// All three are re-read per call rather than snapshotted, so two
+/// searches in one process can legitimately differ.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    env_overrides_with_origins_from(|name| std::env::var(name).ok(), dotenv).1
+}
+
+/// Pure resolution that also reports where each value came from. The
+/// options are read off the rows, so the two cannot disagree.
+fn env_overrides_with_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> (SearchOptions, Vec<KnobOrigin>) {
+    let bypass = vectors_knob(
+        "vectors.bypass_ann",
+        VECTORS_BYPASS_ANN_ENV,
+        get(VECTORS_BYPASS_ANN_ENV).map(|v| {
+            matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes").to_string()
+        }),
+        dotenv,
+        "false",
+    );
+    let nprobes = vectors_opt_knob(
+        "vectors.nprobes",
+        VECTORS_NPROBES_ENV,
+        get(VECTORS_NPROBES_ENV),
+        dotenv,
+    );
+    let refine_factor = vectors_opt_knob(
+        "vectors.refine_factor",
+        VECTORS_REFINE_FACTOR_ENV,
+        get(VECTORS_REFINE_FACTOR_ENV),
+        dotenv,
+    );
+
+    let options = SearchOptions {
+        nprobes: nprobes.value.as_deref().and_then(|v| v.parse().ok()),
+        refine_factor: refine_factor.value.as_deref().and_then(|v| v.parse().ok()),
+        bypass_index: bypass.value.as_deref() == Some("true"),
         exclude_partitions: Vec::new(),
-    }
+    };
+    (options, vec![bypass, nprobes, refine_factor])
+}
+
+/// A vectors knob with a compiled-in default below the variable.
+///
+/// Unlike the numeric pair, an unparseable value here is not "unset":
+/// anything that is not a recognised truth word reads as `false`, which
+/// is what the layer offers.
+fn vectors_knob(
+    key: &str,
+    env_name: &'static str,
+    parsed: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    default: &str,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::PerCall,
+        ReadAt::PerCall,
+        env_over(
+            dotenv,
+            env_name,
+            parsed,
+            vec![Candidate::of(
+                Layer::Default,
+                "built-in",
+                Some(default.to_string()),
+            )],
+        ),
+    )
+}
+
+/// A vectors knob with no layer beneath the variable: unset means the
+/// index's own persisted setting decides, not a default this crate
+/// holds.
+fn vectors_opt_knob(
+    key: &str,
+    env_name: &'static str,
+    raw: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
+    let parsed = raw
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.to_string());
+    resolve_knob(
+        key,
+        KnobReach::PerCall,
+        ReadAt::PerCall,
+        env_layers(dotenv, env_name, parsed),
+    )
 }
 
 /// Layer per-call overrides over the persisted meta defaults:
@@ -1165,6 +1262,52 @@ mod tests {
         assert!(merge_options(bypassing.clone(), plain.clone()).bypass_index);
         assert!(merge_options(plain.clone(), bypassing).bypass_index);
         assert!(!merge_options(plain.clone(), plain).bypass_index);
+    }
+
+    /// The options the resolver returns and the rows it reports are
+    /// the same values, because the fields are read off the rows.
+    #[test]
+    fn the_rows_agree_with_the_options_they_explain() {
+        let (options, rows) = env_overrides_with_origins_from(
+            |name| match name {
+                VECTORS_BYPASS_ANN_ENV => Some(" TRUE ".to_string()),
+                VECTORS_NPROBES_ENV => Some(" 24 ".to_string()),
+                _ => None,
+            },
+            None,
+        );
+
+        let row = |key: &str| {
+            rows.iter()
+                .find(|r| r.key == key)
+                .unwrap_or_else(|| panic!("no row for {key}"))
+        };
+        assert_eq!(
+            row("vectors.bypass_ann").value.as_deref(),
+            Some(options.bypass_index.to_string()).as_deref()
+        );
+        assert_eq!(
+            row("vectors.nprobes").value.as_deref().map(str::to_string),
+            options.nprobes.map(|v| v.to_string())
+        );
+        assert_eq!(row("vectors.bypass_ann").layer, Layer::Environment);
+        assert_eq!(row("vectors.nprobes").site, VECTORS_NPROBES_ENV);
+    }
+
+    /// An unparseable numeric value leaves the knob unset rather than
+    /// reporting a value the search will not use, and does not appear
+    /// as a shadowed layer either.
+    #[test]
+    fn an_unparseable_number_offers_nothing() {
+        let (options, rows) = env_overrides_with_origins_from(
+            |name| (name == VECTORS_NPROBES_ENV).then(|| "many".to_string()),
+            None,
+        );
+
+        assert_eq!(options.nprobes, None);
+        let row = rows.iter().find(|r| r.key == "vectors.nprobes").unwrap();
+        assert_eq!(row.value, None);
+        assert!(row.shadowed.is_empty(), "{:?}", row.shadowed);
     }
 
     #[test]

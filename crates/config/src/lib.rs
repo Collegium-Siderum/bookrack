@@ -130,12 +130,13 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
         .filter_map(|(key, _)| key.into_string().ok())
         .collect();
     let path = dotenvy::dotenv().ok()?;
-    let supplied = dotenvy::from_path_iter(&path)
+    let supplied: BTreeSet<String> = dotenvy::from_path_iter(&path)
         .ok()?
         .filter_map(Result::ok)
         .map(|(key, _)| key)
         .filter(|key| !before.contains(key))
         .collect();
+    let supplied = supplied.into_iter().collect();
 
     let load = DotenvLoad { path, supplied };
     let _ = DOTENV_LOAD.set(load.clone());
@@ -148,9 +149,25 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
 pub struct DotenvLoad {
     /// The file that was read.
     pub path: PathBuf,
-    /// The keys this load supplied. A key the real environment already
-    /// carried is absent: `dotenvy` only fills gaps.
-    pub supplied: BTreeSet<String>,
+    /// The keys this load supplied, sorted and without repeats. A key
+    /// the real environment already carried is absent: `dotenvy` only
+    /// fills gaps.
+    pub supplied: Vec<String>,
+}
+
+impl DotenvLoad {
+    /// This load in the borrowed form a knob row consults.
+    pub fn supply(&self) -> bookrack_core::knob::DotenvSupply<'_> {
+        bookrack_core::knob::DotenvSupply {
+            path: self.path_str(),
+            supplied: &self.supplied,
+        }
+    }
+
+    /// The file's path as the row reports it.
+    fn path_str(&self) -> &str {
+        self.path.to_str().unwrap_or("<non-utf8 path>")
+    }
 }
 
 /// The dotenv load this process performed, if any.
@@ -1836,41 +1853,22 @@ impl LogConfig {
 /// The `site` a compiled-in default is held at.
 const BUILT_IN_SITE: &str = "built-in";
 
-/// An environment variable's layers followed by the layers below it.
-fn env_over(name: &'static str, raw: Option<String>, lower: Vec<Candidate>) -> Vec<Candidate> {
-    let mut candidates = env_layers(name, raw);
-    candidates.extend(lower);
-    candidates
+/// This process's dotenv record, in the borrowed form a knob row
+/// consults. Owns no copy: the record lives in the process-wide slot
+/// [`load_dotenv`] filled.
+fn dotenv_supply() -> Option<bookrack_core::knob::DotenvSupply<'static>> {
+    dotenv_load().map(|load| load.supply())
 }
 
-/// The environment and dotenv layers for one variable, in that order.
-///
-/// `dotenvy` writes the file's keys into the process environment, so by
-/// the time anything reads one the two are indistinguishable — except
-/// through the record [`load_dotenv`] kept of which keys it supplied.
-/// At most one of the two carries a value: the loader only fills gaps.
-///
-/// With no dotenv load in this process there is no dotenv layer to
-/// offer, which is why the returned list is one candidate rather than
-/// two with the second empty.
-fn env_layers(name: &'static str, raw: Option<String>) -> Vec<Candidate> {
-    env_layers_with(dotenv_load(), name, raw)
+/// An environment variable's layers followed by the layers below it,
+/// against this process's dotenv record.
+fn env_over(name: &str, raw: Option<String>, lower: Vec<Candidate>) -> Vec<Candidate> {
+    bookrack_core::knob::env_over(dotenv_supply(), name, raw, lower)
 }
 
-/// Pure core of [`env_layers`], factored out so a test can drive the
-/// dotenv record without a load having happened in its process.
-fn env_layers_with(
-    load: Option<&DotenvLoad>,
-    name: &'static str,
-    raw: Option<String>,
-) -> Vec<Candidate> {
-    match load.filter(|load| load.supplied.contains(name)) {
-        Some(load) => vec![
-            Candidate::of(Layer::Environment, name, None),
-            Candidate::of(Layer::Dotenv, load.path.display().to_string(), raw),
-        ],
-        None => vec![Candidate::of(Layer::Environment, name, raw)],
-    }
+/// The environment and dotenv layers for one variable.
+fn env_layers(name: &str, raw: Option<String>) -> Vec<Candidate> {
+    bookrack_core::knob::env_layers(dotenv_supply(), name, raw)
 }
 
 /// The Ollama endpoint, by precedence `env var > config.toml > default`.

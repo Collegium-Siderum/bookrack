@@ -22,6 +22,9 @@
 //! Stale *content* — a pid or MCP address from a previous run — is
 //! tolerated and overwritten by the next successful acquire.
 
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, resolve_knob,
+};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -66,6 +69,51 @@ pub fn resolve_runtime_dir(override_path: Option<&Path>) -> Result<PathBuf> {
         return Ok(PathBuf::from(v));
     }
     platform_runtime_dir()
+}
+
+/// Every knob this crate reads, with where each value came from.
+///
+/// The flag layer is reported as a place the value can come from, never
+/// as one it came from on this call: `--runtime-dir` belongs to a
+/// `bookrack run` invocation, and a report of one process must not
+/// claim to speak for another.
+pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    let mut candidates = vec![Candidate::of(
+        Layer::Flag,
+        "run --runtime-dir (not this invocation)",
+        None,
+    )];
+    candidates.extend(env_layers(
+        dotenv,
+        RUNTIME_DIR_ENV,
+        std::env::var(RUNTIME_DIR_ENV)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    ));
+    candidates.push(Candidate::of(
+        Layer::Platform,
+        platform_runtime_dir_site(),
+        platform_runtime_dir().ok().map(|p| p.display().to_string()),
+    ));
+
+    vec![resolve_knob(
+        "runtime_dir",
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        candidates,
+    )]
+}
+
+/// Which platform convention supplies the runtime directory here.
+fn platform_runtime_dir_site() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if dirs::runtime_dir().is_some() {
+            return "XDG_RUNTIME_DIR";
+        }
+    }
+    "platform cache directory"
 }
 
 /// Platform-conventional fallback for the runtime directory.
@@ -526,6 +574,28 @@ mod tests {
         assert!(
             content.contains(&sock_line),
             "control_sock line missing after record: {content:?}"
+        );
+    }
+
+    /// The flag layer is present as a place the value can be set, and
+    /// never claims to have supplied it: `--runtime-dir` belongs to the
+    /// `bookrack run` process, not to whoever is reading this report.
+    #[test]
+    fn the_flag_layer_is_reported_without_claiming_this_invocation_used_it() {
+        let rows = knob_origins(None);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.key, "runtime_dir");
+        assert_ne!(
+            row.layer,
+            Layer::Flag,
+            "a report of this process must not attribute a value to another process's flag"
+        );
+        assert!(
+            !row.shadowed.iter().any(|s| s.layer == Layer::Flag),
+            "the flag offered nothing, so it cannot be shadowed: {:?}",
+            row.shadowed
         );
     }
 

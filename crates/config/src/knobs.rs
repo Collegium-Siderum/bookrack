@@ -335,6 +335,17 @@ mod tests {
         }
     }
 
+    /// The layers one variable draws, against a given dotenv record.
+    /// Goes through `DotenvLoad::supply`, so the borrowed form this
+    /// crate hands the shared layering is exercised too.
+    fn layers_for(
+        load: &crate::DotenvLoad,
+        name: &str,
+        raw: Option<String>,
+    ) -> Vec<bookrack_core::knob::Candidate> {
+        bookrack_core::knob::env_layers(Some(load.supply()), name, raw)
+    }
+
     /// A key the file supplied is reported as the dotenv layer, sited
     /// at the file, rather than as the real environment it was written
     /// into — the two are indistinguishable by the time anything reads
@@ -342,7 +353,7 @@ mod tests {
     #[test]
     fn a_key_the_dotenv_file_supplied_reports_the_dotenv_layer() {
         let load = dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]);
-        let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, Some("9".to_string()));
+        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
 
         assert_eq!(layers.len(), 2, "{layers:?}");
         assert_eq!(layers[0].layer, Layer::Environment);
@@ -357,7 +368,7 @@ mod tests {
     #[test]
     fn a_key_the_real_environment_carried_stays_on_the_environment_layer() {
         let load = dotenv_load("/sandbox/.env", &["SOMETHING_ELSE"]);
-        let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, Some("9".to_string()));
+        let layers = layers_for(&load, SEARCH_TOP_K_ENV, Some("9".to_string()));
 
         assert_eq!(layers.len(), 1, "{layers:?}");
         assert_eq!(layers[0].layer, Layer::Environment);
@@ -376,7 +387,7 @@ mod tests {
         ];
         for load in cases {
             for raw in [None, Some("9".to_string())] {
-                let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, raw.clone());
+                let layers = layers_for(&load, SEARCH_TOP_K_ENV, raw.clone());
                 let offering = layers.iter().filter(|c| c.value.is_some()).count();
                 assert!(
                     offering <= 1,

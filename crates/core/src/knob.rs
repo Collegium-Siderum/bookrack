@@ -176,6 +176,63 @@ pub struct KnobOrigin {
     pub read_at: ReadAt,
 }
 
+/// What a dotenv load supplied, as much of it as a knob row needs.
+///
+/// The loader writes the file's keys into the process environment, so
+/// by the time anything reads one the two are indistinguishable. This
+/// is the record that tells them apart, borrowed rather than owned so
+/// every crate reporting a knob can consult one load.
+#[derive(Debug, Clone, Copy)]
+pub struct DotenvSupply<'a> {
+    /// The file that was read.
+    pub path: &'a str,
+    /// The keys it supplied, in whatever order the caller holds them.
+    pub supplied: &'a [String],
+}
+
+impl DotenvSupply<'_> {
+    /// Whether this load is what put `name` in the environment.
+    pub fn supplied(&self, name: &str) -> bool {
+        self.supplied.iter().any(|key| key == name)
+    }
+}
+
+/// The environment and dotenv layers for one variable, in that order.
+///
+/// At most one carries a value: the loader only fills gaps, so a key
+/// the real environment already held was never written by the file.
+///
+/// With no load to consult the result is a single environment
+/// candidate rather than two with the second empty — "no dotenv layer
+/// in this process" and "the file supplied nothing" are different
+/// claims, and only the first is true of a process that never loaded
+/// one.
+pub fn env_layers(
+    dotenv: Option<DotenvSupply<'_>>,
+    name: &str,
+    raw: Option<String>,
+) -> Vec<Candidate> {
+    match dotenv.filter(|load| load.supplied(name)) {
+        Some(load) => vec![
+            Candidate::of(Layer::Environment, name, None),
+            Candidate::of(Layer::Dotenv, load.path, raw),
+        ],
+        None => vec![Candidate::of(Layer::Environment, name, raw)],
+    }
+}
+
+/// An environment variable's layers followed by the layers below it.
+pub fn env_over(
+    dotenv: Option<DotenvSupply<'_>>,
+    name: &str,
+    raw: Option<String>,
+    lower: Vec<Candidate>,
+) -> Vec<Candidate> {
+    let mut candidates = env_layers(dotenv, name, raw);
+    candidates.extend(lower);
+    candidates
+}
+
 /// Resolve one knob from its layers, recording what it eclipsed.
 ///
 /// `candidates` are the layers that can speak for this knob, in
@@ -183,6 +240,11 @@ pub struct KnobOrigin {
 /// lower one that also offered a value is recorded as [`Shadowed`].
 /// The order is the caller's because layer sequences differ per knob,
 /// and a debug assertion holds callers to it.
+///
+/// One layer may appear more than once, at different sites: a data
+/// root can be named by either of two flags, and PDFium's requirement
+/// by either of two variables. Order within a layer is then the
+/// caller's too, and the site is what tells the entries apart.
 ///
 /// `candidates` must be non-empty: a knob with no layer at all has
 /// nothing to report. An empty list yields a valueless
@@ -198,7 +260,7 @@ pub fn resolve_knob(
         "resolve_knob needs at least one candidate layer"
     );
     debug_assert!(
-        candidates.windows(2).all(|w| w[0].layer < w[1].layer),
+        candidates.windows(2).all(|w| w[0].layer <= w[1].layer),
         "candidates must descend in priority, highest layer first"
     );
 
