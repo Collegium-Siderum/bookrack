@@ -11,6 +11,7 @@
 mod error_chain;
 mod item_kind;
 mod kinded_node_id;
+pub mod knob;
 mod node_type;
 mod partition;
 mod problem;
