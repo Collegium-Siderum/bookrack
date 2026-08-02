@@ -16,7 +16,7 @@ mod common;
 
 use std::time::Duration;
 
-use bookrack_test_support::{EmbedStub, Sandbox, bookrack_cmd};
+use bookrack_test_support::{EmbedFailure, EmbedStub, Sandbox, bookrack_cmd};
 use tokio::process::Command;
 
 use crate::common::{DaemonProcess, wait_for_lock};
@@ -42,6 +42,101 @@ async fn client_stderr_against_daemon(args: &[&str]) -> (Option<i32>, String) {
         .output()
         .await
         .expect("run bookrack client");
+
+    if let Some(id) = daemon.id() {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(id.to_string())
+            .status()
+            .await;
+    }
+    let _ = daemon.wait_with_output(Duration::from_secs(10)).await;
+
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A synthetic text long enough for the ingest pipeline to extract
+/// prose, plan chunks, and embed them against the stub.
+const BOOK_TEXT: &str = "\
+Chapter One
+
+The synthetic narrator opened the synthetic ledger and began to
+count. Every entry in the ledger described a fictional object, and
+every fictional object had a fictional weight. Counting the weights
+took the narrator most of the morning.
+
+By noon the ledger was balanced. The narrator celebrated with a
+fictional meal and recorded the celebration as a footnote. Footnotes,
+the narrator believed, were the highest form of bookkeeping.
+
+Chapter Two
+
+On the second day the ledger grew a second column. The new column
+held colours instead of weights, and the narrator sorted them from
+dull to bright. Sorting colours was slower than counting weights.
+
+When the sorting ended the narrator closed the ledger, satisfied
+that both columns agreed with each other in every fictional respect.
+";
+
+/// Ingest one synthetic book against a healthy stub, switch the stub to
+/// `failure`, then re-embed that book — returning the re-embed's exit
+/// status and stderr.
+///
+/// Two constraints pick this vehicle over the shorter
+/// `stamps reconcile`. Bring-up opens each library by probing the
+/// embedder, so the switch cannot be thrown before the daemon answers
+/// or the daemon never starts; and a successful probe caches the
+/// observed dimension per `(model, base_url)` for the process, so every
+/// later single-batch probe of the same text is answered without HTTP.
+/// A re-embed sends real chunk text, which the cache never covers.
+async fn reembed_against_a_failing_backend(failure: EmbedFailure) -> (Option<i32>, String) {
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
+
+    let mut daemon_cmd =
+        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    daemon_cmd.arg("run");
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
+
+    assert!(
+        wait_for_lock(&lock_path, Duration::from_secs(30)).await,
+        "session lock did not appear; bookrack run may have failed to start",
+    );
+
+    let book_path = sandbox.path().join("synthetic-ledger.txt");
+    std::fs::write(&book_path, BOOK_TEXT).expect("write the synthetic book");
+
+    // The session lock lands before the libraries are warm, so the
+    // ingest doubles as the wait: it is answered only once the daemon
+    // serves, and it leaves the chunk rows the re-embed below rewrites.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let ingest = Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["ingest", book_path.to_str().expect("utf-8 path")])
+            .output()
+            .await
+            .expect("run bookrack ingest");
+        if ingest.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture ingest never succeeded: {}",
+            String::from_utf8_lossy(&ingest.stderr),
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    EmbedStub::set_failure(failure);
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["vectors", "reembed", "--yes"])
+        .output()
+        .await
+        .expect("run bookrack vectors reembed");
 
     if let Some(id) = daemon.id() {
         let _ = Command::new("kill")
@@ -163,6 +258,47 @@ async fn an_unclassified_error_still_prints_the_full_cause_chain() {
     assert!(
         !stderr.contains("bookrack: "),
         "an unclassified error is not a one-line report: {stderr}"
+    );
+}
+
+/// The whole chain for an absent embedding model, end to end: the
+/// daemon classifies it as caller input, the CLI registers the code,
+/// and the hint the embed error wrote for itself reaches stderr.
+///
+/// The stderr assertion is not decoration: with the exit code alone,
+/// a variant left out of `problem_data()` would still pass while the
+/// operator lost the one sentence that says what to do.
+#[tokio::test]
+async fn an_absent_embedding_model_exits_two_and_names_the_pull_command() {
+    let (code, stderr) = reembed_against_a_failing_backend(EmbedFailure::ModelNotFound).await;
+
+    assert_eq!(
+        code,
+        Some(2),
+        "an unpulled model is operator input: {stderr}"
+    );
+    assert!(
+        stderr.contains("ollama pull"),
+        "the repair must reach the operator: {stderr}"
+    );
+}
+
+/// The same command against an overloaded backend: nothing about the
+/// request is wrong, and the same call may succeed once the load
+/// clears, so it takes the retryable bucket instead — a distinct code,
+/// a distinct exit, and still its own hint.
+#[tokio::test]
+async fn an_overloaded_backend_exits_four_and_keeps_its_hint() {
+    let (code, stderr) = reembed_against_a_failing_backend(EmbedFailure::Overloaded).await;
+
+    assert_eq!(
+        code,
+        Some(4),
+        "an overloaded backend is retryable: {stderr}"
+    );
+    assert!(
+        stderr.contains("smaller batch"),
+        "the hint must survive the CLI's own classification: {stderr}"
     );
 }
 

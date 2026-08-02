@@ -12,16 +12,23 @@
 //!
 //! [`write_err`] walks the `eyre` cause chain looking for known typed
 //! errors ([`OpsError`], [`IngestError`], [`GleanError`],
-//! [`RegistryError`], [`CmdInputError`]) and, when one matches, maps a
-//! user-input variant onto [`INVALID_PARAMS`] (or the bookrack-specific
-//! code reserved for that shape, e.g. [`INVALID_LIBRARY`]). Anything
-//! that does not match a known user-input variant falls through to
-//! [`INTERNAL_ERROR`].
+//! [`RegistryError`], [`CmdInputError`], [`EmbedError`]) and, when one
+//! matches, maps a user-input variant onto [`INVALID_PARAMS`] (or the
+//! bookrack-specific code reserved for that shape, e.g.
+//! [`INVALID_LIBRARY`]). Anything that does not match a known
+//! user-input variant falls through to [`INTERNAL_ERROR`].
 //!
 //! The first four are raised by the layers below `cmd::*`, so a
 //! refusal a write command makes on its own — before it reaches ops,
 //! ingest, or glean — is only classified if the command raises
 //! [`CmdInputError`] rather than a bare `bail!`.
+//!
+//! An [`EmbedError`] reaches the chain in two shapes: bare, from a
+//! command that calls the embedder directly, and wrapped in
+//! `IngestError::Embed`, `GleanError::Embed`, or
+//! `OpsError::Query(QueryError::Embed)`. The three wrappers delegate to
+//! [`from_embed`] so both shapes take the same code, matching what
+//! their `Explain` impls already do for the wording.
 //!
 //! Wording is not written here. Each error renders itself through
 //! [`bookrack_core::Explain`], and [`rpc_from_problem`] splits the
@@ -35,6 +42,7 @@
 
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem};
+use bookrack_embed::EmbedError;
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
@@ -42,8 +50,8 @@ use bookrack_ops::registry::RegistryError;
 use eyre::Report;
 
 use super::jsonrpc::{
-    INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH,
-    PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError,
+    BACKEND_UNAVAILABLE, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH,
+    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError,
 };
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
@@ -69,6 +77,9 @@ pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
         }
         if let Some(e) = cause.downcast_ref::<CmdInputError>() {
             return from_cmd_input(e);
+        }
+        if let Some(e) = cause.downcast_ref::<EmbedError>() {
+            return from_embed(e);
         }
     }
     RpcError::new(INTERNAL_ERROR, format!("{method} failed: {err:#}"))
@@ -134,7 +145,38 @@ pub(crate) fn rpc_from_problem(code: i32, problem: Problem) -> RpcError {
     err
 }
 
+/// Map an embed-backend failure onto the code its judgement implies.
+///
+/// The split follows `retryable`, not `EmbedError::is_transient()`:
+/// the two ask different questions and are expected to disagree on an
+/// overloaded server. The `match` reads the variant rather than the
+/// rendered `Problem`, so classification does not depend on the
+/// presentation layer it is supposed to precede.
+///
+/// The wildcard is forced: [`EmbedError`] is `#[non_exhaustive]` and
+/// this is a downstream crate, so an exhaustive `match` does not
+/// compile here. The guard against a new variant landing silently on
+/// [`INTERNAL_ERROR`] lives beside the type instead, in
+/// `bookrack-embed`'s own tests.
+fn from_embed(e: &EmbedError) -> RpcError {
+    use EmbedError::*;
+    let code = match e {
+        // The model name comes from the operator's index profile, and
+        // the repair is `ollama pull`.
+        ModelNotFound { .. } => INVALID_PARAMS,
+        Unreachable(_) | Overloaded { .. } => BACKEND_UNAVAILABLE,
+        // The request body is assembled here, so the operator cannot
+        // have written either of these.
+        BadRequest { .. } | MalformedResponse(_) => INTERNAL_ERROR,
+        _ => INTERNAL_ERROR,
+    };
+    rpc_from_problem(code, e.explain())
+}
+
 fn from_ops(e: &OpsError) -> RpcError {
+    if let OpsError::Query(bookrack_query::QueryError::Embed(e)) = e {
+        return from_embed(e);
+    }
     use OpsError::*;
     let code = match e {
         IntakeNotFound { .. }
@@ -151,6 +193,9 @@ fn from_ops(e: &OpsError) -> RpcError {
 }
 
 fn from_ingest(e: &IngestError) -> RpcError {
+    if let IngestError::Embed(e) = e {
+        return from_embed(e);
+    }
     use IngestError::*;
     let code = match e {
         EmptyExtraction
@@ -168,6 +213,9 @@ fn from_ingest(e: &IngestError) -> RpcError {
 }
 
 fn from_glean(e: &GleanError) -> RpcError {
+    if let GleanError::Embed(e) = e {
+        return from_embed(e);
+    }
     use GleanError::*;
     let code = match e {
         NeedsOcr { .. }
@@ -294,9 +342,102 @@ mod tests {
         ))
         .into();
         let rpc = write_err("library.search", err);
-        assert_eq!(rpc.code, INTERNAL_ERROR);
+        assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
         let wire = serde_json::to_string(&rpc).expect("serialize");
         assert!(wire.contains("boom"), "root cause lost: {wire}");
+    }
+
+    /// A command that talks to the embedder folds the failure through
+    /// `?` and `.context()`, so the arm has to find the type below the
+    /// wraps. An absent model is the operator's own configuration —
+    /// the repair is `ollama pull`, and the hint that names it has to
+    /// reach the wire for the code to be worth anything.
+    #[test]
+    fn a_bare_model_not_found_is_caller_input_and_keeps_its_hint() {
+        let inner: Result<(), bookrack_embed::EmbedError> =
+            Err(bookrack_embed::EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found, try pulling it first".into(),
+            });
+        let err: Report = inner
+            .context("probe embedding dimension")
+            .context("stamps.reconcile")
+            .unwrap_err();
+        let rpc = write_err("stamps.reconcile", err);
+        assert_eq!(rpc.code, INVALID_PARAMS);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        assert!(
+            data.hint.expect("hint").contains("ollama pull test-model"),
+            "the repair must reach the operator"
+        );
+    }
+
+    /// An unreachable backend is neither caller input nor a bug in this
+    /// binary: the same call may succeed once Ollama is up, which is
+    /// what `retryable` says and what the dedicated code carries.
+    #[test]
+    fn a_bare_unreachable_backend_is_backend_unavailable_and_retryable() {
+        let err: Report =
+            bookrack_embed::EmbedError::Unreachable("connection refused".into()).into();
+        let rpc = write_err("stamps.reconcile", err);
+        assert_eq!(rpc.code, BACKEND_UNAVAILABLE);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.retryable);
+        assert!(data.hint.expect("hint").contains("BOOKRACK_OLLAMA_URL"));
+    }
+
+    /// The same embed failure reached through a pipeline wrapper takes
+    /// the same code as the bare form. Asserted against the literal
+    /// code rather than against the bare form's code: before the
+    /// wrappers delegated, both were `-32603`, so comparing the two
+    /// would have passed while the classification was wrong.
+    #[test]
+    fn a_wrapped_model_not_found_takes_the_same_code_as_a_bare_one() {
+        let wrapped: Vec<Report> = vec![
+            IngestError::Embed(bookrack_embed::EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found".into(),
+            })
+            .into(),
+            GleanError::Embed(bookrack_embed::EmbedError::ModelNotFound {
+                model: "test-model".into(),
+                reason: "model not found".into(),
+            })
+            .into(),
+            OpsError::Query(bookrack_query::QueryError::Embed(
+                bookrack_embed::EmbedError::ModelNotFound {
+                    model: "test-model".into(),
+                    reason: "model not found".into(),
+                },
+            ))
+            .into(),
+        ];
+        for err in wrapped {
+            let label = format!("{err:#}");
+            let rpc = write_err("vectors.reembed", err);
+            assert_eq!(rpc.code, INVALID_PARAMS, "{label}");
+        }
+    }
+
+    /// The request body an embed call sends is assembled by this
+    /// binary, so a 4xx that is not an absent model is a fault on this
+    /// side. It stays in the residual bucket, and the delegate must not
+    /// sweep it into the caller-input one.
+    #[test]
+    fn a_bad_request_from_the_backend_stays_internal() {
+        for e in [
+            bookrack_embed::EmbedError::BadRequest {
+                status: 400,
+                body: "malformed input".into(),
+            },
+            bookrack_embed::EmbedError::MalformedResponse("not json".into()),
+        ] {
+            let label = format!("{e:?}");
+            let rpc = write_err("stamps.reconcile", e.into());
+            assert_eq!(rpc.code, INTERNAL_ERROR, "{label}");
+        }
     }
 
     #[test]

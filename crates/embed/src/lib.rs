@@ -941,6 +941,30 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
+    /// Every variant must have a wire code registered in
+    /// `bookrack-runtime`'s `control::error_map::from_embed`. Adding one
+    /// here without adding it there means it maps to `-32603` — the
+    /// failure this test exists to make loud.
+    ///
+    /// The guard lives beside the type rather than beside the mapping
+    /// because [`EmbedError`] is `#[non_exhaustive]`: a downstream
+    /// `match` cannot be exhaustive, so only a same-crate one binds.
+    /// Whoever adds a variant edits this crate, and the compiler stops
+    /// them here.
+    #[test]
+    fn every_variant_is_registered_for_wire_mapping() {
+        fn assert_classified(e: &EmbedError) {
+            match e {
+                EmbedError::ModelNotFound { .. }
+                | EmbedError::Unreachable(_)
+                | EmbedError::Overloaded { .. }
+                | EmbedError::BadRequest { .. }
+                | EmbedError::MalformedResponse(_) => {}
+            }
+        }
+        assert_classified(&EmbedError::Unreachable("probe".into()));
+    }
+
     #[test]
     fn the_query_prefix_wraps_the_query() {
         let wrapped = build_query_input("dragons");

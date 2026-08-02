@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use bookrack_control_client::ControlError;
 use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::jsonrpc::{
-    BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, INVALID_REQUEST,
-    JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR, PLAN_KIND_MISMATCH,
-    PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
+    BACKEND_UNAVAILABLE, BUSY, CONFIRMATION_REQUIRED, INTERNAL_ERROR, INVALID_LIBRARY,
+    INVALID_PARAMS, INVALID_REQUEST, JOB_NOT_FOUND, METHOD_NOT_FOUND, NOT_READY, PARSE_ERROR,
+    PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH, PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED,
 };
 use serde_json::Value;
 
@@ -87,6 +87,19 @@ pub enum BookrackCliError {
     /// caller can retry after a backoff.
     #[error("rpc error {code}: {message}")]
     RpcBusy { code: i32, message: String },
+
+    /// An external backend the daemon depends on is unusable — Ollama
+    /// did not answer, or reported itself overloaded. Retryable, so it
+    /// shares exit 4 with [`BookrackCliError::RpcBusy`], but stays its
+    /// own variant: `RpcBusy` says the *daemon* is busy, carries no
+    /// `data`, and would drop the hint that names the repair.
+    #[error("rpc error {code}: {message}")]
+    RpcBackendUnavailable {
+        code: i32,
+        message: String,
+        /// See [`BookrackCliError::RpcUserError`].
+        data: Option<Value>,
+    },
 
     /// Daemon raised an internal error, or returned a JSON-RPC
     /// protocol-layer code (`PARSE_ERROR`, `INVALID_REQUEST`) that
@@ -177,7 +190,7 @@ impl BookrackCliError {
             Self::DoctorUnhealthy => 1,
             Self::LibraryMismatch { .. } => 2,
             Self::RpcUserError { .. } => 2,
-            Self::RpcBusy { .. } => 4,
+            Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
             Self::IngestPartialFailure { .. } => 5,
             Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
@@ -218,6 +231,13 @@ impl BookrackCliError {
                 data,
             },
             BUSY | NOT_READY => Self::RpcBusy { code, message },
+            // Kept out of the `BUSY` arm: that one has no `data` slot,
+            // and the hint naming the repair is the whole point here.
+            BACKEND_UNAVAILABLE => Self::RpcBackendUnavailable {
+                code,
+                message,
+                data,
+            },
             PARSE_ERROR | INVALID_REQUEST | INTERNAL_ERROR => Self::RpcInternal {
                 code,
                 message,
@@ -240,7 +260,9 @@ impl BookrackCliError {
     /// unrenderable extra is not worth failing the report over.
     pub fn problem_data(&self) -> Option<ProblemData> {
         let data = match self {
-            Self::RpcUserError { data, .. } | Self::RpcInternal { data, .. } => data.as_ref()?,
+            Self::RpcUserError { data, .. }
+            | Self::RpcInternal { data, .. }
+            | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
             Self::PreflightRefused { problem } => return Some(problem.data.clone()),
             Self::RpcParamsInvalid { detail, .. } => {
                 return Some(ProblemData {
@@ -523,6 +545,36 @@ mod tests {
             assert!(matches!(err, BookrackCliError::RpcBusy { .. }));
             assert_eq!(err.exit_code(), 4, "code {code}");
         }
+    }
+
+    /// An unusable external backend exits 4 like a busy daemon, but
+    /// through its own variant, because the `data` slot has to survive:
+    /// the hint that names the repair is what separates this from an
+    /// unexplained "try later".
+    #[test]
+    fn from_rpc_classifies_an_unavailable_backend_as_exit_four_and_keeps_its_data() {
+        let err = BookrackCliError::from_rpc(
+            BACKEND_UNAVAILABLE,
+            "could not reach Ollama".into(),
+            Some(serde_json::json!({
+                "detail": "The request failed before a response arrived.",
+                "hint": "Start Ollama, or point BOOKRACK_OLLAMA_URL at the host that runs it.",
+                "retryable": true,
+            })),
+        );
+        assert!(matches!(
+            err,
+            BookrackCliError::RpcBackendUnavailable { .. }
+        ));
+        assert_eq!(err.exit_code(), 4);
+        let data = err
+            .problem_data()
+            .expect("the hint must survive classification");
+        assert!(
+            data.hint.expect("hint").contains("BOOKRACK_OLLAMA_URL"),
+            "the repair must reach the operator",
+        );
+        assert!(data.retryable);
     }
 
     #[test]

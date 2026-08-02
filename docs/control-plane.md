@@ -128,6 +128,14 @@ systems. bookrack is a local-first system and does not probe for it.
   at all: here the id was good and the library moved underneath it.
   Both are cleared the same way, by re-running the dry-run leg and
   confirming the fresh plan.
+- `-32017` backend unavailable (bookrack-specific; an external backend
+  the call depends on could not be used — the Ollama daemon did not
+  answer, or answered that it is overloaded). Distinct from `-32001`,
+  which says *this* daemon is busy: here the daemon is free and
+  something it depends on is not. Retryable, so it maps to exit `4`
+  rather than the exit `2` the same condition produces at bring-up.
+  A model that is simply not pulled is `-32602` instead: no amount of
+  waiting fixes it, and the repair is `ollama pull`.
 
 #### Error data
 
@@ -200,8 +208,17 @@ current implementation produces for it.
 - **A `library` parameter naming a library the registry does not
   hold** (`-32010`): `RegistryError::LibraryUnknown`, raised by any
   handler that resolves that parameter.
+- **An embedding model the Ollama daemon does not hold** (`-32602`):
+  `EmbedError::ModelNotFound`, whether raised bare or wrapped in
+  `IngestError::Embed`, `GleanError::Embed`, or
+  `OpsError::Query(QueryError::Embed)`.
+- **An embedding backend that did not answer, or answered that it is
+  overloaded** (`-32017`): `EmbedError::{Unreachable, Overloaded}`,
+  through the same four shapes.
 - **Everything else** (`-32603`): the handler tried and a downstream
-  subsystem — catalog DB, vector store, embedder, file IO — failed.
+  subsystem — catalog DB, vector store, file IO — failed. A request
+  the embed client itself malformed (`EmbedError::{BadRequest,
+  MalformedResponse}`) belongs here too: the operator did not write it.
 
 The residual bucket is currently wider than that last line describes.
 These scenarios are caller input, and re-submitting different
@@ -245,9 +262,9 @@ the kind of failure without parsing stderr.
 | --- | --- | --- |
 | `0` | success | — |
 | `1` | internal / unexpected error | color-eyre fallback for unclassified errors; `-32700 parse error`, `-32600 invalid request`, `-32603 internal error`, and unknown JSON-RPC codes; `SessionLockUnreadable`; `doctor` reported a FAIL row; `libraries detect` returned a not-a-library or unreadable-manifest verdict |
-| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
+| `2` | user / preflight error | daemon not running or unreachable; `--data-dir` / `--library` disagrees with the running daemon's library; `-32601 method not found`, `-32602 invalid params`, `-32010 invalid library`, `-32011 job not found`, `-32012 confirmation required`, `-32013..-32016` plan-id mismatches and plan-target drift; a locally-resolved command rejected operator input (`libraries default` naming an unknown library, `libraries detect` given a missing or non-directory path, `libraries add`/`register` given a bad target, a name clash, or a uuid clash it cannot resolve non-interactively, `libraries remove`/`remove --purge` naming an unknown library or a `--purge` target that fails the detect gate); a destructive command needed a confirmation and stdin could not carry one (the stream ended before any byte arrived) — distinct from a typed-in decline, which exits `0`; `bookrack run` refused to start because an external backend it needs is unusable (the embed model is not pulled, or the Ollama endpoint does not answer) — the check runs before any library is opened, so nothing was half-started. The same judgement on a live write RPC splits: an unpulled model stays `-32602` and exit `2`, while an unreachable or overloaded backend is `-32017` and exit `4`, because a call that failed mid-session may succeed on the next attempt; `bookrack rpc call` was handed params that are not valid JSON (`RpcParamsInvalid`) or a method name carrying no namespace (`RpcMethodNotNamespaced`), both judged locally before the call is sent |
 | `3` | needs operator cleanup | a stale session lock points at a daemon that no longer answers; the operator must remove the lock file before retrying |
-| `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; a scripted caller can sleep and retry |
+| `4` | busy / not ready (retryable) | `-32001 busy`, `-32002 not ready` and `queue worker disabled`; `-32017 backend unavailable` (the Ollama daemon did not answer, or reported itself overloaded); a scripted caller can sleep and retry |
 | `5` | async job batch had failures | `bookrack ingest`, `bookrack papers ingest`, and `bookrack intake ocr` return this when at least one queued job ended in `Failed` or `Cancelled`. `Done`, `SkippedDuplicate`, and `NeedsOcr` are terminal successes and do not trigger it — a batch of scan sources that all end in `needs_ocr` returns `0` and points at `bookrack intake list-ocr-pending`. The per-job summary on stdout names the offenders; `--no-wait` returns `0` because the batch is not awaited |
 
 `-32601 method not found` is grouped with the user-input bucket so

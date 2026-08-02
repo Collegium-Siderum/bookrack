@@ -26,6 +26,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime, cli: an unusable embedding backend is classified instead
+  of being reported as an internal error.** A write RPC whose embed
+  call failed answered `-32603 internal error` and exited `1` — "this
+  is a bug, report it" — for three conditions that are nothing of the
+  kind. The daemon already judged the same three correctly at start-up,
+  where `bookrack run` exits `2` and names the repair, so the same
+  failure read as operator input before the session began and as a
+  server fault after. Now: a model the Ollama daemon does not hold is
+  `-32602 invalid params` and exit `2`, with `ollama pull <model>` as
+  the hint; an unreachable or overloaded backend is the new
+  `-32017 backend unavailable` and exit `4`, alongside `-32001 busy`,
+  because the same call may succeed on the next attempt. A request the
+  embed client itself malformed stays `-32603`, which is what it is.
+
+  The classification is the same whether the failure arrives bare or
+  wrapped by the ingest, glean, or query layer, so `stamps reconcile`
+  and `vectors reembed` no longer disagree about the same absent model.
+
+  **This is a breaking change** for a script that branches on exit `1`
+  or on `-32603` for these failures.
+
 - **runtime: an unknown `audit_profile` name is refused instead of
   silently falling back.** `dryrun`, `ingest.submit`, `intake.ocr`,
   `metadata.reaudit`, `metadata.advance`, and
