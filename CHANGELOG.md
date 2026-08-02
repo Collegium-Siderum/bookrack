@@ -153,6 +153,16 @@ release workflow extracts the matching section verbatim from this file.
   compared, each against its own stamps and its own chunking constant,
   and a row names the pipeline it speaks for.
 
+- **runtime: `bookrack verify` answered `busy` while any write ran.**
+  The report was funnelled through the write mutex on the reasoning
+  that it shared the catalog handle the write commands mutate — which
+  stopped being true once every store grew a read-only door that takes
+  no write lock. A health check during a long ingest therefore returned
+  "another write command is already in progress" instead of the report,
+  and it also raised the daemon's writing state and paused MCP for its
+  duration. It now runs off the write path, on a blocking executor so
+  the intake file scan does not hold the dispatcher's reactor.
+
 - **runtime: a `doctor` index-profile warning named the profile without
   saying which definition answered.** A user file and the built-in it
   shadows carry the same name, and the row printed the name alone —

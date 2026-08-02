@@ -383,9 +383,10 @@ the exit-code bucket does not distinguish the two.
   oldest first. `n` defaults to 100 and is capped server-side at
   1024. Peer of the `session.logs_tail` MCP tool; same backing
   buffer.
-- `verify.run` — no params; the cross-store verify report. Read-only,
-  but funnelled through the write mutex because it opens the same
-  catalog handle the writes mutate, so it cannot overlap one in flight.
+- `verify.run` — no params; the cross-store verify report. Read-only:
+  each store is opened through its own read-only door, which takes no
+  write lock, so the report answers alongside a write in flight rather
+  than queueing behind the write mutex.
 - `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
   scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
   catalog snapshot for a bug attachment. Scrubbed of local paths and

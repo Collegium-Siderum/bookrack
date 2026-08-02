@@ -514,6 +514,65 @@ pub(crate) fn require_yes(method: &str, yes: bool, exempt: bool) -> Result<(), R
     ))
 }
 
+/// Build a [`MethodContext`] over a catalog-only ops handle rooted at
+/// `dir`, so no embedder probe runs. `library_name` is the registry name
+/// of the served library, `None` for a path-selected root. Shared by the
+/// handler test modules so they all drive the same shape of context.
+#[cfg(test)]
+pub(crate) fn test_method_context(
+    dir: &std::path::Path,
+    library_name: Option<&str>,
+) -> MethodContext {
+    use bookrack_ops::registry::LibraryHandle;
+    use bookrack_ops::{Caller, Ops};
+
+    use crate::control::events::{DaemonState, DaemonStateFlag};
+
+    let ops = Ops::<OllamaEmbedClient>::catalog_only(
+        dir.join("corpus.db"),
+        dir.join("catalog.db"),
+        &dir.join("lancedb"),
+        dir.join("books"),
+        dir.join("backup"),
+        Caller::cli(),
+    );
+    let handle = LibraryHandle::new(library_name.unwrap_or("default"), ops);
+    let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
+    let (shutdown_tx, _) = broadcast::channel(8);
+    MethodContext {
+        cfg: Arc::new(Config::new(
+            dir.to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        )),
+        registry: LibraryRegistry::single(handle),
+        info_context: LibraryInfoContext {
+            data_dir: dir.display().to_string(),
+            library_name: library_name.map(str::to_string),
+            resolution_source: "explicit".to_string(),
+            shadowed_default: None,
+            library_identification: None,
+            ollama_url: "http://127.0.0.1:11434".to_string(),
+            embed_model_configured: "test-model".to_string(),
+            mcp_addr: String::new(),
+        },
+        queue_state: Arc::new(Mutex::new(QueueState::default())),
+        queue_state_path: dir.join("queue.json"),
+        event_stream: EventStreamHandle::new(8, state),
+        write_guard: Arc::new(TokioMutex::new(())),
+        shutdown_tx,
+        started_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+        selection: LibrarySelection::default(),
+        library_name: library_name.unwrap_or("default").to_string(),
+        mcp_tools: Arc::new(Vec::new()),
+        queue_worker_enabled: false,
+        tray_focus_signal: Arc::new(Notify::new()),
+        rerank_supervisor: None,
+        queue_paused: Arc::new(AtomicBool::new(false)),
+        log_stream: LogStreamHandle::new(8, 8),
+        plan_registry: Arc::new(PlanRegistry::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
