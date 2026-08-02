@@ -11,12 +11,14 @@ use std::path::{Path, PathBuf};
 
 use bookrack_config::Config;
 use bookrack_glean::dryrun::{
-    DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, collect_files, dryrun_paper,
-    summarize,
+    DryrunPaperParams, DryrunPaperReport, DryrunPaperSummary, PAPER_EXTENSIONS, collect_files,
+    dryrun_paper, summarize,
 };
 use eyre::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+use crate::cmd::input_error::CmdInputError;
 
 /// How many paper dryrun JSONL artifacts to keep under
 /// `<data_root>/dryruns/` before pruning the oldest. Independent of
@@ -99,7 +101,14 @@ fn run_inner(
 ) -> Result<PapersDryrunRunOutcome> {
     let files = collect_files(path);
     if files.is_empty() {
-        eyre::bail!("no supported paper files found under {}", path.display());
+        return Err(CmdInputError::NothingToDo {
+            summary: format!("no supported paper files found under {}", path.display()),
+            hint: format!(
+                "Point the command at a directory holding one of: {}.",
+                PAPER_EXTENSIONS.join(", ")
+            ),
+        }
+        .into());
     }
     eprintln!(
         "bookrack papers dryrun: {} files under {}",

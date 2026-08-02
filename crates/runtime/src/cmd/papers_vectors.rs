@@ -12,6 +12,8 @@ use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
 use bookrack_vectors::ChunkStore;
 use eyre::{Context, Result};
 
+use crate::cmd::input_error::CmdInputError;
+use crate::cmd::vectors::parse_ann_kind;
 use crate::embed_helpers::embedder;
 use crate::pipeline_run_helpers::{close_pass_run, open_pass_run};
 
@@ -34,8 +36,9 @@ pub async fn rebuild(
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| {
-            eyre::eyre!("papers library has no ingested chunks yet; glean a paper before rebuild")
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested paper chunks",
+            hint: "Glean a paper before rebuilding the index.",
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
@@ -43,9 +46,7 @@ pub async fn rebuild(
         .await
         .context("open papers vector store")?;
     let mut base = if let Some(s) = kind_str {
-        let kind: bookrack_vectors::AnnKind =
-            s.parse().with_context(|| format!("parse --kind {s:?}"))?;
-        bookrack_vectors::AnnConfig::default_for(kind)
+        bookrack_vectors::AnnConfig::default_for(parse_ann_kind(s)?)
     } else if let Some(c) = store
         .current_ann_cfg(&lancedb_dir)
         .context("read ann config")?
@@ -90,7 +91,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| eyre::eyre!("papers library has no ingested chunks yet; nothing to drop"))?
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested paper chunks",
+            hint: "There is no index to drop until a paper has been gleaned.",
+        })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
     let store = ChunkStore::open(&lancedb_dir, dim)

@@ -184,6 +184,20 @@ pub enum AnnKind {
 }
 
 impl AnnKind {
+    /// Every kind, in declaration order. A caller that has to present
+    /// the accepted set — an error message, a help string — reads it
+    /// from here, so a new variant cannot drift out of a list written
+    /// somewhere else.
+    pub const ALL: &'static [AnnKind] = &[
+        AnnKind::IvfFlat,
+        AnnKind::IvfSq,
+        AnnKind::IvfPq,
+        AnnKind::IvfHnswFlat,
+        AnnKind::IvfHnswSq,
+        AnnKind::IvfHnswPq,
+        AnnKind::BruteForce,
+    ];
+
     /// The kebab-case label this kind serializes as in
     /// `vectors_meta.json::kind`.
     pub fn as_str(&self) -> &'static str {
@@ -1200,6 +1214,35 @@ mod tests {
             end_char_offset: 100,
             norm_chunk_sha256: format!("sha-p{partition}-o{offset}"),
         }
+    }
+
+    /// [`AnnKind::ALL`] is only worth reading from if it is complete.
+    /// The `match` fails to compile on a new variant, which is the
+    /// prompt to extend the constant; the count then fails until it is
+    /// extended, so acknowledging the variant is not enough.
+    #[test]
+    fn all_holds_every_kind_exactly_once() {
+        for kind in AnnKind::ALL {
+            match kind {
+                AnnKind::IvfFlat
+                | AnnKind::IvfSq
+                | AnnKind::IvfPq
+                | AnnKind::IvfHnswFlat
+                | AnnKind::IvfHnswSq
+                | AnnKind::IvfHnswPq
+                | AnnKind::BruteForce => {}
+            }
+            assert_eq!(
+                kind.as_str().parse::<AnnKind>().expect("label round-trips"),
+                *kind
+            );
+        }
+        let mut labels: Vec<&str> = AnnKind::ALL.iter().map(AnnKind::as_str).collect();
+        let listed = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), listed, "ALL lists a kind twice");
+        assert_eq!(listed, 7, "ALL is short a kind");
     }
 
     /// Open a fresh store in a temp directory. The `TempDir` is returned

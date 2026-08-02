@@ -7,11 +7,34 @@
 use bookrack_catalog::{Catalog, IntakeStatus};
 use bookrack_config::Config;
 use bookrack_corpus::{Corpus, EMBED_MODEL_KEY, VECTOR_DIM_KEY};
-use bookrack_vectors::ChunkStore;
+use bookrack_vectors::{AnnKind, ChunkStore};
 use eyre::{Context, Result};
 
+use crate::cmd::input_error::CmdInputError;
 use crate::embed_helpers::embedder;
 use crate::pipeline_run_helpers::{close_pass_run, open_pass_run};
+
+/// Parse a `--kind` value, reporting an unsupported one against the
+/// accepted set.
+///
+/// The set is read off [`AnnKind::ALL`] rather than transcribed, so a
+/// new kind reaches this message without anyone remembering to add it.
+/// The parse's own error is dropped: its wording describes a
+/// `vectors_meta.json` this caller never named.
+pub(crate) fn parse_ann_kind(s: &str) -> Result<AnnKind> {
+    s.parse().map_err(|_| {
+        CmdInputError::BadArgument {
+            arg: "kind",
+            value: s.to_string(),
+            expected: AnnKind::ALL
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+        .into()
+    })
+}
 
 /// Render `bookrack vectors rebuild` — build or rebuild the ANN index
 /// from CLI flags, falling back to the persisted meta or the C1
@@ -31,8 +54,9 @@ pub async fn rebuild(
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| {
-            eyre::eyre!("library has no ingested chunks yet; ingest a book before rebuild")
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested chunks",
+            hint: "Ingest a book before rebuilding the index.",
         })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
@@ -41,9 +65,7 @@ pub async fn rebuild(
         .context("open vector store")?;
     // Pick the baseline: explicit kind > existing meta > default IvfFlat.
     let mut base = if let Some(s) = kind_str {
-        let kind: bookrack_vectors::AnnKind =
-            s.parse().with_context(|| format!("parse --kind {s:?}"))?;
-        bookrack_vectors::AnnConfig::default_for(kind)
+        bookrack_vectors::AnnConfig::default_for(parse_ann_kind(s)?)
     } else if let Some(c) = store
         .current_ann_cfg(&lancedb_dir)
         .context("read ann config")?
@@ -134,7 +156,10 @@ pub async fn drop(cfg: &Config) -> Result<()> {
     let dim = corpus
         .meta_get(bookrack_corpus::VECTOR_DIM_KEY)
         .context("read vector_dim stamp")?
-        .ok_or_else(|| eyre::eyre!("library has no ingested chunks yet; nothing to drop"))?
+        .ok_or(CmdInputError::NotIngested {
+            what: "ingested chunks",
+            hint: "There is no index to drop until a book has been ingested.",
+        })?
         .parse::<usize>()
         .context("parse vector_dim stamp")?;
     let store = ChunkStore::open(&lancedb_dir, dim)

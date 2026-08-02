@@ -161,7 +161,7 @@ async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> 
         assert!(
             admitted["error"]["message"]
                 .as_str()
-                .is_some_and(|m| m.contains("nothing to drop")),
+                .is_some_and(|m| m.contains("no ingested chunks")),
             "the write reached the handler body: {admitted}"
         );
 
@@ -285,7 +285,10 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
 
         // Positive control: a real built-in still resolves. Without
         // this, a guard that refused every name would pass everything
-        // above.
+        // above. The handler then refuses the run on its own terms —
+        // the directory holds nothing to scan — which shares the code
+        // with the refusals above, so what separates them is that this
+        // one does not quote a profile name.
         let req = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 20,
@@ -294,10 +297,14 @@ async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()
         });
         send(&mut w, &serde_json::to_string(&req)?).await?;
         let resp = recv(&mut reader).await?;
-        assert_ne!(
-            resp["error"]["code"].as_i64(),
-            Some(-32602),
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("no supported files"),
             "a built-in profile name must reach the handler body: {resp}"
+        );
+        assert!(
+            !message.contains("strict"),
+            "a built-in profile name must not be refused: {resp}"
         );
 
         send(

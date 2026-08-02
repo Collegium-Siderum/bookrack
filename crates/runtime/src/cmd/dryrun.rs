@@ -20,6 +20,8 @@ use bookrack_ingest::{
 use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
+use crate::cmd::input_error::CmdInputError;
+
 /// How many dryrun JSONL artifacts to keep under `<data_root>/dryruns/`
 /// before pruning the oldest. Matches the catalog backup retention so
 /// the two operational artifact directories age out at the same cadence.
@@ -107,7 +109,14 @@ fn run_inner(
     let audit_data = crate::audit_helpers::load_audit_data(cfg);
     let files = collect_files(path, &audit_data.book_extensions);
     if files.is_empty() {
-        eyre::bail!("no supported files found under {}", path.display());
+        return Err(CmdInputError::NothingToDo {
+            summary: format!("no supported files found under {}", path.display()),
+            hint: format!(
+                "Point the command at a directory holding one of: {}.",
+                audit_data.book_extensions.join(", ")
+            ),
+        }
+        .into());
     }
     eprintln!(
         "bookrack dryrun: {} files under {}",

@@ -592,3 +592,198 @@ async fn a_target_that_moved_since_the_dry_run_is_reported_as_drift() -> Result<
 
     join_with_deadline(runtime, repl_handle, driver).await
 }
+
+/// The index writes on a library that has never been ingested into.
+/// Nothing is wrong with the request; the library simply has no layer
+/// for it to act on, and the operator's next step is to put one there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn index_writes_on_a_library_with_no_chunks_are_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        // `drop` is behind the confirmation gate and `rebuild` is not;
+        // an unconfirmed drop would be refused at the gate instead,
+        // which is a different code and a different leg.
+        let cases = [
+            (1, "vectors.rebuild", json!({})),
+            (2, "vectors.drop", json!({"yes": true})),
+            (3, "papers.vectors_rebuild", json!({})),
+            (4, "papers.vectors_drop", json!({"yes": true})),
+        ];
+        for (id, method, params) in cases {
+            let resp = call(&mut w, &mut reader, id, method, params).await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} on a library with no chunks: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("chunks"),
+                "{method} must name the layer the library is missing: {resp}"
+            );
+            let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+            assert!(
+                !hint.is_empty(),
+                "{method} must say what would give the library chunks: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// A `kind` outside the accepted set. The fixture carries a
+/// `vector_dim` stamp on both corpora, because the stamp check runs
+/// first: without it the refusal under test is never reached.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsupported_ann_kind_is_refused_with_the_accepted_set() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    for name in ["corpus.db", "papers_corpus.db"] {
+        let corpus = bookrack_corpus::Corpus::open(&data_root.path().join(name))?;
+        corpus.meta_set(bookrack_corpus::VECTOR_DIM_KEY, "8")?;
+    }
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "vectors.rebuild"), (2, "papers.vectors_rebuild")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"kind": "not-an-index-kind"}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} unsupported kind: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("not-an-index-kind"),
+                "{method} must quote the value it refused: {resp}"
+            );
+            // The whole accepted set, written out here rather than read
+            // from `AnnKind::ALL`: transcribing it is what makes this
+            // test fail when a new kind stops reaching the message.
+            let detail = resp["error"]["data"]["detail"].as_str().unwrap_or_default();
+            for kind in [
+                "ivf-flat",
+                "ivf-sq",
+                "ivf-pq",
+                "ivf-hnsw-flat",
+                "ivf-hnsw-sq",
+                "ivf-hnsw-pq",
+                "brute-force",
+            ] {
+                assert!(
+                    detail.contains(kind),
+                    "{method} must offer {kind} as an accepted value: {resp}"
+                );
+            }
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// A dry run over a directory holding nothing the pipeline can read.
+/// The path resolved and the scan ran; there was simply nothing to
+/// report on, which is the caller's to fix and not a fault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dry_run_over_a_directory_with_nothing_to_scan_is_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let empty = tempfile::tempdir()?;
+    let empty_path = empty.path().to_path_buf();
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "dryrun"), (2, "papers.dryrun")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"path": empty_path.clone()}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} over an empty directory: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(&empty_path.display().to_string()),
+                "{method} must name the directory it scanned: {resp}"
+            );
+            let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+            assert!(
+                !hint.is_empty(),
+                "{method} must say what it would have accepted: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
