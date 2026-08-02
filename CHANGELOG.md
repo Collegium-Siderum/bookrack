@@ -153,6 +153,19 @@ release workflow extracts the matching section verbatim from this file.
   compared, each against its own stamps and its own chunking constant,
   and a row names the pipeline it speaks for.
 
+- **cli: `bookrack status` dropped the reason a store could not be
+  read.** `library.info` reports why the catalog, corpus, or vector
+  store failed to open, on both the book and paper sides, and the card
+  read past all six fields — taking the chunk count and the disk sizes
+  and leaving the failure behind. A library whose catalog was written by
+  a newer binary therefore showed an empty chunk count with nothing
+  saying why, on the surface an operator reaches for first. The card now
+  carries an `unreadable` section naming each store that failed and the
+  reason, absent entirely when every store opened, and its footer sends
+  the reader to `bookrack verify` rather than to `doctor` when one did
+  fail — `doctor` sweeps the environment, and the environment is not
+  what is wrong.
+
 - **runtime: `bookrack verify` answered `busy` while any write ran.**
   The report was funnelled through the write mutex on the reasoning
   that it shared the catalog handle the write commands mutate — which

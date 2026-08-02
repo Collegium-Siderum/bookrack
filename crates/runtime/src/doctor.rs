@@ -4,19 +4,27 @@
 //!
 //! Each environment expectation — a resolved data root, the on-disk
 //! presence of each database store, a loadable PDFium library, a
-//! sufficient file-descriptor limit, a reachable Ollama daemon
-//! carrying the configured embed model — becomes one row in a fixed
-//! three-column table. A row is `OK`,
-//! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
-//! script can branch on the result.
+//! sufficient file-descriptor limit, the registry's internal
+//! consistency, each library's index profile against its built stamps,
+//! the reranker binary and model, the MCP endpoint, and a reachable
+//! Ollama daemon carrying the configured embed model — becomes one row
+//! in a fixed three-column table. A row is `OK`, `WARN`, or `FAIL`; any
+//! FAIL exits the process with status 1 so a script can branch on the
+//! result.
 //!
 //! The store-presence rows deliberately stop at `path.exists()`: a
 //! read-write open would apply pending migrations and contend for the
 //! daemon's exclusive write lock. The registry-coherence rows do open
 //! the corpus read-only to read its built stamps — a `query_only` WAL
 //! open takes no write lock and is safe alongside a running daemon —
-//! but no row opens a store read-write. Deeper introspection lives
-//! behind the REPL `status` command instead.
+//! but no row opens a store read-write.
+//!
+//! The store rows report a library's presence, not its health: what a
+//! store holds and whether it opens is `bookrack verify`, and a running
+//! daemon reports the same through `library.info`, which `bookrack
+//! status` renders. Both need a daemon; this command does not, which is
+//! why it stays the diagnosis of last resort rather than growing into
+//! one of them.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
@@ -953,6 +961,8 @@ fn stamp_issue(
 /// and counting the rest so a four-way divergence does not push the row
 /// off the table.
 fn summarise_findings(findings: &[String]) -> String {
+    // setting: internal -- how much of a note one table row can carry,
+    // not a value an operator tunes
     const SHOWN: usize = 2;
     let head = findings
         .iter()

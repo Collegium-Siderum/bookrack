@@ -70,7 +70,8 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
     let library = helpers::dispatch(&client, "library.info", Value::Null).await?;
     let card = compose_card(lock_path, info, &version, &status, &library);
-    emit_card(&card, "run 'bookrack doctor' for health checks")
+    let hint = card_hint(&card);
+    emit_card(&card, hint)
 }
 
 /// Assemble the full card from the lock snapshot and the three RPC
@@ -83,7 +84,7 @@ fn compose_card(
     status: &Value,
     library: &Value,
 ) -> Value {
-    json!({
+    let mut card = json!({
         "daemon": {
             "version": version.get("version").cloned().unwrap_or(Value::Null),
             "lock": lock_path.display().to_string(),
@@ -108,7 +109,44 @@ fn compose_card(
             "running": status.get("queue_running").cloned().unwrap_or(Value::Null),
             "worker": worker_label(status.get("queue_worker_enabled")),
         },
-    })
+    });
+    // Absent on a healthy library: a heading that is always there, and
+    // almost always empty, is one the eye learns to skip.
+    if let Some(unreadable) = unreadable_stores(library) {
+        card["library"]["unreadable"] = unreadable;
+    }
+    card
+}
+
+/// The footer a full card ends on. A store that could not be read is
+/// the one finding the card states without explaining, so it sends the
+/// reader to the per-store schema check rather than to the environment
+/// sweep `doctor` performs.
+fn card_hint(card: &Value) -> &'static str {
+    if card["library"].get("unreadable").is_some() {
+        "a store could not be read -- run 'bookrack verify' for the per-store schema check"
+    } else {
+        "run 'bookrack doctor' for health checks"
+    }
+}
+
+/// Every store `library.info` reports a read failure for, keyed by the
+/// store an operator would name. `None` when all of them opened.
+fn unreadable_stores(library: &Value) -> Option<Value> {
+    let mut found = serde_json::Map::new();
+    for (store, pointer) in [
+        ("catalog", "/catalog_error"),
+        ("corpus", "/corpus_error"),
+        ("vectors", "/vectors_error"),
+        ("papers_catalog", "/papers/catalog_error"),
+        ("papers_corpus", "/papers/corpus_error"),
+        ("papers_vectors", "/papers/vectors_error"),
+    ] {
+        if let Some(reason) = library.pointer(pointer).and_then(Value::as_str) {
+            found.insert(store.to_string(), Value::String(reason.to_string()));
+        }
+    }
+    (!found.is_empty()).then_some(Value::Object(found))
 }
 
 /// Sum the `library.info` disk section (catalog, corpus, vector
@@ -241,6 +279,60 @@ mod tests {
         assert_eq!(card["queue"]["pending"], 1);
         assert_eq!(card["queue"]["running"], 0);
         assert_eq!(card["queue"]["worker"], "enabled");
+    }
+
+    #[test]
+    fn compose_card_surfaces_a_store_that_cannot_be_read() {
+        // `library.info` reports why each store failed to open. Dropping
+        // those fields left the card showing a null chunk count and no
+        // reason for it -- on the one surface an operator reaches for
+        // when something is wrong.
+        let library = json!({
+            "current_chunks": Value::Null,
+            "catalog_error": "catalog.db: schema version 99 is newer than this binary",
+            "papers": { "corpus_error": "papers_corpus.db: file is not a database" },
+        });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(Some("/run/control.sock")),
+            &json!({ "version": "0.1.0" }),
+            &json!({ "library": "main", "data_dir": "/data/main" }),
+            &library,
+        );
+        assert_eq!(
+            card["library"]["unreadable"]["catalog"],
+            "catalog.db: schema version 99 is newer than this binary",
+        );
+        assert_eq!(
+            card["library"]["unreadable"]["papers_corpus"],
+            "papers_corpus.db: file is not a database",
+        );
+    }
+
+    #[test]
+    fn compose_card_omits_the_unreadable_section_on_a_healthy_library() {
+        // The section is absent, not empty: a card that always carries
+        // an "unreadable" heading trains the eye to skip it.
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &json!({ "library": "main", "data_dir": "/data/main" }),
+            &json!({ "current_chunks": 5, "papers": { "current_chunks": 1 } }),
+        );
+        assert!(card["library"].get("unreadable").is_none(), "{card}");
+    }
+
+    #[test]
+    fn the_footer_points_at_the_check_that_answers_what_the_card_shows() {
+        let healthy = json!({ "library": { "name": "main" } });
+        assert!(card_hint(&healthy).contains("doctor"));
+        let broken = json!({ "library": { "unreadable": { "catalog": "boom" } } });
+        assert!(
+            card_hint(&broken).contains("verify"),
+            "{}",
+            card_hint(&broken)
+        );
     }
 
     #[test]
