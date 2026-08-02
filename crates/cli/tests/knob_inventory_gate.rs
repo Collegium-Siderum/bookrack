@@ -24,6 +24,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use bookrack_core::knob::Layer;
 use eyre::Result;
 
 /// The workspace root, from this crate's manifest directory.
@@ -98,6 +99,46 @@ fn env_example_declares_exactly_the_knobs_the_inventory_names() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Every key `bookrack libraries config` writes is a key the inventory
+/// reports, and the reverse.
+///
+/// The `config.toml` counterpart of the `.env.example` rule above, and
+/// the two failures mirror it: a writable key missing from the inventory
+/// is a setting an operator can put in the file and never find again, and
+/// a file rung with no writable key behind it points at a line the write
+/// surface refuses to produce.
+///
+/// [`Layer::File`] names one file — the data root's `config.toml` — so
+/// every rung on that layer is a key of that file and the two sets are
+/// comparable without filtering.
+#[test]
+fn the_inventory_names_exactly_the_config_toml_keys_that_can_be_written() {
+    let reported: BTreeSet<String> = bookrack_cli::config_knobs::catalog()
+        .iter()
+        .flat_map(|row| row.chain.iter())
+        .filter(|site| site.layer == Layer::File)
+        .map(|site| site.site.clone())
+        .collect();
+    let writable: BTreeSet<String> = bookrack_config::ROOT_CONFIG_KEYS
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
+
+    let unreported: Vec<&String> = writable.difference(&reported).collect();
+    assert!(
+        unreported.is_empty(),
+        "`libraries config` writes keys the inventory does not report: {unreported:?}. \
+         Give each one a file rung in the resolver that owns it."
+    );
+
+    let unwritable: Vec<&String> = reported.difference(&writable).collect();
+    assert!(
+        unwritable.is_empty(),
+        "the inventory reports file keys `libraries config` will not write: {unwritable:?}. \
+         Add each to ROOT_CONFIG_KEYS, or drop the rung."
+    );
 }
 
 /// Both entry points of every knob-reporting crate are named by a
