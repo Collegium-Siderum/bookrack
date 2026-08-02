@@ -39,7 +39,7 @@ mod process;
 mod sandbox;
 mod spawn;
 
-pub use embed_stub::EmbedStub;
+pub use embed_stub::{EmbedFailure, EmbedStub};
 pub use process::{ProcessEnv, process_env};
 pub use sandbox::Sandbox;
 pub use spawn::{PASSTHROUGH_ENV, Spawn};
