@@ -149,10 +149,25 @@ pub type Result<T> = std::result::Result<T, EmbedError>;
 
 /// Cap on how much of an error response body is kept, in characters —
 /// a diagnostic prefix, not a transcript.
+// setting: embed.error_body_cap
 const ERROR_BODY_CAP: usize = 300;
 
 /// Longest backoff between retries, regardless of attempt count.
+// setting: embed.retry_backoff_cap
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+bookrack_core::fixed_settings! {
+    owner = "embed";
+    "embed.error_body_cap" = ERROR_BODY_CAP,
+        "characters of a failed embed response kept as diagnostic detail",
+        acts on "the detail line of an embed backend error";
+    "embed.probe_timeout" = probe::DEFAULT_PROBE_TIMEOUT,
+        "how long the reachability probe waits for the embed backend",
+        acts on "doctor and bring-up, which report the backend unreachable past it";
+    "embed.retry_backoff_cap" = MAX_BACKOFF,
+        "longest pause between two attempts at one embed request",
+        acts on "every ingest and every search that embeds a query";
+}
 
 /// Request body for Ollama `/api/embed`.
 #[derive(Serialize)]

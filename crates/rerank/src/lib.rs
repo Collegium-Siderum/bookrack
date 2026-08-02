@@ -103,10 +103,25 @@ pub type Result<T> = std::result::Result<T, RerankError>;
 
 /// Cap on how much of an error response body is kept, in characters —
 /// a diagnostic prefix, not a transcript.
+// setting: reranker.error_body_cap
 const ERROR_BODY_CAP: usize = 300;
 
 /// Longest backoff between retries, regardless of attempt count.
+// setting: reranker.retry_backoff_cap
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+bookrack_core::fixed_settings! {
+    owner = "rerank";
+    "reranker.error_body_cap" = ERROR_BODY_CAP,
+        "characters of a failed rerank response kept as diagnostic detail",
+        acts on "the detail line of a reranker backend error";
+    "reranker.health_timeout" = DEFAULT_HEALTH_TIMEOUT,
+        "how long one health probe waits for the reranker server to answer",
+        acts on "doctor and bring-up, which report the server unreachable past it";
+    "reranker.retry_backoff_cap" = MAX_BACKOFF,
+        "longest pause between two attempts at one rerank request",
+        acts on "every reranked search";
+}
 
 /// One scored document out of a rerank call: the index of the document
 /// in the request's input order, and the model's relevance score.
@@ -293,6 +308,7 @@ pub enum ServerHealth {
 }
 
 /// Timeout for a single [`probe_health`] request.
+// setting: reranker.health_timeout
 pub const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Probe a server's `/health` endpoint once, with the default timeout.

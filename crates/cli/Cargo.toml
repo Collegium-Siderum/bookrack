@@ -13,6 +13,7 @@ path = "src/main.rs"
 bookrack-config = { path = "../config" }
 bookrack-control-client = { path = "../control-client" }
 bookrack-core = { path = "../core" }
+bookrack-dbkit = { path = "../dbkit" }
 bookrack-diagnose = { path = "../diagnose" }
 bookrack-embed = { path = "../embed" }
 # Knob-origin producers for the effective-configuration report.
@@ -23,6 +24,7 @@ bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 # Registrations of compiled-in values for `config fixed`.
 bookrack-query = { path = "../query" }
+bookrack-rerank = { path = "../rerank" }
 bookrack-catalog = { path = "../catalog" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
 bookrack-runtime = { path = "../runtime" }

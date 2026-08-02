@@ -32,8 +32,13 @@ use crate::render::table::RowTable;
 /// the same list so a registration that no surface collects fails
 /// rather than going quiet.
 pub const REGISTRIES: &[&[FixedSetting]] = &[
+    bookrack_control_client::FIXED_SETTINGS,
+    bookrack_dbkit::FIXED_SETTINGS,
+    bookrack_embed::FIXED_SETTINGS,
+    bookrack_mcp::FIXED_SETTINGS,
     bookrack_obs::stream::FIXED_SETTINGS,
     bookrack_query::dto::FIXED_SETTINGS,
+    bookrack_rerank::FIXED_SETTINGS,
     bookrack_runtime::fixed::FIXED_SETTINGS,
 ];
 

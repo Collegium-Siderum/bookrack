@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bookrack-core = { path = "../core" }
 rusqlite.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

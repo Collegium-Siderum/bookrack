@@ -12,6 +12,9 @@
 
 bookrack_core::fixed_settings! {
     owner = "runtime";
+    "control.event_channel_capacity" = crate::control::events::DEFAULT_EVENT_CHANNEL_CAPACITY,
+        "events the daemon buffers before a slow client starts losing them",
+        acts on "every control-plane client following the event stream";
     "control.plan_ttl" = crate::control::plan_registry::DEFAULT_PLAN_TTL,
         "how long a dry-run plan stays presentable before it must be re-planned",
         acts on "every destructive method's execute leg, which fails with plan not found";

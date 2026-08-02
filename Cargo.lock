@@ -870,6 +870,7 @@ dependencies = [
  "bookrack-config",
  "bookrack-control-client",
  "bookrack-core",
+ "bookrack-dbkit",
  "bookrack-diagnose",
  "bookrack-distill",
  "bookrack-embed",
@@ -879,6 +880,7 @@ dependencies = [
  "bookrack-ops",
  "bookrack-query",
  "bookrack-refs",
+ "bookrack-rerank",
  "bookrack-runtime",
  "bookrack-search",
  "bookrack-session",
@@ -928,6 +930,7 @@ dependencies = [
 name = "bookrack-control-client"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "bookrack-session",
  "eyre",
  "serde",
@@ -963,6 +966,7 @@ dependencies = [
 name = "bookrack-dbkit"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",

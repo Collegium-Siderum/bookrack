@@ -532,6 +532,7 @@ pub struct SessionQueueStatusResult {
 }
 
 /// Cap on the `recent` field returned by `session.queue_status`.
+// setting: mcp.queue_status_recent
 pub const SESSION_QUEUE_STATUS_RECENT: usize = 10;
 
 /// Arguments for `session.shutdown`. The tool takes no inputs.
@@ -2037,6 +2038,13 @@ pub fn spawn_listener(
         )
         .await
     }))
+}
+
+bookrack_core::fixed_settings! {
+    owner = "mcp";
+    "mcp.queue_status_recent" = SESSION_QUEUE_STATUS_RECENT,
+        "recent jobs one queue-status answer carries alongside the counts",
+        acts on "session.queue_status";
 }
 
 /// Enumerate every MCP tool the live server exposes. Calls into the

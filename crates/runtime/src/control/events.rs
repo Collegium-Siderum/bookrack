@@ -31,6 +31,7 @@ use ts_rs::TS;
 
 /// Default capacity for the event broadcast. Matches the `obs`
 /// log-event channel.
+// setting: control.event_channel_capacity
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 512;
 
 /// Discrete daemon lifecycle state, exposed to clients through both

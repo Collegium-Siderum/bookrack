@@ -43,7 +43,16 @@ use eyre::Result;
 /// numeric constant it declares. A crate not on it is exempt, which is
 /// why the list has to grow: the exemption is a rollout step, not a
 /// standing allowance.
-const COVERED: &[&str] = &["obs", "query", "runtime"];
+const COVERED: &[&str] = &[
+    "control-client",
+    "dbkit",
+    "embed",
+    "mcp",
+    "obs",
+    "query",
+    "rerank",
+    "runtime",
+];
 
 /// Constant types the rule applies to.
 ///
@@ -100,8 +109,8 @@ struct Found {
 
 /// Every numeric constant a crate declares outside its test modules.
 ///
-/// The scan stops at the first `#[cfg(test)]` in a file: a constant a
-/// test declares for its own fixture is not part of the build's
+/// The scan stops where a file's test module starts: a constant a test
+/// declares for its own fixture is not part of the build's
 /// configuration, and demanding a marker on one would train the reflex
 /// to write `internal` without thinking.
 fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
@@ -121,12 +130,9 @@ fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
                 continue;
             }
             let text = std::fs::read_to_string(&path)?;
-            let body = match text.find("#[cfg(test)]") {
-                Some(cut) => &text[..cut],
-                None => &text[..],
-            };
-            let lines: Vec<&str> = body.lines().collect();
-            let whole_file = file_scoped_marker(&lines);
+            let all: Vec<&str> = text.lines().collect();
+            let lines = &all[..test_module_start(&all)];
+            let whole_file = file_scoped_marker(lines);
             for (idx, line) in lines.iter().enumerate() {
                 let Some(name) = declares_numeric_constant(line) else {
                     continue;
@@ -134,13 +140,38 @@ fn numeric_constants(crate_dir: &Path) -> Result<Vec<Found>> {
                 found.push(Found {
                     site: format!("{}:{}", path.display(), idx + 1),
                     name,
-                    marker: marker_above(&lines, idx).or_else(|| whole_file.clone()),
+                    marker: marker_above(lines, idx).or_else(|| whole_file.clone()),
                 });
             }
         }
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(found)
+}
+
+/// Where a file's test module begins, or its length when it has none.
+///
+/// `#[cfg(test)]` alone does not mark it: the attribute also gates
+/// imports a test-only derive needs, and cutting at the first one of
+/// those truncates a file at its `use` block and hides every constant
+/// below. Only the attribute standing on a `mod` starts the tests.
+fn test_module_start(lines: &[&str]) -> usize {
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim() != "#[cfg(test)]" {
+            continue;
+        }
+        let opens_a_module = lines[idx + 1..]
+            .iter()
+            .find(|next| !next.trim().is_empty())
+            .is_some_and(|next| {
+                let next = next.trim();
+                next.starts_with("mod ") || next.starts_with("pub mod ")
+            });
+        if opens_a_module {
+            return idx;
+        }
+    }
+    lines.len()
 }
 
 /// The constant's name when this line declares one of a tunable type.

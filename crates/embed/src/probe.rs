@@ -50,6 +50,7 @@ pub enum ProbeError {
 /// Default probe timeout. Short by design: the probe runs before the
 /// user's first interaction and a hung daemon should fall through to
 /// "unreachable" within a couple of seconds.
+// setting: embed.probe_timeout
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// GET `<base_url>/api/tags` and report whether the daemon is up and

@@ -23,7 +23,15 @@ use tokio::sync::{Mutex, broadcast, oneshot};
 /// [`bookrack_runtime::control::events::DEFAULT_EVENT_CHANNEL_CAPACITY`];
 /// the local mirror buffers the same order of magnitude so a slow
 /// subscriber does not stall the connection reader.
+// setting: control.event_mirror_capacity
 pub const DEFAULT_EVENT_CAPACITY: usize = 256;
+
+bookrack_core::fixed_settings! {
+    owner = "control-client";
+    "control.event_mirror_capacity" = DEFAULT_EVENT_CAPACITY,
+        "events this client buffers locally before a slow subscriber starts losing them",
+        acts on "every client following the daemon's event stream";
+}
 
 /// A control-plane `event` notification, demultiplexed from the wire.
 #[derive(Debug, Clone)]
