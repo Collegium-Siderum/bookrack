@@ -120,6 +120,14 @@ systems. bookrack is a local-first system and does not probe for it.
   resolves to a plan minted for a different destructive method)
 - `-32015` plan library mismatch (bookrack-specific; the `plan_id`
   resolves to a plan minted against a different library)
+- `-32016` plan target drifted (bookrack-specific; the `plan_id`
+  resolved and was consumed, but the target it was minted against
+  moved before the execute leg presented it — the intake is gone, or
+  its state no longer matches the fingerprint the plan pinned).
+  Distinct from `-32013`, which says the daemon does not hold the id
+  at all: here the id was good and the library moved underneath it.
+  Both are cleared the same way, by re-running the dry-run leg and
+  confirming the fresh plan.
 
 #### Error data
 

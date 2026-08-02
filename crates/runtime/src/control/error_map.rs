@@ -12,11 +12,16 @@
 //!
 //! [`write_err`] walks the `eyre` cause chain looking for known typed
 //! errors ([`OpsError`], [`IngestError`], [`GleanError`],
-//! [`RegistryError`]) and, when one matches, maps a user-input
-//! variant onto [`INVALID_PARAMS`] (or the bookrack-specific code
-//! reserved for that shape, e.g. [`INVALID_LIBRARY`]). Anything that
-//! does not match a known user-input variant falls through to
+//! [`RegistryError`], [`CmdInputError`]) and, when one matches, maps a
+//! user-input variant onto [`INVALID_PARAMS`] (or the bookrack-specific
+//! code reserved for that shape, e.g. [`INVALID_LIBRARY`]). Anything
+//! that does not match a known user-input variant falls through to
 //! [`INTERNAL_ERROR`].
+//!
+//! The first four are raised by the layers below `cmd::*`, so a
+//! refusal a write command makes on its own — before it reaches ops,
+//! ingest, or glean — is only classified if the command raises
+//! [`CmdInputError`] rather than a bare `bail!`.
 //!
 //! Wording is not written here. Each error renders itself through
 //! [`bookrack_core::Explain`], and [`rpc_from_problem`] splits the
@@ -38,9 +43,10 @@ use eyre::Report;
 
 use super::jsonrpc::{
     INTERNAL_ERROR, INVALID_LIBRARY, INVALID_PARAMS, PLAN_KIND_MISMATCH, PLAN_LIBRARY_MISMATCH,
-    PLAN_NOT_FOUND, RpcError,
+    PLAN_NOT_FOUND, PLAN_TARGET_DRIFTED, RpcError,
 };
 use super::plan_registry::PlanLookupError;
+use crate::cmd::input_error::CmdInputError;
 
 /// Map a write-handler error onto a JSON-RPC error envelope.
 ///
@@ -60,6 +66,9 @@ pub(crate) fn write_err(method: &str, err: Report) -> RpcError {
         }
         if let Some(e) = cause.downcast_ref::<RegistryError>() {
             return from_registry(e);
+        }
+        if let Some(e) = cause.downcast_ref::<CmdInputError>() {
+            return from_cmd_input(e);
         }
     }
     RpcError::new(INTERNAL_ERROR, format!("{method} failed: {err:#}"))
@@ -180,6 +189,25 @@ fn from_registry(e: &RegistryError) -> RpcError {
     // No `Explain` impl on the registry errors yet, so the fallback
     // applies: a flattened summary and no hint.
     rpc_from_problem(code, Problem::from_error_chain(e))
+}
+
+/// Map a refusal a write command raised on its own input.
+///
+/// The `match` is exhaustive rather than defaulted: every variant is
+/// caller input, so the only decision a new one carries is which
+/// caller-input code it takes, and that decision should not have a
+/// silent default.
+fn from_cmd_input(e: &CmdInputError) -> RpcError {
+    let code = match e {
+        CmdInputError::UnknownIntake { .. }
+        | CmdInputError::UnknownSha { .. }
+        | CmdInputError::NotIngested { .. }
+        | CmdInputError::BadArgument { .. }
+        | CmdInputError::NothingToDo { .. }
+        | CmdInputError::Refused { .. } => INVALID_PARAMS,
+        CmdInputError::TargetDrifted { .. } => PLAN_TARGET_DRIFTED,
+    };
+    rpc_from_problem(code, e.explain())
 }
 
 fn from_config(e: &ConfigError) -> RpcError {
@@ -331,6 +359,103 @@ mod tests {
         let expected = e.to_string(); // error-boundary-check: allow
         let rpc = from_ops(&e);
         assert_eq!(rpc.message, expected);
+    }
+
+    /// Every `CmdInputError` variant, with the code the caller sees.
+    /// Written out rather than derived from `from_cmd_input`, which is
+    /// the function under test.
+    fn cmd_input_cases() -> Vec<(CmdInputError, i32)> {
+        vec![
+            (
+                CmdInputError::UnknownIntake { intake_id: 999_999 },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::UnknownSha {
+                    sha: "deadbeef".into(),
+                },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::NotIngested {
+                    what: "catalog",
+                    hint: "Ingest a book into this library first.",
+                },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::BadArgument {
+                    arg: "kind",
+                    value: "nosuch".into(),
+                    expected: "ivf-flat, hnsw".into(),
+                },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::NothingToDo {
+                    summary: "no supported files found under \"/x\"".into(),
+                    hint: "Point it at a directory holding a supported format.".into(),
+                },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::Refused {
+                    summary: "library name is empty".into(),
+                    hint: None,
+                },
+                INVALID_PARAMS,
+            ),
+            (
+                CmdInputError::TargetDrifted {
+                    intake_id: 7,
+                    detail: "The intake was removed after the plan was minted.".into(),
+                },
+                PLAN_TARGET_DRIFTED,
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_cmd_input_variant_maps_onto_a_caller_input_code() {
+        for (e, expected) in cmd_input_cases() {
+            let label = format!("{e:?}");
+            let rpc = write_err("remove", e.into());
+            assert_eq!(rpc.code, expected, "{label}");
+            assert_ne!(rpc.code, INTERNAL_ERROR, "{label}");
+        }
+    }
+
+    /// The wording the variant wrote for itself must reach the wire
+    /// intact — that is the whole reason the arm downcasts instead of
+    /// letting the residual channel flatten the chain.
+    #[test]
+    fn cmd_input_hint_survives_onto_the_wire() {
+        let err: Report = CmdInputError::UnknownIntake { intake_id: 999_999 }.into();
+        let rpc = write_err("remove", err);
+        assert!(rpc.message.contains("999999"), "{}", rpc.message);
+        let data: bookrack_core::ProblemData =
+            serde_json::from_value(rpc.data.expect("data slot filled")).expect("ProblemData");
+        assert!(data.hint.expect("hint").contains("bookrack list"));
+        assert!(!data.retryable);
+    }
+
+    /// A write command folds its refusal through `?` and `.context()`
+    /// on the way up, so the arm has to find the type below the wraps.
+    /// This also pins the premise that the arm needs no help from the
+    /// ops-error arms above it: nothing on this path is an `OpsError`.
+    #[test]
+    fn cmd_input_error_walks_context_chain() {
+        let inner: Result<(), CmdInputError> = Err(CmdInputError::TargetDrifted {
+            intake_id: 7,
+            detail: "The intake was removed after the plan was minted.".into(),
+        });
+        let err: Report = inner
+            .context("execute remove plan")
+            .context("remove")
+            .unwrap_err();
+        let rpc = write_err("remove", err);
+        assert_eq!(rpc.code, PLAN_TARGET_DRIFTED);
+        assert!(rpc.message.contains("book 7"), "{}", rpc.message);
     }
 
     #[test]

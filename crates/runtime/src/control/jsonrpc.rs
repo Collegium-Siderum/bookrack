@@ -55,6 +55,11 @@ pub const PLAN_KIND_MISMATCH: i32 = -32014;
 /// different library than the one the execute leg is scoped to.
 #[allow(dead_code)]
 pub const PLAN_LIBRARY_MISMATCH: i32 = -32015;
+/// bookrack-specific: a `plan_id` resolved, but the target it was
+/// minted against moved before the execute leg presented it. Distinct
+/// from [`PLAN_NOT_FOUND`]: the id was valid and has now been
+/// consumed, so what changed is the target, not the plan registry.
+pub const PLAN_TARGET_DRIFTED: i32 = -32016;
 
 /// One inbound JSON-RPC request.
 #[derive(Debug, Clone, Deserialize)]
