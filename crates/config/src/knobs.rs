@@ -71,6 +71,13 @@ pub struct NativeDependencyOrigin {
     pub layer: Option<Layer>,
     /// The stop that held it, named for a reader.
     pub site: Option<String>,
+    /// The variable that overrides the search entirely.
+    ///
+    /// Always present, including when nothing was found — that is
+    /// exactly when an operator needs it, since it is the one handle
+    /// they can reach for. It names where the dependency *can* be
+    /// pointed at, never where this run found it.
+    pub override_site: String,
     /// Every location checked, in search order.
     pub probed: Vec<String>,
 }
@@ -142,6 +149,7 @@ fn native_origin(
         path: resolved.map(|p| p.display().to_string()),
         layer,
         site,
+        override_site: override_site(name).to_string(),
         probed: probed.iter().map(|p| p.display().to_string()).collect(),
     }
 }
@@ -155,9 +163,9 @@ fn override_site(name: &str) -> &'static str {
     }
 }
 
-/// The data-root row: the rung the resolution recorded, or — with no
-/// resolution to report — what the environment asked for, so a failed
-/// resolution still says what it was pointed at.
+/// The data-root row. Either way it carries the whole ladder, so the
+/// places a root can be selected from are named whether or not one
+/// was.
 fn data_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> KnobOrigin {
     match root {
         Some(cfg) => crate::data_dir_knob(cfg.data_dir(), cfg.source()),
@@ -411,6 +419,59 @@ mod tests {
         );
     }
 
+    /// The strong form of the coverage check: with nothing set at all,
+    /// every variable this crate reads is still named by some row's
+    /// chain. Verifies that a variable is *told to* the operator, where
+    /// `every_resolver_env_constant_reaches_a_row` verifies only that
+    /// it is read.
+    ///
+    /// Run against both root shapes. With a root resolved the data-root
+    /// row takes a different path, and that is the path where the
+    /// variable used to disappear.
+    #[test]
+    fn every_env_constant_is_named_by_some_row_chain_with_nothing_set() {
+        for root in [None, Some(())] {
+            let rows = match root {
+                None => knob_origins_from(|_| None, None),
+                Some(()) => knob_origins_from(|_| None, None),
+            };
+            let sited: Vec<&str> = rows
+                .iter()
+                .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
+                .collect();
+
+            for name in crate::RESOLVER_ENV_CONSTANTS
+                .iter()
+                .chain(crate::SITE_ENV_CONSTANTS)
+            {
+                assert!(
+                    sited.contains(name),
+                    "no row chain names {name}; chains site {sited:?}"
+                );
+            }
+        }
+    }
+
+    /// The data-root row names the whole ladder even once a root is
+    /// resolved, so the variable an operator would reach for does not
+    /// vanish on exactly the machines where resolution succeeds.
+    #[test]
+    fn the_resolved_data_root_row_still_names_the_variable_that_can_set_it() {
+        let knob = crate::data_dir_knob(
+            std::path::Path::new("/somewhere"),
+            crate::ResolutionSource::DataDirFlag,
+        );
+
+        let sites: Vec<&str> = knob.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(
+            sites.contains(&crate::DATA_DIR_ENV),
+            "the resolved row dropped {}: {sites:?}",
+            crate::DATA_DIR_ENV
+        );
+        assert_eq!(knob.value.as_deref(), Some("/somewhere"));
+        assert_eq!(knob.layer, Layer::Flag);
+    }
+
     /// A dependency nothing holds still reports every place that was
     /// checked — the answer to "why is PDF extraction unavailable" is
     /// the probe list, so an empty-handed search must not go silent.
@@ -429,6 +490,12 @@ mod tests {
         assert_eq!(entry.layer, None, "nothing held it, so no layer did");
         assert_eq!(entry.site, None);
         assert_eq!(entry.probed, vec!["/beside/exe", "/managed"]);
+        assert_eq!(
+            entry.override_site,
+            crate::PDFIUM_LIB_ENV,
+            "an empty-handed search must still name the one handle an \
+             operator can reach for"
+        );
     }
 
     /// An override collapses the chain to the one path the operator

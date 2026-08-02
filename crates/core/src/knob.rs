@@ -37,11 +37,17 @@ pub enum Layer {
     File,
     /// The data root's manifest, which travels with the data.
     Manifest,
+    /// A convention of the running installation: an XDG directory, the
+    /// per-user cache directory, or a data directory shipped beside the
+    /// executable.
+    ///
+    /// Above [`Layer::Registry`] because the one knob ordering the two
+    /// against each other — the data root — takes a `bookrack-data`
+    /// directory beside the binary before it consults any registry, so
+    /// a portable install serves its own data rather than the machine's.
+    Platform,
     /// The machine's library registry, a regenerable cache.
     Registry,
-    /// A platform convention, such as an XDG directory or the
-    /// per-user cache directory.
-    Platform,
     /// The value compiled in.
     Default,
 }
@@ -56,8 +62,8 @@ impl Layer {
             Layer::Dotenv => "dotenv",
             Layer::File => "file",
             Layer::Manifest => "manifest",
-            Layer::Registry => "registry",
             Layer::Platform => "platform",
+            Layer::Registry => "registry",
             Layer::Default => "default",
         }
     }
@@ -126,10 +132,13 @@ pub struct Candidate {
     pub site: String,
     /// The rendered value, or `None` when this layer says nothing.
     ///
-    /// A layer whose raw text is present but unusable — blank, or
-    /// malformed for the knob's type — offers `None`, matching the
-    /// resolvers that treat both as unset. Such a layer is therefore
-    /// not a [`Shadowed`] one either: it did not lose, it abstained.
+    /// `None` means this resolution took no value from this layer.
+    /// That covers two cases a caller need not distinguish: text that
+    /// was present but unusable — blank, or malformed for the knob's
+    /// type, which every resolver treats as unset — and a layer below
+    /// the winner that a short-circuiting ladder never asked. Either
+    /// way the layer is not [`Shadowed`]: it did not lose, it offered
+    /// nothing to lose with.
     pub value: Option<String>,
 }
 
@@ -142,6 +151,16 @@ impl Candidate {
             value,
         }
     }
+}
+
+/// One layer that can speak for a knob, whether or not it did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KnobSite {
+    /// The layer.
+    pub layer: Layer,
+    /// Where that layer holds the knob: a variable name, a file path,
+    /// a flag.
+    pub site: String,
 }
 
 /// A lower layer that held a value and lost.
@@ -170,6 +189,16 @@ pub struct KnobOrigin {
     /// Every lower layer that offered a value and lost, in priority
     /// order.
     pub shadowed: Vec<Shadowed>,
+    /// Every layer that can speak for this knob, in priority order,
+    /// including the ones that offered nothing.
+    ///
+    /// Carries no values: a value lives in [`KnobOrigin::value`] or in
+    /// [`KnobOrigin::shadowed`], and nowhere else, so this list cannot
+    /// drift from either. It answers a question those two cannot —
+    /// where a knob *can* be set, as opposed to where this run's value
+    /// came from — which on a machine with nothing configured is the
+    /// only question with a useful answer.
+    pub chain: Vec<KnobSite>,
     /// How far this knob's value reaches.
     pub reach: KnobReach,
     /// When in a process's life it is read.
@@ -271,8 +300,13 @@ pub fn resolve_knob(
 
     let mut winner: Option<Candidate> = None;
     let mut shadowed = Vec::new();
+    let mut chain = Vec::with_capacity(candidates.len());
 
     for candidate in candidates {
+        chain.push(KnobSite {
+            layer: candidate.layer,
+            site: candidate.site.clone(),
+        });
         match (&winner, candidate.value) {
             (_, None) => {}
             (None, Some(value)) => {
@@ -298,6 +332,7 @@ pub fn resolve_knob(
             layer: c.layer,
             site: c.site,
             shadowed,
+            chain,
             reach,
             read_at,
         },
@@ -307,6 +342,7 @@ pub fn resolve_knob(
             layer: backstop.0,
             site: backstop.1,
             shadowed,
+            chain,
             reach,
             read_at,
         },
@@ -319,6 +355,73 @@ mod tests {
 
     fn candidate(layer: Layer, site: &str, value: Option<&str>) -> Candidate {
         Candidate::of(layer, site, value.map(str::to_string))
+    }
+
+    /// A knob nothing is set for still names where it can be set.
+    /// On a machine with no configuration that is the only useful
+    /// thing the row has to say, and the winner alone cannot say it.
+    #[test]
+    fn a_knob_no_layer_set_still_names_where_it_can_be_set() {
+        let origin = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                candidate(Layer::Environment, "BOOKRACK_SEARCH_TOP_K", None),
+                candidate(Layer::File, "search.top_k", None),
+                candidate(Layer::Default, "built-in", Some("5")),
+            ],
+        );
+
+        let sites: Vec<(Layer, &str)> = origin
+            .chain
+            .iter()
+            .map(|s| (s.layer, s.site.as_str()))
+            .collect();
+        assert_eq!(
+            sites,
+            vec![
+                (Layer::Environment, "BOOKRACK_SEARCH_TOP_K"),
+                (Layer::File, "search.top_k"),
+                (Layer::Default, "built-in"),
+            ]
+        );
+    }
+
+    /// The chain is the whole ladder, so the winner and every shadowed
+    /// layer must appear in it: three fields describing one resolution
+    /// must not be able to disagree about which layers took part.
+    #[test]
+    fn the_chain_contains_the_winner_and_every_shadowed_layer() {
+        let origin = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                candidate(Layer::Environment, "BOOKRACK_SEARCH_TOP_K", Some("9")),
+                candidate(Layer::File, "search.top_k", Some("5")),
+                candidate(Layer::Default, "built-in", Some("5")),
+            ],
+        );
+
+        assert!(
+            origin
+                .chain
+                .iter()
+                .any(|s| s.layer == origin.layer && s.site == origin.site),
+            "the winning layer is missing from the chain: {:?}",
+            origin.chain
+        );
+        for shadowed in &origin.shadowed {
+            assert!(
+                origin
+                    .chain
+                    .iter()
+                    .any(|s| s.layer == shadowed.layer && s.site == shadowed.site),
+                "shadowed layer {shadowed:?} is missing from the chain: {:?}",
+                origin.chain
+            );
+        }
     }
 
     #[test]
@@ -430,8 +533,8 @@ mod tests {
             Layer::Dotenv,
             Layer::File,
             Layer::Manifest,
-            Layer::Registry,
             Layer::Platform,
+            Layer::Registry,
             Layer::Default,
         ];
         for layer in layers {
@@ -479,9 +582,15 @@ mod tests {
         );
         assert!(Layer::Dotenv < Layer::File);
         assert!(Layer::File < Layer::Manifest);
-        assert!(Layer::Manifest < Layer::Registry);
-        assert!(Layer::Registry < Layer::Platform);
-        assert!(Layer::Platform < Layer::Default);
+        assert!(
+            Layer::Manifest < Layer::Platform,
+            "the manifest travels with the data and outranks any convention of the host"
+        );
+        assert!(
+            Layer::Platform < Layer::Registry,
+            "a bookrack-data directory beside the binary is taken before any registry"
+        );
+        assert!(Layer::Registry < Layer::Default);
     }
 
     #[test]

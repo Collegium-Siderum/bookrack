@@ -283,6 +283,22 @@ pub enum ResolutionSource {
 }
 
 impl ResolutionSource {
+    /// The ladder in descending priority, as `Config::resolve` walks
+    /// it.
+    ///
+    /// [`ResolutionSource::Explicit`] is deliberately absent: it is not
+    /// a rung that can win, it is the mark of a [`Config::new`] that
+    /// never climbed. A row for such a config reports that one source
+    /// alone, because no other could have applied.
+    pub(crate) const LADDER: [ResolutionSource; 6] = [
+        ResolutionSource::DataDirFlag,
+        ResolutionSource::LibraryFlag,
+        ResolutionSource::EnvVar,
+        ResolutionSource::PortableExeNeighbor,
+        ResolutionSource::RegistryDefault,
+        ResolutionSource::DefaultRegistryDefault,
+    ];
+
     /// The knob layer this rung stands for, and the site within it.
     ///
     /// The two registry rungs share [`Layer::Registry`] and differ by
@@ -1977,18 +1993,6 @@ pub(crate) fn registry_knob(env: Option<String>) -> KnobOrigin {
     )
 }
 
-/// The data root when resolution did not reach one: the row reports
-/// what the environment named, so a failed resolution still says what
-/// it was pointed at rather than going silent.
-pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
-    resolve_knob(
-        "data_dir",
-        KnobReach::Process,
-        ReadAt::DuringResolution,
-        env_layers(DATA_DIR_ENV, env_trimmed(env)),
-    )
-}
-
 /// The backup directory with no data root resolved: only the override
 /// can speak, since the lower layer is derived from the root.
 pub(crate) fn unrooted_backup_dir_knob(env: Option<String>) -> KnobOrigin {
@@ -2007,17 +2011,59 @@ pub(crate) fn unrooted_backup_dir_knob(env: Option<String>) -> KnobOrigin {
 /// re-walking the ladder, so this row and `bookrack info` cannot
 /// disagree about which rung won.
 pub(crate) fn data_dir_knob(data_dir: &Path, source: ResolutionSource) -> KnobOrigin {
-    let (layer, site) = source.as_layer();
     resolve_knob(
         "data_dir",
         KnobReach::Process,
         ReadAt::DuringResolution,
-        vec![Candidate::of(
-            layer,
-            site,
-            Some(data_dir.display().to_string()),
-        )],
+        data_dir_candidates(Some((data_dir, source))),
     )
+}
+
+/// The data root when resolution did not reach one.
+///
+/// The ladder is the same, and the environment rung still reports what
+/// it was pointed at: that value was read, and an operator debugging a
+/// failed resolution needs to see it. Whether the resolution succeeded
+/// is a separate question, answered by the error rather than by this
+/// row.
+pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
+    let mut candidates = data_dir_candidates(None);
+    if let Some(rung) = candidates.iter_mut().find(|c| c.site == DATA_DIR_ENV) {
+        rung.value = env_trimmed(env);
+    }
+    resolve_knob(
+        "data_dir",
+        KnobReach::Process,
+        ReadAt::DuringResolution,
+        candidates,
+    )
+}
+
+/// Every rung of the data-root ladder, with the resolved value on the
+/// one that won.
+///
+/// The whole ladder rather than just the winner, so the row names the
+/// places a root can be selected from even when one already was. The
+/// rungs below the winner offer nothing: resolution short-circuits, so
+/// what they would have produced was never computed and must not be
+/// guessed at here.
+fn data_dir_candidates(resolved: Option<(&Path, ResolutionSource)>) -> Vec<Candidate> {
+    let winner = resolved.map(|(_, source)| source);
+    let value = resolved.map(|(dir, _)| dir.display().to_string());
+
+    if winner == Some(ResolutionSource::Explicit) {
+        let (layer, site) = ResolutionSource::Explicit.as_layer();
+        return vec![Candidate::of(layer, site, value)];
+    }
+
+    ResolutionSource::LADDER
+        .iter()
+        .map(|source| {
+            let (layer, site) = source.as_layer();
+            let held = (Some(*source) == winner).then(|| value.clone()).flatten();
+            Candidate::of(layer, site, held)
+        })
+        .collect()
 }
 
 /// One of the two log filter directives: an environment override over a
