@@ -9,7 +9,7 @@
 //! what the resolvers actually do, which is the failure this module
 //! exists to make impossible.
 
-use bookrack_core::knob::KnobOrigin;
+use bookrack_core::knob::{KnobOrigin, Layer};
 
 use crate::{Config, EmbedConfig, LogConfig, McpConfig, RerankerConfig, RootConfig, SearchConfig};
 
@@ -54,6 +54,107 @@ fn knob_origins_from(
     rows
 }
 
+/// Where one native dependency was found, and everywhere that was
+/// looked.
+///
+/// Kept apart from [`KnobOrigin`] because a search chain is not a
+/// priority chain: a stop loses by **not existing on disk**, not by
+/// being outranked, so "shadowed" has no meaning here and the list of
+/// places checked is the diagnostic instead.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct NativeDependencyOrigin {
+    /// The dependency, e.g. `pdfium`.
+    pub name: String,
+    /// Where it resolved to, or `None` when no stop held it.
+    pub path: Option<String>,
+    /// The kind of stop that held it. `None` when nothing did.
+    pub layer: Option<Layer>,
+    /// The stop that held it, named for a reader.
+    pub site: Option<String>,
+    /// Every location checked, in search order.
+    pub probed: Vec<String>,
+}
+
+/// Every native dependency this crate locates, with where each
+/// resolved.
+///
+/// Touches the filesystem: each entry reports what a load would find
+/// right now, which is the whole point of asking.
+pub fn native_dependency_origins(reranker_tag: &str) -> Vec<NativeDependencyOrigin> {
+    let pdfium = crate::locate_pdfium();
+    let llama = crate::llama_server_pin::locate_llama_server();
+    let model = crate::reranker_model_pin::locate_reranker_model(reranker_tag);
+
+    vec![
+        native_origin(
+            "pdfium",
+            std::env::var(crate::PDFIUM_LIB_ENV).ok(),
+            pdfium.dir.as_deref(),
+            &pdfium.probed,
+            &["beside the executable", "managed directory"],
+        ),
+        native_origin(
+            "llama_server",
+            std::env::var(crate::LLAMA_SERVER_BIN_ENV).ok(),
+            llama.path.as_deref(),
+            &llama.probed,
+            &["beside the executable", "managed directory"],
+        ),
+        native_origin(
+            "reranker_model",
+            std::env::var(crate::RERANKER_MODEL_ENV).ok(),
+            model.path.as_deref(),
+            &model.probed,
+            &["managed directory"],
+        ),
+    ]
+}
+
+/// Assemble one dependency's entry.
+///
+/// An override collapses the chain to a single stop, so the layer is
+/// the environment; otherwise the winning stop's position in the probe
+/// list names it, `stops` giving those positions their words.
+fn native_origin(
+    name: &str,
+    override_env: Option<String>,
+    resolved: Option<&std::path::Path>,
+    probed: &[std::path::PathBuf],
+    stops: &[&str],
+) -> NativeDependencyOrigin {
+    let overridden = override_env.is_some_and(|v| !v.trim().is_empty());
+    let index = resolved.and_then(|r| probed.iter().position(|p| p == r));
+
+    let (layer, site) = match (overridden, index) {
+        (_, None) => (None, None),
+        (true, Some(_)) => (
+            Some(Layer::Environment),
+            Some(override_site(name).to_string()),
+        ),
+        (false, Some(i)) => (
+            Some(Layer::Platform),
+            Some(stops.get(i).copied().unwrap_or("unnamed stop").to_string()),
+        ),
+    };
+
+    NativeDependencyOrigin {
+        name: name.to_string(),
+        path: resolved.map(|p| p.display().to_string()),
+        layer,
+        site,
+        probed: probed.iter().map(|p| p.display().to_string()).collect(),
+    }
+}
+
+/// The variable that overrides one dependency's search chain.
+fn override_site(name: &str) -> &'static str {
+    match name {
+        "pdfium" => crate::PDFIUM_LIB_ENV,
+        "llama_server" => crate::LLAMA_SERVER_BIN_ENV,
+        _ => crate::RERANKER_MODEL_ENV,
+    }
+}
+
 /// The data-root row: the rung the resolution recorded, or — with no
 /// resolution to report — what the environment asked for, so a failed
 /// resolution still says what it was pointed at.
@@ -81,7 +182,7 @@ mod tests {
     use crate::{
         DEFAULT_SEARCH_TOP_K, RootConfig, RootSearchConfig, SEARCH_TOP_K_ENV, SearchConfig,
     };
-    use bookrack_core::knob::Layer;
+    use std::path::PathBuf;
 
     /// A `get` that answers one variable and nothing else.
     fn only(name: &str, value: &str) -> impl Fn(&str) -> Option<String> + 'static {
@@ -225,6 +326,62 @@ mod tests {
             sites.len(),
             "two sources share a site, so the row cannot say which won: {sites:?}"
         );
+    }
+
+    /// A dependency nothing holds still reports every place that was
+    /// checked — the answer to "why is PDF extraction unavailable" is
+    /// the probe list, so an empty-handed search must not go silent.
+    #[test]
+    fn a_dependency_that_resolved_nowhere_still_lists_what_was_probed() {
+        let probed = [PathBuf::from("/beside/exe"), PathBuf::from("/managed")];
+        let entry = native_origin(
+            "pdfium",
+            None,
+            None,
+            &probed,
+            &["beside the executable", "managed directory"],
+        );
+
+        assert_eq!(entry.path, None);
+        assert_eq!(entry.layer, None, "nothing held it, so no layer did");
+        assert_eq!(entry.site, None);
+        assert_eq!(entry.probed, vec!["/beside/exe", "/managed"]);
+    }
+
+    /// An override collapses the chain to the one path the operator
+    /// vouched for, and the entry says so rather than calling it a
+    /// platform location.
+    #[test]
+    fn an_overridden_dependency_reports_the_environment_layer() {
+        let probed = [PathBuf::from("/vouched/for")];
+        let entry = native_origin(
+            "pdfium",
+            Some("/vouched/for".to_string()),
+            Some(&probed[0]),
+            &probed,
+            &["beside the executable", "managed directory"],
+        );
+
+        assert_eq!(entry.layer, Some(Layer::Environment));
+        assert_eq!(entry.site.as_deref(), Some(crate::PDFIUM_LIB_ENV));
+        assert_eq!(entry.path.as_deref(), Some("/vouched/for"));
+    }
+
+    /// Without an override the winning stop is named by its position,
+    /// so the second stop is not reported as the first.
+    #[test]
+    fn a_later_stop_is_named_for_its_own_position() {
+        let probed = [PathBuf::from("/beside/exe"), PathBuf::from("/managed")];
+        let entry = native_origin(
+            "llama_server",
+            None,
+            Some(&probed[1]),
+            &probed,
+            &["beside the executable", "managed directory"],
+        );
+
+        assert_eq!(entry.layer, Some(Layer::Platform));
+        assert_eq!(entry.site.as_deref(), Some("managed directory"));
     }
 
     /// A blank environment value is unset, not a losing offer: it must
