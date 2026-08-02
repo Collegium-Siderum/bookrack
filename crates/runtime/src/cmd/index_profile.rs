@@ -301,26 +301,11 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
 
     let profile_model = resolved.as_ref().map(|(p, _, _)| p.embed.model.as_str());
     let effective_model = EmbedConfig::resolve(profile_model).model;
-    // An unstamped corpus reports as "no built index", same as a
-    // missing one: there is nothing to compare a profile against. An
-    // unreadable corpus is reported alongside instead, this being a
-    // best-effort status surface rather than a hard failure.
-    let (built, built_error) =
-        match crate::profile::built_stamps(&Pipeline::Books.corpus_db(target.data_dir())) {
-            Ok(stamps) => (stamps.filter(|b| !b.is_unstamped()), None),
-            Err(reason) => (None, Some(reason)),
-        };
-    let findings = match (&resolved, &built) {
-        (Some((profile, _, _)), Some(stamps)) => {
-            let stamps_target =
-                Pipeline::Books.target_stamps(&profile.embed.model, profile.embed.dim);
-            Some(crate::profile::profile_stamp_findings(
-                &stamps_target,
-                stamps,
-            ))
-        }
-        _ => None,
-    };
+    let stamps = pipeline_stamps(target.data_dir(), resolved.as_ref().map(|(p, _, _)| *p));
+    // Consistency is a property of the whole library: every pipeline
+    // that could be compared agreed. `None` when none could be.
+    let comparable: Vec<&Vec<String>> = stamps.iter().filter_map(|s| s.findings.as_ref()).collect();
+    let consistent = (!comparable.is_empty()).then(|| comparable.iter().all(|f| f.is_empty()));
 
     if json {
         let value = serde_json::json!({
@@ -337,15 +322,22 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
             })),
             "drift": drift,
             "effective_embed_model": effective_model,
-            "built_stamps": built.as_ref().map(|b| serde_json::json!({
-                "embed_model": b.embed_model,
-                "vector_dim": b.vector_dim,
-                "chunk_version": b.chunk_version,
-                "normalize_version": b.normalize_version,
-            })),
-            "built_stamps_error": built_error,
-            "stamp_findings": findings,
-            "consistent": findings.as_ref().map(|f| f.is_empty()),
+            // One object per pipeline: each keeps its own corpus, its
+            // own stamp record, and its own chunking constant, so a
+            // single flat comparison could only ever answer for one.
+            "pipelines": stamps.iter().map(|s| serde_json::json!({
+                "pipeline": s.pipeline.as_str(),
+                "built_stamps": s.built.as_ref().map(|b| serde_json::json!({
+                    "embed_model": b.embed_model,
+                    "vector_dim": b.vector_dim,
+                    "chunk_version": b.chunk_version,
+                    "normalize_version": b.normalize_version,
+                })),
+                "built_stamps_error": s.error,
+                "stamp_findings": s.findings,
+                "consistent": s.findings.as_ref().map(|f| f.is_empty()),
+            })).collect::<Vec<_>>(),
+            "consistent": consistent,
         });
         println!("{value}");
         return Ok(());
@@ -397,31 +389,86 @@ fn current(selection: &LibrarySelection, json: bool) -> Result<()> {
         );
     }
     println!("effective embed model: {effective_model}");
-    match (&built, &findings) {
-        (None, _) => match &built_error {
-            Some(reason) => println!("stamps: corpus database cannot be opened ({reason})"),
-            None => println!("stamps: no built index to compare against"),
-        },
-        (Some(b), None) => {
-            println!(
-                "stamps: built index is {} (no profile to compare against)",
-                stamp_pair(b)
-            );
-        }
-        (Some(b), Some(f)) if f.is_empty() => {
-            println!(
-                "stamps: consistent with the built index ({})",
-                stamp_pair(b)
-            );
-        }
-        (Some(_), Some(f)) => {
-            for finding in f {
-                println!("stamp mismatch: {finding}");
+    let mut mismatched = false;
+    for section in &stamps {
+        let pipeline = section.pipeline.as_str();
+        match (&section.built, &section.findings) {
+            (None, _) => match &section.error {
+                Some(reason) => {
+                    println!("stamps ({pipeline}): corpus database cannot be opened ({reason})");
+                }
+                None => println!("stamps ({pipeline}): no built index to compare against"),
+            },
+            (Some(b), None) => {
+                println!(
+                    "stamps ({pipeline}): built index is {} (no profile to compare against)",
+                    stamp_pair(b)
+                );
             }
-            println!("note: `bookrack index-profile apply` reconciles this");
+            (Some(b), Some(f)) if f.is_empty() => {
+                println!(
+                    "stamps ({pipeline}): consistent with the built index ({})",
+                    stamp_pair(b)
+                );
+            }
+            (Some(_), Some(f)) => {
+                mismatched = true;
+                for finding in f {
+                    println!("stamp mismatch ({pipeline}): {finding}");
+                }
+            }
         }
     }
+    if mismatched {
+        println!("note: `bookrack index-profile apply` reconciles this");
+    }
     Ok(())
+}
+
+/// One pipeline's built stamps, read from its own corpus database and
+/// compared against what a clean build under the effective profile
+/// would record.
+#[derive(Debug)]
+struct PipelineStamps {
+    pipeline: Pipeline,
+    /// The recorded stamps, `None` when no index has been built or the
+    /// corpus could not be opened.
+    built: Option<crate::profile::BuiltStamps>,
+    /// Why the corpus could not be opened, when that is what happened.
+    error: Option<String>,
+    /// Field-level divergences, `None` when there was nothing to compare
+    /// — no profile, or no built index.
+    findings: Option<Vec<String>>,
+}
+
+/// Read and compare every pipeline's stamps under `data_dir`. An
+/// unstamped corpus reports as "no built index", same as a missing one:
+/// there is nothing to compare a profile against. An unreadable corpus
+/// is reported alongside instead, this being a best-effort status
+/// surface rather than a hard failure.
+fn pipeline_stamps(data_dir: &Path, profile: Option<&IndexProfile>) -> Vec<PipelineStamps> {
+    Pipeline::ALL
+        .into_iter()
+        .map(|pipeline| {
+            let (built, error) = match crate::profile::built_stamps(&pipeline.corpus_db(data_dir)) {
+                Ok(stamps) => (stamps.filter(|b| !b.is_unstamped()), None),
+                Err(reason) => (None, Some(reason)),
+            };
+            let findings = match (profile, &built) {
+                (Some(profile), Some(stamps)) => {
+                    let target = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+                    Some(crate::profile::profile_stamp_findings(&target, stamps))
+                }
+                _ => None,
+            };
+            PipelineStamps {
+                pipeline,
+                built,
+                error,
+                findings,
+            }
+        })
+        .collect()
 }
 
 /// The `model/dim` display pair for a built-stamp record, with a
@@ -916,6 +963,62 @@ mod tests {
         assert!(!PipelineFilter::Books.selects(Pipeline::Papers));
         assert!(PipelineFilter::Papers.selects(Pipeline::Papers));
         assert!(!PipelineFilter::Papers.selects(Pipeline::Books));
+    }
+
+    #[test]
+    fn the_stamp_comparison_covers_a_library_indexed_on_the_paper_side_only() {
+        // One profile governs both pipelines, and papers chunk under
+        // their own constant. Reading the book corpus alone answers
+        // "no built index" for a library whose paper index is stamped —
+        // and would answer it for a drifted paper index too.
+        let root = tempfile::tempdir().expect("tempdir");
+        let profile = IndexProfile::from_named(PROFILE_QWEN3_06B_DEFAULT).expect("built-in");
+        let mut drifted = Pipeline::Papers.target_stamps(&profile.embed.model, profile.embed.dim);
+        drifted.chunk_version += 1;
+        let corpus = bookrack_corpus::Corpus::open(&Pipeline::Papers.corpus_db(root.path()))
+            .expect("create the paper corpus");
+        for (key, value) in [
+            (
+                bookrack_corpus::EMBED_MODEL_KEY,
+                drifted.embed_model.clone(),
+            ),
+            (
+                bookrack_corpus::VECTOR_DIM_KEY,
+                drifted.vector_dim.to_string(),
+            ),
+            (
+                bookrack_corpus::CHUNK_VERSION_KEY,
+                drifted.chunk_version.to_string(),
+            ),
+            (
+                bookrack_corpus::NORMALIZE_VERSION_KEY,
+                drifted.normalize_version.to_string(),
+            ),
+        ] {
+            corpus.meta_set(key, &value).expect("stamp the corpus");
+        }
+        drop(corpus);
+
+        let stamps = pipeline_stamps(root.path(), Some(&profile));
+
+        let papers = stamps
+            .iter()
+            .find(|s| s.pipeline == Pipeline::Papers)
+            .expect("the paper pipeline is compared");
+        let findings = papers
+            .findings
+            .as_ref()
+            .expect("a stamped paper index is compared against the profile");
+        assert!(
+            findings.iter().any(|f| f.contains("chunk_version")),
+            "{findings:?}"
+        );
+        let books = stamps
+            .iter()
+            .find(|s| s.pipeline == Pipeline::Books)
+            .expect("the book pipeline is still reported");
+        assert!(books.built.is_none(), "{books:?}");
+        assert!(books.error.is_none(), "{books:?}");
     }
 
     #[test]

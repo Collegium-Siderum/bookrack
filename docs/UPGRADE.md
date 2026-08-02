@@ -209,9 +209,9 @@ running daemon:
    that exports it; it does nothing now, but a variable that does
    nothing is a trap for the next reader.
 2. **See what the library's vectors were written with.** `bookrack
-   index-profile current --library <name>` prints the `stamps:` line.
-   That is the model the built index carries, and the one your profile
-   must declare.
+   index-profile current --library <name>` prints a `stamps (<pipeline>):`
+   line per pipeline. That is the model the built index carries, and the
+   one your profile must declare.
 3. **Pick a profile that declares that same model** and declare it:
    `bookrack libraries config <name> index_profile=<profile>`.
    `bookrack index-profile list` shows the built-ins and what each
@@ -221,10 +221,13 @@ running daemon:
 4. **Confirm the profile matches the vectors you already have.** Re-run
    `index-profile current` and read its `stamps:` line:
 
-   - `stamps: consistent with the built index (…)` — the profile
-     declares the model your vectors were written with. Done.
-   - `stamp mismatch: embed.model: profile declares 'X' but the built
-     index is stamped 'Y'` — **stop**. The library now resolves to `X`,
+   - `stamps (books): consistent with the built index (…)` — the profile
+     declares the model your vectors were written with. Done. There is
+     one line per pipeline: `(papers)` answers the same question for a
+     library that carries papers, and reads `no built index to compare
+     against` for one that does not.
+   - `stamp mismatch (books): embed.model: profile declares 'X' but the
+     built index is stamped 'Y'` — **stop**. The library now resolves to `X`,
      and every query and embed will fail against vectors written by `Y`.
      Go back to step 3 and pick a profile declaring `Y`, or change the
      library deliberately with `index-profile apply` (below).

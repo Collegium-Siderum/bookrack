@@ -153,6 +153,19 @@ release workflow extracts the matching section verbatim from this file.
   compared, each against its own stamps and its own chunking constant,
   and a row names the pipeline it speaks for.
 
+- **cli: `index-profile current` compared the book pipeline only.** It
+  read `corpus.db`, compared its four stamps against the effective
+  profile, and reported the answer as the library's — so a paper index
+  built under another model or chunking version was invisible, and a
+  library carrying papers alone reported "no built index to compare
+  against" while holding one. Both pipelines are now read and compared,
+  each against its own stamps. The text report carries one `stamps
+  (<pipeline>):` line each, and the JSON moves the per-pipeline fields
+  (`built_stamps`, `built_stamps_error`, `stamp_findings`,
+  `consistent`) into a `pipelines` array, keeping a top-level
+  `consistent` that is true when every pipeline that could be compared
+  agreed.
+
 - **config: a data root set in `.env` was reported as coming from the
   real environment.** Every other knob the file supplies is credited to
   the file — `config effective` names the path an operator would have
