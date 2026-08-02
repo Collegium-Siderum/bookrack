@@ -862,6 +862,111 @@ async fn advance_reports_each_unmet_precondition_as_caller_input() -> Result<()>
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// The read / write asymmetry `docs/control-plane.md` documents, on
+/// one daemon and one id: an id the catalog does not hold reads as a
+/// `null` body and writes as `-32602`. Both halves are asserted
+/// together because the contract is the pair — either one alone is
+/// satisfied by an implementation that reports the same id the same
+/// way on both sides, which is the thing the document says it does
+/// not do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_id_reads_as_null_and_writes_as_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    // A catalog that exists and holds one intake, so the phantom id
+    // below is refused for being unknown rather than for the library
+    // being empty.
+    let book_id = seed_intake(
+        &data_root.path().join("catalog.db"),
+        ItemKind::Book,
+        "sha-book",
+    )?;
+    // The book reads project TOC statistics out of the corpus, which
+    // they open read-only; the file has to be there for the positive
+    // control below to reach the catalog row it is about.
+    bookrack_corpus::Corpus::open(&data_root.path().join("corpus.db"))?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "library.show_book"), (2, "library.show_toc")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": PHANTOM}),
+            )
+            .await?;
+            assert!(
+                resp["error"].is_null(),
+                "{method} must not report an unknown id as an error: {resp}"
+            );
+            assert!(
+                resp["result"].is_null(),
+                "{method} must read an unknown id as a null body: {resp}"
+            );
+        }
+
+        // The reads are not null for everything: the seeded id has a
+        // body. Without this, a proxy that answered `null` on every
+        // call would satisfy the two assertions above.
+        let resp = call(
+            &mut w,
+            &mut reader,
+            3,
+            "library.show_book",
+            json!({"intake_id": book_id}),
+        )
+        .await?;
+        assert!(
+            resp["error"].is_null() && !resp["result"].is_null(),
+            "library.show_book must still return a body for a real id: {resp}"
+        );
+
+        // Same id, write side: an error naming the id, not a null body.
+        let resp = call(
+            &mut w,
+            &mut reader,
+            4,
+            "remove",
+            json!({"intake_id": PHANTOM, "dry_run": true, "yes": true}),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(INVALID_PARAMS),
+            "remove must refuse the id the reads treated as a miss: {resp}"
+        );
+        assert!(
+            resp["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("999999"),
+            "remove must name the id it could not resolve: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// `library.fork` refuses a fork it cannot perform. Its validation ran
 /// before any of this — what changes is that the refusal now reaches
 /// the caller as caller input rather than as a fault.

@@ -26,6 +26,42 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime, cli: the write-class methods report operator input as
+  operator input.** `remove`, `papers.remove`, `vectors.*`,
+  `papers.vectors_*`, `dryrun`, `papers.dryrun`, `metadata.advance`,
+  and `library.fork` answered `-32603 internal error` — "this is a
+  bug, report it" — for refusals that are nothing of the kind: an
+  `intake_id` or `sha` the catalog does not hold; a data root with no
+  catalog database; a library with no ingested chunks; a `kind`
+  outside the ANN set; an `index_profile` reference naming no defined
+  profile; a dry-run path holding no supported file; a book with no
+  state row, or one whose structure pass has not run; and every
+  `library.fork` input check — an empty name, a relative `data_dir`, a
+  missing parent directory, a target resolving onto the source
+  library, a name the registry already holds, a non-empty target
+  directory. Each now answers `-32602 invalid params` and names the
+  next step in `error.data.hint`; where the refusal is a value outside
+  a closed set, `error.data.detail` carries the accepted values, read
+  off the set's own definition so it cannot drift. On the CLI these
+  exit `2` instead of `1`.
+
+  The `remove` execute leg gets its own code. **`-32016 plan target
+  drifted`** says the `plan_id` resolved and was consumed, but the
+  target moved since the dry run — the intake is gone, or its state no
+  longer matches the fingerprint the plan pinned. It is distinct from
+  `-32013 plan not found`, which says the daemon never held the id:
+  recovery here is a fresh dry-run leg, not a corrected parameter.
+  Exit `2`, alongside the other plan-id codes.
+
+  `-32603` on these methods now means what it says — the handler tried
+  and something below it failed. The split is still drawn by the type
+  the failing step raised, so a refusal from a step that has not been
+  given one is still reported as a fault; `docs/control-plane.md`
+  names the two known holdouts.
+
+  **This is a breaking change** for a script that branches on exit `1`
+  or on `-32603` for these failures.
+
 - **runtime: an unclassified write failure carries `error.data`.** The
   control plane promises that every error envelope sends `data` with at
   least `retryable`, so a client branches on that field instead of

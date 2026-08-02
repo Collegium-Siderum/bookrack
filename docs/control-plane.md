@@ -181,16 +181,17 @@ ignores it sees exactly what it saw before the slot was filled.
 #### Write-class error mapping
 
 Write-class RPCs — `metadata.*`, `corpus.rebuild`, `vectors.*`,
-`remove`, `dryrun`, `stamps.reconcile`, and their `papers.*`
-counterparts — route their failure through one mapping layer, which
-walks the error's cause chain looking for a **typed** downstream error
-it recognises. That is where the split is drawn, and it is drawn by
-the type the failing layer raised, not by the method that was called:
-a step that folds its refusal into an untyped error is reported as a
-handler-side fault even when the refusal is plainly caller input.
+`remove`, `dryrun`, `stamps.reconcile`, `library.fork`, and their
+`papers.*` counterparts — route their failure through one mapping
+layer, which walks the error's cause chain looking for a **typed**
+error it recognises. That is where the split is drawn, and it is drawn
+by the type the failing layer raised, not by the method that was
+called: a step that folds its refusal into an untyped error is
+reported as a handler-side fault even when the refusal is plainly
+caller input.
 
-Each item below names a scenario and, in parentheses, the code the
-current implementation produces for it.
+Each item below names a scenario and, in parentheses, the code it maps
+onto.
 
 - **Unknown intake id, unknown metadata field, unknown contributor
   role or contributor row, unknown node id, or a node addressed with
@@ -215,42 +216,82 @@ current implementation produces for it.
 - **An embedding backend that did not answer, or answered that it is
   overloaded** (`-32017`): `EmbedError::{Unreachable, Overloaded}`,
   through the same four shapes.
+- **A refusal the write command makes on its own, before it reaches
+  ops, ingest, or glean** (`-32602`): `CmdInputError`. The command
+  layer otherwise returns an untyped error, which is what the mapping
+  layer has nothing to recognise in; this is the type a command raises
+  in place of a bare refusal. Its scenarios:
+  - a `remove` / `papers.remove` selector — an `intake_id` or a
+    `sha` — that the catalog does not hold;
+  - a layer the command reads that the library has not been built up
+    to yet: no catalog database under `remove` / `papers.remove`, no
+    ingested chunks under `vectors.*` / `papers.vectors_*`;
+  - a value outside a closed set, answered with the accepted set in
+    `error.data.detail`: `kind` outside the ANN set, `audit_profile`
+    outside the built-in set for the pipeline being addressed, an
+    `index_profile` reference naming no defined profile;
+  - a `dryrun` / `papers.dryrun` path holding no supported file;
+  - `metadata.advance` against an unknown intake, a book with no
+    state row, or a book whose structure pass has not run;
+  - the `library.fork` input checks — an empty name, a relative
+    `data_dir`, a parent directory that does not exist, a target that
+    resolves onto the source library, a name the registry already
+    holds, a non-empty target directory.
+
+  The `audit_profile` check also guards `ingest.submit` and
+  `intake.ocr`. Those two queue their work rather than running it
+  inline, so they render the refusal straight onto the envelope
+  instead of routing it through this layer — same code, same wording.
+- **A `remove` / `papers.remove` execute leg whose target moved since
+  the dry run** (`-32016`): `CmdInputError::TargetDrifted` — the
+  intake is gone, or its state no longer matches the fingerprint the
+  plan pinned. It is the one `CmdInputError` variant with its own
+  code, because a client recovers from it differently: by minting a
+  fresh plan rather than by correcting a parameter.
 - **Everything else** (`-32603`): the handler tried and a downstream
   subsystem — catalog DB, vector store, file IO — failed. A request
   the embed client itself malformed (`EmbedError::{BadRequest,
   MalformedResponse}`) belongs here too: the operator did not write it.
 
-The residual bucket is currently wider than that last line describes.
-These scenarios are caller input, and re-submitting different
-parameters is what fixes them, but the step that refuses them raises
-an untyped error, so they arrive as `-32603` and a client cannot tell
-them from a fault:
+Clients distinguish "fix the request and retry" (`-32602` / `-32010` /
+`-32016`) from "report or escalate" (`-32603`) by the code, not by
+parsing the human-readable `error.message`.
 
-- `remove` / `papers.remove` given an intake id or a `source_sha256`
-  that is not registered;
-- `remove` / `papers.remove` against a data root that holds no
-  catalog database yet;
-- `remove` / `papers.remove` on the execute leg when the target
-  drifted since the dry run — the intake is gone, or its state no
-  longer matches the fingerprint the plan pinned;
-- `vectors.*` / `papers.vectors_*` on a library with no ingested
-  chunks, and a `kind` outside the ANN set;
-- `dryrun` / `papers.dryrun` given a directory that holds no
-  supported file;
-- `metadata.advance` given an unknown intake, a book with no state
-  row, or a book whose structure pass has not run.
+The residual bucket is not a promise that nothing caller-shaped can
+land in it. The split is drawn by the type the failing step raised, so
+a step that has not yet been given one still reports its refusal as
+`-32603`; the scenarios above are the ones that have. Two known
+holdouts: a library whose `index_profile` reference names a profile
+that exists and fails to load or parse, and the `library.fork` legs
+that find the *source* library missing its catalog or corpus.
 
-`library.fork` is absent from the method list above for the same
-reason: its handler maps every failure to `-32603` without consulting
-the mapping layer, so its input validation — an empty name, a
-relative `data_dir`, a target that resolves onto the source library,
-a name the registry already holds, a non-empty target directory — is
-reported the way a disk fault would be.
+#### Reads and writes disagree about an unknown id
 
-Clients distinguish "fix the request and retry" (`-32602` / `-32010`)
-from "report or escalate" (`-32603`) by the code, not by parsing the
-human-readable `error.message` — subject to the residual bucket being
-wider than that split implies.
+The same id, unknown on both sides, is not reported the same way. A
+client that branches on the write-class codes above needs the read
+side's rule too, because it is the opposite one.
+
+- On the `library.*` read proxies an id that resolves to nothing is a
+  **soft miss**: the call succeeds and the result body is `null`.
+  `library.show_book`, `show_toc`, `show_metadata_audit`,
+  `show_metadata_report`, `show_audit_trail`, `show_pipeline_trail`,
+  `show_paper`, `show_paper_toc`, `papers_export_csl`, and
+  `papers_fetch_source` do this for an unknown `intake_id`;
+  `read_context` and `read_span` do it for an unknown `node_id`.
+- On every write-class method an id that resolves to nothing is an
+  **error**: `-32602`, naming the id it could not resolve.
+
+The split is deliberate. A read asking "what is under this id" has a
+truthful answer when there is nothing there, and an agent walking a
+result set should not have to catch an exception per miss. A write has
+no such answer: the caller asked for a change to something that does
+not exist, and reporting success would say the change happened.
+
+The consequence for a client is that "does this id exist" is not one
+code path: a read answers in the body, a write in the error code. A
+client that treats a `null` body as a failure will report misses that
+are not failures, and one that treats a write's `-32602` as an empty
+result will silently drop a refused change.
 
 #### CLI exit codes
 
@@ -490,8 +531,14 @@ the exit-code bucket does not distinguish the two.
 - `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id? }`. Exactly
   one of `intake_id` or `sha` must be set on the dry-run leg; the
   execute leg presents the `plan_id` returned by dry-run and the
-  daemon rejects the call without `yes = true`. Paper-side peer:
-  `papers.remove`.
+  daemon rejects the call without `yes = true`. A selector that
+  resolves to no intake, and a data root that holds no catalog at all,
+  are both `-32602`. The execute leg additionally answers `-32016
+  plan target drifted` when the plan resolved but its target moved
+  since the dry run — the intake is gone, or its state no longer
+  matches the fingerprint the plan pinned; the plan id is consumed
+  either way, so recovery is a fresh dry-run leg. Paper-side peer:
+  `papers.remove`, with the same three refusals.
 - `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile? }`.
   Writes the JSONL plus a summary sidecar under `<data_root>/dryruns/`.
   `audit_profile`, when set to a built-in, resolves through the shared
