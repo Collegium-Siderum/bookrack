@@ -19,8 +19,7 @@ use std::time::Instant;
 
 use bookrack_catalog::Catalog;
 use bookrack_core::knob::{
-    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_layers, env_over,
-    resolve_knob,
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, env_over, resolve_knob,
 };
 use bookrack_core::{ItemKind, NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
@@ -320,6 +319,11 @@ pub const VECTORS_NPROBES_ENV: &str = "BOOKRACK_VECTORS_NPROBES";
 /// Environment variable overriding the ANN refine factor.
 pub const VECTORS_REFINE_FACTOR_ENV: &str = "BOOKRACK_VECTORS_REFINE_FACTOR";
 
+/// The artifact deciding `nprobes` / `refine_factor` when no variable
+/// sets them: the ANN settings a build stamped beside the vector store,
+/// which [`options_from_meta`] reads per search.
+pub const ANN_META_SITE: &str = "built index ann settings (vectors_meta.json)";
+
 /// Every knob this crate reads, with where each value came from.
 ///
 /// All three are re-read per call rather than snapshotted, so two
@@ -405,9 +409,14 @@ fn vectors_knob(
     )
 }
 
-/// A vectors knob with no layer beneath the variable: unset means the
-/// index's own persisted setting decides, not a default this crate
-/// holds.
+/// A vectors knob with no compiled-in value beneath the variable:
+/// unset means the ANN settings the build stamped beside the vector
+/// store decide, and with no IVF index there nothing does.
+///
+/// The rung under the variable carries no value. Resolving one would
+/// mean opening a data root, which the inventory these rows feed does
+/// not do; what a reader is owed is the name of the artifact that
+/// decides, and that name is static.
 fn vectors_opt_knob(
     key: &str,
     env_name: &'static str,
@@ -421,7 +430,12 @@ fn vectors_opt_knob(
         key,
         KnobReach::PerCall,
         ReadAt::PerCall,
-        env_layers(dotenv, env_name, parsed),
+        env_over(
+            dotenv,
+            env_name,
+            parsed,
+            vec![Candidate::of(Layer::Manifest, ANN_META_SITE, None)],
+        ),
     )
 }
 
@@ -1276,8 +1290,8 @@ mod tests {
     }
 
     /// The catalog reports all three knobs with nothing set, and names
-    /// each one's variable. The two that have no layer under the
-    /// variable report no value at all — unset means the built index's
+    /// each one's variable. The two whose rung under the variable holds
+    /// no value report no value at all — unset means the built index's
     /// own setting decides, and an inventory must not invent a default
     /// this crate does not hold.
     #[test]
@@ -1311,6 +1325,47 @@ mod tests {
             rows[2].value, None,
             "refine_factor has no default to report"
         );
+    }
+
+    /// The two knobs with no compiled-in default still name what
+    /// decides when they are unset: the ANN settings stamped beside the
+    /// vector store when the index was built. A row backstopping at the
+    /// variable itself would say nothing is under it, and send a reader
+    /// hunting for a library default that does not exist.
+    #[test]
+    fn an_unset_ann_knob_names_the_built_index_as_its_backstop() {
+        let rows = knob_catalog();
+        for key in ["vectors.nprobes", "vectors.refine_factor"] {
+            let row = rows.iter().find(|r| r.key == key).unwrap();
+            assert_eq!(row.value, None, "{key} has no value to report");
+            assert_eq!(row.layer, Layer::Manifest, "{key} backstops elsewhere");
+            assert_eq!(row.site, ANN_META_SITE, "{key} names another artifact");
+        }
+    }
+
+    /// The rung names the file it stands for, so renaming the sidecar
+    /// cannot leave the inventory pointing at a path that is gone.
+    #[test]
+    fn the_ann_meta_rung_names_the_sidecar_it_stands_for() {
+        assert!(
+            ANN_META_SITE.contains(bookrack_vectors::META_FILENAME),
+            "{ANN_META_SITE:?}"
+        );
+    }
+
+    /// The rung sits under the variable, not over it: a set variable
+    /// still wins, and the built index is what it overrides.
+    #[test]
+    fn the_variable_outranks_the_built_index() {
+        let (_, rows) = env_overrides_with_origins_from(
+            |name| (name == VECTORS_NPROBES_ENV).then(|| "24".to_string()),
+            None,
+        );
+        let row = rows.iter().find(|r| r.key == "vectors.nprobes").unwrap();
+        assert_eq!(row.value.as_deref(), Some("24"));
+        assert_eq!(row.layer, Layer::Environment);
+        let layers: Vec<Layer> = row.chain.iter().map(|s| s.layer).collect();
+        assert_eq!(layers, vec![Layer::Environment, Layer::Manifest]);
     }
 
     /// The options the resolver returns and the rows it reports are
