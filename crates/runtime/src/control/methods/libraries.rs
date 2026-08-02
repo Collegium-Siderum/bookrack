@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::super::error_map::{config_err, registry_err};
+use super::super::error_map::{config_err, registry_err, write_err};
 use super::super::events::Event;
 use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use super::MethodContext;
@@ -83,12 +83,7 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })
-        .map_err(|e| {
-            RpcError::new(
-                crate::control::jsonrpc::INTERNAL_ERROR,
-                format!("library.fork: {e:#}"),
-            )
-        })?;
+        .map_err(|e| write_err("library.fork", e))?;
         Ok(json!({
             "new_name": new_name,
             "data_dir": target,

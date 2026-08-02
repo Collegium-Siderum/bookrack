@@ -11,9 +11,10 @@ use bookrack_corpus::Corpus;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ingest::{IngestParams, resume_from_chunk};
 use bookrack_ops::Ops;
-use eyre::{Context, ContextCompat, Result};
+use eyre::{Context, Result};
 
 use crate::audit_helpers::load_audit_profile;
+use crate::cmd::input_error::CmdInputError;
 use crate::embed_helpers::embedder;
 use crate::ops_helpers::catalog_only_ops;
 
@@ -378,15 +379,21 @@ async fn advance(cfg: &Config, book: i64, profile_name: Option<&str>) -> Result<
     let intake = catalog
         .intake_by_id(book)
         .context("look up intake")?
-        .with_context(|| format!("no intake registered for book {book}"))?;
+        .ok_or(CmdInputError::UnknownIntake { intake_id: book })?;
     let state = catalog
         .book_state(book_root_id.get())
         .context("read book state")?
-        .with_context(|| format!("no book state for book {book}"))?;
+        .ok_or_else(|| CmdInputError::Refused {
+            summary: format!("no book state for book {book}"),
+            hint: Some("Ingest the book before advancing it.".to_string()),
+        })?;
     let parsed_at = state
         .parsed_at
         .clone()
-        .with_context(|| format!("book {book} has no parsed_at; STRUCTURE has not run"))?;
+        .ok_or_else(|| CmdInputError::Refused {
+            summary: format!("book {book} has no parsed_at"),
+            hint: Some("Run the STRUCTURE pass before advancing it.".to_string()),
+        })?;
     // Mint a fresh run id so resume rows are distinguishable from the
     // original ingest's; pin them to the same source_sha for traceability.
     let run_id = format!(

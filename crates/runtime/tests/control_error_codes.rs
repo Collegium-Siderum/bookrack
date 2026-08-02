@@ -18,8 +18,8 @@ mod common;
 
 use std::path::Path;
 
-use bookrack_catalog::{Catalog, NewIntake};
-use bookrack_core::ItemKind;
+use bookrack_catalog::{Catalog, NewIntake, NewItemState};
+use bookrack_core::{ItemKind, PartitionIdx};
 use eyre::{Result, eyre};
 use serde_json::{Value, json};
 
@@ -773,6 +773,151 @@ async fn a_dry_run_over_a_directory_with_nothing_to_scan_is_caller_input() -> Re
             assert!(
                 !hint.is_empty(),
                 "{method} must say what it would have accepted: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// The three preconditions `metadata.advance` checks before it resumes
+/// a pipeline. Each is a distinct state of the same book, and each is
+/// something the operator can act on, so each is asserted separately.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn advance_reports_each_unmet_precondition_as_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let catalog_db = data_root.path().join("catalog.db");
+    // One intake with no book state at all, and one with a state row
+    // that never recorded a `parsed_at`.
+    let stateless = seed_intake(&catalog_db, ItemKind::Book, "sha-stateless")?;
+    let unparsed = seed_intake(&catalog_db, ItemKind::Book, "sha-unparsed")?;
+    {
+        let catalog = Catalog::open(&catalog_db)?;
+        catalog.upsert_book_state(&NewItemState::new(
+            PartitionIdx::new(unparsed).root().get(),
+            unparsed,
+            "extract",
+        ))?;
+    }
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        // The three legs share the code, so the message is what tells
+        // them apart: each names the state it found, not just that
+        // something was wrong.
+        let cases = [
+            (1, PHANTOM, "no intake registered"),
+            (2, stateless, "no book state"),
+            (3, unparsed, "parsed_at"),
+        ];
+        for (id, book, expected) in cases {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                "metadata.advance",
+                json!({"book": book}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "metadata.advance on book {book}: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(expected),
+                "metadata.advance on book {book} must report {expected:?}: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// `library.fork` refuses a fork it cannot perform. Its validation ran
+/// before any of this — what changes is that the refusal now reaches
+/// the caller as caller input rather than as a fault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_validation_failures_are_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let occupied = tempfile::tempdir()?;
+    std::fs::write(occupied.path().join("someone-was-here"), b"x")?;
+    let occupied_path = occupied.path().to_path_buf();
+    let free = tempfile::tempdir()?;
+    let free_path = free.path().join("fork-target");
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let cases = [
+            (
+                1,
+                "a relative data_dir",
+                json!({"new_name": "forked", "data_dir": "relative/target", "yes": true}),
+                "absolute",
+            ),
+            (
+                2,
+                "a target whose parent does not exist",
+                json!({"new_name": "forked", "data_dir": free_path.join("not/there"), "yes": true}),
+                "does not exist",
+            ),
+            (
+                3,
+                "a target that is not empty",
+                json!({"new_name": "forked", "data_dir": occupied_path, "yes": true}),
+                "not empty",
+            ),
+        ];
+        for (id, what, params, expected) in cases {
+            let resp = call(&mut w, &mut reader, id, "library.fork", params).await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "library.fork with {what}: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(expected),
+                "library.fork with {what} must say which check failed: {resp}"
             );
         }
 

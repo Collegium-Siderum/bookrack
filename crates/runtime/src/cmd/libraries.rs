@@ -16,6 +16,7 @@ use bookrack_config::{
 };
 use eyre::{Context, ContextCompat, Result, bail};
 
+use crate::cmd::input_error::CmdInputError;
 use crate::render;
 
 pub fn list(json: bool) -> Result<()> {
@@ -184,34 +185,51 @@ fn validate_inputs(
     registry_path: &Path,
 ) -> Result<()> {
     if new_name.trim().is_empty() {
-        bail!("new library name must not be empty");
+        return Err(refused("new library name must not be empty", None));
     }
     if !target.is_absolute() {
-        bail!("--data-dir must be an absolute path: {}", target.display());
+        return Err(refused(
+            format!("--data-dir must be an absolute path: {}", target.display()),
+            None,
+        ));
     }
     let source = cfg.data_dir();
     let source_canonical = source
         .canonicalize()
         .with_context(|| format!("canonicalize source library {}", source.display()))?;
-    let target_canonical = canonicalize_target(target).with_context(|| {
-        format!(
-            "canonicalize target {} (parent must exist before fork runs)",
-            target.display()
-        )
-    })?;
+    // A parent that is not there yet is the one canonicalize failure
+    // the caller can fix by changing an argument; the rest — a broken
+    // symlink, a directory it may not traverse — are faults and keep
+    // their own reporting.
+    if let Some(parent) = target.parent()
+        && !parent.exists()
+    {
+        return Err(refused(
+            format!(
+                "parent directory {} does not exist; fork does not create it",
+                parent.display()
+            ),
+            Some("Create the parent directory, or point --data-dir at one that exists."),
+        ));
+    }
+    let target_canonical = canonicalize_target(target)
+        .with_context(|| format!("canonicalize target {}", target.display()))?;
     if target_canonical == source_canonical {
-        bail!(
-            "target {} resolves to the same path as the source library; fork would be a no-op",
-            target.display()
-        );
+        return Err(refused(
+            format!(
+                "target {} resolves to the same path as the source library",
+                target.display()
+            ),
+            Some("Point --data-dir at a directory outside the library being forked."),
+        ));
     }
     let entries = bookrack_config::list_libraries_at(registry_path)
         .with_context(|| format!("list libraries in registry {}", registry_path.display()))?;
     if entries.iter().any(|e| e.name == new_name) {
-        bail!(
-            "registry already has a library named '{}'; choose another name",
-            new_name
-        );
+        return Err(refused(
+            format!("registry already has a library named '{new_name}'"),
+            Some("Choose a name no registered library carries."),
+        ));
     }
     if target.exists() {
         // Accept an empty directory so a script that pre-creates the
@@ -219,13 +237,28 @@ fn validate_inputs(
         let mut iter =
             std::fs::read_dir(target).with_context(|| format!("read {}", target.display()))?;
         if iter.next().is_some() {
-            bail!(
-                "target {} already exists and is not empty; choose a fresh path or `rm -rf` it first",
-                target.display()
-            );
+            return Err(refused(
+                format!(
+                    "target {} already exists and is not empty",
+                    target.display()
+                ),
+                Some("Point --data-dir at a fresh path, or empty the one it names."),
+            ));
         }
     }
     Ok(())
+}
+
+/// One refused fork input. Every check in [`validate_inputs`] answers
+/// with the same variant: they map onto one wire code and the variant
+/// name never leaves the process, so the summary is what distinguishes
+/// them.
+fn refused(summary: impl Into<String>, hint: Option<&str>) -> eyre::Report {
+    CmdInputError::Refused {
+        summary: summary.into(),
+        hint: hint.map(str::to_string),
+    }
+    .into()
 }
 
 /// Canonicalize a fork target. The target may not exist on disk yet
@@ -370,6 +403,66 @@ mod tests {
         assert_ne!(
             source_manifest.uuid, copied.uuid,
             "fork must mint a fresh uuid, never carry the source's over"
+        );
+    }
+
+    /// Every refusal `validate_inputs` makes is about an argument the
+    /// caller passed, and the control plane classifies on the type
+    /// rather than on the wording. Asserting the summaries alone would
+    /// stay green if one of these went back to a bare `bail!`.
+    #[test]
+    fn every_validation_refusal_is_typed_as_caller_input() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).expect("source");
+        let registry_path = dir.path().join("registry.toml");
+        let entry = LibraryEntryFields {
+            data_dir: source.clone(),
+            kind: LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: Some("2020-01-01T00:00:00Z".to_string()),
+            uuid: None,
+        };
+        upsert_library_entry(&registry_path, "taken", &entry).expect("register source");
+        let occupied = dir.path().join("occupied");
+        touch(&occupied.join("someone-was-here"), b"x");
+        let cfg = Config::new(source.clone(), "http://localhost:11434".to_string());
+
+        let cases: [(&str, &str, PathBuf); 5] = [
+            ("empty name", "  ", dir.path().join("fresh")),
+            ("relative target", "clone", PathBuf::from("relative/target")),
+            ("self clone", "clone", source.clone()),
+            ("name in use", "taken", dir.path().join("fresh")),
+            ("non-empty target", "clone", occupied),
+        ];
+        for (what, name, target) in cases {
+            let err = validate_inputs(&cfg, name, &target, &registry_path)
+                .expect_err("{what} must be rejected");
+            assert!(
+                matches!(
+                    err.root_cause().downcast_ref::<CmdInputError>(),
+                    Some(CmdInputError::Refused { .. })
+                ),
+                "{what} must reach the caller as caller input: {err:#}"
+            );
+        }
+
+        // A parent that is not there yet is the one canonicalize
+        // failure that belongs with them.
+        let err = validate_inputs(
+            &cfg,
+            "clone",
+            &dir.path().join("no-such-parent").join("clone"),
+            &registry_path,
+        )
+        .expect_err("a missing parent must be rejected");
+        assert!(
+            matches!(
+                err.root_cause().downcast_ref::<CmdInputError>(),
+                Some(CmdInputError::Refused { .. })
+            ),
+            "a missing parent directory is caller input: {err:#}"
         );
     }
 

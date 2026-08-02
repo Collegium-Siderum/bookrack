@@ -30,11 +30,13 @@ use bookrack_corpus::{
     CHUNK_VERSION_KEY, Corpus, EMBED_MODEL_KEY, IndexStamps, NORMALIZE_VERSION_KEY, VECTOR_DIM_KEY,
 };
 use bookrack_index_profile::{
-    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors, resolve,
-    validate,
+    AnnKind, AnnSpec, IndexProfile, ProfileOrigin, USER_PROFILE_DIR_NAME, has_errors,
+    list_profiles, resolve, validate,
 };
 use bookrack_vectors::AnnConfig;
 use eyre::{Result, eyre};
+
+use crate::cmd::input_error::CmdInputError;
 
 /// The profile a library effectively runs under, with the reference that
 /// selected it.
@@ -117,13 +119,21 @@ fn effective_index_profile_in(
     let drift = profile_reference_drift(manifest_ref, registry_ref.as_deref());
 
     let dir = user_profile_dir();
+    // A name that resolves to nothing is a value outside a closed set,
+    // and the set is what the caller needs back. A profile that exists
+    // and fails to load is not: reading or parsing a file the operator
+    // already wrote has no argument to correct, so it keeps its own
+    // reporting.
     let (profile, source) = resolve(dir.as_deref(), &name)
         .map_err(|e| eyre!("index profile '{name}' failed to load: {e}"))?
-        .ok_or_else(|| {
-            eyre!(
-                "index profile '{name}' is not defined; \
-                 `bookrack index-profile list` shows the available names"
-            )
+        .ok_or_else(|| CmdInputError::BadArgument {
+            arg: "index_profile",
+            value: name.clone(),
+            expected: list_profiles(dir.as_deref())
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect::<Vec<_>>()
+                .join(", "),
         })?;
 
     Ok(Some(EffectiveProfile {
@@ -544,7 +554,38 @@ pub fn ann_matches_profile(current: &AnnConfig, spec: &AnnSpec) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_core::Explain;
     use bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+
+    /// A library pointed at a profile nobody defined is a value
+    /// outside a closed set: the caller edits the reference, and the
+    /// set is what tells them what to edit it to. Reported as a fault,
+    /// the operator gets neither.
+    #[test]
+    fn an_undefined_profile_reference_is_refused_with_the_defined_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        let err = effective_index_profile_in(&cfg, Some("no-such-profile"))
+            .expect_err("an undefined profile reference cannot resolve");
+        let refusal = err
+            .root_cause()
+            .downcast_ref::<CmdInputError>()
+            .expect("an undefined name is caller input");
+        assert!(
+            matches!(refusal, CmdInputError::BadArgument { .. }),
+            "{err:#}"
+        );
+        let problem = refusal.explain();
+        assert!(problem.summary.contains("no-such-profile"), "{problem:?}");
+        let detail = problem.data.detail.expect("detail names the defined set");
+        assert!(
+            detail.contains(PROFILE_QWEN3_06B_DEFAULT),
+            "the built-ins are always defined: {detail}"
+        );
+    }
 
     #[test]
     fn built_stamps_distinguishes_missing_from_unreadable() {
