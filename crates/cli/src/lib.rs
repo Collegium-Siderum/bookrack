@@ -4,6 +4,7 @@
 //! modules that need cross-module access through `cargo test`; the
 //! daemon-side primitives now live in `bookrack-runtime`.
 
+pub mod config_effective;
 pub mod distill_cmd;
 pub mod error;
 pub mod libraries_local;

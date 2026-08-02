@@ -873,11 +873,13 @@ dependencies = [
  "bookrack-diagnose",
  "bookrack-distill",
  "bookrack-embed",
+ "bookrack-extract",
  "bookrack-mcp",
  "bookrack-obs",
  "bookrack-ops",
  "bookrack-refs",
  "bookrack-runtime",
+ "bookrack-search",
  "bookrack-session",
  "bookrack-test-support",
  "chrono",
@@ -1301,6 +1303,7 @@ dependencies = [
 name = "bookrack-session"
 version = "0.11.0-dev"
 dependencies = [
+ "bookrack-core",
  "dirs 5.0.1",
  "eyre",
  "fs2",

@@ -128,6 +128,11 @@ impl Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
+    /// Report the configuration that actually resolves, and from where.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Inspect and compare the built-in audit profiles.
     ///
     /// Pure reflection over the profiles compiled into the binary — no
@@ -452,6 +457,24 @@ enum Command {
         "status --json",
     ])]
     Status,
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum ConfigAction {
+    /// Print every knob's effective value with the layer that supplied it.
+    ///
+    /// `libraries config` edits one library's `config.toml`; this
+    /// reports the value every layer together produces — flags, the
+    /// environment, `.env`, that file, the manifest, the registry,
+    /// platform conventions, and the built-in defaults. Needs no
+    /// running daemon: it is the surface for the case where the daemon
+    /// will not start, so a data root that does not resolve still
+    /// yields a report, with the failure stated at its head.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config effective",
+        "config effective --library demo --json",
+    ])]
+    Effective,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1079,6 +1102,9 @@ async fn run() -> Result<()> {
     }
     let selection = cli.selection();
     match cli.command {
+        Command::Config { action } => match action {
+            ConfigAction::Effective => bookrack_cli::config_effective::run(&selection),
+        },
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
             match &mut action {
@@ -1301,7 +1327,8 @@ fn accepts_audit_profile(command: &Command) -> bool {
                 action: PapersMetadataAction::Reaudit { .. }
             }
         ),
-        Command::AuditProfile { .. }
+        Command::Config { .. }
+        | Command::AuditProfile { .. }
         | Command::IndexProfile { .. }
         | Command::Verify
         | Command::Libraries { .. }
@@ -2196,6 +2223,7 @@ mod tests {
     /// or an observation command.
     const TOP_LEVEL_BY_DESIGN: &[&str] = &[
         "audit-profile",
+        "config",
         "corpus",
         "diagnose",
         "distill",
@@ -2232,8 +2260,9 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 26),
+        ("bookrack", 27),
         ("bookrack audit-profile", 3),
+        ("bookrack config", 1),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),

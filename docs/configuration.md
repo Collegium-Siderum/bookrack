@@ -85,6 +85,12 @@ reinstall.
 
 ## Per-library settings: `config.toml`
 
+`libraries config` edits this file for one library. To see what all
+the layers together produce — this file, the environment, `.env`, the
+manifest, the registry, and the built-in defaults — use
+`bookrack config effective`, which reports the value each knob
+resolves to and the layer it came from.
+
 Operational knobs resolve `environment variable > <data_root>/config.toml
 > hardcoded default`. That chain covers this machine's operational
 preferences only; a library's embed model is not one of them — it is the
@@ -141,6 +147,12 @@ and [Retiring the process-level keys from
 
 ## Environment knobs
 
+`bookrack config effective` reports what every knob below actually
+resolves to on this machine, which layer supplied it, and — for the
+knobs nothing is set for — every layer each one *can* be set at. It
+needs no daemon and works when the data root does not resolve, so it
+is also the surface for diagnosing a root that will not open.
+
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
 registry selectors, the Ollama endpoint, the embed-batch and search
@@ -149,6 +161,10 @@ per-query ANN overrides. Copy that file to `.env` and fill in what you
 need.
 
 ### Process-level knobs with no `config.toml` key
+
+These are the rows `config effective` marks `per_call`: read afresh on
+every operation rather than snapshotted, so two calls in one process
+can legitimately differ.
 
 `BOOKRACK_VECTORS_BYPASS_ANN`, `BOOKRACK_VECTORS_NPROBES`, and
 `BOOKRACK_VECTORS_REFINE_FACTOR` are read from the environment and have

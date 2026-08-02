@@ -10,6 +10,32 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack config effective` reports what the configuration
+  resolves to, and where each value came from.** One row per knob:
+  the effective value, the layer that supplied it (a flag, the
+  environment, `.env`, the data root's `config.toml`, its manifest,
+  the registry, a platform convention, or the built-in default), the
+  layers that offered a value and lost, and — the part no other
+  surface answers — every layer the knob *can* be set at, including
+  the ones that offered nothing. On a machine with nothing
+  configured, that last list is the only thing in the row worth
+  reading. A second table reports the native dependencies (PDFium,
+  llama-server, the reranker model): where each resolved, everywhere
+  that was searched, and the variable that overrides the search.
+
+  Needs no running daemon, and deliberately survives a data root that
+  does not resolve: the failure is stated at the head of the report
+  and every knob that never depended on a root still reports its
+  value, because a configuration report that fails when the
+  configuration is broken is useful exactly when it is not needed.
+  Such a run exits `2`, the user-error code, since a root the
+  operator named wrongly is operator input. `--json` carries the same
+  answer under fixed field names; `--quiet` prints nothing and lets
+  the exit code speak.
+
+  `libraries config` still edits one library's `config.toml`; this
+  reports what all the layers together produce.
+
 - **runtime: the whole-library maintenance passes register in
   `pipeline_runs`.** `vectors reset`, `vectors reembed`, and their
   paper-side peers each open a run row at entry and close it with a
