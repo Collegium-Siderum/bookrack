@@ -15,9 +15,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use bookrack_core::knob::{Candidate, KnobOrigin, KnobReach, Layer, ReadAt, resolve_knob};
 use fs2::FileExt;
 
 mod detect;
+mod knobs;
 pub mod llama_server_pin;
 mod manifest;
 mod profile_ref;
@@ -28,6 +30,7 @@ pub use detect::{
     DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
     scan_for_libraries,
 };
+pub use knobs::knob_origins;
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
     ManifestIdentitySeed, load_manifest, new_manifest, render_manifest_toml,
@@ -1206,6 +1209,26 @@ pub const DEFAULT_MCP_ADDR: &str = "127.0.0.1:8765";
 /// Environment variable overriding the MCP server listen address.
 pub const MCP_ADDR_ENV: &str = "BOOKRACK_MCP_ADDR";
 
+/// The environment variables the five configuration resolvers read.
+///
+/// These are the knobs whose priority chain runs inside
+/// [`EmbedConfig`], [`SearchConfig`], [`RerankerConfig`], [`McpConfig`],
+/// and [`LogConfig`]; every one of them is a row in
+/// [`knob_origins`](crate::knob_origins). The crate's remaining
+/// variables are read at their own sites and reported separately.
+pub const RESOLVER_ENV_CONSTANTS: &[&str] = &[
+    EMBED_BATCH_CHAR_BUDGET_ENV,
+    EMBED_BATCH_MAX_CHUNKS_ENV,
+    EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
+    EMBED_PROGRESS_INTERVAL_ENV,
+    SEARCH_TOP_K_ENV,
+    SEARCH_WEAK_THRESHOLD_ENV,
+    RERANKER_URL_ENV,
+    MCP_ADDR_ENV,
+    LOG_ENV,
+    LOG_CONSOLE_ENV,
+];
+
 /// Tunable parameters for the embedding subsystem.
 ///
 /// A single source of truth for the knobs the `embed` client and the
@@ -1285,28 +1308,106 @@ impl EmbedConfig {
         get: impl Fn(&str) -> Option<String>,
         profile_model: Option<&str>,
     ) -> EmbedConfig {
+        EmbedConfig::resolve_with_origins_from(get, profile_model).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        profile_model: Option<&str>,
+    ) -> (EmbedConfig, Vec<KnobOrigin>) {
         let d = EmbedConfig::default();
-        EmbedConfig {
-            model: profile_model
-                .map(str::to_string)
-                .filter(|m| !m.trim().is_empty())
-                .unwrap_or(d.model),
+
+        let model = resolve_knob(
+            "embed.model",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(
+                    Layer::Manifest,
+                    "index profile",
+                    profile_model
+                        .map(str::to_string)
+                        .filter(|m| !m.trim().is_empty()),
+                ),
+                Candidate::of(Layer::Default, BUILT_IN_SITE, Some(d.model.clone())),
+            ],
+        );
+        let batch_char_budget = embed_usize_knob(
+            "embed.batch_char_budget",
+            EMBED_BATCH_CHAR_BUDGET_ENV,
+            &get,
+            d.batch_char_budget,
+        );
+        let batch_max_chunks = embed_usize_knob(
+            "embed.batch_max_chunks",
+            EMBED_BATCH_MAX_CHUNKS_ENV,
+            &get,
+            d.batch_max_chunks,
+        );
+        let batch_min_char_budget = embed_usize_knob(
+            "embed.batch_min_char_budget",
+            EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
+            &get,
+            d.batch_min_char_budget,
+        );
+        let progress_interval = embed_usize_knob(
+            "embed.progress_interval_secs",
+            EMBED_PROGRESS_INTERVAL_ENV,
+            &get,
+            DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
+        );
+
+        let cfg = EmbedConfig {
+            model: knob_value(&model, d.model),
             request_timeout: d.request_timeout,
             max_retries: d.max_retries,
             backoff_base: d.backoff_base,
-            batch_char_budget: env_usize(get(EMBED_BATCH_CHAR_BUDGET_ENV), d.batch_char_budget),
-            batch_max_chunks: env_usize(get(EMBED_BATCH_MAX_CHUNKS_ENV), d.batch_max_chunks),
-            batch_min_char_budget: env_usize(
-                get(EMBED_BATCH_MIN_CHAR_BUDGET_ENV),
-                d.batch_min_char_budget,
-            ),
+            batch_char_budget: knob_value(&batch_char_budget, d.batch_char_budget),
+            batch_max_chunks: knob_value(&batch_max_chunks, d.batch_max_chunks),
+            batch_min_char_budget: knob_value(&batch_min_char_budget, d.batch_min_char_budget),
             channel_capacity: d.channel_capacity,
-            progress_interval: Duration::from_secs(env_usize(
-                get(EMBED_PROGRESS_INTERVAL_ENV),
+            progress_interval: Duration::from_secs(knob_value(
+                &progress_interval,
                 DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
             ) as u64),
-        }
+        };
+        (
+            cfg,
+            vec![
+                model,
+                batch_char_budget,
+                batch_max_chunks,
+                batch_min_char_budget,
+                progress_interval,
+            ],
+        )
     }
+}
+
+/// One of the embed batching knobs: an environment override over a
+/// compiled-in default, with no file layer between them.
+fn embed_usize_knob(
+    key: &str,
+    env_name: &'static str,
+    get: impl Fn(&str) -> Option<String>,
+    default: usize,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Process,
+        ReadAt::AfterResolution,
+        vec![
+            Candidate::of(
+                Layer::Environment,
+                env_name,
+                env_parsed::<usize>(get(env_name)).map(|v| v.to_string()),
+            ),
+            Candidate::of(Layer::Default, BUILT_IN_SITE, Some(default.to_string())),
+        ],
+    )
 }
 
 /// Retrieval knobs. Separate from [`EmbedConfig`] so the query side reads
@@ -1360,13 +1461,55 @@ impl RerankerConfig {
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> RerankerConfig {
-        let file = root.reranker.clone().unwrap_or_default();
-        RerankerConfig {
-            url: env_trimmed(get(RERANKER_URL_ENV)).or_else(|| env_trimmed(file.url)),
-            ctx: file.ctx,
-            threads: file.threads,
-        }
+        RerankerConfig::resolve_with_origins_from(get, root).0
     }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    ///
+    /// The three knobs have no compiled-in default: unset is a value
+    /// here, meaning "supervise our own server" rather than "fall back".
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        root: &RootConfig,
+    ) -> (RerankerConfig, Vec<KnobOrigin>) {
+        let file = root.reranker.clone().unwrap_or_default();
+
+        let url = resolve_knob(
+            "reranker.url",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(
+                    Layer::Environment,
+                    RERANKER_URL_ENV,
+                    env_trimmed(get(RERANKER_URL_ENV)),
+                ),
+                Candidate::of(Layer::File, "reranker.url", env_trimmed(file.url)),
+            ],
+        );
+        let ctx = reranker_file_knob("reranker.ctx", file.ctx);
+        let threads = reranker_file_knob("reranker.threads", file.threads);
+
+        let cfg = RerankerConfig {
+            url: url.value.clone(),
+            ctx: ctx.value.as_deref().and_then(|s| s.parse().ok()),
+            threads: threads.value.as_deref().and_then(|s| s.parse().ok()),
+        };
+        (cfg, vec![url, ctx, threads])
+    }
+}
+
+/// One of the reranker knobs the `config.toml` table is the only source
+/// for: no environment variable and no compiled-in default.
+fn reranker_file_knob(key: &str, file: Option<u32>) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Library,
+        ReadAt::AfterResolution,
+        vec![Candidate::of(Layer::File, key, file.map(|v| v.to_string()))],
+    )
 }
 
 impl SearchConfig {
@@ -1388,17 +1531,68 @@ impl SearchConfig {
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> SearchConfig {
+        SearchConfig::resolve_with_origins_from(get, root).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+        root: &RootConfig,
+    ) -> (SearchConfig, Vec<KnobOrigin>) {
         let file = root.search.clone().unwrap_or_default();
-        SearchConfig {
-            top_k: env_usize(
-                get(SEARCH_TOP_K_ENV),
-                file.top_k.unwrap_or(DEFAULT_SEARCH_TOP_K),
-            ),
-            weak_distance_threshold: env_f32(
-                get(SEARCH_WEAK_THRESHOLD_ENV),
-                file.weak_threshold.unwrap_or(DEFAULT_SEARCH_WEAK_THRESHOLD),
-            ),
-        }
+
+        let top_k = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(
+                    Layer::Environment,
+                    SEARCH_TOP_K_ENV,
+                    env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::File,
+                    "search.top_k",
+                    file.top_k.map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_SEARCH_TOP_K.to_string()),
+                ),
+            ],
+        );
+        let weak_threshold = resolve_knob(
+            "search.weak_threshold",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(
+                    Layer::Environment,
+                    SEARCH_WEAK_THRESHOLD_ENV,
+                    env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::File,
+                    "search.weak_threshold",
+                    file.weak_threshold.map(|v| v.to_string()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
+                ),
+            ],
+        );
+
+        let cfg = SearchConfig {
+            top_k: knob_value(&top_k, DEFAULT_SEARCH_TOP_K),
+            weak_distance_threshold: knob_value(&weak_threshold, DEFAULT_SEARCH_WEAK_THRESHOLD),
+        };
+        (cfg, vec![top_k, weak_threshold])
     }
 }
 
@@ -1428,9 +1622,36 @@ impl McpConfig {
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> McpConfig {
-        McpConfig {
-            addr: env_trimmed(get(MCP_ADDR_ENV)).unwrap_or_else(|| DEFAULT_MCP_ADDR.to_string()),
-        }
+        McpConfig::resolve_with_origins_from(get).0
+    }
+
+    /// Pure resolution that also reports where the value came from. The
+    /// struct's field is read off the row, so the two cannot disagree.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> (McpConfig, Vec<KnobOrigin>) {
+        let addr = resolve_knob(
+            "mcp.addr",
+            KnobReach::Process,
+            ReadAt::BeforeResolution,
+            vec![
+                Candidate::of(
+                    Layer::Environment,
+                    MCP_ADDR_ENV,
+                    env_trimmed(get(MCP_ADDR_ENV)),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_MCP_ADDR.to_string()),
+                ),
+            ],
+        );
+
+        let cfg = McpConfig {
+            addr: knob_value(&addr, DEFAULT_MCP_ADDR.to_string()),
+        };
+        (cfg, vec![addr])
     }
 }
 
@@ -1477,11 +1698,33 @@ impl LogConfig {
     /// Pure resolution, factored out so it can be tested without mutating
     /// process-global environment variables.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
-        LogConfig {
-            directive: env_trimmed(get(LOG_ENV)).unwrap_or_else(|| DEFAULT_LOG.to_string()),
-            console_level: env_trimmed(get(LOG_CONSOLE_ENV))
-                .unwrap_or_else(|| DEFAULT_LOG_CONSOLE.to_string()),
-        }
+        LogConfig::resolve_with_origins_from(get).0
+    }
+
+    /// Pure resolution that also reports where each value came from.
+    /// The struct's fields are read off the rows, so the two cannot
+    /// disagree.
+    ///
+    /// Reports the [`from_env`](Self::from_env) shape. The headless
+    /// variant defaults the console layer to the file directive rather
+    /// than to [`DEFAULT_LOG_CONSOLE`], which is a different layer
+    /// sequence and not what a `config effective` table describes.
+    fn resolve_with_origins_from(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> (LogConfig, Vec<KnobOrigin>) {
+        let directive = log_knob("log.directive", LOG_ENV, &get, DEFAULT_LOG);
+        let console_level = log_knob(
+            "log.console_level",
+            LOG_CONSOLE_ENV,
+            &get,
+            DEFAULT_LOG_CONSOLE,
+        );
+
+        let cfg = LogConfig {
+            directive: knob_value(&directive, DEFAULT_LOG.to_string()),
+            console_level: knob_value(&console_level, DEFAULT_LOG_CONSOLE.to_string()),
+        };
+        (cfg, vec![directive, console_level])
     }
 
     /// Resolve a [`LogConfig`] suitable for a headless daemon binary
@@ -1509,28 +1752,60 @@ impl LogConfig {
     }
 }
 
+/// The `site` a compiled-in default is held at.
+const BUILT_IN_SITE: &str = "built-in";
+
+/// One of the two log filter directives: an environment override over a
+/// compiled-in default, read before any data root is known.
+fn log_knob(
+    key: &str,
+    env_name: &'static str,
+    get: impl Fn(&str) -> Option<String>,
+    default: &str,
+) -> KnobOrigin {
+    resolve_knob(
+        key,
+        KnobReach::Process,
+        ReadAt::BeforeResolution,
+        vec![
+            Candidate::of(Layer::Environment, env_name, env_trimmed(get(env_name))),
+            Candidate::of(Layer::Default, BUILT_IN_SITE, Some(default.to_string())),
+        ],
+    )
+}
+
+/// Parse an environment value, treating blank and unparseable text as
+/// unset — the same judgement [`env_usize`] makes, expressed as the
+/// absence of an offer so the layer is not recorded as a losing one.
+fn env_parsed<T: std::str::FromStr>(value: Option<String>) -> Option<T> {
+    env_trimmed(value).and_then(|s| s.parse().ok())
+}
+
+/// [`env_parsed`] for `f32`, additionally rejecting non-finite values
+/// as [`env_f32`] does.
+fn env_f32_parsed(value: Option<String>) -> Option<f32> {
+    env_parsed::<f32>(value).filter(|n| n.is_finite())
+}
+
+/// The value a resolved row settled on, parsed back to the knob's own
+/// type.
+///
+/// `fallback` covers only the case of a row whose every layer abstained;
+/// a row that has a winner always round-trips, because each layer's
+/// offer was rendered from a value of this type.
+fn knob_value<T: std::str::FromStr>(origin: &KnobOrigin, fallback: T) -> T {
+    origin
+        .value
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(fallback)
+}
+
 /// Trim an environment value, treating whitespace-only as unset.
 fn env_trimmed(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-/// Parse an environment value as `usize`, falling back to `default` when
-/// it is unset, blank, or unparseable.
-fn env_usize(value: Option<String>, default: usize) -> usize {
-    env_trimmed(value)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Parse an environment value as `f32`, falling back to `default` when
-/// it is unset, blank, unparseable, or not a finite number.
-fn env_f32(value: Option<String>, default: f32) -> f32 {
-    env_trimmed(value)
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|n| n.is_finite())
-        .unwrap_or(default)
 }
 
 /// Outcome of [`select_root`]: the chosen data root paired with the
