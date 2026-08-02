@@ -143,6 +143,16 @@ release workflow extracts the matching section verbatim from this file.
   divergence beside an unbuilt store no longer promises a failure the
   operator will not see.
 
+- **runtime: `doctor` checked the book pipeline only when comparing a
+  profile against its built indexes.** One index profile governs both
+  pipelines, but the coherence check read `corpus.db` and stopped
+  there, so a paper index built under another embedding model, vector
+  width, or chunking version never reached the report — including the
+  case where the library carries papers and no books at all, which drew
+  a clean summary having compared nothing. Both pipelines are now
+  compared, each against its own stamps and its own chunking constant,
+  and a row names the pipeline it speaks for.
+
 - **config: a data root set in `.env` was reported as coming from the
   real environment.** Every other knob the file supplies is credited to
   the file — `config effective` names the path an operator would have

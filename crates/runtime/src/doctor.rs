@@ -1069,24 +1069,27 @@ fn push_index_profile_coherence_rows_in(
             });
         }
         // Only a profile that resolved cleanly has stamps to compare
-        // against; the arms above already reported the rest.
+        // against; the arms above already reported the rest. One profile
+        // governs both pipelines, and each keeps its own corpus and
+        // stamp record, so each is compared on its own.
         if let Ok(Some((model, dim, false))) = &resolved {
-            let pipeline = crate::profile::Pipeline::Books;
-            let note = stamp_issue(
-                &entry.name,
-                profile_name,
-                pipeline,
-                &pipeline.target_stamps(model, *dim),
-                crate::profile::built_stamps(&pipeline.corpus_db(&entry.data_dir)),
-                pipeline.lancedb_dir(&entry.data_dir).exists(),
-            );
-            if let Some(note) = note {
-                clean = false;
-                rows.push(Row {
-                    label: "index-profile".to_string(),
-                    value: entry.name.clone(),
-                    status: Status::Warn { note },
-                });
+            for pipeline in crate::profile::Pipeline::ALL {
+                let note = stamp_issue(
+                    &entry.name,
+                    profile_name,
+                    pipeline,
+                    &pipeline.target_stamps(model, *dim),
+                    crate::profile::built_stamps(&pipeline.corpus_db(&entry.data_dir)),
+                    pipeline.lancedb_dir(&entry.data_dir).exists(),
+                );
+                if let Some(note) = note {
+                    clean = false;
+                    rows.push(Row {
+                        label: "index-profile".to_string(),
+                        value: entry.name.clone(),
+                        status: Status::Warn { note },
+                    });
+                }
             }
         }
         if let Some(note) = drift_issue(&entry.name, profile_name, &drift) {
@@ -1858,12 +1861,13 @@ mod tests {
     }
 
     /// Seed a data root that declares the built-in profile in its
-    /// manifest and carries a `corpus.db` stamped by `stamp`, and return
-    /// the registry entry pointing at it. The built-in resolves without
-    /// a profile file, so the caller can hand the coherence pass an
-    /// empty profile directory.
+    /// manifest and carries `pipeline`'s corpus database stamped by
+    /// `stamp`, and return the registry entry pointing at it. The
+    /// built-in resolves without a profile file, so the caller can hand
+    /// the coherence pass an empty profile directory.
     fn root_with_built_stamps(
         root: &Path,
+        pipeline: crate::profile::Pipeline,
         stamp: impl FnOnce(&bookrack_corpus::Corpus, &bookrack_index_profile::IndexProfile),
     ) -> LibraryEntry {
         bookrack_config::set_manifest_index_profile(
@@ -1879,13 +1883,35 @@ mod tests {
         let (profile, _) = resolve(None, bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
             .expect("resolve the built-in profile")
             .expect("the built-in profile is defined");
-        let corpus = bookrack_corpus::Corpus::open(&root.join("corpus.db")).expect("create corpus");
+        let corpus =
+            bookrack_corpus::Corpus::open(&pipeline.corpus_db(root)).expect("create corpus");
         stamp(&corpus, &profile);
         drop(corpus);
 
         let mut entry = entry("stamped", None);
         entry.data_dir = root.to_path_buf();
         entry
+    }
+
+    /// Record `stamps` in `corpus` the way a completed build would.
+    fn write_stamps(corpus: &bookrack_corpus::Corpus, stamps: &IndexStamps) {
+        for (key, value) in [
+            (bookrack_corpus::EMBED_MODEL_KEY, stamps.embed_model.clone()),
+            (
+                bookrack_corpus::VECTOR_DIM_KEY,
+                stamps.vector_dim.to_string(),
+            ),
+            (
+                bookrack_corpus::CHUNK_VERSION_KEY,
+                stamps.chunk_version.to_string(),
+            ),
+            (
+                bookrack_corpus::NORMALIZE_VERSION_KEY,
+                stamps.normalize_version.to_string(),
+            ),
+        ] {
+            corpus.meta_set(key, &value).expect("stamp the corpus");
+        }
     }
 
     #[test]
@@ -1895,26 +1921,11 @@ mod tests {
         // whose chunk version does not is exactly what the daemon refuses
         // to bring up, so it must not land on that summary.
         let root = tempfile::tempdir().expect("tempdir");
-        let entry = root_with_built_stamps(root.path(), |corpus, profile| {
-            let target = crate::profile::Pipeline::Books
-                .target_stamps(&profile.embed.model, profile.embed.dim);
-            for (key, value) in [
-                (bookrack_corpus::EMBED_MODEL_KEY, target.embed_model.clone()),
-                (
-                    bookrack_corpus::VECTOR_DIM_KEY,
-                    target.vector_dim.to_string(),
-                ),
-                (
-                    bookrack_corpus::CHUNK_VERSION_KEY,
-                    (target.chunk_version + 1).to_string(),
-                ),
-                (
-                    bookrack_corpus::NORMALIZE_VERSION_KEY,
-                    target.normalize_version.to_string(),
-                ),
-            ] {
-                corpus.meta_set(key, &value).expect("stamp the corpus");
-            }
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
         });
         let profiles = tempfile::tempdir().expect("tempdir");
 
@@ -1933,22 +1944,54 @@ mod tests {
     }
 
     #[test]
+    fn coherence_covers_the_paper_pipeline() {
+        // One profile governs both pipelines and papers carry their own
+        // chunking constant, so a paper index built under a different one
+        // is the same bring-up failure as a book index -- checking the
+        // book corpus alone reports a library the daemon will refuse as
+        // coherent.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Papers;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        assert!(
+            !crate::profile::Pipeline::Books
+                .corpus_db(root.path())
+                .exists(),
+            "the scenario is a library indexed on the paper side only",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("papers"), "{note}");
+        assert!(note.contains("chunk_version"), "{note}");
+    }
+
+    #[test]
     fn coherence_does_not_promise_a_refused_start_without_a_vector_store() {
         // The daemon only verifies stamps when the vector store holds
         // rows, so a divergence under an unbuilt vector store does not
         // stop it from starting. Saying it does sends the operator after
         // a failure they will not see.
         let root = tempfile::tempdir().expect("tempdir");
-        let entry = root_with_built_stamps(root.path(), |corpus, profile| {
-            corpus
-                .meta_set(bookrack_corpus::EMBED_MODEL_KEY, "some-other-model")
-                .expect("stamp the corpus");
-            corpus
-                .meta_set(
-                    bookrack_corpus::VECTOR_DIM_KEY,
-                    &profile.embed.dim.to_string(),
-                )
-                .expect("stamp the corpus");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.embed_model = "some-other-model".to_string();
+            write_stamps(corpus, &built);
         });
         assert!(
             !crate::profile::Pipeline::Books
