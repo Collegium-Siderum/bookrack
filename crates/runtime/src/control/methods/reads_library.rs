@@ -21,11 +21,6 @@ use super::MethodContext;
 use crate::control::error_map::rpc_from_problem;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
-/// Mirror of the MCP-side `READ_CONTEXT_DEFAULT_RADIUS`. The
-/// `library.read_context` tool returns this many leaves on each side
-/// of the anchor when the caller omits `before` / `after`.
-const READ_CONTEXT_DEFAULT_RADIUS: u32 = 3;
-
 #[derive(Debug, Deserialize, Default)]
 pub struct LibraryOnlyParams {
     #[serde(default)]
@@ -369,8 +364,12 @@ pub fn show_toc(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, Rp
 pub fn read_context(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ReadContextParams = parse(params, "library.read_context")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let before = p.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-    let after = p.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+    let before = p
+        .before
+        .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
+    let after = p
+        .after
+        .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
     let target = KindedNodeId {
         kind: p.kind,
         node_id: NodeId::new(p.node_id),

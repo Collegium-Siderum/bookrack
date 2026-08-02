@@ -359,10 +359,6 @@ impl SearchInPaperArgs {
     }
 }
 
-/// Default number of leaves on each side of the anchor when a
-/// `library.read_context` call does not specify a radius.
-pub const READ_CONTEXT_DEFAULT_RADIUS: u32 = 3;
-
 /// Arguments for the `library.read_context` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadContextArgs {
@@ -471,17 +467,12 @@ pub struct SessionInfoResult {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct SessionLogsTailArgs {
     /// Maximum number of log events to return, from the most recent.
-    /// Capped server-side at [`SESSION_LOGS_TAIL_MAX`]. Defaults to
-    /// [`SESSION_LOGS_TAIL_DEFAULT`] when omitted.
+    /// Capped server-side at [`bookrack_obs::stream::TAIL_REQUEST_MAX`];
+    /// defaults to [`bookrack_obs::stream::TAIL_REQUEST_DEFAULT`] when
+    /// omitted.
     #[serde(default)]
     pub n: Option<usize>,
 }
-
-/// Default `n` when [`SessionLogsTailArgs::n`] is omitted.
-pub const SESSION_LOGS_TAIL_DEFAULT: usize = 100;
-
-/// Server-side cap on `n` for `session.logs_tail`.
-pub const SESSION_LOGS_TAIL_MAX: usize = 1024;
 
 /// Response shape returned by `session.logs_tail`: a slice of the
 /// daemon's in-memory log ring buffer, oldest first.
@@ -1188,8 +1179,12 @@ impl BookrackServer {
         Parameters(args): Parameters<ReadContextArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let before = args.before.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
-        let after = args.after.unwrap_or(READ_CONTEXT_DEFAULT_RADIUS);
+        let before = args
+            .before
+            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
+        let after = args
+            .after
+            .unwrap_or(bookrack_query::dto::DEFAULT_CONTEXT_RADIUS);
         let target = KindedNodeId {
             kind: args.kind,
             node_id: NodeId::new(args.node_id),
@@ -1436,8 +1431,8 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let n = args
             .n
-            .unwrap_or(SESSION_LOGS_TAIL_DEFAULT)
-            .min(SESSION_LOGS_TAIL_MAX);
+            .unwrap_or(bookrack_obs::stream::TAIL_REQUEST_DEFAULT)
+            .min(bookrack_obs::stream::TAIL_REQUEST_MAX);
         let events = self.log_stream.tail(n);
         let returned = events.len();
         respond_with(&SessionLogsTailResult { events, returned })

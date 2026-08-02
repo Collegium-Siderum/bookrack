@@ -34,7 +34,7 @@ use eyre::Result;
 /// numeric constant it declares. A crate not on it is exempt, which is
 /// why the list has to grow: the exemption is a rollout step, not a
 /// standing allowance.
-const COVERED: &[&str] = &["query"];
+const COVERED: &[&str] = &["obs", "query"];
 
 /// Constant types the rule applies to.
 ///

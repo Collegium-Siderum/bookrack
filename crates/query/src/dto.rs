@@ -55,6 +55,14 @@ pub const MAX_TOC_NODES: usize = 2000;
 // setting: reads.context_radius_max
 pub const MAX_CONTEXT_RADIUS: u32 = 20;
 
+/// Leaves on either side of the anchor a context-window read returns
+/// when the caller names no radius. Shared by every surface offering
+/// the read — the `library.read_context` tool, the control plane's
+/// method of the same name — so the window a caller gets does not
+/// depend on which one it asked.
+// setting: reads.context_radius_default
+pub const DEFAULT_CONTEXT_RADIUS: u32 = 3;
+
 /// Character budget for the passage text one read response may carry.
 /// A response stops adding passages once the budget is spent; the
 /// caller pages with the returned cursor instead of receiving an
@@ -70,6 +78,9 @@ pub const MAX_SPAN_LEAVES: usize = 2000;
 
 bookrack_core::fixed_settings! {
     owner = "query";
+    "reads.context_radius_default" = DEFAULT_CONTEXT_RADIUS,
+        "leaves on either side of the anchor one context read returns unasked",
+        acts on "library.read_context";
     "reads.context_radius_max" = MAX_CONTEXT_RADIUS,
         "leaves on either side of the anchor one context read may ask for",
         acts on "library.read_context";

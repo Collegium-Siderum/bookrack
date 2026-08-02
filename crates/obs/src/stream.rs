@@ -35,12 +35,44 @@ use tracing_subscriber::layer::Context;
 /// scenarios (REPL builtin, SSE clients) where every consumer keeps
 /// up; lagging subscribers get a `Lagged` error and resume from the
 /// next event rather than blocking the producer.
+// setting: logs.broadcast_capacity
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 512;
 
 /// Default capacity of the ring buffer backing [`LogStreamHandle::tail`].
 /// 2048 events covers the most recent minutes of a busy ingest run
 /// without unbounded memory growth.
+// setting: logs.tail_capacity
 pub const DEFAULT_TAIL_CAPACITY: usize = 2048;
+
+/// Events [`LogStreamHandle::tail`] returns when the caller names no
+/// count. Shared by every surface that exposes the tail — the control
+/// plane's `logs.tail`, the `session.logs_tail` tool — so the number a
+/// caller gets does not depend on which one it asked.
+// setting: logs.tail_request_default
+pub const TAIL_REQUEST_DEFAULT: usize = 100;
+
+/// Ceiling on the count a tail caller may ask for, applied before the
+/// ring is read. Below [`DEFAULT_TAIL_CAPACITY`] on purpose: a request
+/// that could name the whole ring would return a slice whose length
+/// depended on how recently the daemon started.
+// setting: logs.tail_request_max
+pub const TAIL_REQUEST_MAX: usize = 1024;
+
+bookrack_core::fixed_settings! {
+    owner = "obs";
+    "logs.broadcast_capacity" = DEFAULT_BROADCAST_CAPACITY,
+        "events a live subscriber may fall behind by before it is told it lagged",
+        acts on "the SSE log endpoint and every event-stream subscriber";
+    "logs.tail_capacity" = DEFAULT_TAIL_CAPACITY,
+        "events the daemon keeps in memory for the tail to read",
+        acts on "logs.tail, session.logs_tail";
+    "logs.tail_request_default" = TAIL_REQUEST_DEFAULT,
+        "events one tail call returns when the caller names no count",
+        acts on "logs.tail, session.logs_tail";
+    "logs.tail_request_max" = TAIL_REQUEST_MAX,
+        "events one tail call may ask for at most",
+        acts on "logs.tail, session.logs_tail";
+}
 
 /// A single `tracing` event captured by [`BroadcastLayer`].
 ///

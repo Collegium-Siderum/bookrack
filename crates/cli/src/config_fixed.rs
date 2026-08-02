@@ -31,7 +31,10 @@ use crate::render::table::RowTable;
 /// crate absent from this list contributes nothing, and the gate reads
 /// the same list so a registration that no surface collects fails
 /// rather than going quiet.
-pub const REGISTRIES: &[&[FixedSetting]] = &[bookrack_query::dto::FIXED_SETTINGS];
+pub const REGISTRIES: &[&[FixedSetting]] = &[
+    bookrack_obs::stream::FIXED_SETTINGS,
+    bookrack_query::dto::FIXED_SETTINGS,
+];
 
 /// One value as the JSON form carries it.
 ///

@@ -27,8 +27,15 @@ release workflow extracts the matching section verbatim from this file.
   is not a setting, and the markers and registrations are compared in
   both directions. A row renders the constant itself rather than a copy
   of it, and one key can be claimed by only one crate, so the same
-  value given two homes is a build failure. `bookrack-query`'s six read
-  caps are the first crate listed.
+  value given two homes is a build failure. The read caps and the log
+  ring's bounds are the first crates listed.
+
+  Two values the read surfaces had been holding twice now have one
+  home each: the context-window radius a `library.read_context` call
+  gets when it names none, and the count and ceiling a log tail
+  applies. Each was written once for the MCP tool and once for the
+  control-plane method of the same name, at the same value, with
+  nothing holding the two together.
 
 - **cli: `bookrack config knobs` lists every knob this build has.**
   The inventory beside `config effective`'s report: for each knob, the
