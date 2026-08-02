@@ -26,8 +26,14 @@ use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
-use eyre::{Context, ContextCompat, Result};
+use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
+
+use crate::cmd::input_error::CmdInputError;
+
+/// What produces the layer `remove` needs before it can resolve
+/// anything. Shared by the plan leg's guard and its wording.
+const INGEST_FIRST: &str = "Ingest a book into this library first.";
 
 /// Inputs `Cli` collects for a `bookrack remove` invocation.
 pub struct RemoveArgs {
@@ -53,6 +59,16 @@ pub struct RemoveArgs {
 pub async fn plan_remove(cfg: &Config, args: &RemoveArgs) -> Result<RemovePlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
         eyre::bail!("pass an intake id (positional) or --sha <hex>");
+    }
+    // Only the absent file is caller input: a library nobody has
+    // ingested into has no intake to name. Every other way the open
+    // can fail is a fault and keeps its own reporting.
+    if !cfg.catalog_db().exists() {
+        return Err(CmdInputError::NotIngested {
+            what: "catalog",
+            hint: INGEST_FIRST,
+        }
+        .into());
     }
     let catalog = Catalog::open_read_only(&cfg.catalog_db()).context("open catalog")?;
     let intake = resolve_intake(&catalog, args)?;
@@ -133,19 +149,23 @@ pub async fn execute_remove_from_plan(
     let intake = catalog
         .intake_by_id(intake_id)
         .context("look up intake")?
-        .with_context(|| {
-            format!("plan referenced intake {intake_id}, which no longer exists in the catalog")
+        .ok_or_else(|| CmdInputError::TargetDrifted {
+            intake_id,
+            detail: "The intake the plan was minted against is no longer in the catalog."
+                .to_string(),
         })?;
 
     if let ExpectedFingerprint::Required(expected) = expected_fingerprint {
         let current = derive_remove_plan(cfg, &catalog, intake.clone()).await?;
         let actual = current.fingerprint();
         if actual != expected {
-            eyre::bail!(
-                "remove plan stale: target state for intake {intake_id} drifted since dry-run \
-                 (expected fingerprint {expected}, current {actual}). Re-run dry_run=true and \
-                 confirm again."
-            );
+            return Err(CmdInputError::TargetDrifted {
+                intake_id,
+                detail: format!(
+                    "The dry-run pinned fingerprint {expected}; the target now hashes to {actual}."
+                ),
+            }
+            .into());
         }
     }
 
@@ -275,13 +295,18 @@ fn resolve_intake(catalog: &Catalog, args: &RemoveArgs) -> Result<Intake> {
         catalog
             .intake_by_id(id)
             .context("look up intake")?
-            .with_context(|| format!("no intake registered for book {id}"))
+            .ok_or_else(|| CmdInputError::UnknownIntake { intake_id: id }.into())
     } else {
         let sha = args.sha.as_deref().expect("checked by run()");
         catalog
             .intake_by_sha(sha)
             .context("look up intake by sha")?
-            .with_context(|| format!("no intake registered for source_sha256 {sha}"))
+            .ok_or_else(|| {
+                CmdInputError::UnknownSha {
+                    sha: sha.to_string(),
+                }
+                .into()
+            })
     }
 }
 
@@ -327,7 +352,7 @@ fn read_corpus_node_count(cfg: &Config, book_root_id: NodeId) -> Result<u64> {
 mod tests {
     use super::*;
     use bookrack_catalog::NewIntake;
-    use bookrack_core::{ItemKind, NodeType};
+    use bookrack_core::{Explain, ItemKind, NodeType};
     use bookrack_corpus::NewNode;
 
     /// Seed a minimal book directly through the library APIs the
@@ -704,7 +729,69 @@ mod tests {
         )
         .await
         .expect_err("unknown id must error");
-        assert!(format!("{err:#}").contains("no intake registered"));
+        // The type is what the control plane classifies on; the string
+        // is only what the operator reads. Asserting the message alone
+        // would stay green if a later `wrap_err` stripped the type and
+        // the refusal reached the wire as a fault again.
+        assert!(
+            matches!(
+                err.root_cause().downcast_ref::<CmdInputError>(),
+                Some(CmdInputError::UnknownIntake { intake_id: 999 })
+            ),
+            "unknown id must reach the caller as caller input: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_on_a_library_with_no_catalog_reports_the_missing_layer() {
+        let (_tmp, cfg) = temp_cfg();
+        let err = plan_remove(
+            &cfg,
+            &RemoveArgs {
+                intake_id: Some(1),
+                sha: None,
+                dry_run: true,
+                yes: true,
+            },
+        )
+        .await
+        .expect_err("a data root with no catalog cannot resolve an intake");
+        assert!(
+            matches!(
+                err.root_cause().downcast_ref::<CmdInputError>(),
+                Some(CmdInputError::NotIngested {
+                    what: "catalog",
+                    ..
+                })
+            ),
+            "an un-ingested library is caller input, not a fault: {err:#}"
+        );
+    }
+
+    /// The guard above tests `!exists()` and nothing else. A catalog
+    /// that is on disk but cannot be opened is a fault, and must stay
+    /// one — without this, widening the guard to `open(..).is_err()`
+    /// would turn a real IO failure into "go ingest a book".
+    #[tokio::test]
+    async fn a_catalog_that_exists_but_will_not_open_stays_a_fault() {
+        let (_tmp, cfg) = temp_cfg();
+        std::fs::write(cfg.catalog_db(), b"not a database at all").expect("seed junk");
+
+        let err = plan_remove(
+            &cfg,
+            &RemoveArgs {
+                intake_id: Some(1),
+                sha: None,
+                dry_run: true,
+                yes: true,
+            },
+        )
+        .await
+        .expect_err("an unreadable catalog must error");
+        assert!(
+            err.root_cause().downcast_ref::<CmdInputError>().is_none(),
+            "an unopenable catalog is not caller input: {err:#}"
+        );
     }
 
     #[tokio::test]
@@ -763,10 +850,17 @@ mod tests {
         let err = execute_remove_from_plan(&cfg, intake_id, ExpectedFingerprint::Required(&pinned))
             .await
             .expect_err("drift must be rejected");
-        let msg = format!("{err:#}");
+        let drifted = err.root_cause().downcast_ref::<CmdInputError>();
         assert!(
-            msg.contains("plan stale") && msg.contains(&pinned),
-            "expected drift bail, got: {msg}",
+            matches!(drifted, Some(CmdInputError::TargetDrifted { .. })),
+            "expected a typed drift refusal, got: {err:#}",
+        );
+        assert!(
+            drifted
+                .map(|e| e.explain())
+                .and_then(|p| p.data.detail)
+                .is_some_and(|d| d.contains(&pinned)),
+            "the fingerprint the operator confirmed is the evidence: {err:#}",
         );
         // Without the guard, the same call proceeds to clean up the
         // remaining intake row idempotently.

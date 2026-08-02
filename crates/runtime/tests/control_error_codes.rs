@@ -16,8 +16,12 @@
 
 mod common;
 
+use std::path::Path;
+
+use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_core::ItemKind;
 use eyre::{Result, eyre};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::common::{Reader, Writer};
 use crate::common::{build_opts, connect, join_with_deadline, recv, send};
@@ -26,6 +30,10 @@ use bookrack_test_support::{ProcessEnv, process_env};
 const INVALID_PARAMS: i64 = -32602;
 const INVALID_LIBRARY: i64 = -32010;
 const CONFIRMATION_REQUIRED: i64 = -32012;
+const PLAN_TARGET_DRIFTED: i64 = -32016;
+
+/// An id no intake in these fixtures can carry.
+const PHANTOM: i64 = 999_999;
 
 async fn rpc_code(
     writer: &mut Writer,
@@ -47,6 +55,39 @@ async fn rpc_code(
         .ok_or_else(|| eyre!("expected error payload, got {resp}"))?;
     let message = resp["error"]["message"].as_str().unwrap_or("").to_string();
     Ok((code, message))
+}
+
+/// Issue one request and return the whole response frame.
+async fn call(
+    writer: &mut Writer,
+    reader: &mut Reader,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let frame = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    send(writer, &frame.to_string()).await?;
+    recv(reader).await
+}
+
+/// Register one intake straight through the catalog API. Used to give
+/// a fixture a catalog that exists and holds a known id, which is what
+/// separates "this library has nothing in it" from "that id is not one
+/// of the ids it has".
+fn seed_intake(catalog_db: &Path, kind: ItemKind, sha: &str) -> Result<i64> {
+    let mut catalog = Catalog::open(catalog_db)?;
+    Ok(catalog
+        .register_intake(kind, &NewIntake::new(sha).format("epub"))?
+        .into_intake()
+        .intake_id)
+}
+
+/// Take the `plan_id` out of a dry-run response.
+fn plan_id(resp: &Value) -> Result<String> {
+    resp["result"]["plan_id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| eyre!("dry-run did not register a plan: {resp}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -243,6 +284,302 @@ async fn write_handlers_surface_invalid_params_not_internal() -> Result<()> {
             msg.contains("copy_mode"),
             "the refusal must name the offending knob: {msg}"
         );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// `remove` against a library that has never been ingested into. The
+/// fixture is exclusive on purpose: every other write RPC in this
+/// suite reaches a read-write catalog open on its way through ops and
+/// creates `catalog.db`, after which the absent-catalog leg can no
+/// longer be reached. The remove dry-run has to be the first write
+/// this data root sees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_on_a_library_with_no_catalog_is_caller_input() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "remove"), (2, "papers.remove")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": 1, "dry_run": true, "yes": true}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} on a library with no catalog: {resp}"
+            );
+            // The code alone cannot tell this leg from the unknown-id
+            // leg — they share it. Naming the missing layer is what
+            // proves the operator is being told to ingest something
+            // rather than to correct the id.
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("catalog"),
+                "{method} must name the layer the library is missing: {resp}"
+            );
+            let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+            assert!(
+                !hint.is_empty(),
+                "{method} must say what would give the library a catalog: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// Both remove surfaces, both selectors: a catalog that exists but
+/// holds no such intake is caller input, not a handler fault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_refuses_a_selector_the_catalog_cannot_resolve() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    // Both catalogs exist and hold one intake each, so a refusal below
+    // can only be about the selector.
+    let book_id = seed_intake(
+        &data_root.path().join("catalog.db"),
+        ItemKind::Book,
+        "sha-book",
+    )?;
+    let paper_id = seed_intake(
+        &data_root.path().join("papers_catalog.db"),
+        ItemKind::Paper,
+        "sha-paper",
+    )?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        for (id, method) in [(1, "remove"), (2, "papers.remove")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": PHANTOM, "dry_run": true, "yes": true}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} unknown intake id: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("999999"),
+                "{method} must name the id it could not resolve: {resp}"
+            );
+        }
+
+        for (id, method) in [(3, "remove"), (4, "papers.remove")] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"sha": "no-such-sha", "dry_run": true, "yes": true}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} unknown sha: {resp}"
+            );
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("no-such-sha"),
+                "{method} must name the hash it could not resolve: {resp}"
+            );
+        }
+
+        // Positive control: the seeded ids still plan. Without it, a
+        // guard that refused every selector would satisfy everything
+        // above.
+        for (id, method, intake_id) in [(5, "remove", book_id), (6, "papers.remove", paper_id)] {
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": intake_id, "dry_run": true, "yes": true}),
+            )
+            .await?;
+            assert!(
+                resp["error"].is_null(),
+                "{method} must still plan a real intake: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// The two drift legs of the execute step. They are two independent
+/// pieces of code — the intake is gone, and the intake is there but
+/// its state moved — so each is pinned on its own; one assertion
+/// would leave the other free to regress.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_target_that_moved_since_the_dry_run_is_reported_as_drift() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let catalog_db = data_root.path().join("catalog.db");
+    let vanishing = seed_intake(&catalog_db, ItemKind::Book, "sha-vanishing")?;
+    let moving = seed_intake(&catalog_db, ItemKind::Book, "sha-moving")?;
+    let papers_catalog_db = data_root.path().join("papers_catalog.db");
+    let paper_vanishing = seed_intake(&papers_catalog_db, ItemKind::Paper, "sha-paper-vanishing")?;
+    let paper_moving = seed_intake(&papers_catalog_db, ItemKind::Paper, "sha-paper-moving")?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let cases = [
+            (
+                "remove",
+                catalog_db.clone(),
+                ItemKind::Book,
+                vanishing,
+                moving,
+            ),
+            (
+                "papers.remove",
+                papers_catalog_db.clone(),
+                ItemKind::Paper,
+                paper_vanishing,
+                paper_moving,
+            ),
+        ];
+        let mut id = 1;
+        for (method, db, kind, vanishing, moving) in cases {
+            // Leg one: the intake the plan pinned is deleted between
+            // the two RPCs, so the execute leg cannot resolve it.
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": vanishing, "dry_run": true, "yes": true}),
+            )
+            .await?;
+            let pinned = plan_id(&resp)?;
+            {
+                let catalog = Catalog::open(&db)?;
+                assert!(catalog.delete_intake(vanishing)?, "{method}: seed removed");
+            }
+            id += 1;
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"plan_id": pinned, "yes": true}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(PLAN_TARGET_DRIFTED),
+                "{method}: the pinned intake vanished: {resp}"
+            );
+
+            // Leg two: the intake is still there, but the state the
+            // operator confirmed is not.
+            id += 1;
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"intake_id": moving, "dry_run": true, "yes": true}),
+            )
+            .await?;
+            let pinned = plan_id(&resp)?;
+            {
+                let catalog = Catalog::open(&db)?;
+                assert!(
+                    catalog.set_stored_path(kind, moving, "/nowhere/envelope.json")?,
+                    "{method}: seed moved"
+                );
+            }
+            id += 1;
+            let resp = call(
+                &mut w,
+                &mut reader,
+                id,
+                method,
+                json!({"plan_id": pinned, "yes": true}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(PLAN_TARGET_DRIFTED),
+                "{method}: the pinned state moved: {resp}"
+            );
+            let detail = resp["error"]["data"]["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.contains("fingerprint"),
+                "{method}: the evidence for a refused delete belongs in detail: {resp}"
+            );
+            id += 1;
+        }
 
         send(
             &mut w,

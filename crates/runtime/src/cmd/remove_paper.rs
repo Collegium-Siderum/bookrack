@@ -20,10 +20,15 @@ use bookrack_config::Config;
 use bookrack_core::{NodeId, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_vectors::ChunkStore;
-use eyre::{Context, ContextCompat, Result};
+use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
+use crate::cmd::input_error::CmdInputError;
 use crate::cmd::remove::ExpectedFingerprint;
+
+/// What produces the layer `papers remove` needs before it can
+/// resolve anything.
+const GLEAN_FIRST: &str = "Glean a paper into this library first.";
 
 /// Inputs `Cli` collects for a `bookrack papers remove` invocation.
 pub struct RemovePaperArgs {
@@ -49,6 +54,14 @@ pub struct RemovePaperArgs {
 pub async fn plan_remove(cfg: &Config, args: &RemovePaperArgs) -> Result<RemovePaperPlan> {
     if args.intake_id.is_none() && args.sha.is_none() {
         eyre::bail!("pass an intake id (positional) or --sha <hex>");
+    }
+    // Only the absent file is caller input; see the book-side peer.
+    if !cfg.papers_catalog_db().exists() {
+        return Err(CmdInputError::NotIngested {
+            what: "papers catalog",
+            hint: GLEAN_FIRST,
+        }
+        .into());
     }
     let catalog =
         Catalog::open_read_only(&cfg.papers_catalog_db()).context("open papers catalog")?;
@@ -130,21 +143,23 @@ pub async fn execute_remove_from_plan(
     let intake = catalog
         .intake_by_id(intake_id)
         .context("look up intake")?
-        .with_context(|| {
-            format!(
-                "plan referenced paper intake {intake_id}, which no longer exists in the catalog"
-            )
+        .ok_or_else(|| CmdInputError::TargetDrifted {
+            intake_id,
+            detail: "The paper intake the plan was minted against is no longer in the catalog."
+                .to_string(),
         })?;
 
     if let ExpectedFingerprint::Required(expected) = expected_fingerprint {
         let current = derive_remove_plan(cfg, &catalog, intake.clone()).await?;
         let actual = current.fingerprint();
         if actual != expected {
-            eyre::bail!(
-                "papers.remove plan stale: target state for paper intake {intake_id} drifted \
-                 since dry-run (expected fingerprint {expected}, current {actual}). Re-run \
-                 dry_run=true and confirm again."
-            );
+            return Err(CmdInputError::TargetDrifted {
+                intake_id,
+                detail: format!(
+                    "The dry-run pinned fingerprint {expected}; the target now hashes to {actual}."
+                ),
+            }
+            .into());
         }
     }
 
@@ -277,13 +292,18 @@ fn resolve_intake(catalog: &Catalog, args: &RemovePaperArgs) -> Result<Intake> {
         catalog
             .intake_by_id(id)
             .context("look up intake")?
-            .with_context(|| format!("no paper intake registered for id {id}"))
+            .ok_or_else(|| CmdInputError::UnknownIntake { intake_id: id }.into())
     } else {
         let sha = args.sha.as_deref().expect("checked by plan_remove");
         catalog
             .intake_by_sha(sha)
             .context("look up intake by sha")?
-            .with_context(|| format!("no paper intake registered for source_sha256 {sha}"))
+            .ok_or_else(|| {
+                CmdInputError::UnknownSha {
+                    sha: sha.to_string(),
+                }
+                .into()
+            })
     }
 }
 
