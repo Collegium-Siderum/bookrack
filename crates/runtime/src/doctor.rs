@@ -33,7 +33,7 @@ use bookrack_config::{
 };
 use bookrack_corpus::IndexStamps;
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
-use bookrack_index_profile::{has_errors, resolve, validate};
+use bookrack_index_profile::{ProfileOrigin, has_errors, resolve, validate};
 use eyre::{Context, Result};
 use serde::Serialize;
 
@@ -874,7 +874,7 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
 fn reference_issue(
     entry_name: &str,
     profile_name: &str,
-    resolved: &Result<Option<(String, u32, bool)>, String>,
+    resolved: &Result<Option<(String, u32, bool, ProfileOrigin)>, String>,
 ) -> Option<String> {
     match resolved {
         Err(reason) => Some(format!(
@@ -883,11 +883,22 @@ fn reference_issue(
         Ok(None) => Some(format!(
             "'{entry_name}' references index profile '{profile_name}', which is not defined"
         )),
-        Ok(Some((_, _, true))) => Some(format!(
-            "'{entry_name}' references index profile '{profile_name}', which has validation errors \
-             (run `bookrack index-profile validate {profile_name}`)"
+        Ok(Some((_, _, true, origin))) => Some(format!(
+            "'{entry_name}' references index profile {}, which has validation errors \
+             (run `bookrack index-profile validate {profile_name}`)",
+            profile_label(profile_name, *origin)
         )),
-        Ok(Some((_, _, false))) => None,
+        Ok(Some((_, _, false, _))) => None,
+    }
+}
+
+/// The profile as a row names it: the reference, qualified by the
+/// definition that answered it. A user file and the built-in it shadows
+/// carry the same name, and the remedy differs by which one is in force.
+fn profile_label(name: &str, origin: ProfileOrigin) -> String {
+    match origin {
+        ProfileOrigin::User => format!("'{name}' (user file)"),
+        ProfileOrigin::BuiltIn => format!("'{name}' (built-in)"),
     }
 }
 
@@ -904,7 +915,7 @@ fn reference_issue(
 /// divergence beside an absent store does not stop it from starting.
 fn stamp_issue(
     entry_name: &str,
-    profile_name: &str,
+    profile_label: &str,
     pipeline: crate::profile::Pipeline,
     target: &IndexStamps,
     built: Result<Option<crate::profile::BuiltStamps>, String>,
@@ -914,7 +925,7 @@ fn stamp_issue(
     match built {
         Err(reason) => Some(format!(
             "the {pipeline} corpus of '{entry_name}' cannot be opened ({reason}); coherence with \
-             index profile '{profile_name}' was not checked"
+             index profile {profile_label} was not checked"
         )),
         Ok(None) => None,
         Ok(Some(built)) if built.is_unstamped() => None,
@@ -930,7 +941,7 @@ fn stamp_issue(
             };
             Some(format!(
                 "the {pipeline} index of '{entry_name}' disagrees with index profile \
-                 '{profile_name}': {}{consequence} (`bookrack index-profile current` compares \
+                 {profile_label}: {}{consequence} (`bookrack index-profile current` compares \
                  every stamp)",
                 summarise_findings(&findings)
             ))
@@ -1050,10 +1061,11 @@ fn push_index_profile_coherence_rows_in(
         let profile_name = profile_name.as_str();
         let resolved = match profile_dir {
             Some(dir) => match resolve(Some(dir), profile_name) {
-                Ok(Some((profile, _source))) => Ok(Some((
+                Ok(Some((profile, source))) => Ok(Some((
                     profile.embed.model.clone(),
                     profile.embed.dim,
                     has_errors(&validate(&profile, false)),
+                    source,
                 ))),
                 Ok(None) => Ok(None),
                 Err(e) => Err(e.to_string()),
@@ -1072,11 +1084,12 @@ fn push_index_profile_coherence_rows_in(
         // against; the arms above already reported the rest. One profile
         // governs both pipelines, and each keeps its own corpus and
         // stamp record, so each is compared on its own.
-        if let Ok(Some((model, dim, false))) = &resolved {
+        if let Ok(Some((model, dim, false, source))) = &resolved {
+            let label = profile_label(profile_name, *source);
             for pipeline in crate::profile::Pipeline::ALL {
                 let note = stamp_issue(
                     &entry.name,
-                    profile_name,
+                    &label,
                     pipeline,
                     &pipeline.target_stamps(model, *dim),
                     crate::profile::built_stamps(&pipeline.corpus_db(&entry.data_dir)),
@@ -1944,6 +1957,41 @@ mod tests {
     }
 
     #[test]
+    fn a_coherence_row_names_the_definition_that_answered() {
+        // A user file and the built-in it shadows carry the same name,
+        // so a row naming the name alone leaves the operator without the
+        // one thing they need to act: which of the two definitions the
+        // library actually runs under.
+        let root = tempfile::tempdir().expect("tempdir");
+        let pipeline = crate::profile::Pipeline::Books;
+        let entry = root_with_built_stamps(root.path(), pipeline, |corpus, profile| {
+            let mut built = pipeline.target_stamps(&profile.embed.model, profile.embed.dim);
+            built.chunk_version += 1;
+            write_stamps(corpus, &built);
+        });
+        let profiles = tempfile::tempdir().expect("tempdir");
+        let name = bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT;
+        std::fs::write(
+            bookrack_index_profile::user_profile_path(profiles.path(), name),
+            bookrack_index_profile::builtin_toml(name).expect("the built-in source"),
+        )
+        .expect("shadow the built-in with a user profile");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("user"), "{note}");
+    }
+
+    #[test]
     fn coherence_covers_the_paper_pipeline() {
         // One profile governs both pipelines and papers carry their own
         // chunking constant, so a paper index built under a different one
@@ -2064,11 +2112,25 @@ mod tests {
         assert!(reference_issue("lib", "p", &Ok(None)).is_some());
         // Failed to load.
         assert!(reference_issue("lib", "p", &Err("boom".to_string())).is_some());
-        // Has validation errors.
-        assert!(reference_issue("lib", "p", &Ok(Some(("m".to_string(), 8, true)))).is_some());
+        // Has validation errors, and the row says which definition to
+        // go and fix.
+        let note = reference_issue(
+            "lib",
+            "p",
+            &Ok(Some(("m".to_string(), 8, true, ProfileOrigin::User))),
+        )
+        .expect("validation errors flagged");
+        assert!(note.contains("user file"), "{note}");
         // A profile that resolved cleanly leaves the stamp comparison to
         // run; the reference itself is not a problem.
-        assert!(reference_issue("lib", "p", &Ok(Some(("m".to_string(), 8, false)))).is_none());
+        assert!(
+            reference_issue(
+                "lib",
+                "p",
+                &Ok(Some(("m".to_string(), 8, false, ProfileOrigin::BuiltIn)))
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -153,6 +153,14 @@ release workflow extracts the matching section verbatim from this file.
   compared, each against its own stamps and its own chunking constant,
   and a row names the pipeline it speaks for.
 
+- **runtime: a `doctor` index-profile warning named the profile without
+  saying which definition answered.** A user file and the built-in it
+  shadows carry the same name, and the row printed the name alone —
+  leaving an operator with validation errors to fix, or a stamp
+  divergence to reconcile, unable to tell which of the two was in force.
+  The resolver already reports it; the row now says `(user file)` or
+  `(built-in)` beside the name.
+
 - **cli: `index-profile current` compared the book pipeline only.** It
   read `corpus.db`, compared its four stamps against the effective
   profile, and reported the answer as the library's — so a paper index
