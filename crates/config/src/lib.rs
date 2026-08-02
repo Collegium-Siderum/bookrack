@@ -90,6 +90,30 @@ pub const RERANKER_MODEL_ENV: &str = "BOOKRACK_RERANKER_MODEL";
 /// spawning a supervised llama-server to probing the named endpoint.
 pub const RERANKER_URL_ENV: &str = "BOOKRACK_RERANKER_URL";
 
+/// `-b`/`-ub` batch sizes the supervised rerank server is launched with.
+///
+/// Rerank (`--pooling rank`) requires each query+document pair to fit
+/// inside one physical batch, and the server rejects a pair larger than
+/// `-ub` outright, failing the whole query. Chunked passages are capped
+/// at 1000 characters (`ChunkParams::default` in the ingest crate),
+/// which tokenizes to ~1300 tokens in the CJK worst case; 2048 covers
+/// that with headroom to spare.
+pub const RERANKER_SERVER_BATCH_SIZE: u32 = 2048;
+
+/// `-c` context size for the supervised rerank server when
+/// `reranker.ctx` is unset.
+///
+/// Left unset, the server opens the model's full training context and
+/// sizes its KV cache to match — gigabytes for a workload that only
+/// ever holds one query+document pair per slot. The server defaults to
+/// four parallel slots, so four pairs at
+/// [`RERANKER_SERVER_BATCH_SIZE`] bound the whole working set.
+///
+/// Lives here rather than beside the supervisor because it is the
+/// backstop layer of the `reranker.ctx` knob: a row that reported no
+/// default would be describing a knob that has one.
+pub const DEFAULT_RERANKER_CTX: u32 = 4 * RERANKER_SERVER_BATCH_SIZE;
+
 /// Environment variable naming the directory database backups are written
 /// to. When unset, a `backup/` directory under the data root is used.
 pub const BACKUP_DIR_ENV: &str = "BOOKRACK_BACKUP_DIR";
@@ -902,8 +926,8 @@ pub struct RootRerankerConfig {
     /// endpoint. Overridden by [`RERANKER_URL_ENV`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// `-c` context size for the supervised server; its own default
-    /// when unset.
+    /// `-c` context size for the supervised server; falls back to
+    /// [`DEFAULT_RERANKER_CTX`] when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ctx: Option<u32>,
     /// `--threads` for the supervised server; its own choice when
@@ -1603,8 +1627,9 @@ impl Default for SearchConfig {
 /// and the `[reranker]` table. `url` decides the backend mode: `Some`
 /// means an operator-run server is probed, `None` means the daemon
 /// supervises its own. `ctx` and `threads` only apply to the
-/// supervised mode; unset, `ctx` falls to the supervisor's
-/// workload-sized default and `threads` to the server's own choice.
+/// supervised mode; `ctx` falls to [`DEFAULT_RERANKER_CTX`] when the
+/// file does not set it, and `threads` stays `None` so the server makes
+/// its own choice.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RerankerConfig {
     /// Operator-run rerank server URL, when one is configured.
@@ -1634,8 +1659,12 @@ impl RerankerConfig {
     /// The struct's fields are read off the rows, so the two cannot
     /// disagree.
     ///
-    /// The three knobs have no compiled-in default: unset is a value
-    /// here, meaning "supervise our own server" rather than "fall back".
+    /// `url` and `threads` have no compiled-in default: unset is a value
+    /// for them, meaning "supervise our own server" and "let the server
+    /// choose". `ctx` does have one — the supervisor sizes the context to
+    /// the rerank working set — so its row reports
+    /// [`DEFAULT_RERANKER_CTX`] rather than leaving three different
+    /// facts looking like one empty cell.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
@@ -1658,7 +1687,19 @@ impl RerankerConfig {
                 )],
             ),
         );
-        let ctx = reranker_file_knob("reranker.ctx", file.ctx);
+        let ctx = resolve_knob(
+            "reranker.ctx",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                Candidate::of(Layer::File, "reranker.ctx", file.ctx.map(|v| v.to_string())),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_RERANKER_CTX.to_string()),
+                ),
+            ],
+        );
         let threads = reranker_file_knob("reranker.threads", file.threads);
 
         let cfg = RerankerConfig {
@@ -1670,8 +1711,8 @@ impl RerankerConfig {
     }
 }
 
-/// One of the reranker knobs the `config.toml` table is the only source
-/// for: no environment variable and no compiled-in default.
+/// The reranker knob the `config.toml` table is the only source for: no
+/// environment variable and no compiled-in default.
 fn reranker_file_knob(key: &str, file: Option<u32>) -> KnobOrigin {
     resolve_knob(
         key,
@@ -1799,24 +1840,36 @@ impl McpConfig {
 
     /// Pure resolution that also reports where the value came from. The
     /// struct's field is read off the row, so the two cannot disagree.
+    ///
+    /// The flag rung offers nothing here and always will: `bookrack run`
+    /// applies `--mcp-addr` itself, over the value this returns, so no
+    /// resolution reachable from this function can see one. It is drawn
+    /// because the row's chain answers where the knob *can* be set, and
+    /// the flag outranks the variable.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
         dotenv: Option<DotenvSupply<'_>>,
     ) -> (McpConfig, Vec<KnobOrigin>) {
+        let mut candidates = vec![Candidate::of(
+            Layer::Flag,
+            "run --mcp-addr (not this invocation)",
+            None,
+        )];
+        candidates.extend(env_over(
+            dotenv,
+            MCP_ADDR_ENV,
+            env_trimmed(get(MCP_ADDR_ENV)),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(DEFAULT_MCP_ADDR.to_string()),
+            )],
+        ));
         let addr = resolve_knob(
             "mcp.addr",
             KnobReach::Process,
             ReadAt::BeforeResolution,
-            env_over(
-                dotenv,
-                MCP_ADDR_ENV,
-                env_trimmed(get(MCP_ADDR_ENV)),
-                vec![Candidate::of(
-                    Layer::Default,
-                    BUILT_IN_SITE,
-                    Some(DEFAULT_MCP_ADDR.to_string()),
-                )],
-            ),
+            candidates,
         );
 
         let cfg = McpConfig {
@@ -1929,6 +1982,13 @@ impl LogConfig {
 /// The `site` a compiled-in default is held at.
 const BUILT_IN_SITE: &str = "built-in";
 
+/// The `site` the backup directory's default is held at.
+///
+/// Named once because the rooted and unrooted forms of the row must
+/// spell it identically: a reader comparing the two has no other way to
+/// tell they describe one knob.
+const BACKUP_DIR_DERIVED_SITE: &str = "beside the data root";
+
 /// This process's dotenv record, in the borrowed form a knob row
 /// consults. Owns no copy: the record lives in the process-wide slot
 /// [`load_dotenv`] filled.
@@ -1956,11 +2016,6 @@ fn env_over(
     lower: Vec<Candidate>,
 ) -> Vec<Candidate> {
     bookrack_core::knob::env_over(dotenv, name, raw, lower)
-}
-
-/// The environment and dotenv layers for one variable.
-fn env_layers(dotenv: Option<DotenvSupply<'_>>, name: &str, raw: Option<String>) -> Vec<Candidate> {
-    bookrack_core::knob::env_layers(dotenv, name, raw)
 }
 
 /// The Ollama endpoint, by precedence `env var > config.toml > default`.
@@ -2017,7 +2072,7 @@ pub(crate) fn backup_dir_knob(
             env_trimmed(env),
             vec![Candidate::of(
                 Layer::Default,
-                "beside the data root",
+                BACKUP_DIR_DERIVED_SITE,
                 Some(data_dir.join("backup").display().to_string()),
             )],
         ),
@@ -2084,8 +2139,12 @@ pub(crate) fn registry_knob(env: Option<String>, dotenv: Option<DotenvSupply<'_>
     )
 }
 
-/// The backup directory with no data root resolved: only the override
-/// can speak, since the lower layer is derived from the root.
+/// The backup directory with no data root resolved: the lower layer is
+/// still named, but has no value to offer.
+///
+/// Only the value is derived from the root; where the knob falls back to
+/// is a fact about the resolver, and dropping the rung would report a
+/// knob that has a default as one that has none.
 pub(crate) fn unrooted_backup_dir_knob(
     env: Option<String>,
     dotenv: Option<DotenvSupply<'_>>,
@@ -2094,7 +2153,12 @@ pub(crate) fn unrooted_backup_dir_knob(
         "backup_dir",
         KnobReach::Machine,
         ReadAt::PerCall,
-        env_layers(dotenv, BACKUP_DIR_ENV, env_trimmed(env)),
+        env_over(
+            dotenv,
+            BACKUP_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(Layer::Default, BACKUP_DIR_DERIVED_SITE, None)],
+        ),
     )
 }
 
@@ -4419,10 +4483,14 @@ mod tests {
 
     #[test]
     fn reranker_config_resolves_env_over_file_and_keeps_knobs_file_only() {
+        // The file's context deliberately differs from
+        // `DEFAULT_RERANKER_CTX`, or the file layer winning and the
+        // default layer winning would produce the same number.
+        let file_ctx = DEFAULT_RERANKER_CTX + 1024;
         let file = RootConfig {
             reranker: Some(RootRerankerConfig {
                 url: Some("http://file:1".to_string()),
-                ctx: Some(8192),
+                ctx: Some(file_ctx),
                 threads: Some(4),
             }),
             ..RootConfig::default()
@@ -4431,7 +4499,7 @@ mod tests {
         // No env: the [reranker] table supplies everything.
         let from_file = RerankerConfig::resolve_from(|_| None, &file);
         assert_eq!(from_file.url.as_deref(), Some("http://file:1"));
-        assert_eq!(from_file.ctx, Some(8192));
+        assert_eq!(from_file.ctx, Some(file_ctx));
         assert_eq!(from_file.threads, Some(4));
 
         // Env set: it wins over the file for the URL; the numeric
@@ -4444,7 +4512,7 @@ mod tests {
             &file,
         );
         assert_eq!(from_env.url.as_deref(), Some("http://env:2"));
-        assert_eq!(from_env.ctx, Some(8192));
+        assert_eq!(from_env.ctx, Some(file_ctx));
 
         // A blank env value falls through to the file layer.
         let blank_env = RerankerConfig::resolve_from(
@@ -4456,9 +4524,18 @@ mod tests {
         );
         assert_eq!(blank_env.url.as_deref(), Some("http://file:1"));
 
-        // Nothing set anywhere: no URL means the supervised mode.
+        // Nothing set anywhere: no URL means the supervised mode, no
+        // thread count means the server chooses, and the context falls
+        // to the compiled-in size of the rerank working set.
         let bare = RerankerConfig::resolve_from(|_| None, &RootConfig::default());
-        assert_eq!(bare, RerankerConfig::default());
+        assert_eq!(
+            bare,
+            RerankerConfig {
+                url: None,
+                ctx: Some(DEFAULT_RERANKER_CTX),
+                threads: None,
+            }
+        );
     }
 
     #[test]

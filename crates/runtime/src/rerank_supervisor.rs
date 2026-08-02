@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use bookrack_config::llama_server_pin::locate_llama_server;
 use bookrack_config::reranker_model_pin::locate_reranker_model;
-use bookrack_config::{Config, RerankerConfig};
+use bookrack_config::{Config, DEFAULT_RERANKER_CTX, RERANKER_SERVER_BATCH_SIZE, RerankerConfig};
 use bookrack_index_profile::RerankerKind;
 use bookrack_rerank::ServerHealth;
 use eyre::{Context, bail, eyre};
@@ -116,33 +116,16 @@ pub struct RerankSupervisorConfig {
 /// Longest delay between restart attempts.
 const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
-/// `-b`/`-ub` batch sizes for the spawned server. Rerank
-/// (`--pooling rank`) requires each query+document pair to fit inside
-/// one physical batch, and the server rejects a pair larger than `-ub`
-/// outright, failing the whole query. Chunked passages are capped at
-/// 1000 characters (`ChunkParams::default` in the ingest crate), which
-/// tokenizes to ~1300 tokens in the CJK worst case; 2048 covers that
-/// with headroom to spare.
-const SERVER_BATCH_SIZE: u32 = 2048;
-
-/// Default `-c` context size for the spawned server, overridable
-/// through `reranker.ctx`. Left unset, the server opens the model's
-/// full training context and sizes its KV cache to match — gigabytes
-/// for a workload that only ever holds one query+document pair per
-/// slot. The server defaults to four parallel slots, so four pairs at
-/// the batch cap bound the whole working set.
-const DEFAULT_SERVER_CTX: u32 = 4 * SERVER_BATCH_SIZE;
-
 impl RerankSupervisorConfig {
     /// Defaults: a 60 s readiness deadline polled every 250 ms (the
     /// 0.6B model loads in seconds; the headroom is for slow disks),
     /// a 5 s TERM grace, restarts backing off from 1 s, and a context
-    /// sized to the rerank working set ([`DEFAULT_SERVER_CTX`]).
+    /// sized to the rerank working set ([`DEFAULT_RERANKER_CTX`]).
     pub fn new(server_bin: impl Into<PathBuf>, model_path: impl Into<PathBuf>) -> Self {
         RerankSupervisorConfig {
             server_bin: server_bin.into(),
             model_path: model_path.into(),
-            ctx: Some(DEFAULT_SERVER_CTX),
+            ctx: Some(DEFAULT_RERANKER_CTX),
             threads: None,
             pid_file: None,
             port: None,
@@ -449,7 +432,7 @@ fn pick_loopback_port() -> std::io::Result<u16> {
 ///
 /// `--embedding --pooling rank` is what the rerank endpoint requires
 /// of the server and is deliberately not configurable. The batch
-/// sizes ([`SERVER_BATCH_SIZE`]) guarantee any query+document pair
+/// sizes ([`RERANKER_SERVER_BATCH_SIZE`]) guarantee any query+document pair
 /// fits one physical batch. `-ngl 99` offloads every layer to the GPU
 /// when the build has one and falls back to CPU cleanly when not.
 /// Slot reuse by prompt similarity is disabled: rerank prompts share
@@ -467,9 +450,9 @@ fn server_args(config: &RerankSupervisorConfig, port: u16) -> Vec<OsString> {
         "--port".into(),
         port.to_string().into(),
         "-ub".into(),
-        SERVER_BATCH_SIZE.to_string().into(),
+        RERANKER_SERVER_BATCH_SIZE.to_string().into(),
         "-b".into(),
-        SERVER_BATCH_SIZE.to_string().into(),
+        RERANKER_SERVER_BATCH_SIZE.to_string().into(),
         "-ngl".into(),
         "99".into(),
         "--slot-prompt-similarity".into(),

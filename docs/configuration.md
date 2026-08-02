@@ -109,7 +109,8 @@ weak_threshold = 0.5    # cosine distance at or above which a hit is
 [reranker]
 url     = "http://localhost:8080"  # probe an operator-run server instead
                                    # of supervising one
-ctx     = 8192          # -c for the supervised server
+ctx     = 8192          # -c for the supervised server; 8192 is also the
+                        # default, sized to the rerank working set
 threads = 4             # --threads; unset leaves the server's own choice
 ```
 

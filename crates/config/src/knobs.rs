@@ -773,6 +773,113 @@ mod tests {
         assert_eq!(entry.site.as_deref(), Some("managed directory"));
     }
 
+    /// The MCP address can be set by `bookrack run --mcp-addr`, which
+    /// outranks the variable, so its row names that flag.
+    ///
+    /// The same shape `runtime_dir` already carries: both are process
+    /// knobs the daemon takes a flag for, and a row that names only the
+    /// variable reports the environment as the top of a ladder that has
+    /// a rung above it.
+    #[test]
+    fn the_mcp_address_row_names_the_flag_that_overrides_it() {
+        let rows = knob_origins_from(|_| None, None, None);
+        let addr = row(&rows, "mcp.addr");
+
+        let flag = addr
+            .chain
+            .iter()
+            .find(|s| s.layer == Layer::Flag)
+            .unwrap_or_else(|| panic!("the mcp.addr row names no flag: {:?}", addr.chain));
+        assert!(
+            flag.site.contains("--mcp-addr"),
+            "the flag rung does not name the flag: {}",
+            flag.site
+        );
+        assert_eq!(
+            addr.chain.first().map(|s| s.layer),
+            Some(Layer::Flag),
+            "the flag outranks the variable, so it heads the chain: {:?}",
+            addr.chain
+        );
+    }
+
+    /// With no data root the backup directory still names the layer
+    /// that backstops it, and names it the same way the rooted form
+    /// does.
+    ///
+    /// Only the *value* needs a root; the site is a fact about the
+    /// resolver. Dropping the rung makes `config knobs` — which never
+    /// has a root — report the knob as having no default at all, and
+    /// makes `config effective` lose it on exactly the machines where
+    /// resolution failed, which is the case that command exists for.
+    #[test]
+    fn the_unrooted_backup_dir_row_names_the_layer_that_backstops_it() {
+        let rows = knob_origins_from(|_| None, None, None);
+        let unrooted = row(&rows, "backup_dir");
+
+        let site = unrooted
+            .chain
+            .iter()
+            .find(|s| s.layer == Layer::Default)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the unrooted backup_dir row names no backstop: {:?}",
+                    unrooted.chain
+                )
+            });
+
+        let rooted = crate::backup_dir_knob(std::path::Path::new("/root"), None, None);
+        let rooted_site = rooted
+            .chain
+            .iter()
+            .find(|s| s.layer == Layer::Default)
+            .expect("the rooted row has a default rung");
+        assert_eq!(
+            site.site, rooted_site.site,
+            "the two shapes name the same layer differently, so a reader \
+             cannot tell they are one knob"
+        );
+        assert_eq!(
+            unrooted.value, None,
+            "the site is knowable without a root; the value is not"
+        );
+    }
+
+    /// The reranker context size has a compiled-in default, and the row
+    /// reports it.
+    ///
+    /// Its two siblings — `reranker.url` and `reranker.threads` — really
+    /// do treat unset as a value, so a row that reported nothing for all
+    /// three made three different facts look like one.
+    #[test]
+    fn the_reranker_context_row_reports_its_compiled_in_default() {
+        let rows = knob_catalog();
+        let ctx = row(&rows, "reranker.ctx");
+
+        assert_eq!(ctx.layer, Layer::Default);
+        assert_eq!(
+            ctx.value.as_deref(),
+            Some(crate::DEFAULT_RERANKER_CTX.to_string().as_str()),
+        );
+    }
+
+    /// The other two reranker knobs stay valueless: unset means
+    /// "supervise our own server" and "let the server choose", not
+    /// "fall back to a number".
+    #[test]
+    fn the_other_reranker_knobs_have_no_compiled_in_default() {
+        let rows = knob_catalog();
+        for key in ["reranker.url", "reranker.threads"] {
+            let knob = row(&rows, key);
+            assert_eq!(knob.value, None, "{key} acquired a default");
+            assert!(
+                !knob.chain.iter().any(|s| s.layer == Layer::Default),
+                "{key} acquired a default rung: {:?}",
+                knob.chain
+            );
+        }
+    }
+
     /// A blank environment value is unset, not a losing offer: it must
     /// neither win nor appear as shadowed.
     #[test]
