@@ -11,7 +11,7 @@
 
 use bookrack_config::{Config, LibrarySelection};
 use bookrack_core::Problem;
-use bookrack_core::knob::{KnobOrigin, KnobReach};
+use bookrack_core::knob::{DotenvSupply, KnobOrigin, KnobReach};
 use eyre::Result;
 use serde::Serialize;
 
@@ -120,6 +120,45 @@ fn resolution_problem(err: &bookrack_config::ConfigError) -> Problem {
     )
 }
 
+/// One crate that reports knobs, as the pair of entry points it offers.
+///
+/// The two are kept together so adding a crate is a single edit: a
+/// contributor reachable from the report but not the inventory would
+/// make `config knobs` quietly narrower than `config effective`, which
+/// is the drift the pair exists to prevent.
+pub struct Contributor {
+    /// What this crate resolves on this machine, given the dotenv
+    /// record of the running process.
+    pub report: fn(Option<DotenvSupply<'_>>) -> Vec<KnobOrigin>,
+    /// What this crate would resolve with nothing set anywhere.
+    pub catalog: fn() -> Vec<KnobOrigin>,
+}
+
+/// Every crate that reports knobs.
+///
+/// `bookrack-config` is absent by design: its report needs the resolved
+/// [`Config`] that no other contributor takes, so it is called directly
+/// by each surface. `every_knob_reporting_crate_is_a_contributor` holds
+/// the rest of the workspace to this list.
+pub const CONTRIBUTORS: &[Contributor] = &[
+    Contributor {
+        report: bookrack_search::knob_origins,
+        catalog: bookrack_search::knob_catalog,
+    },
+    Contributor {
+        report: bookrack_session::knob_origins,
+        catalog: bookrack_session::knob_catalog,
+    },
+    Contributor {
+        report: bookrack_extract::pdfium_gate::knob_origins,
+        catalog: bookrack_extract::pdfium_gate::knob_catalog,
+    },
+    Contributor {
+        report: crate::render::confirm::knob_origins,
+        catalog: crate::render::confirm::knob_catalog,
+    },
+];
+
 /// Every knob every crate resolves, in one list.
 ///
 /// Each crate reports its own, because each is where the priority
@@ -130,10 +169,9 @@ fn collect_rows(cfg: Option<&Config>) -> Vec<KnobOrigin> {
     let dotenv = bookrack_config::dotenv_load().map(|load| load.supply());
 
     let mut rows = bookrack_config::knob_origins(cfg);
-    rows.extend(bookrack_search::knob_origins(dotenv));
-    rows.extend(bookrack_session::knob_origins(dotenv));
-    rows.extend(bookrack_extract::pdfium_gate::knob_origins(dotenv));
-    rows.extend(crate::render::confirm::knob_origins(dotenv));
+    for contributor in CONTRIBUTORS {
+        rows.extend((contributor.report)(dotenv));
+    }
     rows
 }
 

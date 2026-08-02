@@ -5,6 +5,7 @@
 //! daemon-side primitives now live in `bookrack-runtime`.
 
 pub mod config_effective;
+pub mod config_knobs;
 pub mod distill_cmd;
 pub mod error;
 pub mod libraries_local;

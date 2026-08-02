@@ -475,6 +475,20 @@ pub(crate) enum ConfigAction {
         "config effective --library demo --json",
     ])]
     Effective,
+
+    /// List every knob this build has, with where each can be set.
+    ///
+    /// The inventory beside `config effective`'s report: the same knobs
+    /// from the same resolvers, asked what they would be with nothing
+    /// set anywhere. It reads no data root, no daemon, and no `.env`,
+    /// so the answer is a property of the binary rather than of this
+    /// machine — which is what makes it the list to check a `.env`
+    /// against, or to hand someone asking what can be configured.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "config knobs",
+        "config knobs --json",
+    ])]
+    Knobs,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1104,6 +1118,7 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::Config { action } => match action {
             ConfigAction::Effective => bookrack_cli::config_effective::run(&selection),
+            ConfigAction::Knobs => bookrack_cli::config_knobs::run(),
         },
         Command::AuditProfile { action } => bookrack_runtime::cmd::audit_profile::run(action),
         Command::IndexProfile { mut action } => {
@@ -2262,7 +2277,7 @@ mod tests {
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
         ("bookrack", 27),
         ("bookrack audit-profile", 3),
-        ("bookrack config", 1),
+        ("bookrack config", 2),
         ("bookrack corpus", 1),
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
