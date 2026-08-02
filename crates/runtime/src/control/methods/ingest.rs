@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::MethodContext;
+use super::{MethodContext, input_err};
+use crate::audit_helpers::require_known_profile;
 use crate::control::events::Event;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::queue::{self, Priority};
@@ -49,10 +50,12 @@ pub struct IngestSubmitParams {
     /// audit remains advisory.
     #[serde(default)]
     hold_for_metadata: bool,
-    /// Optional book-side audit profile name. When set, every enqueued
-    /// job carries this override and the worker reloads the named
-    /// built-in (`default` / `trust-source` / `strict`) before running
-    /// the ingest. When unset, the daemon's startup profile applies.
+    /// Optional book-side audit profile name. When unset, the
+    /// daemon's startup profile applies. When it names a built-in
+    /// (`default` / `trust-source` / `strict`), every enqueued job
+    /// carries the override and the worker reloads it before running
+    /// the ingest. Any other name is refused as invalid params, before
+    /// a job is queued.
     #[serde(default)]
     audit_profile: Option<String>,
 }
@@ -92,6 +95,11 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     if parsed.paths.is_empty() {
         return Err(RpcError::new(INVALID_PARAMS, "paths: must be non-empty"));
     }
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let library = parsed.library.unwrap_or_else(|| ctx.library_name.clone());
     let priority = parsed
         .priority

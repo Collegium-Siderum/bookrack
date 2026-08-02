@@ -350,10 +350,12 @@ the exit-code bucket does not distinguish the two.
   When `hold_for_metadata` is `true`, the worker parks every book
   whose audit verdict is `needs_work` at STRUCTURE, skipping CHUNK
   and EMBED until a curator drives it past the metadata gate.
-  `audit_profile`, when set, rides on every enqueued job and the
-  worker reloads the named built-in (`default` / `trust-source` /
-  `strict`) before running the ingest; absent, the daemon's startup
-  profile applies.
+  `audit_profile` resolves in three ways: absent, the daemon's startup
+  profile applies; set to a built-in (`default` / `trust-source` /
+  `strict`), that name rides on every enqueued job and the worker
+  reloads it before running the ingest; set to anything else, the call
+  is refused with `-32602 invalid params` before a job is queued, and
+  the error's `detail` lists the accepted names.
 - `ingest.cancel` — `{ job_id }` → `{ ok: true }`. Marks the matching
   pending or running job as cancelled.
 - `intake.ocr` — `{ ocr_md, from_pdf, expected_pages?, allow_partial?,
@@ -366,8 +368,10 @@ the exit-code bucket does not distinguish the two.
   `expected_pages` overrides the page-count gate the OCR ingest
   derives from the source PDF; `allow_partial = true` accepts an OCR
   product that does not cover every page. `audit_profile` overrides
-  the worker's book-side audit profile for this job; same semantics as
-  `ingest.submit`. The persistent queue schema is `v6`.
+  the worker's book-side audit profile for this job, with the same
+  three-way resolution as `ingest.submit` — including the `-32602` on
+  a name outside the built-in set. The persistent queue schema is
+  `v6`.
 - `glean.submit` — `{ paths, library?, priority?, force? }` →
   `{ job_ids: [<uuid v7>] }`. The paper-pipeline peer of
   `ingest.submit`: appends one glean job per path to the same
@@ -379,7 +383,8 @@ the exit-code bucket does not distinguish the two.
   `bookrack metadata` REPL subcommands; return `{ ok: true }` on
   success. `metadata.reaudit` and `metadata.advance` additionally
   accept `audit_profile?`, which routes through the same built-in set
-  as `ingest.submit` for the re-audit they trigger. The other writes
+  as `ingest.submit` for the re-audit they trigger, and is refused
+  with `-32602` when it names nothing in that set. The other writes
   in this family do not call the audit and reject the field at the
   CLI white-list; the daemon-side helper passes `None` for them.
   `metadata.advance` resumes CHUNK→EMBED for a book held
@@ -427,7 +432,10 @@ the exit-code bucket does not distinguish the two.
   `node_publication_attrs`. The named profile (`default` /
   `trust-source` / `strict`) takes precedence; absent it, the
   `<data_root>/audit-rules/paper_audit_profile.local.toml` overlay
-  applies on top of the shipped default.
+  applies on top of the shipped default. A name outside the set is
+  refused with `-32602`. The paper side keeps its own built-in set:
+  it holds the same three names as the book side today, but the two
+  are checked separately and are free to diverge.
 - `papers.metadata.set` — `{ intake_id, field, value, confirmed?,
   library? }`. Writes an override on one paper field. `field` must
   belong to the editable set
@@ -469,9 +477,10 @@ the exit-code bucket does not distinguish the two.
   `papers.remove`.
 - `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile? }`.
   Writes the JSONL plus a summary sidecar under `<data_root>/dryruns/`.
-  `audit_profile`, when set, resolves through the shared built-in set
-  for this dryrun only; absent means the daemon's overlay-resolved
-  default profile.
+  `audit_profile`, when set to a built-in, resolves through the shared
+  set for this dryrun only; absent means the daemon's overlay-resolved
+  default profile; any other name is refused with `-32602` before the
+  write session is taken.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.

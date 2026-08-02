@@ -11,7 +11,8 @@ use serde_json::Value;
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, input_err, run_write};
+use crate::audit_helpers::require_known_profile;
 use crate::cmd::dryrun;
 use crate::control::error_map::write_err;
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -27,9 +28,10 @@ pub struct DryrunParams {
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
-    /// Optional book-side audit profile name. Resolves through the
-    /// shared built-in set (`default` / `trust-source` / `strict`);
-    /// absent means the daemon's overlay-resolved default profile.
+    /// Optional book-side audit profile name. Absent means the
+    /// daemon's overlay-resolved default profile; a name in the shared
+    /// built-in set (`default` / `trust-source` / `strict`) selects
+    /// that built-in; any other name is refused as invalid params.
     #[serde(default)]
     #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
@@ -41,6 +43,15 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
             .map_err(|e| RpcError::new(INVALID_PARAMS, format!("invalid dryrun params: {e}")))?,
         _ => return Err(RpcError::new(INVALID_PARAMS, "missing dryrun params")),
     };
+    // Ahead of `run_write`: a misspelt profile name should not first
+    // take the write session and then fail, leaving a concurrent
+    // caller to collide with `-32001` over a request that was never
+    // going to run.
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         let outcome = tokio::task::spawn_blocking(move || {

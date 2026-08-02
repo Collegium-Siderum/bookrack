@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::{MethodContext, run_write};
+use super::{MethodContext, input_err, run_write};
+use crate::audit_helpers::require_known_profile;
 use crate::cmd::metadata::{WriteMetadataAction, run_write as run_metadata};
 use crate::control::error_map::write_err;
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
@@ -56,8 +57,9 @@ pub struct MetadataVoidParams {
 pub struct MetadataReauditParams {
     book: i64,
     /// Optional book-side audit profile name. Resolves through the
-    /// shared built-in set; absent means the daemon's overlay-resolved
-    /// default profile.
+    /// shared built-in set, and is refused as invalid params on a name
+    /// outside it; absent means the daemon's overlay-resolved default
+    /// profile.
     #[serde(default)]
     #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
@@ -118,8 +120,9 @@ pub struct MetadataAdvanceParams {
     book: i64,
     /// Optional book-side audit profile name. Used when `advance`
     /// triggers a re-audit on the way out of the metadata gate;
-    /// resolves through the shared built-in set, absent means the
-    /// daemon's overlay-resolved default profile.
+    /// resolves through the shared built-in set and is refused as
+    /// invalid params on a name outside it, absent means the daemon's
+    /// overlay-resolved default profile.
     #[serde(default)]
     #[cfg_attr(test, ts(type = "string | null"))]
     audit_profile: Option<String>,
@@ -159,6 +162,11 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
 
 pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataReauditParams = parse(params, "metadata.reaudit")?;
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Reaudit { book: parsed.book };
     run_metadata_action(ctx, action, profile).await
@@ -221,6 +229,11 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 
 pub async fn advance(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: MetadataAdvanceParams = parse(params, "metadata.advance")?;
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let profile = parsed.audit_profile;
     let action = WriteMetadataAction::Advance { book: parsed.book };
     run_metadata_action(ctx, action, profile).await

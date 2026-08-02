@@ -176,3 +176,138 @@ async fn a_write_is_refused_while_another_holds_the_write_mutex() -> Result<()> 
 
     join_with_deadline(runtime, repl_handle, driver).await
 }
+
+/// An `audit_profile` naming no built-in used to fall through to the
+/// overlay path: the method ran to completion under a different
+/// profile and reported success, so a caller that asked for `strict`
+/// silently got the overlay default. Every entry point that accepts
+/// the parameter now refuses the name instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unknown_audit_profile_is_refused_at_every_entry_point() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let scan_dir = tempfile::tempdir()?;
+    let ocr_md = scan_dir.path().join("x.md");
+    let from_pdf = scan_dir.path().join("x.pdf");
+    std::fs::write(&ocr_md, "# x\n")?;
+    std::fs::write(&from_pdf, "%PDF-1.4\n")?;
+    // The positive control runs a real dryrun, so it is pointed at an
+    // empty directory: the handler refuses it for having nothing to
+    // scan, which is the proof the profile name was accepted.
+    let empty_dir = tempfile::tempdir()?;
+    // The queue worker must be up: the queue-bound gate answers
+    // `-32002` ahead of every handler in headless mode, and would mask
+    // what this test is asserting.
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+    let scan_path = scan_dir.path().to_path_buf();
+    let empty_path = empty_dir.path().to_path_buf();
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        // The six entry points that accept `audit_profile`. Each is
+        // given otherwise-valid params, so a refusal can only come
+        // from the profile name.
+        let cases: Vec<(&str, Value)> = vec![
+            (
+                "dryrun",
+                serde_json::json!({"path": scan_path, "audit_profile": "strictt"}),
+            ),
+            (
+                "ingest.submit",
+                serde_json::json!({"paths": [scan_path], "audit_profile": "strictt"}),
+            ),
+            (
+                "intake.ocr",
+                serde_json::json!({
+                    "ocr_md": ocr_md,
+                    "from_pdf": from_pdf,
+                    "audit_profile": "strictt",
+                }),
+            ),
+            (
+                "metadata.reaudit",
+                serde_json::json!({"book": 1, "audit_profile": "strictt"}),
+            ),
+            (
+                "metadata.advance",
+                serde_json::json!({"book": 1, "audit_profile": "strictt"}),
+            ),
+            (
+                "papers.metadata.reaudit",
+                serde_json::json!({"intake_id": 1, "audit_profile": "strictt"}),
+            ),
+        ];
+
+        for (id, (method, params)) in cases.into_iter().enumerate() {
+            let req = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id + 1,
+                "method": method,
+                "params": params,
+            });
+            send(&mut w, &serde_json::to_string(&req)?).await?;
+            let resp = recv(&mut reader).await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(-32602),
+                "{method} must refuse an unknown audit_profile: {resp}"
+            );
+            // The code alone does not discriminate here: four of these
+            // six answer `-32602` anyway, because book / intake `1`
+            // does not exist either. Quoting the rejected name is what
+            // proves the profile guard is the leg that ran. Do not
+            // weaken this to the code check.
+            let message = resp["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("strictt"),
+                "{method} must quote the name it refused: {resp}"
+            );
+            // Without the accepted set the operator learns only that
+            // something was wrong, not what to send instead — which is
+            // the half of this defect the error code alone leaves open.
+            let detail = resp["error"]["data"]["detail"].as_str().unwrap_or_default();
+            for name in ["default", "trust-source", "strict"] {
+                assert!(
+                    detail.contains(name),
+                    "{method} must offer the accepted set: {resp}"
+                );
+            }
+        }
+
+        // Positive control: a real built-in still resolves. Without
+        // this, a guard that refused every name would pass everything
+        // above.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "dryrun",
+            "params": {"path": empty_path, "audit_profile": "strict"},
+        });
+        send(&mut w, &serde_json::to_string(&req)?).await?;
+        let resp = recv(&mut reader).await?;
+        assert_ne!(
+            resp["error"]["code"].as_i64(),
+            Some(-32602),
+            "a built-in profile name must reach the handler body: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}

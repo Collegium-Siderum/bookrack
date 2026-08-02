@@ -76,3 +76,59 @@ async fn library_info_round_trips_through_running_daemon() {
         "SIGTERM must produce a clean exit: status={status:?} stderr={stderr}",
     );
 }
+
+/// An `--audit-profile` naming no built-in used to run the command to
+/// completion under a different profile and exit `0`. It is now
+/// caller input, which the exit-code table puts at `2`.
+///
+/// The exit code alone is a weak signal here — several unrelated
+/// failures also exit `2` — so the assertion that discriminates is
+/// stderr naming the profile that was refused.
+#[tokio::test]
+async fn an_unknown_audit_profile_exits_two_from_the_cli() {
+    let sandbox = Sandbox::new();
+    let lock_path = sandbox.tty_lock_path();
+    // An empty directory: with the name accepted, `dryrun` fails for
+    // having nothing to scan, which is a different exit code from the
+    // refusal under test.
+    let scan_dir = sandbox.path().join("empty-scan");
+    std::fs::create_dir_all(&scan_dir).expect("create scan dir");
+
+    let mut daemon_cmd =
+        Command::from(bookrack_cmd!(&sandbox).ollama_url(EmbedStub::url()).build());
+    daemon_cmd.arg("run");
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
+
+    assert!(
+        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
+        "session lock did not appear; bookrack run may have failed to start",
+    );
+
+    let output = Command::from(bookrack_cmd!(&sandbox).build())
+        .arg("--audit-profile")
+        .arg("strictt")
+        .arg("dryrun")
+        .arg(&scan_dir)
+        .output()
+        .await
+        .expect("run bookrack dryrun");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unknown audit profile is caller input: stderr={stderr}",
+    );
+    assert!(
+        stderr.contains("strictt"),
+        "the refusal must name the profile it rejected: stderr={stderr}",
+    );
+
+    if let Some(id) = daemon.id() {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(id.to_string())
+            .status()
+            .await;
+    }
+    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+}

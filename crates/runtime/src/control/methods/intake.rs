@@ -16,8 +16,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::MethodContext;
 use super::ingest::PriorityRepr;
+use super::{MethodContext, input_err};
+use crate::audit_helpers::require_known_profile;
 use crate::control::events::Event;
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 use crate::queue::{self, IntakeOcrInfo};
@@ -57,7 +58,8 @@ pub struct IntakeOcrParams {
     hold_for_metadata: bool,
     /// Optional book-side audit profile name applied to the OCR
     /// intake's book pipeline. Resolves through the same built-in set
-    /// as `ingest.submit`; absent means the daemon's startup profile.
+    /// as `ingest.submit`, and is refused as invalid params on a name
+    /// outside it; absent means the daemon's startup profile.
     #[serde(default)]
     audit_profile: Option<String>,
 }
@@ -71,6 +73,11 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
             return Err(RpcError::new(INVALID_PARAMS, "missing intake.ocr params"));
         }
     };
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_audit_profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     if !parsed.ocr_md.is_file() {
         return Err(RpcError::new(
             INVALID_PARAMS,

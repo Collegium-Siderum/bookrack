@@ -26,6 +26,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: an unknown `audit_profile` name is refused instead of
+  silently falling back.** `dryrun`, `ingest.submit`, `intake.ocr`,
+  `metadata.reaudit`, `metadata.advance`, and
+  `papers.metadata.reaudit` accepted any string for `audit_profile`: a
+  name that matched no built-in fell through to the overlay path, so
+  the call ran to completion under a *different* profile and reported
+  success. A caller who asked for `strict` and mistyped it got the
+  overlay default, with nothing in the result saying so — a fallback
+  in the least safe direction. All six now answer `-32602 invalid
+  params`, quoting the name and listing the accepted set in
+  `error.data.detail`, before any work starts. On the CLI,
+  `--audit-profile <typo>` exits `2` instead of `0`.
+
+  The book and paper sides keep separate built-in sets. They hold the
+  same three names today, but each entry point is checked against the
+  set for its own pipeline, so the two can diverge without one side
+  starting to reject the other's legal names.
+
+  **This is a breaking change** for a script that relies on a
+  misspelt profile name being accepted.
+
 - **runtime: the paper-side metadata writes refuse an intake the
   catalog does not hold.** `papers.metadata.set`, `clear`, `void`,
   `ack`, `approve`, `reject`, `reopen`, and `contributor_add` wrote

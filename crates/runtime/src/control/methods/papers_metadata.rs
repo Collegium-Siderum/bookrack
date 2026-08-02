@@ -22,7 +22,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{MethodContext, input_err};
-use crate::audit_helpers::{load_paper_audit_data, load_paper_audit_profile};
+use crate::audit_helpers::{
+    load_paper_audit_data, load_paper_audit_profile, require_known_profile,
+};
 use crate::cmd::input_error::CmdInputError;
 use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
@@ -113,6 +115,11 @@ fn require_editable(field: &str) -> Result<(), RpcError> {
 #[derive(Debug, Deserialize)]
 pub struct PapersMetadataReauditParams {
     intake_id: i64,
+    /// Optional paper-side audit profile name. Absent means the
+    /// overlay-resolved default; a name in the paper-side built-in set
+    /// (`default` / `trust-source` / `strict`) selects that built-in;
+    /// any other name is refused as invalid params. The paper set is
+    /// checked separately from the book one.
     #[serde(default)]
     audit_profile: Option<String>,
     #[serde(default)]
@@ -125,6 +132,11 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         .registry
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
+    require_known_profile(
+        parsed.audit_profile.as_deref(),
+        bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(input_err)?;
     let profile = load_paper_audit_profile(&ctx.cfg, parsed.audit_profile.as_deref());
     let data = load_paper_audit_data(&ctx.cfg);
     let outcome = handle
