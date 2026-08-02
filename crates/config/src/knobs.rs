@@ -677,11 +677,12 @@ mod tests {
     /// variable used to disappear.
     #[test]
     fn every_env_constant_is_named_by_some_row_chain_with_nothing_set() {
-        for root in [None, Some(())] {
-            let rows = match root {
-                None => knob_origins_from(|_| None, None, None),
-                Some(()) => knob_origins_from(|_| None, None, None),
-            };
+        // A root the flag won, not the variable: that is the shape
+        // where the variable has no value of its own to carry and can
+        // fall out of the row unnoticed.
+        let resolved = root_resolved_by(crate::ResolutionSource::DataDirFlag, "/sandbox/root");
+        for root in [None, Some(&resolved)] {
+            let rows = knob_origins_from(|_| None, None, root);
             let sited: Vec<&str> = rows
                 .iter()
                 .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
@@ -720,14 +721,14 @@ mod tests {
         assert_eq!(knob.layer, Layer::Flag);
     }
 
-    /// A root won by the data-root variable, as the rows see it once
-    /// resolution has recorded which rung spoke.
-    fn root_won_by_the_variable(dir: &str) -> Config {
+    /// A resolved root, as the rows see it once resolution has recorded
+    /// which rung spoke.
+    fn root_resolved_by(source: crate::ResolutionSource, dir: &str) -> Config {
         Config {
             data_dir: PathBuf::from(dir),
             ollama_url: crate::DEFAULT_OLLAMA_URL.to_string(),
             library: None,
-            source: crate::ResolutionSource::EnvVar,
+            source,
             root_config: RootConfig::default(),
             shadowed_default: None,
             library_identification: None,
@@ -746,7 +747,7 @@ mod tests {
     #[test]
     fn a_data_root_the_dotenv_file_supplied_is_credited_to_the_file() {
         let load = dotenv_load("/sandbox/.env", &[crate::DATA_DIR_ENV]);
-        let root = root_won_by_the_variable("/sandbox/root");
+        let root = root_resolved_by(crate::ResolutionSource::EnvVar, "/sandbox/root");
         let rows = knob_origins_from(
             only(crate::DATA_DIR_ENV, "/sandbox/root"),
             Some(load.supply()),
@@ -778,7 +779,7 @@ mod tests {
     #[test]
     fn a_dotenv_data_root_line_the_environment_beat_is_reported_as_shadowed() {
         let load = dotenv_eclipsed("/sandbox/.env", crate::DATA_DIR_ENV, "/sandbox/from-file");
-        let root = root_won_by_the_variable("/sandbox/from-shell");
+        let root = root_resolved_by(crate::ResolutionSource::EnvVar, "/sandbox/from-shell");
         let rows = knob_origins_from(
             only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
             Some(load.supply()),
