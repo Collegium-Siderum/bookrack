@@ -43,19 +43,33 @@ const GATE: Gate = Gate::new("PDFium", "PDFium native library", "PDF test", REQU
 /// anyway, and says so in its site, because "why was the PDF test
 /// skipped" has no other answer on a CI machine.
 pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    knob_origins_from(|name| std::env::var(name).ok(), dotenv)
+}
+
+/// The same row on a machine where nothing is configured: the inventory
+/// form, so a list of this build's knobs can include the one that
+/// decides whether a missing PDFium fails a test run.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None)
+}
+
+/// Pure form of [`knob_origins`], so the inventory can describe an
+/// environment that sets neither the dedicated variable nor `CI`.
+fn knob_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<KnobOrigin> {
     let mut candidates = env_layers(
         dotenv,
         REQUIRE_ENV,
-        std::env::var(REQUIRE_ENV)
-            .ok()
+        get(REQUIRE_ENV)
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
     );
     candidates.push(Candidate::of(
         Layer::Environment,
         "CI",
-        std::env::var("CI")
-            .ok()
+        get("CI")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
     ));
@@ -119,6 +133,26 @@ mod tests {
             "no layer of the row says it is a test-harness knob: site={:?} shadowed={:?}",
             row.site, row.shadowed
         );
+    }
+
+    /// The catalog row falls to the built-in default and names both
+    /// variables as places it can be moved from.
+    ///
+    /// Fully discriminating under CI, which sets `CI` non-blank: a
+    /// catalog wired to [`knob_origins`] instead of the pure form would
+    /// report that site as the winner there, so the test that passes on
+    /// a developer machine either way still fails in the environment
+    /// that matters.
+    #[test]
+    fn the_catalog_falls_to_the_built_in_default() {
+        let rows = knob_catalog();
+        let row = &rows[0];
+
+        assert_eq!(row.layer, Layer::Default, "site: {}", row.site);
+        assert_eq!(row.value.as_deref(), Some("false"));
+        let sites: Vec<&str> = row.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(sites.contains(&REQUIRE_ENV), "{sites:?}");
+        assert!(sites.contains(&"CI"), "{sites:?}");
     }
 
     /// `CI` is a second environment input alongside the dedicated

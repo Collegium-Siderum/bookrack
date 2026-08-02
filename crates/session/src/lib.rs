@@ -78,6 +78,27 @@ pub fn resolve_runtime_dir(override_path: Option<&Path>) -> Result<PathBuf> {
 /// `bookrack run` invocation, and a report of one process must not
 /// claim to speak for another.
 pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    knob_origins_from(|name| std::env::var(name).ok(), dotenv)
+}
+
+/// Every knob this crate reads, as it stands on a machine where nothing
+/// is configured.
+///
+/// The inventory form of [`knob_origins`]: the same row from the same
+/// resolution, fed an empty environment and no dotenv record. The
+/// platform layer still reports where the convention lands on this
+/// host, which is what a reader asking after the default wants — the
+/// row exists to say that the default is derived.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None)
+}
+
+/// Pure form of [`knob_origins`], so the inventory can describe an
+/// environment that sets nothing.
+fn knob_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<KnobOrigin> {
     let mut candidates = vec![Candidate::of(
         Layer::Flag,
         "run --runtime-dir (not this invocation)",
@@ -86,8 +107,7 @@ pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
     candidates.extend(env_layers(
         dotenv,
         RUNTIME_DIR_ENV,
-        std::env::var(RUNTIME_DIR_ENV)
-            .ok()
+        get(RUNTIME_DIR_ENV)
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty()),
     ));
@@ -678,6 +698,25 @@ mod tests {
         assert_eq!(
             content, "pid=55\nmcp=127.0.0.1:1\n",
             "tail left: {content:?}"
+        );
+    }
+
+    /// The catalog row falls through to the platform convention and
+    /// still names the variable and the flag as places it can be set.
+    /// A catalog that read the environment would report the variable as
+    /// the winner wherever it is set.
+    #[test]
+    fn the_catalog_falls_to_the_platform_convention() {
+        let rows = knob_catalog();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.layer, Layer::Platform, "site: {}", row.site);
+        let sites: Vec<&str> = row.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(sites.contains(&RUNTIME_DIR_ENV), "{sites:?}");
+        assert!(
+            sites.iter().any(|s| s.contains("--runtime-dir")),
+            "{sites:?}"
         );
     }
 

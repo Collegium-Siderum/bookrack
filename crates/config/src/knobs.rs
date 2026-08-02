@@ -30,6 +30,25 @@ pub fn knob_origins(root: Option<&Config>) -> Vec<KnobOrigin> {
     knob_origins_from(|key| std::env::var(key).ok(), crate::dotenv_supply(), root)
 }
 
+/// Every knob this crate resolves, as it stands on a machine where
+/// nothing is configured.
+///
+/// The inventory form of [`knob_origins`]: the same rows from the same
+/// resolvers, fed an empty environment and no dotenv record, so each
+/// row settles on its lowest layer and reports the compiled-in default
+/// while its `chain` still names every layer it can be set at. One call
+/// into the same function rather than a second traversal, so a knob
+/// cannot be in the report and missing from the inventory.
+///
+/// Not wholly machine-independent, and deliberately so: a row whose
+/// lowest layer is a platform convention (the registry file, the daemon
+/// state directory) reports where that convention lands on this host,
+/// which is the value a reader is asking after — the point of such a
+/// row is that its default is derived rather than fixed.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None, None)
+}
+
 /// Pure form of [`knob_origins`], factored out so a test can drive the
 /// environment layer without consulting process-global state.
 ///
@@ -87,6 +106,39 @@ pub struct NativeDependencyOrigin {
     /// Every location checked, in search order.
     pub probed: Vec<String>,
 }
+
+/// One native dependency as an inventory names it: what it is called,
+/// and the variable that points at it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct NativeDependencyKnob {
+    /// The dependency, e.g. `pdfium`.
+    pub name: &'static str,
+    /// The variable that overrides its search chain entirely.
+    pub override_site: &'static str,
+}
+
+/// Every native dependency this crate locates, with the variable that
+/// overrides each one's search chain.
+///
+/// Touches nothing: an inventory answers where a dependency *can* be
+/// pointed at, while where one sits today is
+/// [`native_dependency_origins`]'s question. Both read this list, so a
+/// dependency cannot be locatable at runtime and absent from the
+/// inventory.
+pub const NATIVE_DEPENDENCY_KNOBS: &[NativeDependencyKnob] = &[
+    NativeDependencyKnob {
+        name: "pdfium",
+        override_site: crate::PDFIUM_LIB_ENV,
+    },
+    NativeDependencyKnob {
+        name: "llama_server",
+        override_site: crate::LLAMA_SERVER_BIN_ENV,
+    },
+    NativeDependencyKnob {
+        name: "reranker_model",
+        override_site: crate::RERANKER_MODEL_ENV,
+    },
+];
 
 /// Every native dependency this crate locates, with where each
 /// resolved.
@@ -161,12 +213,17 @@ fn native_origin(
 }
 
 /// The variable that overrides one dependency's search chain.
+///
+/// A name absent from [`NATIVE_DEPENDENCY_KNOBS`] yields an empty site
+/// rather than a plausible wrong one:
+/// `every_located_dependency_is_named_in_the_inventory` holds the two
+/// lists together, so an empty site here means that test has been
+/// bypassed and should read as broken.
 fn override_site(name: &str) -> &'static str {
-    match name {
-        "pdfium" => crate::PDFIUM_LIB_ENV,
-        "llama_server" => crate::LLAMA_SERVER_BIN_ENV,
-        _ => crate::RERANKER_MODEL_ENV,
-    }
+    NATIVE_DEPENDENCY_KNOBS
+        .iter()
+        .find(|knob| knob.name == name)
+        .map_or("", |knob| knob.override_site)
 }
 
 /// The data-root row. Either way it carries the whole ladder, so the
@@ -462,6 +519,92 @@ mod tests {
             "the eclipsed dotenv line is missing from shadowed: {:?}",
             knob.shadowed
         );
+    }
+
+    /// The catalog settles every row on a layer that speaks for itself:
+    /// no row may report a value it took from the environment, because
+    /// the catalog is fed none. Discriminating because the resolvers it
+    /// calls are the ones that do read the environment — a catalog
+    /// wired to [`knob_origins`] instead of the pure form passes every
+    /// other test in this file and fails this one.
+    #[test]
+    fn the_catalog_takes_no_value_from_the_environment() {
+        let rows = knob_catalog();
+        let sourced: Vec<(&str, Layer)> = rows
+            .iter()
+            .filter(|r| {
+                r.value.is_some()
+                    && matches!(r.layer, Layer::Environment | Layer::Dotenv | Layer::Flag)
+            })
+            .map(|r| (r.key.as_str(), r.layer))
+            .collect();
+
+        assert!(
+            sourced.is_empty(),
+            "the catalog reported values from layers it was given none of: {sourced:?}"
+        );
+    }
+
+    /// Every knob in the report is in the catalog and the reverse: the
+    /// two are one function under different inputs, and a knob visible
+    /// in only one of them would mean that stopped being true.
+    #[test]
+    fn the_catalog_and_the_report_cover_the_same_knobs() {
+        let reported: Vec<String> = knob_origins_from(|_| None, None, None)
+            .into_iter()
+            .map(|r| r.key)
+            .collect();
+        let catalogued: Vec<String> = knob_catalog().into_iter().map(|r| r.key).collect();
+
+        assert_eq!(catalogued, reported);
+    }
+
+    /// The catalog names every variable the crate reads, so a list built
+    /// from it is a list of the knobs that exist rather than of the ones
+    /// this machine happens to set.
+    #[test]
+    fn the_catalog_names_every_env_constant() {
+        let rows = knob_catalog();
+        let sited: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
+            .collect();
+
+        for name in crate::RESOLVER_ENV_CONSTANTS
+            .iter()
+            .chain(crate::SITE_ENV_CONSTANTS)
+        {
+            assert!(
+                sited.contains(name),
+                "the catalog names no site {name}; it sites {sited:?}"
+            );
+        }
+    }
+
+    /// The inventory of native dependencies and the runtime search agree
+    /// on which dependencies exist. Without this the empty-site fallback
+    /// in `override_site` becomes reachable, and a report would name a
+    /// dependency with no variable to point it at.
+    #[test]
+    fn every_located_dependency_is_named_in_the_inventory() {
+        let located: Vec<String> = native_dependency_origins("")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let inventoried: Vec<&str> = NATIVE_DEPENDENCY_KNOBS.iter().map(|k| k.name).collect();
+
+        assert_eq!(
+            located, inventoried,
+            "the located set and the inventory disagree, so a located \
+             dependency can lose the variable that overrides it"
+        );
+        for knob in NATIVE_DEPENDENCY_KNOBS {
+            assert!(
+                !override_site(knob.name).is_empty(),
+                "{} resolves to no override site",
+                knob.name
+            );
+        }
     }
 
     /// The rows report the dotenv record the caller passed, not the one

@@ -34,7 +34,10 @@ pub use detect::{
     DetectError, DetectVerdict, ScanOutcome, Signal, detect_library, mounted_volumes,
     scan_for_libraries,
 };
-pub use knobs::{NativeDependencyOrigin, knob_origins, native_dependency_origins};
+pub use knobs::{
+    NATIVE_DEPENDENCY_KNOBS, NativeDependencyKnob, NativeDependencyOrigin, knob_catalog,
+    knob_origins, native_dependency_origins,
+};
 pub use manifest::{
     LibraryManifest, MANIFEST_FILENAME, MANIFEST_FORMAT, MANIFEST_SCHEMA_VERSION, ManifestError,
     ManifestIdentitySeed, load_manifest, new_manifest, render_manifest_toml,

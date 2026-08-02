@@ -328,6 +328,17 @@ pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
     env_overrides_with_origins_from(|name| std::env::var(name).ok(), dotenv).1
 }
 
+/// Every knob this crate reads, as it stands on a machine where nothing
+/// is configured.
+///
+/// The inventory form of [`knob_origins`]: the same rows from the same
+/// resolution, fed an empty environment and no dotenv record, so each
+/// row reports what it falls back to while its `chain` still names the
+/// variable that can move it.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    env_overrides_with_origins_from(|_| None, None).1
+}
+
 /// Pure resolution that also reports where each value came from. The
 /// options are read off the rows, so the two cannot disagree.
 fn env_overrides_with_origins_from(
@@ -1262,6 +1273,44 @@ mod tests {
         assert!(merge_options(bypassing.clone(), plain.clone()).bypass_index);
         assert!(merge_options(plain.clone(), bypassing).bypass_index);
         assert!(!merge_options(plain.clone(), plain).bypass_index);
+    }
+
+    /// The catalog reports all three knobs with nothing set, and names
+    /// each one's variable. The two that have no layer under the
+    /// variable report no value at all — unset means the built index's
+    /// own setting decides, and an inventory must not invent a default
+    /// this crate does not hold.
+    #[test]
+    fn the_catalog_names_every_variable_and_invents_no_default() {
+        let rows = knob_catalog();
+        let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "vectors.bypass_ann",
+                "vectors.nprobes",
+                "vectors.refine_factor"
+            ]
+        );
+
+        let sites: Vec<&str> = rows
+            .iter()
+            .flat_map(|r| r.chain.iter().map(|s| s.site.as_str()))
+            .collect();
+        for name in [
+            VECTORS_BYPASS_ANN_ENV,
+            VECTORS_NPROBES_ENV,
+            VECTORS_REFINE_FACTOR_ENV,
+        ] {
+            assert!(sites.contains(&name), "the catalog sites {sites:?}");
+        }
+
+        assert_eq!(rows[0].value.as_deref(), Some("false"));
+        assert_eq!(rows[1].value, None, "nprobes has no default to report");
+        assert_eq!(
+            rows[2].value, None,
+            "refine_factor has no default to report"
+        );
     }
 
     /// The options the resolver returns and the rows it reports are

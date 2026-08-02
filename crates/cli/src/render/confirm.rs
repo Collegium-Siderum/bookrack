@@ -65,6 +65,22 @@ pub fn confirm_bound_from(get: impl Fn(&str) -> Option<String>) -> Option<Durati
 
 /// Every knob this module reads, with where the value came from.
 pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
+    knob_origins_from(|name| std::env::var(name).ok(), dotenv)
+}
+
+/// The same row on a machine where nothing is configured: the inventory
+/// form, reporting [`DEFAULT_CONFIRM_TIMEOUT_SECS`] as the value and the
+/// variable as the place it can be moved from.
+pub fn knob_catalog() -> Vec<KnobOrigin> {
+    knob_origins_from(|_| None, None)
+}
+
+/// Pure form of [`knob_origins`], sharing the parse rule with
+/// [`confirm_bound_from`] rather than restating it.
+fn knob_origins_from(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> Vec<KnobOrigin> {
     vec![resolve_knob(
         "confirm.timeout_secs",
         KnobReach::Process,
@@ -72,8 +88,7 @@ pub fn knob_origins(dotenv: Option<DotenvSupply<'_>>) -> Vec<KnobOrigin> {
         env_over(
             dotenv,
             CONFIRM_TIMEOUT_ENV,
-            std::env::var(CONFIRM_TIMEOUT_ENV)
-                .ok()
+            get(CONFIRM_TIMEOUT_ENV)
                 .and_then(|raw| raw.trim().parse::<u64>().ok())
                 .map(|v| v.to_string()),
             vec![Candidate::of(
@@ -747,6 +762,25 @@ mod tests {
         );
         let (verdict, _) = via(Answer::Abandoned, AnswerWindow::Within(window), false);
         assert_eq!(verdict, Confirmation::Unanswerable(NoAnswer::Abandoned));
+    }
+
+    /// The catalog row reports the compiled-in window and names the
+    /// variable that moves it, which is what an inventory of this
+    /// build's knobs has to say about a knob nobody has set.
+    #[test]
+    fn the_catalog_reports_the_compiled_in_window() {
+        let rows = knob_catalog();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        assert_eq!(row.key, "confirm.timeout_secs");
+        assert_eq!(row.layer, Layer::Default, "site: {}", row.site);
+        assert_eq!(
+            row.value.as_deref(),
+            Some(DEFAULT_CONFIRM_TIMEOUT_SECS.to_string().as_str())
+        );
+        let sites: Vec<&str> = row.chain.iter().map(|s| s.site.as_str()).collect();
+        assert!(sites.contains(&CONFIRM_TIMEOUT_ENV), "{sites:?}");
     }
 
     /// The reason has to tell the operator which knob widens the
