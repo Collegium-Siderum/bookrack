@@ -92,6 +92,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **config, cli: three knob rows named fewer places than the knob
+  really has.** `config knobs` and `config effective` answer "where can
+  I set this", so a row short of a rung is a setting an operator cannot
+  find. `mcp.addr` named only `BOOKRACK_MCP_ADDR`, though `bookrack run
+  --mcp-addr` outranks it — the same shape `runtime_dir` already
+  reported for `run --runtime-dir`. `backup_dir` dropped its fallback
+  entirely when no data root was resolved, so the inventory — which
+  never has one — reported the knob as having no default, and the
+  report lost it on exactly the machines where resolution failed.
+  `reranker.ctx` reported no default beside `reranker.url` and
+  `reranker.threads`, for which unset genuinely is the value; it has
+  one, the context size the supervised rerank server is launched with,
+  and the row now says so.
+
+  `config.toml` is now checked against the inventory in both
+  directions, the way `.env.example` already is: a key `libraries
+  config` writes that no row reports, and a file rung behind no
+  writable key, are both build failures.
+
 - **runtime, mcp, cli: a daemon that cannot take the MCP address
   refuses to start, instead of reporting success and serving
   nothing.** The listening socket was bound inside the task that
