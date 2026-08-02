@@ -153,12 +153,20 @@ knobs nothing is set for — every layer each one *can* be set at. It
 needs no daemon and works when the data root does not resolve, so it
 is also the surface for diagnosing a root that will not open.
 
+`bookrack config knobs` lists every knob this build has, without
+consulting the machine at all: each one's compiled-in default, the
+variable that moves it, every other layer it can be set at, its reach,
+and when it is read. Use it to find out what can be configured;
+`config effective` to find out what is.
+
 Every environment variable bookrack reads is documented, with its
 default, in [`.env.example`](../.env.example): the data-root and
 registry selectors, the Ollama endpoint, the embed-batch and search
 knobs, the PDFium library directory, the log filters, and the
 per-query ANN overrides. Copy that file to `.env` and fill in what you
-need.
+need. That file and `config knobs` cannot drift apart: a test compares
+the two in both directions, so a knob with no stanza and a stanza with
+no knob are both build failures.
 
 ### Process-level knobs with no `config.toml` key
 

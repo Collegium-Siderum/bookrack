@@ -10,6 +10,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **cli: `bookrack config knobs` lists every knob this build has.**
+  The inventory beside `config effective`'s report: for each knob, the
+  compiled-in default, the environment variable that moves it, every
+  other layer it can be set at (a `config.toml` key, a flag, a
+  manifest, a platform convention), its reach and when it is read —
+  plus the variable that points at each native dependency. It reads no
+  data root, no daemon and no `.env`, so it answers on a machine where
+  nothing is configured and a root that will not resolve does not
+  reach it. Both surfaces are assembled from the same crates, so a
+  knob cannot be in one and missing from the other.
+
+  `.env.example` is now checked against that inventory rather than
+  kept in step by hand: a knob with no stanza there, and a stanza
+  describing a knob the binary no longer reads, are both build
+  failures.
+
 - **cli, runtime: `bookrack doctor` checks the MCP endpoint.** The
   report covered the data root, PDFium, the file-descriptor limit, the
   databases, the registry, the index profile, the embed backend and
