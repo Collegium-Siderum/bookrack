@@ -125,6 +125,24 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **runtime: `doctor` called an index coherent after comparing two of
+  its four stamps.** The index-profile section ends on a summary
+  promising the referenced profiles are "coherent with their built
+  indexes", but the comparison behind it read the embed model and the
+  vector dimension only — the two-field view that predates the
+  four-stamp record. A binary that raised its chunking or normalization
+  version therefore drew a green row while the daemon refused to bring
+  the library up on the very stamps that had drifted, and `doctor` is
+  the diagnosis an operator reaches for precisely when the daemon will
+  not start. Every stamp is now compared, through the same comparator
+  `bookrack index-profile current` already uses, and the row names the
+  fields that diverged — the first two, with a count standing in for
+  the rest — and points at that command for the full comparison. The
+  bring-up sentence is conditional now as well: the daemon verifies the
+  stamps only when the pipeline's vector store holds rows, so a
+  divergence beside an unbuilt store no longer promises a failure the
+  operator will not see.
+
 - **config: a data root set in `.env` was reported as coming from the
   real environment.** Every other knob the file supplies is credited to
   the file — `config effective` names the path an operator would have

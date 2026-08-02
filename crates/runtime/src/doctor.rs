@@ -31,6 +31,7 @@ use bookrack_config::{
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
+use bookrack_corpus::IndexStamps;
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
 use bookrack_index_profile::{has_errors, resolve, validate};
 use eyre::{Context, Result};
@@ -863,28 +864,17 @@ fn index_profile_dir() -> Option<std::path::PathBuf> {
     crate::profile::user_profile_dir()
 }
 
-/// The built embed-model/dimension stamp pair for the book pipeline;
-/// see [`crate::profile::built_stamps`] for the three-way contract
-/// (missing / unreadable / stamped) this passes through.
-fn built_stamps(data_dir: &Path) -> Result<Option<(String, u32)>, String> {
-    crate::profile::built_stamps(&crate::profile::Pipeline::Books.corpus_db(data_dir))
-        .map(|stamps| stamps.and_then(|b| b.embed_pair()))
-}
-
 /// Classify one entry's index-profile reference against its resolution
-/// outcome and the built stamps. Pure, so a test drives it without a
-/// filesystem. `resolved` is `Ok(Some(embed_model, dim, has_errors))`
-/// for a valid profile, `Ok(None)` when the name does not resolve, and
-/// `Err(reason)` when the file failed to load. `built` is
-/// `Ok(Some(pair))` for a stamped index, `Ok(None)` when no index has
-/// been built, and `Err(reason)` when the corpus database exists but
-/// cannot be opened — the latter is reported instead of being passed
-/// off as a clean skip.
-fn coherence_issue(
+/// outcome, without looking at any built index. Pure, so a test drives
+/// it without a filesystem. `resolved` is `Ok(Some(embed_model, dim,
+/// has_errors))` for a profile that resolved, `Ok(None)` when the name
+/// does not resolve, and `Err(reason)` when the file failed to load.
+/// `None` means the reference itself is sound and the stamp comparison
+/// can proceed.
+fn reference_issue(
     entry_name: &str,
     profile_name: &str,
-    resolved: Result<Option<(String, u32, bool)>, String>,
-    built: Result<Option<(String, u32)>, String>,
+    resolved: &Result<Option<(String, u32, bool)>, String>,
 ) -> Option<String> {
     match resolved {
         Err(reason) => Some(format!(
@@ -897,20 +887,71 @@ fn coherence_issue(
             "'{entry_name}' references index profile '{profile_name}', which has validation errors \
              (run `bookrack index-profile validate {profile_name}`)"
         )),
-        Ok(Some((model, dim, false))) => match built {
-            Err(reason) => Some(format!(
-                "corpus database for '{entry_name}' cannot be opened ({reason}); coherence with \
-                 index profile '{profile_name}' was not checked"
-            )),
-            Ok(built) => built.and_then(|(built_model, built_dim)| {
-                (built_model != model || built_dim != dim).then(|| {
-                    format!(
-                        "index profile '{profile_name}' for '{entry_name}' declares {model}/{dim} but \
-                         the built index is {built_model}/{built_dim}; the daemon will refuse to start"
-                    )
-                })
-            }),
-        },
+        Ok(Some((_, _, false))) => None,
+    }
+}
+
+/// Compare one pipeline's built stamps against what a clean build under
+/// `target` would record. Pure, so a test drives it without a
+/// filesystem. `built` is `Ok(Some(stamps))` for a corpus that opened,
+/// `Ok(None)` when no index has been built, and `Err(reason)` when the
+/// corpus database exists but cannot be opened — the latter is reported
+/// instead of being passed off as a clean skip. An unstamped corpus is
+/// treated as unbuilt: there is nothing to compare against.
+///
+/// `vectors_built` gates the bring-up sentence. The daemon verifies the
+/// stamps only when the pipeline's vector store holds rows, so a
+/// divergence beside an absent store does not stop it from starting.
+fn stamp_issue(
+    entry_name: &str,
+    profile_name: &str,
+    pipeline: crate::profile::Pipeline,
+    target: &IndexStamps,
+    built: Result<Option<crate::profile::BuiltStamps>, String>,
+    vectors_built: bool,
+) -> Option<String> {
+    let pipeline = pipeline.as_str();
+    match built {
+        Err(reason) => Some(format!(
+            "the {pipeline} corpus of '{entry_name}' cannot be opened ({reason}); coherence with \
+             index profile '{profile_name}' was not checked"
+        )),
+        Ok(None) => None,
+        Ok(Some(built)) if built.is_unstamped() => None,
+        Ok(Some(built)) => {
+            let findings = crate::profile::profile_stamp_findings(target, &built);
+            if findings.is_empty() {
+                return None;
+            }
+            let consequence = if vectors_built {
+                "; the daemon will refuse to start until the index is rebuilt"
+            } else {
+                ""
+            };
+            Some(format!(
+                "the {pipeline} index of '{entry_name}' disagrees with index profile \
+                 '{profile_name}': {}{consequence} (`bookrack index-profile current` compares \
+                 every stamp)",
+                summarise_findings(&findings)
+            ))
+        }
+    }
+}
+
+/// Join stamp findings into one note-sized clause, keeping the first two
+/// and counting the rest so a four-way divergence does not push the row
+/// off the table.
+fn summarise_findings(findings: &[String]) -> String {
+    const SHOWN: usize = 2;
+    let head = findings
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("; ");
+    match findings.len().saturating_sub(SHOWN) {
+        0 => head,
+        rest => format!("{head} (+{rest} more)"),
     }
 }
 
@@ -1019,14 +1060,34 @@ fn push_index_profile_coherence_rows_in(
             },
             None => Ok(None),
         };
-        let built = built_stamps(&entry.data_dir);
-        if let Some(note) = coherence_issue(&entry.name, profile_name, resolved, built) {
+        if let Some(note) = reference_issue(&entry.name, profile_name, &resolved) {
             clean = false;
             rows.push(Row {
                 label: "index-profile".to_string(),
                 value: entry.name.clone(),
                 status: Status::Warn { note },
             });
+        }
+        // Only a profile that resolved cleanly has stamps to compare
+        // against; the arms above already reported the rest.
+        if let Ok(Some((model, dim, false))) = &resolved {
+            let pipeline = crate::profile::Pipeline::Books;
+            let note = stamp_issue(
+                &entry.name,
+                profile_name,
+                pipeline,
+                &pipeline.target_stamps(model, *dim),
+                crate::profile::built_stamps(&pipeline.corpus_db(&entry.data_dir)),
+                pipeline.lancedb_dir(&entry.data_dir).exists(),
+            );
+            if let Some(note) = note {
+                clean = false;
+                rows.push(Row {
+                    label: "index-profile".to_string(),
+                    value: entry.name.clone(),
+                    status: Status::Warn { note },
+                });
+            }
         }
         if let Some(note) = drift_issue(&entry.name, profile_name, &drift) {
             clean = false;
@@ -1796,6 +1857,124 @@ mod tests {
         assert_eq!(rows[0].value, "1 referenced");
     }
 
+    /// Seed a data root that declares the built-in profile in its
+    /// manifest and carries a `corpus.db` stamped by `stamp`, and return
+    /// the registry entry pointing at it. The built-in resolves without
+    /// a profile file, so the caller can hand the coherence pass an
+    /// empty profile directory.
+    fn root_with_built_stamps(
+        root: &Path,
+        stamp: impl FnOnce(&bookrack_corpus::Corpus, &bookrack_index_profile::IndexProfile),
+    ) -> LibraryEntry {
+        bookrack_config::set_manifest_index_profile(
+            root,
+            Some(bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT),
+            bookrack_config::ManifestIdentitySeed {
+                name: "stamped",
+                kind: bookrack_config::LibraryKind::Test,
+                description: None,
+            },
+        )
+        .expect("seed a manifest declaring a profile");
+        let (profile, _) = resolve(None, bookrack_index_profile::PROFILE_QWEN3_06B_DEFAULT)
+            .expect("resolve the built-in profile")
+            .expect("the built-in profile is defined");
+        let corpus = bookrack_corpus::Corpus::open(&root.join("corpus.db")).expect("create corpus");
+        stamp(&corpus, &profile);
+        drop(corpus);
+
+        let mut entry = entry("stamped", None);
+        entry.data_dir = root.to_path_buf();
+        entry
+    }
+
+    #[test]
+    fn coherence_compares_every_stamp_not_only_the_embed_pair() {
+        // The OK summary promises the referenced profiles are "coherent
+        // with their built indexes". A corpus whose embed pair agrees but
+        // whose chunk version does not is exactly what the daemon refuses
+        // to bring up, so it must not land on that summary.
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root_with_built_stamps(root.path(), |corpus, profile| {
+            let target = crate::profile::Pipeline::Books
+                .target_stamps(&profile.embed.model, profile.embed.dim);
+            for (key, value) in [
+                (bookrack_corpus::EMBED_MODEL_KEY, target.embed_model.clone()),
+                (
+                    bookrack_corpus::VECTOR_DIM_KEY,
+                    target.vector_dim.to_string(),
+                ),
+                (
+                    bookrack_corpus::CHUNK_VERSION_KEY,
+                    (target.chunk_version + 1).to_string(),
+                ),
+                (
+                    bookrack_corpus::NORMALIZE_VERSION_KEY,
+                    target.normalize_version.to_string(),
+                ),
+            ] {
+                corpus.meta_set(key, &value).expect("stamp the corpus");
+            }
+        });
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(note.contains("chunk_version"), "{note}");
+    }
+
+    #[test]
+    fn coherence_does_not_promise_a_refused_start_without_a_vector_store() {
+        // The daemon only verifies stamps when the vector store holds
+        // rows, so a divergence under an unbuilt vector store does not
+        // stop it from starting. Saying it does sends the operator after
+        // a failure they will not see.
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root_with_built_stamps(root.path(), |corpus, profile| {
+            corpus
+                .meta_set(bookrack_corpus::EMBED_MODEL_KEY, "some-other-model")
+                .expect("stamp the corpus");
+            corpus
+                .meta_set(
+                    bookrack_corpus::VECTOR_DIM_KEY,
+                    &profile.embed.dim.to_string(),
+                )
+                .expect("stamp the corpus");
+        });
+        assert!(
+            !crate::profile::Pipeline::Books
+                .lancedb_dir(root.path())
+                .exists(),
+            "the scenario is a corpus stamped without a vector store",
+        );
+        let profiles = tempfile::tempdir().expect("tempdir");
+
+        let mut rows = Vec::new();
+        push_index_profile_coherence_rows_in(
+            &mut rows,
+            &RegistryProbe::Entries(vec![entry]),
+            Some(profiles.path()),
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a stamp divergence is a warning, not a pass: {rows:?}");
+        };
+        assert!(
+            !note.contains("refuse to start"),
+            "no vector store was built, so bring-up is not blocked: {note}"
+        );
+    }
+
     #[test]
     fn a_registry_that_is_absent_or_uncreated_leaves_both_sections_silent() {
         // `Ok(None)` is "no registry is configured"; a `NotFound` read
@@ -1823,55 +2002,161 @@ mod tests {
         }
     }
 
+    /// Target stamps standing in for a clean build, and the record a
+    /// matching build would leave behind.
+    fn target_and_matching_built() -> (IndexStamps, crate::profile::BuiltStamps) {
+        let target = crate::profile::Pipeline::Books.target_stamps("m", 8);
+        let built = crate::profile::BuiltStamps {
+            embed_model: Some(target.embed_model.clone()),
+            vector_dim: Some(target.vector_dim),
+            chunk_version: Some(target.chunk_version),
+            normalize_version: Some(target.normalize_version),
+        };
+        (target, built)
+    }
+
     #[test]
-    fn coherence_unresolved_and_invalid_and_mismatch_are_flagged() {
+    fn an_unresolved_or_invalid_reference_is_flagged() {
         // Unresolved profile.
-        assert!(coherence_issue("lib", "p", Ok(None), Ok(None)).is_some());
+        assert!(reference_issue("lib", "p", &Ok(None)).is_some());
         // Failed to load.
-        assert!(coherence_issue("lib", "p", Err("boom".to_string()), Ok(None)).is_some());
+        assert!(reference_issue("lib", "p", &Err("boom".to_string())).is_some());
         // Has validation errors.
+        assert!(reference_issue("lib", "p", &Ok(Some(("m".to_string(), 8, true)))).is_some());
+        // A profile that resolved cleanly leaves the stamp comparison to
+        // run; the reference itself is not a problem.
+        assert!(reference_issue("lib", "p", &Ok(Some(("m".to_string(), 8, false)))).is_none());
+    }
+
+    #[test]
+    fn every_stamp_divergence_is_flagged_and_a_matching_index_is_not() {
+        let (target, built) = target_and_matching_built();
         assert!(
-            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, true))), Ok(None)).is_some()
-        );
-        // Valid and coherent with the built stamps.
-        assert!(
-            coherence_issue(
+            stamp_issue(
                 "lib",
                 "p",
-                Ok(Some(("m".to_string(), 8, false))),
-                Ok(Some(("m".to_string(), 8))),
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(built.clone())),
+                true,
             )
             .is_none()
         );
-        // Valid but disagrees with the built stamps.
-        let note = coherence_issue(
-            "lib",
-            "p",
-            Ok(Some(("m".to_string(), 8, false))),
-            Ok(Some(("other".to_string(), 8))),
-        )
-        .expect("mismatch flagged");
-        assert!(note.contains("refuse to start"), "{note}");
+
+        // One case per stamp: each of the four must be able to raise the
+        // row on its own, which the embed-pair comparison this replaced
+        // could not do for the latter two.
+        let cases: [(&str, crate::profile::BuiltStamps); 4] = [
+            (
+                "embed.model",
+                crate::profile::BuiltStamps {
+                    embed_model: Some("other".to_string()),
+                    ..built.clone()
+                },
+            ),
+            (
+                "embed.dim",
+                crate::profile::BuiltStamps {
+                    vector_dim: Some(target.vector_dim + 1),
+                    ..built.clone()
+                },
+            ),
+            (
+                "chunk_version",
+                crate::profile::BuiltStamps {
+                    chunk_version: Some(target.chunk_version + 1),
+                    ..built.clone()
+                },
+            ),
+            (
+                "normalize_version",
+                crate::profile::BuiltStamps {
+                    normalize_version: Some(target.normalize_version + 1),
+                    ..built.clone()
+                },
+            ),
+        ];
+        for (field, drifted) in cases {
+            let note = stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(drifted)),
+                true,
+            )
+            .unwrap_or_else(|| panic!("a divergent {field} must be flagged"));
+            assert!(note.contains(field), "{field}: {note}");
+            assert!(note.contains("refuse to start"), "{field}: {note}");
+        }
     }
 
     #[test]
-    fn coherence_skips_the_stamp_check_when_the_index_is_unbuilt() {
-        // No built stamps (corpus missing, so no index built yet) and a
-        // valid profile is not a problem — the check cannot compare.
+    fn a_note_keeps_two_findings_and_counts_the_rest() {
+        // Four simultaneous divergences must not run the row off the
+        // table; the count stands in for what is elided.
+        let (target, _) = target_and_matching_built();
+        let note = stamp_issue(
+            "lib",
+            "p",
+            crate::profile::Pipeline::Books,
+            &target,
+            Ok(Some(crate::profile::BuiltStamps {
+                embed_model: Some("other".to_string()),
+                vector_dim: Some(target.vector_dim + 1),
+                chunk_version: Some(target.chunk_version + 1),
+                normalize_version: Some(target.normalize_version + 1),
+            })),
+            true,
+        )
+        .expect("four divergences flagged");
+        assert!(note.contains("(+2 more)"), "{note}");
+        assert!(!note.contains("normalize_version"), "{note}");
+    }
+
+    #[test]
+    fn the_stamp_check_is_skipped_when_the_index_is_unbuilt_or_unstamped() {
+        let (target, _) = target_and_matching_built();
+        // Corpus missing, so no index has been built yet.
         assert!(
-            coherence_issue("lib", "p", Ok(Some(("m".to_string(), 8, false))), Ok(None)).is_none()
+            stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(None),
+                false
+            )
+            .is_none()
+        );
+        // A corpus that opened but carries no stamps has nothing to
+        // compare either; reporting four missing stamps on a library
+        // that was never indexed is noise, not a finding.
+        assert!(
+            stamp_issue(
+                "lib",
+                "p",
+                crate::profile::Pipeline::Books,
+                &target,
+                Ok(Some(crate::profile::BuiltStamps::default())),
+                false,
+            )
+            .is_none()
         );
     }
 
     #[test]
-    fn coherence_flags_an_unreadable_corpus_instead_of_skipping() {
+    fn an_unreadable_corpus_is_flagged_instead_of_skipped() {
         // An existing corpus that cannot be opened is a distinct state
         // from "unbuilt": the check must surface it, not report clean.
-        let note = coherence_issue(
+        let (target, _) = target_and_matching_built();
+        let note = stamp_issue(
             "lib",
             "p",
-            Ok(Some(("m".to_string(), 8, false))),
+            crate::profile::Pipeline::Books,
+            &target,
             Err("schema version 99 is newer than this binary".to_string()),
+            false,
         )
         .expect("unreadable corpus flagged");
         assert!(note.contains("cannot be opened"), "{note}");
