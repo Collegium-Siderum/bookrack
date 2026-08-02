@@ -11,8 +11,10 @@
 //! databases, and the vector store — so book content, including real
 //! titles, never sits next to the source code.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use bookrack_core::knob::{Candidate, KnobOrigin, KnobReach, Layer, ReadAt, resolve_knob};
@@ -115,11 +117,54 @@ pub const NO_DOTENV_ENV: &str = "BOOKRACK_NO_DOTENV";
 /// of the caller's working directory is a decision only a program can
 /// make on its own behalf — a library that did it would hand its
 /// embedder a configuration source the embedder never asked for.
-pub fn load_dotenv() {
-    if should_load_dotenv(|key| std::env::var(key).ok()) {
-        dotenvy::dotenv().ok();
+/// Returns what the load did, so a later report can tell a value the
+/// file supplied from one the real environment carried. `None` when the
+/// file was suppressed, absent, or unreadable. The result is also
+/// recorded process-wide for [`dotenv_load`] to answer without the
+/// caller threading it through.
+pub fn load_dotenv() -> Option<DotenvLoad> {
+    if !should_load_dotenv(|key| std::env::var(key).ok()) {
+        return None;
     }
+    let before: BTreeSet<String> = std::env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .collect();
+    let path = dotenvy::dotenv().ok()?;
+    let supplied = dotenvy::from_path_iter(&path)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|(key, _)| key)
+        .filter(|key| !before.contains(key))
+        .collect();
+
+    let load = DotenvLoad { path, supplied };
+    let _ = DOTENV_LOAD.set(load.clone());
+    Some(load)
 }
+
+/// What a dotenv load did: which file, and which keys it supplied
+/// because the real environment carried none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DotenvLoad {
+    /// The file that was read.
+    pub path: PathBuf,
+    /// The keys this load supplied. A key the real environment already
+    /// carried is absent: `dotenvy` only fills gaps.
+    pub supplied: BTreeSet<String>,
+}
+
+/// The dotenv load this process performed, if any.
+///
+/// Empty in a process that never called [`load_dotenv`] — a library
+/// embedding this crate rather than a binary entry point. That is
+/// reported as "no dotenv layer", which is not the same claim as "the
+/// file supplied nothing", and the knob rows keep them apart by
+/// offering no `Dotenv` candidate at all.
+pub fn dotenv_load() -> Option<&'static DotenvLoad> {
+    DOTENV_LOAD.get()
+}
+
+static DOTENV_LOAD: OnceLock<DotenvLoad> = OnceLock::new();
 
 /// The pure core of [`load_dotenv`]: whether the file should be read.
 fn should_load_dotenv(get: impl Fn(&str) -> Option<String>) -> bool {
@@ -1438,14 +1483,15 @@ fn embed_usize_knob(
         key,
         KnobReach::Process,
         ReadAt::AfterResolution,
-        vec![
-            Candidate::of(
-                Layer::Environment,
-                env_name,
-                env_parsed::<usize>(get(env_name)).map(|v| v.to_string()),
-            ),
-            Candidate::of(Layer::Default, BUILT_IN_SITE, Some(default.to_string())),
-        ],
+        env_over(
+            env_name,
+            env_parsed::<usize>(get(env_name)).map(|v| v.to_string()),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(default.to_string()),
+            )],
+        ),
     )
 }
 
@@ -1519,14 +1565,15 @@ impl RerankerConfig {
             "reranker.url",
             KnobReach::Library,
             ReadAt::AfterResolution,
-            vec![
-                Candidate::of(
-                    Layer::Environment,
-                    RERANKER_URL_ENV,
-                    env_trimmed(get(RERANKER_URL_ENV)),
-                ),
-                Candidate::of(Layer::File, "reranker.url", env_trimmed(file.url)),
-            ],
+            env_over(
+                RERANKER_URL_ENV,
+                env_trimmed(get(RERANKER_URL_ENV)),
+                vec![Candidate::of(
+                    Layer::File,
+                    "reranker.url",
+                    env_trimmed(file.url),
+                )],
+            ),
         );
         let ctx = reranker_file_knob("reranker.ctx", file.ctx);
         let threads = reranker_file_knob("reranker.threads", file.threads);
@@ -1586,45 +1633,43 @@ impl SearchConfig {
             "search.top_k",
             KnobReach::Library,
             ReadAt::AfterResolution,
-            vec![
-                Candidate::of(
-                    Layer::Environment,
-                    SEARCH_TOP_K_ENV,
-                    env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
-                ),
-                Candidate::of(
-                    Layer::File,
-                    "search.top_k",
-                    file.top_k.map(|v| v.to_string()),
-                ),
-                Candidate::of(
-                    Layer::Default,
-                    BUILT_IN_SITE,
-                    Some(DEFAULT_SEARCH_TOP_K.to_string()),
-                ),
-            ],
+            env_over(
+                SEARCH_TOP_K_ENV,
+                env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
+                vec![
+                    Candidate::of(
+                        Layer::File,
+                        "search.top_k",
+                        file.top_k.map(|v| v.to_string()),
+                    ),
+                    Candidate::of(
+                        Layer::Default,
+                        BUILT_IN_SITE,
+                        Some(DEFAULT_SEARCH_TOP_K.to_string()),
+                    ),
+                ],
+            ),
         );
         let weak_threshold = resolve_knob(
             "search.weak_threshold",
             KnobReach::Library,
             ReadAt::AfterResolution,
-            vec![
-                Candidate::of(
-                    Layer::Environment,
-                    SEARCH_WEAK_THRESHOLD_ENV,
-                    env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
-                ),
-                Candidate::of(
-                    Layer::File,
-                    "search.weak_threshold",
-                    file.weak_threshold.map(|v| v.to_string()),
-                ),
-                Candidate::of(
-                    Layer::Default,
-                    BUILT_IN_SITE,
-                    Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
-                ),
-            ],
+            env_over(
+                SEARCH_WEAK_THRESHOLD_ENV,
+                env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
+                vec![
+                    Candidate::of(
+                        Layer::File,
+                        "search.weak_threshold",
+                        file.weak_threshold.map(|v| v.to_string()),
+                    ),
+                    Candidate::of(
+                        Layer::Default,
+                        BUILT_IN_SITE,
+                        Some(DEFAULT_SEARCH_WEAK_THRESHOLD.to_string()),
+                    ),
+                ],
+            ),
         );
 
         let cfg = SearchConfig {
@@ -1673,18 +1718,15 @@ impl McpConfig {
             "mcp.addr",
             KnobReach::Process,
             ReadAt::BeforeResolution,
-            vec![
-                Candidate::of(
-                    Layer::Environment,
-                    MCP_ADDR_ENV,
-                    env_trimmed(get(MCP_ADDR_ENV)),
-                ),
-                Candidate::of(
+            env_over(
+                MCP_ADDR_ENV,
+                env_trimmed(get(MCP_ADDR_ENV)),
+                vec![Candidate::of(
                     Layer::Default,
                     BUILT_IN_SITE,
                     Some(DEFAULT_MCP_ADDR.to_string()),
-                ),
-            ],
+                )],
+            ),
         );
 
         let cfg = McpConfig {
@@ -1794,6 +1836,43 @@ impl LogConfig {
 /// The `site` a compiled-in default is held at.
 const BUILT_IN_SITE: &str = "built-in";
 
+/// An environment variable's layers followed by the layers below it.
+fn env_over(name: &'static str, raw: Option<String>, lower: Vec<Candidate>) -> Vec<Candidate> {
+    let mut candidates = env_layers(name, raw);
+    candidates.extend(lower);
+    candidates
+}
+
+/// The environment and dotenv layers for one variable, in that order.
+///
+/// `dotenvy` writes the file's keys into the process environment, so by
+/// the time anything reads one the two are indistinguishable — except
+/// through the record [`load_dotenv`] kept of which keys it supplied.
+/// At most one of the two carries a value: the loader only fills gaps.
+///
+/// With no dotenv load in this process there is no dotenv layer to
+/// offer, which is why the returned list is one candidate rather than
+/// two with the second empty.
+fn env_layers(name: &'static str, raw: Option<String>) -> Vec<Candidate> {
+    env_layers_with(dotenv_load(), name, raw)
+}
+
+/// Pure core of [`env_layers`], factored out so a test can drive the
+/// dotenv record without a load having happened in its process.
+fn env_layers_with(
+    load: Option<&DotenvLoad>,
+    name: &'static str,
+    raw: Option<String>,
+) -> Vec<Candidate> {
+    match load.filter(|load| load.supplied.contains(name)) {
+        Some(load) => vec![
+            Candidate::of(Layer::Environment, name, None),
+            Candidate::of(Layer::Dotenv, load.path.display().to_string(), raw),
+        ],
+        None => vec![Candidate::of(Layer::Environment, name, raw)],
+    }
+}
+
 /// The Ollama endpoint, by precedence `env var > config.toml > default`.
 ///
 /// The only place that order is written down: [`finish`] reads the
@@ -1804,19 +1883,22 @@ pub(crate) fn ollama_url_knob(env: Option<String>, root_config: &RootConfig) -> 
         "ollama_url",
         KnobReach::Library,
         ReadAt::DuringResolution,
-        vec![
-            Candidate::of(Layer::Environment, OLLAMA_URL_ENV, env_trimmed(env)),
-            Candidate::of(
-                Layer::File,
-                "ollama_url",
-                env_trimmed(root_config.ollama_url.clone()),
-            ),
-            Candidate::of(
-                Layer::Default,
-                BUILT_IN_SITE,
-                Some(DEFAULT_OLLAMA_URL.to_string()),
-            ),
-        ],
+        env_over(
+            OLLAMA_URL_ENV,
+            env_trimmed(env),
+            vec![
+                Candidate::of(
+                    Layer::File,
+                    "ollama_url",
+                    env_trimmed(root_config.ollama_url.clone()),
+                ),
+                Candidate::of(
+                    Layer::Default,
+                    BUILT_IN_SITE,
+                    Some(DEFAULT_OLLAMA_URL.to_string()),
+                ),
+            ],
+        ),
     )
 }
 
@@ -1830,14 +1912,15 @@ pub(crate) fn backup_dir_knob(data_dir: &Path, env: Option<String>) -> KnobOrigi
         "backup_dir",
         KnobReach::Machine,
         ReadAt::PerCall,
-        vec![
-            Candidate::of(Layer::Environment, BACKUP_DIR_ENV, env_trimmed(env)),
-            Candidate::of(
+        env_over(
+            BACKUP_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
                 Layer::Default,
                 "beside the data root",
                 Some(data_dir.join("backup").display().to_string()),
-            ),
-        ],
+            )],
+        ),
     )
 }
 
@@ -1848,14 +1931,15 @@ pub(crate) fn daemon_state_dir_knob(env: Option<String>) -> KnobOrigin {
         "daemon_state_dir",
         KnobReach::Machine,
         ReadAt::BeforeResolution,
-        vec![
-            Candidate::of(Layer::Environment, DAEMON_STATE_DIR_ENV, env_trimmed(env)),
-            Candidate::of(
+        env_over(
+            DAEMON_STATE_DIR_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
                 Layer::Platform,
                 "platform data directory",
                 dirs::data_dir().map(|d| d.join("bookrack").join("daemon").display().to_string()),
-            ),
-        ],
+            )],
+        ),
     )
 }
 
@@ -1883,14 +1967,15 @@ pub(crate) fn registry_knob(env: Option<String>) -> KnobOrigin {
         "registry",
         KnobReach::Machine,
         ReadAt::DuringResolution,
-        vec![
-            Candidate::of(Layer::Environment, REGISTRY_ENV, env_trimmed(env)),
-            Candidate::of(
+        env_over(
+            REGISTRY_ENV,
+            env_trimmed(env),
+            vec![Candidate::of(
                 Layer::Platform,
                 "platform config directory",
                 default_registry_path().map(|p| p.display().to_string()),
-            ),
-        ],
+            )],
+        ),
     )
 }
 
@@ -1902,11 +1987,7 @@ pub(crate) fn unresolved_data_dir_knob(env: Option<String>) -> KnobOrigin {
         "data_dir",
         KnobReach::Process,
         ReadAt::DuringResolution,
-        vec![Candidate::of(
-            Layer::Environment,
-            DATA_DIR_ENV,
-            env_trimmed(env),
-        )],
+        env_layers(DATA_DIR_ENV, env_trimmed(env)),
     )
 }
 
@@ -1917,11 +1998,7 @@ pub(crate) fn unrooted_backup_dir_knob(env: Option<String>) -> KnobOrigin {
         "backup_dir",
         KnobReach::Machine,
         ReadAt::PerCall,
-        vec![Candidate::of(
-            Layer::Environment,
-            BACKUP_DIR_ENV,
-            env_trimmed(env),
-        )],
+        env_layers(BACKUP_DIR_ENV, env_trimmed(env)),
     )
 }
 
@@ -1957,10 +2034,15 @@ fn log_knob(
         key,
         KnobReach::Process,
         ReadAt::BeforeResolution,
-        vec![
-            Candidate::of(Layer::Environment, env_name, env_trimmed(get(env_name))),
-            Candidate::of(Layer::Default, BUILT_IN_SITE, Some(default.to_string())),
-        ],
+        env_over(
+            env_name,
+            env_trimmed(get(env_name)),
+            vec![Candidate::of(
+                Layer::Default,
+                BUILT_IN_SITE,
+                Some(default.to_string()),
+            )],
+        ),
     )
 }
 

@@ -44,7 +44,7 @@ async fn main() -> std::process::ExitCode {
     // In `main` rather than `run`: `run` is an ordinary function
     // another caller could reach, and reading a file out of the working
     // directory is the binary's decision, not a callable's.
-    bookrack_config::load_dotenv();
+    let _ = bookrack_config::load_dotenv();
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {

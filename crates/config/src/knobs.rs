@@ -328,6 +328,78 @@ mod tests {
         );
     }
 
+    fn dotenv_load(path: &str, supplied: &[&str]) -> crate::DotenvLoad {
+        crate::DotenvLoad {
+            path: PathBuf::from(path),
+            supplied: supplied.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    /// A key the file supplied is reported as the dotenv layer, sited
+    /// at the file, rather than as the real environment it was written
+    /// into — the two are indistinguishable by the time anything reads
+    /// them, so the loader's record is the only thing that can tell.
+    #[test]
+    fn a_key_the_dotenv_file_supplied_reports_the_dotenv_layer() {
+        let load = dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]);
+        let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, Some("9".to_string()));
+
+        assert_eq!(layers.len(), 2, "{layers:?}");
+        assert_eq!(layers[0].layer, Layer::Environment);
+        assert_eq!(layers[0].value, None, "the real environment carried none");
+        assert_eq!(layers[1].layer, Layer::Dotenv);
+        assert_eq!(layers[1].site, "/sandbox/.env");
+        assert_eq!(layers[1].value.as_deref(), Some("9"));
+    }
+
+    /// A key the real environment carried is not attributed to the
+    /// file, even when a load happened.
+    #[test]
+    fn a_key_the_real_environment_carried_stays_on_the_environment_layer() {
+        let load = dotenv_load("/sandbox/.env", &["SOMETHING_ELSE"]);
+        let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, Some("9".to_string()));
+
+        assert_eq!(layers.len(), 1, "{layers:?}");
+        assert_eq!(layers[0].layer, Layer::Environment);
+        assert_eq!(layers[0].value.as_deref(), Some("9"));
+    }
+
+    /// `dotenvy` only fills gaps, so the two layers can never both hold
+    /// a value. Pinned directly: a future loader change that started
+    /// overwriting would make the table claim a value came from two
+    /// places at once.
+    #[test]
+    fn a_key_is_never_offered_by_both_the_environment_and_the_dotenv_layer() {
+        let cases = [
+            dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]),
+            dotenv_load("/sandbox/.env", &[]),
+        ];
+        for load in cases {
+            for raw in [None, Some("9".to_string())] {
+                let layers = crate::env_layers_with(Some(&load), SEARCH_TOP_K_ENV, raw.clone());
+                let offering = layers.iter().filter(|c| c.value.is_some()).count();
+                assert!(
+                    offering <= 1,
+                    "both layers offered a value: {layers:?} (supplied={:?})",
+                    load.supplied
+                );
+            }
+        }
+    }
+
+    /// The knob that decides whether the file is read at all is read
+    /// before it, so it can never acquire a dotenv layer.
+    #[test]
+    fn the_dotenv_switch_itself_has_no_dotenv_layer() {
+        let knob = crate::no_dotenv_knob(Some("1".to_string()));
+        assert_ne!(knob.layer, Layer::Dotenv);
+        assert!(
+            !knob.shadowed.iter().any(|s| s.layer == Layer::Dotenv),
+            "{:?}",
+            knob.shadowed
+        );
+    }
+
     /// A dependency nothing holds still reports every place that was
     /// checked — the answer to "why is PDF extraction unavailable" is
     /// the probe list, so an empty-handed search must not go silent.

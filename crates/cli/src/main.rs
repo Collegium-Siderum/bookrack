@@ -808,7 +808,7 @@ async fn main() -> std::process::ExitCode {
     // First, before anything reads a variable: every later read then
     // sees one environment, whether it goes through `Config::resolve`
     // or straight to `std::env`.
-    bookrack_config::load_dotenv();
+    let _ = bookrack_config::load_dotenv();
     // Install the color-eyre report and panic hooks. The hooks render
     // `eyre::Report` cause chains and panics with rustc-style colored
     // prefixes when stderr is a TTY, and as plain text when it is not.
