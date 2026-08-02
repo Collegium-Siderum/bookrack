@@ -9,7 +9,7 @@
 //! what the resolvers actually do, which is the failure this module
 //! exists to make impossible.
 
-use bookrack_core::knob::{KnobOrigin, Layer};
+use bookrack_core::knob::{DotenvSupply, KnobOrigin, Layer};
 
 use crate::{Config, EmbedConfig, LogConfig, McpConfig, RerankerConfig, RootConfig, SearchConfig};
 
@@ -27,30 +27,36 @@ use crate::{Config, EmbedConfig, LogConfig, McpConfig, RerankerConfig, RootConfi
 /// [`effective_profile_reference`](crate::effective_profile_reference),
 /// which produces a row of the same shape.
 pub fn knob_origins(root: Option<&Config>) -> Vec<KnobOrigin> {
-    knob_origins_from(|key| std::env::var(key).ok(), root)
+    knob_origins_from(|key| std::env::var(key).ok(), crate::dotenv_supply(), root)
 }
 
 /// Pure form of [`knob_origins`], factored out so a test can drive the
-/// environment layer without mutating process-global state.
+/// environment layer without consulting process-global state.
+///
+/// Takes the dotenv record rather than reading this process's: the
+/// record decides which layer is credited for a value, so a caller
+/// describing a hypothetical environment must be able to say there was
+/// no file.
 fn knob_origins_from(
     get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
     root: Option<&Config>,
 ) -> Vec<KnobOrigin> {
     let root_config = root.map_or_else(RootConfig::default, |c| c.root_config.clone());
 
     let mut rows = vec![
         crate::no_dotenv_knob(get(crate::NO_DOTENV_ENV)),
-        crate::registry_knob(get(crate::REGISTRY_ENV)),
+        crate::registry_knob(get(crate::REGISTRY_ENV), dotenv),
         data_dir_row(&get, root),
-        crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), &root_config),
-        backup_dir_row(&get, root),
-        crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV)),
+        crate::ollama_url_knob(get(crate::OLLAMA_URL_ENV), dotenv, &root_config),
+        backup_dir_row(&get, dotenv, root),
+        crate::daemon_state_dir_knob(get(crate::DAEMON_STATE_DIR_ENV), dotenv),
     ];
-    rows.extend(EmbedConfig::resolve_with_origins_from(&get, None).1);
-    rows.extend(SearchConfig::resolve_with_origins_from(&get, &root_config).1);
-    rows.extend(RerankerConfig::resolve_with_origins_from(&get, &root_config).1);
-    rows.extend(McpConfig::resolve_with_origins_from(&get).1);
-    rows.extend(LogConfig::resolve_with_origins_from(&get).1);
+    rows.extend(EmbedConfig::resolve_with_origins_from(&get, dotenv, None).1);
+    rows.extend(SearchConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
+    rows.extend(RerankerConfig::resolve_with_origins_from(&get, dotenv, &root_config).1);
+    rows.extend(McpConfig::resolve_with_origins_from(&get, dotenv).1);
+    rows.extend(LogConfig::resolve_with_origins_from(&get, dotenv).1);
     rows
 }
 
@@ -175,11 +181,15 @@ fn data_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> 
 
 /// The backup-directory row. Its lower layer is derived from the data
 /// root, so with no root that layer has nothing to offer.
-fn backup_dir_row(get: impl Fn(&str) -> Option<String>, root: Option<&Config>) -> KnobOrigin {
+fn backup_dir_row(
+    get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    root: Option<&Config>,
+) -> KnobOrigin {
     let env = get(crate::BACKUP_DIR_ENV);
     match root {
-        Some(cfg) => crate::backup_dir_knob(cfg.data_dir(), env),
-        None => crate::unrooted_backup_dir_knob(env),
+        Some(cfg) => crate::backup_dir_knob(cfg.data_dir(), env, dotenv),
+        None => crate::unrooted_backup_dir_knob(env, dotenv),
     }
 }
 
@@ -218,7 +228,8 @@ mod tests {
     #[test]
     fn the_env_layer_eclipses_the_file_layer() {
         let root = root_with_top_k(5);
-        let (_, rows) = SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), &root);
+        let (_, rows) =
+            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, &root);
         let top_k = row(&rows, "search.top_k");
 
         assert_eq!(top_k.layer, Layer::Environment);
@@ -249,7 +260,7 @@ mod tests {
     fn the_table_agrees_with_the_struct_it_explains() {
         let root = root_with_top_k(5);
         let (cfg, rows) =
-            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), &root);
+            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, &root);
 
         assert_eq!(
             Some(cfg.top_k.to_string()),
@@ -270,7 +281,7 @@ mod tests {
             .iter()
             .chain(crate::SITE_ENV_CONSTANTS);
         for name in names {
-            let rows = knob_origins_from(only(name, "7"), None);
+            let rows = knob_origins_from(only(name, "7"), None, None);
             let winner = rows
                 .iter()
                 .find(|r| r.layer == Layer::Environment && r.value.is_some())
@@ -453,6 +464,44 @@ mod tests {
         );
     }
 
+    /// The rows report the dotenv record the caller passed, not the one
+    /// this process happens to have loaded.
+    ///
+    /// Both directions matter. A caller holding a record must see its
+    /// layers, or `config effective` stops naming the file an operator
+    /// has to edit; a caller declaring there was none must see no dotenv
+    /// layer at all, which is what lets the catalog report compiled-in
+    /// defaults on a machine that does have a `.env`.
+    #[test]
+    fn the_rows_report_the_dotenv_record_they_were_given() {
+        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
+        let carried = knob_origins_from(only(SEARCH_TOP_K_ENV, "9"), Some(load.supply()), None);
+        let top_k = row(&carried, "search.top_k");
+        assert!(
+            top_k
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.site == "/sandbox/.env" && s.value == "7"),
+            "the record the caller passed is missing from the row: {:?}",
+            top_k.shadowed
+        );
+
+        let none = knob_origins_from(only(SEARCH_TOP_K_ENV, "9"), None, None);
+        let drawn: Vec<(&str, &str)> = none
+            .iter()
+            .flat_map(|r| {
+                r.chain
+                    .iter()
+                    .filter(|s| s.layer == Layer::Dotenv)
+                    .map(|s| (r.key.as_str(), s.site.as_str()))
+            })
+            .collect();
+        assert!(
+            drawn.is_empty(),
+            "a caller that passed no record still drew dotenv layers: {drawn:?}"
+        );
+    }
+
     /// The knob that decides whether the file is read at all is read
     /// before it, so it can never acquire a dotenv layer.
     #[test]
@@ -479,8 +528,8 @@ mod tests {
     fn every_env_constant_is_named_by_some_row_chain_with_nothing_set() {
         for root in [None, Some(())] {
             let rows = match root {
-                None => knob_origins_from(|_| None, None),
-                Some(()) => knob_origins_from(|_| None, None),
+                None => knob_origins_from(|_| None, None, None),
+                Some(()) => knob_origins_from(|_| None, None, None),
             };
             let sited: Vec<&str> = rows
                 .iter()
@@ -587,7 +636,7 @@ mod tests {
     fn a_blank_env_value_does_not_win() {
         let root = root_with_top_k(5);
         let (cfg, rows) =
-            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "   "), &root);
+            SearchConfig::resolve_with_origins_from(only(SEARCH_TOP_K_ENV, "   "), None, &root);
         let top_k = row(&rows, "search.top_k");
 
         assert_eq!(top_k.layer, Layer::File);

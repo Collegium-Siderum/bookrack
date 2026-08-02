@@ -17,7 +17,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use bookrack_core::knob::{Candidate, KnobOrigin, KnobReach, Layer, ReadAt, resolve_knob};
+use bookrack_core::knob::{
+    Candidate, DotenvSupply, KnobOrigin, KnobReach, Layer, ReadAt, resolve_knob,
+};
 use fs2::FileExt;
 
 mod detect;
@@ -703,7 +705,7 @@ impl Config {
 /// override wins when set and non-blank; otherwise `<data_dir>/backup`.
 fn backup_dir_from(data_dir: &Path, override_dir: Option<String>) -> PathBuf {
     PathBuf::from(knob_value(
-        &backup_dir_knob(data_dir, override_dir),
+        &backup_dir_knob(data_dir, override_dir, NO_DOTENV_RECORD),
         String::new(),
     ))
 }
@@ -734,7 +736,7 @@ pub fn daemon_state_dir() -> Result<PathBuf, ConfigError> {
 /// The pure layer of [`daemon_state_dir`], factored out so it can be
 /// tested without mutating process-global environment variables.
 fn daemon_state_dir_from(override_dir: Option<String>) -> Result<PathBuf, ConfigError> {
-    daemon_state_dir_knob(override_dir)
+    daemon_state_dir_knob(override_dir, NO_DOTENV_RECORD)
         .value
         .map(PathBuf::from)
         .ok_or(ConfigError::DaemonStateDirUnavailable)
@@ -1453,12 +1455,14 @@ impl EmbedConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record: it
+    /// keeps the values and discards the rows, and the record moves only
+    /// the attribution (see [`NO_DOTENV_RECORD`]).
     fn resolve_from(
         get: impl Fn(&str) -> Option<String>,
         profile_model: Option<&str>,
     ) -> EmbedConfig {
-        EmbedConfig::resolve_with_origins_from(get, profile_model).0
+        EmbedConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, profile_model).0
     }
 
     /// Pure resolution that also reports where each value came from.
@@ -1466,6 +1470,7 @@ impl EmbedConfig {
     /// disagree.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
         profile_model: Option<&str>,
     ) -> (EmbedConfig, Vec<KnobOrigin>) {
         let d = EmbedConfig::default();
@@ -1489,24 +1494,28 @@ impl EmbedConfig {
             "embed.batch_char_budget",
             EMBED_BATCH_CHAR_BUDGET_ENV,
             &get,
+            dotenv,
             d.batch_char_budget,
         );
         let batch_max_chunks = embed_usize_knob(
             "embed.batch_max_chunks",
             EMBED_BATCH_MAX_CHUNKS_ENV,
             &get,
+            dotenv,
             d.batch_max_chunks,
         );
         let batch_min_char_budget = embed_usize_knob(
             "embed.batch_min_char_budget",
             EMBED_BATCH_MIN_CHAR_BUDGET_ENV,
             &get,
+            dotenv,
             d.batch_min_char_budget,
         );
         let progress_interval = embed_usize_knob(
             "embed.progress_interval_secs",
             EMBED_PROGRESS_INTERVAL_ENV,
             &get,
+            dotenv,
             DEFAULT_EMBED_PROGRESS_INTERVAL_SECS as usize,
         );
 
@@ -1543,6 +1552,7 @@ fn embed_usize_knob(
     key: &str,
     env_name: &'static str,
     get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
     default: usize,
 ) -> KnobOrigin {
     resolve_knob(
@@ -1550,6 +1560,7 @@ fn embed_usize_knob(
         KnobReach::Process,
         ReadAt::AfterResolution,
         env_over(
+            dotenv,
             env_name,
             env_parsed::<usize>(get(env_name)).map(|v| v.to_string()),
             vec![Candidate::of(
@@ -1610,9 +1621,10 @@ impl RerankerConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> RerankerConfig {
-        RerankerConfig::resolve_with_origins_from(get, root).0
+        RerankerConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
     }
 
     /// Pure resolution that also reports where each value came from.
@@ -1623,6 +1635,7 @@ impl RerankerConfig {
     /// here, meaning "supervise our own server" rather than "fall back".
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
         root: &RootConfig,
     ) -> (RerankerConfig, Vec<KnobOrigin>) {
         let file = root.reranker.clone().unwrap_or_default();
@@ -1632,6 +1645,7 @@ impl RerankerConfig {
             KnobReach::Library,
             ReadAt::AfterResolution,
             env_over(
+                dotenv,
                 RERANKER_URL_ENV,
                 env_trimmed(get(RERANKER_URL_ENV)),
                 vec![Candidate::of(
@@ -1681,9 +1695,10 @@ impl SearchConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>, root: &RootConfig) -> SearchConfig {
-        SearchConfig::resolve_with_origins_from(get, root).0
+        SearchConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD, root).0
     }
 
     /// Pure resolution that also reports where each value came from.
@@ -1691,6 +1706,7 @@ impl SearchConfig {
     /// disagree.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
         root: &RootConfig,
     ) -> (SearchConfig, Vec<KnobOrigin>) {
         let file = root.search.clone().unwrap_or_default();
@@ -1700,6 +1716,7 @@ impl SearchConfig {
             KnobReach::Library,
             ReadAt::AfterResolution,
             env_over(
+                dotenv,
                 SEARCH_TOP_K_ENV,
                 env_parsed::<usize>(get(SEARCH_TOP_K_ENV)).map(|v| v.to_string()),
                 vec![
@@ -1721,6 +1738,7 @@ impl SearchConfig {
             KnobReach::Library,
             ReadAt::AfterResolution,
             env_over(
+                dotenv,
                 SEARCH_WEAK_THRESHOLD_ENV,
                 env_f32_parsed(get(SEARCH_WEAK_THRESHOLD_ENV)).map(|v| v.to_string()),
                 vec![
@@ -1770,21 +1788,24 @@ impl McpConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> McpConfig {
-        McpConfig::resolve_with_origins_from(get).0
+        McpConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
     }
 
     /// Pure resolution that also reports where the value came from. The
     /// struct's field is read off the row, so the two cannot disagree.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
     ) -> (McpConfig, Vec<KnobOrigin>) {
         let addr = resolve_knob(
             "mcp.addr",
             KnobReach::Process,
             ReadAt::BeforeResolution,
             env_over(
+                dotenv,
                 MCP_ADDR_ENV,
                 env_trimmed(get(MCP_ADDR_ENV)),
                 vec![Candidate::of(
@@ -1843,9 +1864,10 @@ impl LogConfig {
     }
 
     /// Pure resolution, factored out so it can be tested without mutating
-    /// process-global environment variables.
+    /// process-global environment variables. Takes no dotenv record, for
+    /// the reason [`EmbedConfig::resolve_from`] gives.
     fn resolve_from(get: impl Fn(&str) -> Option<String>) -> LogConfig {
-        LogConfig::resolve_with_origins_from(get).0
+        LogConfig::resolve_with_origins_from(get, NO_DOTENV_RECORD).0
     }
 
     /// Pure resolution that also reports where each value came from.
@@ -1858,12 +1880,14 @@ impl LogConfig {
     /// sequence and not what a `config effective` table describes.
     fn resolve_with_origins_from(
         get: impl Fn(&str) -> Option<String>,
+        dotenv: Option<DotenvSupply<'_>>,
     ) -> (LogConfig, Vec<KnobOrigin>) {
-        let directive = log_knob("log.directive", LOG_ENV, &get, DEFAULT_LOG);
+        let directive = log_knob("log.directive", LOG_ENV, &get, dotenv, DEFAULT_LOG);
         let console_level = log_knob(
             "log.console_level",
             LOG_CONSOLE_ENV,
             &get,
+            dotenv,
             DEFAULT_LOG_CONSOLE,
         );
 
@@ -1909,15 +1933,31 @@ fn dotenv_supply() -> Option<bookrack_core::knob::DotenvSupply<'static>> {
     dotenv_load().map(|load| load.supply())
 }
 
+/// The record a caller passes when it reads a knob for its value alone.
+///
+/// The record decides which layer is *credited* for a value, never what
+/// the value is: the loader writes the file's keys into the environment,
+/// so a key it supplied is already visible to the environment getter and
+/// only the attribution moves. A caller that takes
+/// [`KnobOrigin::value`](bookrack_core::knob::KnobOrigin::value) and
+/// discards the row therefore cannot observe the difference, and naming
+/// that here is cheaper than threading a parameter no result depends on.
+const NO_DOTENV_RECORD: Option<DotenvSupply<'static>> = None;
+
 /// An environment variable's layers followed by the layers below it,
-/// against this process's dotenv record.
-fn env_over(name: &str, raw: Option<String>, lower: Vec<Candidate>) -> Vec<Candidate> {
-    bookrack_core::knob::env_over(dotenv_supply(), name, raw, lower)
+/// against the caller's dotenv record.
+fn env_over(
+    dotenv: Option<DotenvSupply<'_>>,
+    name: &str,
+    raw: Option<String>,
+    lower: Vec<Candidate>,
+) -> Vec<Candidate> {
+    bookrack_core::knob::env_over(dotenv, name, raw, lower)
 }
 
 /// The environment and dotenv layers for one variable.
-fn env_layers(name: &str, raw: Option<String>) -> Vec<Candidate> {
-    bookrack_core::knob::env_layers(dotenv_supply(), name, raw)
+fn env_layers(dotenv: Option<DotenvSupply<'_>>, name: &str, raw: Option<String>) -> Vec<Candidate> {
+    bookrack_core::knob::env_layers(dotenv, name, raw)
 }
 
 /// The Ollama endpoint, by precedence `env var > config.toml > default`.
@@ -1925,12 +1965,17 @@ fn env_layers(name: &str, raw: Option<String>) -> Vec<Candidate> {
 /// The only place that order is written down: [`finish`] reads the
 /// value off this row, and [`knob_origins`](crate::knob_origins)
 /// reports the same row.
-pub(crate) fn ollama_url_knob(env: Option<String>, root_config: &RootConfig) -> KnobOrigin {
+pub(crate) fn ollama_url_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+    root_config: &RootConfig,
+) -> KnobOrigin {
     resolve_knob(
         "ollama_url",
         KnobReach::Library,
         ReadAt::DuringResolution,
         env_over(
+            dotenv,
             OLLAMA_URL_ENV,
             env_trimmed(env),
             vec![
@@ -1954,12 +1999,17 @@ pub(crate) fn ollama_url_knob(env: Option<String>, root_config: &RootConfig) -> 
 /// `read_at` is [`ReadAt::PerCall`] because [`Config::backup_dir`]
 /// re-reads the variable on every call rather than snapshotting it at
 /// resolution, unlike every sibling accessor.
-pub(crate) fn backup_dir_knob(data_dir: &Path, env: Option<String>) -> KnobOrigin {
+pub(crate) fn backup_dir_knob(
+    data_dir: &Path,
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
     resolve_knob(
         "backup_dir",
         KnobReach::Machine,
         ReadAt::PerCall,
         env_over(
+            dotenv,
             BACKUP_DIR_ENV,
             env_trimmed(env),
             vec![Candidate::of(
@@ -1973,12 +2023,16 @@ pub(crate) fn backup_dir_knob(data_dir: &Path, env: Option<String>) -> KnobOrigi
 
 /// The daemon state directory, by precedence
 /// `env var > platform data directory`.
-pub(crate) fn daemon_state_dir_knob(env: Option<String>) -> KnobOrigin {
+pub(crate) fn daemon_state_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
     resolve_knob(
         "daemon_state_dir",
         KnobReach::Machine,
         ReadAt::BeforeResolution,
         env_over(
+            dotenv,
             DAEMON_STATE_DIR_ENV,
             env_trimmed(env),
             vec![Candidate::of(
@@ -2009,12 +2063,13 @@ pub(crate) fn no_dotenv_knob(env: Option<String>) -> KnobOrigin {
 
 /// The library registry file, by precedence
 /// `env var > platform config directory`.
-pub(crate) fn registry_knob(env: Option<String>) -> KnobOrigin {
+pub(crate) fn registry_knob(env: Option<String>, dotenv: Option<DotenvSupply<'_>>) -> KnobOrigin {
     resolve_knob(
         "registry",
         KnobReach::Machine,
         ReadAt::DuringResolution,
         env_over(
+            dotenv,
             REGISTRY_ENV,
             env_trimmed(env),
             vec![Candidate::of(
@@ -2028,12 +2083,15 @@ pub(crate) fn registry_knob(env: Option<String>) -> KnobOrigin {
 
 /// The backup directory with no data root resolved: only the override
 /// can speak, since the lower layer is derived from the root.
-pub(crate) fn unrooted_backup_dir_knob(env: Option<String>) -> KnobOrigin {
+pub(crate) fn unrooted_backup_dir_knob(
+    env: Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
+) -> KnobOrigin {
     resolve_knob(
         "backup_dir",
         KnobReach::Machine,
         ReadAt::PerCall,
-        env_layers(BACKUP_DIR_ENV, env_trimmed(env)),
+        env_layers(dotenv, BACKUP_DIR_ENV, env_trimmed(env)),
     )
 }
 
@@ -2105,6 +2163,7 @@ fn log_knob(
     key: &str,
     env_name: &'static str,
     get: impl Fn(&str) -> Option<String>,
+    dotenv: Option<DotenvSupply<'_>>,
     default: &str,
 ) -> KnobOrigin {
     resolve_knob(
@@ -2112,6 +2171,7 @@ fn log_knob(
         KnobReach::Process,
         ReadAt::BeforeResolution,
         env_over(
+            dotenv,
             env_name,
             env_trimmed(get(env_name)),
             vec![Candidate::of(
@@ -2438,7 +2498,7 @@ fn finish(resolved: Resolved, ollama_url_env: Option<String>) -> Result<Config, 
     }
     let root_config = load_root_config(&data_dir)?;
     let ollama_url = knob_value(
-        &ollama_url_knob(ollama_url_env, &root_config),
+        &ollama_url_knob(ollama_url_env, NO_DOTENV_RECORD, &root_config),
         DEFAULT_OLLAMA_URL.to_string(),
     );
     Ok(Config {
