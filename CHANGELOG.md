@@ -25,6 +25,22 @@ release workflow extracts the matching section verbatim from this file.
   somewhere uncreatable, which otherwise surfaces at the worst possible
   moment, as a migration is about to rewrite a store.
 
+- **runtime: `doctor` reports the daemon's own state and who produced
+  the report.** Two rows cover what no per-library row could: the
+  daemon state directory, which one daemon owns however many libraries
+  it serves, and the queue snapshot inside it. An unparseable snapshot
+  is a `FAIL` — the daemon reads it at start-up and will not come up
+  until it is repaired, and until now the first symptom of that was a
+  daemon that would not start beside a report that was all green.
+
+  A third row names the vantage point. The report has two shapes: a
+  daemon answering `doctor.gather` covers the reranker backend it
+  supervises and the MCP address it actually bound, while the
+  in-process path can only ask about the configured one. The row says
+  which produced this run, names the control socket when a daemon did,
+  and warns when a daemon holds the session lock but did not answer —
+  the case that silently yields the thinner report.
+
 - **runtime: `doctor` reports free space on the data root's volume.**
   Every row said whether something exists; none said whether there is
   room for the next one. The disk row warns below the floor

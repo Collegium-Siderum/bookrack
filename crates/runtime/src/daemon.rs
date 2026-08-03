@@ -763,6 +763,7 @@ impl DaemonRuntime {
             queue_worker_enabled: opts.spawn_queue_worker,
             tray_focus_signal: Arc::clone(&tray_focus_signal),
             rerank_supervisor: rerank_supervisor.clone(),
+            control_socket: Some(control_sock_guard.path().to_path_buf()),
             queue_paused: Arc::clone(&queue_paused),
             log_stream: log_stream.clone(),
             plan_registry,

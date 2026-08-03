@@ -111,8 +111,12 @@ impl Report {
 /// expected "not ready" health outcome to a non-zero exit code
 /// without adding an extra error line on top of the table the
 /// renderer already wrote.
-pub async fn run(selection: &LibrarySelection, json: bool) -> Result<bool> {
-    let report = gather(selection).await;
+pub async fn run(
+    selection: &LibrarySelection,
+    json: bool,
+    runtime_dir: Option<&Path>,
+) -> Result<bool> {
+    let report = gather(selection, runtime_dir).await;
     if json {
         render_json(&report);
     } else {
@@ -136,26 +140,51 @@ pub fn render_value(value: &serde_json::Value, json: bool) -> Result<bool> {
     Ok(!report.has_failures())
 }
 
-/// Build a [`Report`] for the given selection. Pure over its inputs in
-/// the sense that every observation is fresh — there is no in-process
-/// cache to invalidate between successive calls.
-pub async fn gather(selection: &LibrarySelection) -> Report {
-    gather_with(selection, None, None).await
+/// Who is producing a report, and what that vantage point can see.
+///
+/// The two differ in shape, not only in detail: a daemon reports on the
+/// reranker backend it supervises and the MCP address it actually
+/// bound, where the in-process path can only ask about the configured
+/// one. The report says which one produced it, so two runs on one
+/// machine that disagree are readable rather than mysterious.
+pub enum Reporter<'a> {
+    /// The daemon serving the library answered `doctor.gather`.
+    Daemon {
+        /// The supervised reranker backend, when the profile enables one.
+        rerank_supervisor: Option<&'a crate::rerank_supervisor::RerankSupervisor>,
+        /// The MCP address this daemon bound.
+        mcp_addr: &'a str,
+        /// The control socket a client reached it on.
+        control_socket: Option<&'a Path>,
+    },
+    /// The binary gathered the report itself, no daemon answering.
+    InProcess {
+        /// Where to look for a session lock, so the row can tell "no
+        /// daemon" from "a daemon is up but did not answer".
+        runtime_dir: Option<&'a Path>,
+    },
 }
 
-/// [`gather`] with what only a live daemon knows: its supervised
-/// reranker backend, so that row reports the supervisor state instead
-/// of `not running`, and the MCP address it actually bound, so the
-/// endpoint row asks about the address being served rather than the
-/// one configured. The daemon's `doctor.gather` handler passes both;
-/// the offline CLI path passes neither.
-pub async fn gather_with(
-    selection: &LibrarySelection,
-    rerank_supervisor: Option<&crate::rerank_supervisor::RerankSupervisor>,
-    served_mcp_addr: Option<&str>,
-) -> Report {
-    let mut rows = Vec::new();
+/// Build a [`Report`] for the given selection, gathered in-process.
+/// Pure over its inputs in the sense that every observation is fresh —
+/// there is no in-process cache to invalidate between successive calls.
+pub async fn gather(selection: &LibrarySelection, runtime_dir: Option<&Path>) -> Report {
+    gather_with(selection, Reporter::InProcess { runtime_dir }).await
+}
 
+/// [`gather`] from a named vantage point; see [`Reporter`].
+pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -> Report {
+    let mut rows = Vec::new();
+    let (rerank_supervisor, served_mcp_addr) = match &reporter {
+        Reporter::Daemon {
+            rerank_supervisor,
+            mcp_addr,
+            ..
+        } => (*rerank_supervisor, Some(*mcp_addr)),
+        Reporter::InProcess { .. } => (None, None),
+    };
+
+    push_reporter_row(&mut rows, &reporter);
     let cfg = push_data_root_row(&mut rows, selection);
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
@@ -163,6 +192,7 @@ pub async fn gather_with(
         push_store_rows(&mut rows, cfg);
         push_disk_free_row(&mut rows, cfg);
     }
+    push_daemon_state_rows(&mut rows);
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
     let registry = probe_registry(list_libraries());
@@ -644,6 +674,145 @@ fn push_fd_limit_row(rows: &mut Vec<Row>) {
                 note: format!("could not raise RLIMIT_NOFILE: {e}"),
             },
         }),
+    }
+}
+
+/// State which vantage point produced this report, and — from the
+/// in-process one — whether a daemon is nonetheless holding the session
+/// lock. That combination is the one an operator cannot otherwise see:
+/// a daemon that is up but did not answer produces a report of a
+/// different shape than the one that daemon would have written.
+fn push_reporter_row(rows: &mut Vec<Row>, reporter: &Reporter<'_>) {
+    let label = "report by".to_string();
+    let runtime_dir = match reporter {
+        Reporter::Daemon { control_socket, .. } => {
+            rows.push(Row {
+                label,
+                value: "the daemon serving this library".to_string(),
+                status: Status::Ok {
+                    note: control_socket.map(|s| format!("control socket {}", s.display())),
+                },
+            });
+            return;
+        }
+        Reporter::InProcess { runtime_dir } => *runtime_dir,
+    };
+    let (value, status) = match session_lock_holder(runtime_dir) {
+        Ok(Some(pid)) => (
+            "this process".to_string(),
+            Status::Warn {
+                note: format!(
+                    "a daemon holds the session lock (pid {pid}) but did not answer, so this \
+                     report covers the configured MCP address rather than the one that daemon \
+                     bound, and omits the reranker backend it supervises"
+                ),
+            },
+        ),
+        Ok(None) => (
+            "this process".to_string(),
+            Status::Ok {
+                note: Some("no daemon is running".to_string()),
+            },
+        ),
+        Err(reason) => (
+            "this process".to_string(),
+            Status::Ok {
+                note: Some(format!(
+                    "could not tell whether a daemon is running: {reason}"
+                )),
+            },
+        ),
+    };
+    rows.push(Row {
+        label,
+        value,
+        status,
+    });
+}
+
+/// The pid recorded in a held session lock under `runtime_dir`, or
+/// `None` when no lock is held. A lock left behind by a crashed daemon
+/// is not held, so it reports as no daemon — the same reading
+/// `bookrack status` takes.
+fn session_lock_holder(runtime_dir: Option<&Path>) -> Result<Option<u32>, String> {
+    let dir = bookrack_session::resolve_runtime_dir(runtime_dir).map_err(|e| format!("{e}"))?;
+    let lock_path = dir.join(bookrack_session::tty_lock_name());
+    let info = bookrack_session::peek_lock(&lock_path).map_err(|e| format!("{e}"))?;
+    let held = bookrack_session::lock_is_held(&lock_path).map_err(|e| format!("{e}"))?;
+    Ok(info.filter(|_| held).map(|i| i.pid))
+}
+
+/// The daemon's own state directory and the queue snapshot inside it.
+/// Neither hangs off a data root — one daemon process owns one of each
+/// however many libraries it serves — so nothing in the per-library
+/// rows above covers them. A snapshot that cannot be parsed is a
+/// failure the daemon would otherwise report only at its next start,
+/// which is exactly when an operator is least equipped to read it.
+fn push_daemon_state_rows(rows: &mut Vec<Row>) {
+    let dir = match bookrack_config::daemon_state_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            rows.push(Row {
+                label: "daemon state".to_string(),
+                value: "(unresolved)".to_string(),
+                status: Status::Fail {
+                    note: format!(
+                        "{e}; the daemon writes its queue snapshot and logs there and \
+                         cannot start without it"
+                    ),
+                },
+            });
+            return;
+        }
+    };
+    let queue_path = dir.join("queue.json");
+    rows.push(Row {
+        label: "daemon state".to_string(),
+        value: dir.display().to_string(),
+        status: if dir.exists() {
+            Status::Ok { note: None }
+        } else {
+            Status::Ok {
+                note: Some("not created yet; the first `bookrack run` creates it".to_string()),
+            }
+        },
+    });
+    let loaded = crate::queue::load(&queue_path).map_err(|e| format!("{e:#}"));
+    rows.push(queue_snapshot_row(&queue_path, loaded));
+}
+
+/// Grade the queue snapshot from the same read the daemon performs at
+/// start-up. A missing file is the normal state of a library nothing
+/// has been queued on, and `load` reports it as an empty queue; an
+/// unparseable one is what the daemon refuses to start on.
+fn queue_snapshot_row(
+    path: &std::path::Path,
+    loaded: Result<crate::queue::QueueState, String>,
+) -> Row {
+    let label = "queue snapshot".to_string();
+    match loaded {
+        Ok(_) if !path.exists() => Row {
+            label,
+            value: "(absent)".to_string(),
+            status: Status::Ok {
+                note: Some("nothing has been queued yet".to_string()),
+            },
+        },
+        Ok(state) => Row {
+            label,
+            value: format!("{} job(s)", state.jobs.len()),
+            status: Status::Ok { note: None },
+        },
+        Err(reason) => Row {
+            label,
+            value: path.display().to_string(),
+            status: Status::Fail {
+                note: format!(
+                    "{reason}; the daemon reads this at start-up and will not come up until \
+                     the file is repaired or removed"
+                ),
+            },
+        },
     }
 }
 
@@ -2136,6 +2305,97 @@ mod tests {
             .find(|r| r.label == "lancedb_papers/")
             .expect("row present");
         assert!(matches!(papers.status, Status::Ok { .. }), "{papers:?}");
+    }
+
+    #[test]
+    fn the_report_names_the_vantage_point_that_produced_it() {
+        // Two runs on one machine produce reports of different shapes
+        // depending on whether a daemon answered. Without this row an
+        // operator comparing them has nothing to explain the difference.
+        let socket = std::path::PathBuf::from("/run/bookrack/control.sock");
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::Daemon {
+                rerank_supervisor: None,
+                mcp_addr: "127.0.0.1:8391",
+                control_socket: Some(&socket),
+            },
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].label, "report by");
+        let Status::Ok { note } = &rows[0].status else {
+            panic!("a daemon-served report is not a fault: {rows:?}");
+        };
+        assert!(
+            note.as_deref().is_some_and(|n| n.contains("control.sock")),
+            "{rows:?}"
+        );
+
+        // An empty runtime directory holds no lock, so the in-process
+        // row reports the plain "no daemon" reading.
+        let runtime = tempfile::tempdir().expect("tempdir");
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::InProcess {
+                runtime_dir: Some(runtime.path()),
+            },
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].value, "this process");
+        let Status::Ok { note } = &rows[0].status else {
+            panic!("no daemon running is an answer, not a fault: {rows:?}");
+        };
+        assert_eq!(note.as_deref(), Some("no daemon is running"));
+    }
+
+    #[test]
+    fn a_daemon_that_holds_the_lock_but_did_not_answer_is_flagged() {
+        // The case the row exists for: a daemon is up, the client fell
+        // back to gathering in-process, and the report that comes out
+        // covers the configured MCP address rather than the bound one.
+        let runtime = tempfile::tempdir().expect("tempdir");
+        let lock_path = runtime.path().join(bookrack_session::tty_lock_name());
+        let _held = bookrack_session::TtyLock::acquire(&lock_path, 4242, "127.0.0.1:8391", None)
+            .expect("hold the session lock");
+
+        let mut rows = Vec::new();
+        push_reporter_row(
+            &mut rows,
+            &Reporter::InProcess {
+                runtime_dir: Some(runtime.path()),
+            },
+        );
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let Status::Warn { note } = &rows[0].status else {
+            panic!("a daemon that did not answer is a warning: {rows:?}");
+        };
+        assert!(note.contains("4242"), "{note}");
+    }
+
+    #[test]
+    fn a_corrupt_queue_snapshot_is_a_failure_and_an_absent_one_is_not() {
+        // The daemon reads this file at start-up and refuses to come up
+        // on a parse error. Until doctor read it too, the first symptom
+        // was a daemon that would not start and a report that was all
+        // green.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+
+        let absent = queue_snapshot_row(&path, Ok(crate::queue::QueueState::default()));
+        assert!(matches!(absent.status, Status::Ok { .. }), "{absent:?}");
+        assert_eq!(absent.value, "(absent)");
+
+        std::fs::write(&path, b"{ not json").expect("write a corrupt snapshot");
+        let loaded = crate::queue::load(&path).map_err(|e| format!("{e:#}"));
+        assert!(loaded.is_err(), "the corrupt document must not parse");
+        let row = queue_snapshot_row(&path, loaded);
+        let Status::Fail { note } = &row.status else {
+            panic!("an unparseable queue snapshot blocks start-up: {row:?}");
+        };
+        assert!(note.contains("will not come up"), "{note}");
     }
 
     #[test]

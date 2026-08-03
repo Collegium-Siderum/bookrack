@@ -95,16 +95,20 @@ pub async fn run(
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)
             }
-            Err(ControlError::NotRunning) => bookrack_runtime::doctor::run(selection, json).await,
+            Err(ControlError::NotRunning) => {
+                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
+            }
             Err(err) => {
                 eprintln!("bookrack: connect to {}: {err}", socket.path().display());
-                bookrack_runtime::doctor::run(selection, json).await
+                bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
             }
         },
-        Err(ControlError::NotRunning) => bookrack_runtime::doctor::run(selection, json).await,
+        Err(ControlError::NotRunning) => {
+            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
+        }
         Err(err) => {
             eprintln!("bookrack: resolve daemon address: {err}");
-            bookrack_runtime::doctor::run(selection, json).await
+            bookrack_runtime::doctor::run(selection, json, runtime_dir.as_deref()).await
         }
     }
 }

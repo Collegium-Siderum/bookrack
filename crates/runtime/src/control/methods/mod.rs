@@ -117,6 +117,10 @@ pub struct MethodContext {
     /// a reranker and no operator URL overrides the backend. `doctor.
     /// gather` reads its state for the backend row.
     pub rerank_supervisor: Option<Arc<crate::rerank_supervisor::RerankSupervisor>>,
+    /// The control socket this daemon is answering on. `doctor.gather`
+    /// names it so a report says which daemon produced it. `None` in
+    /// entry points that dispatch without a bound socket.
+    pub control_socket: Option<PathBuf>,
     /// Worker-loop pause flag. The `queue.pause` / `queue.resume`
     /// handlers flip this atomic; the worker loop reads it before
     /// pulling the next pending job. Mirrored onto
@@ -567,6 +571,7 @@ pub(crate) fn test_method_context(
         queue_worker_enabled: false,
         tray_focus_signal: Arc::new(Notify::new()),
         rerank_supervisor: None,
+        control_socket: None,
         queue_paused: Arc::new(AtomicBool::new(false)),
         log_stream: LogStreamHandle::new(8, 8),
         plan_registry: Arc::new(PlanRegistry::new()),

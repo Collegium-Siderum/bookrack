@@ -135,8 +135,11 @@ pub async fn doctor_gather(ctx: &MethodContext) -> Value {
     // names: the report is about the surface this session is serving.
     let report = doctor::gather_with(
         &ctx.selection,
-        ctx.rerank_supervisor.as_deref(),
-        Some(ctx.info_context.mcp_addr.as_str()),
+        doctor::Reporter::Daemon {
+            rerank_supervisor: ctx.rerank_supervisor.as_deref(),
+            mcp_addr: ctx.info_context.mcp_addr.as_str(),
+            control_socket: ctx.control_socket.as_deref(),
+        },
     )
     .await;
     serde_json::to_value(report).unwrap_or(Value::Null)

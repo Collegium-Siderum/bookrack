@@ -236,7 +236,18 @@ address and checks that bookrack is what answers, so a port taken over
 by another service is reported rather than assumed healthy. With a
 daemon running the row is about the address that daemon bound; with
 none running it is about the configured address, and a free one is
-`OK`. Each row is
+`OK`.
+
+Which of those two the report is comes from the first row. A daemon
+answering `doctor.gather` names the control socket it answered on; a
+report gathered in-process says so, and warns when a daemon holds the
+session lock but did not answer — that fallback is what silently
+produces the thinner report. Two further rows cover what belongs to the
+daemon rather than to a library: its state directory and the queue
+snapshot inside it, whose parse failure is a `FAIL`, since the daemon
+reads the same file at start-up and refuses to come up on it.
+
+Each row is
 `OK`, `WARN`, or `FAIL`; any `FAIL` exits non-zero so a script can branch
 on it. Pass `--json` for a machine-readable report suitable for a bug
 attachment.
