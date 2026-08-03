@@ -810,6 +810,64 @@ mod tests {
         );
     }
 
+    /// An eclipsed data-root line is reported even when the environment
+    /// rung of the ladder took no value at all.
+    #[test]
+    fn an_eclipsed_data_root_line_is_reported_when_the_environment_rung_is_silent() {
+        let load = dotenv_eclipsed("/sandbox/.env", crate::DATA_DIR_ENV, "/sandbox/from-file");
+        let root = root_resolved_by(
+            crate::ResolutionSource::RegistryDefault,
+            "/sandbox/registry",
+        );
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "  "),
+            Some(load.supply()),
+            Some(&root),
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/registry"));
+        assert_eq!(data_dir.layer, Layer::Registry);
+        assert!(
+            data_dir.chain.iter().any(|s| s.layer == Layer::Dotenv),
+            "the ladder never names the file: {:?}",
+            data_dir.chain
+        );
+        assert!(
+            data_dir
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.value == "/sandbox/from-file"),
+            "the file's own root vanished from the row: {:?}",
+            data_dir.shadowed
+        );
+    }
+
+    /// The same claim on the path where a flag short-circuits the ladder
+    /// above the environment rung.
+    #[test]
+    fn an_eclipsed_data_root_line_is_reported_when_a_flag_won() {
+        let load = dotenv_eclipsed("/sandbox/.env", crate::DATA_DIR_ENV, "/sandbox/from-file");
+        let root = root_resolved_by(crate::ResolutionSource::DataDirFlag, "/sandbox/flag");
+        let rows = knob_origins_from(
+            only(crate::DATA_DIR_ENV, "/sandbox/from-shell"),
+            Some(load.supply()),
+            Some(&root),
+        );
+        let data_dir = row(&rows, "data_dir");
+
+        assert_eq!(data_dir.value.as_deref(), Some("/sandbox/flag"));
+        assert_eq!(data_dir.layer, Layer::Flag);
+        assert!(
+            data_dir
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.value == "/sandbox/from-file"),
+            "the file's own root vanished from the row: {:?}",
+            data_dir.shadowed
+        );
+    }
+
     /// The credit holds on the path where resolution failed: a root the
     /// file pointed at and that does not exist is exactly the case an
     /// operator is debugging, and sending them to the wrong file is

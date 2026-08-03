@@ -2244,6 +2244,14 @@ pub(crate) fn unresolved_data_dir_knob(
 /// lost to a flag offers nothing for the file to have supplied, and
 /// splitting silence into two silent layers would name a file that
 /// decided nothing.
+///
+/// A line the file wrote and the real environment eclipsed is the one
+/// exception. The loader recorded that discard when it read the file,
+/// and it holds whichever rung the ladder stopped at, so a silent rung
+/// still carries it — as a [`Candidate::discarded`], which is reported
+/// and can never be taken. What the file *supplied* has no such
+/// record: a load keeps the key, not the value, so a supplied root
+/// some rung above outranked stays unreported.
 fn data_dir_candidates(
     resolved: Option<(&Path, ResolutionSource)>,
     env_read: Option<String>,
@@ -2265,7 +2273,18 @@ fn data_dir_candidates(
             match source {
                 ResolutionSource::EnvVar => match held.or_else(|| env_read.clone()) {
                     Some(read) => env_layers(dotenv, DATA_DIR_ENV, Some(read)),
-                    None => vec![Candidate::of(layer, site, None)],
+                    // The eclipsed rung goes below the environment and
+                    // above the platform rung that follows, which is
+                    // the order `Layer` already declares.
+                    None => {
+                        let mut rungs = vec![Candidate::of(layer, site, None)];
+                        if let Some(load) = dotenv
+                            && let Some(value) = load.eclipsed(DATA_DIR_ENV)
+                        {
+                            rungs.push(Candidate::discarded(Layer::Dotenv, load.path, value));
+                        }
+                        rungs
+                    }
                 },
                 _ => vec![Candidate::of(layer, site, held)],
             }

@@ -240,9 +240,16 @@ so it stays lost — a variable that is set but blank, or set to text the
 knob cannot parse, offers nothing itself and still does not hand the
 file's line its chance back. The value in that case comes from
 `config.toml` or the built-in default, and the table shows the file's
-line beneath it. This holds for the data root as well — a
-`BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder above
-and is credited to the file.
+line beneath it. This holds for the data root as well, on both halves:
+a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder
+above and is credited to the file, and one the real environment already
+carried leaves the file's line reported as a layer that lost. The
+second holds whichever rung the root came from — including a
+`--data-dir` flag that stopped the walk above rung 3, which decides
+where the root comes from and not what the file says. What the file
+*supplied* is the one thing a losing rung cannot report: the loader
+records which keys it filled in, not the values, so a root the file
+supplied and a higher rung outranked is absent from the row.
 
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the

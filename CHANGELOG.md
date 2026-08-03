@@ -227,6 +227,20 @@ release workflow extracts the matching section verbatim from this file.
   variable was affected, across the configuration, search, session,
   PDFium and CLI-prompt tables.
 
+- **config: the `data_dir` row dropped a `.env` line the environment
+  eclipsed.** The data root is the one knob whose row is a ladder
+  rather than a single variable, and its environment rung drew the
+  dotenv layer only when it held a value itself. A rung that took none
+  — because the variable was blank, or because `--data-dir`,
+  `--library`, or a registry default settled the root without it —
+  reported no `dotenv` layer at all, so an operator who had written
+  `BOOKRACK_DATA_DIR` into `.env` saw a table that never mentioned the
+  file and went back to editing a line already being ignored. That
+  discard is recorded when the file is read, which is true whichever
+  rung the ladder stopped at, so the row now reports it as a layer that
+  lost wherever the root came from. The value is untouched: the layer
+  is reported having already been discarded and cannot be taken.
+
 - **runtime: `doctor` called an index coherent after comparing two of
   its four stamps.** The index-profile section ends on a summary
   promising the referenced profiles are "coherent with their built
