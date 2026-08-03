@@ -2,29 +2,31 @@
 
 //! `bookrack doctor`: one-screen health check of an install.
 //!
-//! Each environment expectation — a resolved data root, the on-disk
-//! presence of each database store, a loadable PDFium library, a
-//! sufficient file-descriptor limit, the registry's internal
-//! consistency, each library's index profile against its built stamps,
-//! the reranker binary and model, the MCP endpoint, and a reachable
-//! Ollama daemon carrying the configured embed model — becomes one row
-//! in a fixed three-column table. A row is `OK`, `WARN`, or `FAIL`; any
-//! FAIL exits the process with status 1 so a script can branch on the
-//! result.
+//! Each environment expectation — which vantage point is answering, a
+//! resolved data root, every store under it, free space to grow into, a
+//! loadable PDFium library, a sufficient file-descriptor limit, the
+//! daemon's own state directory and queue snapshot, the registry's
+//! internal consistency, each library's index profile against its built
+//! stamps, the reranker binary and model, the MCP endpoint, and a
+//! reachable Ollama daemon carrying the configured embed model —
+//! becomes one row in a fixed three-column table. A row is `OK`,
+//! `WARN`, or `FAIL`; any FAIL exits the process with status 1 so a
+//! script can branch on the result.
 //!
-//! The store-presence rows deliberately stop at `path.exists()`: a
-//! read-write open would apply pending migrations and contend for the
-//! daemon's exclusive write lock. The registry-coherence rows do open
-//! the corpus read-only to read its built stamps — a `query_only` WAL
-//! open takes no write lock and is safe alongside a running daemon —
-//! but no row opens a store read-write.
+//! **No row opens a store read-write.** A present store is opened
+//! through its read-only door, which is a `query_only` connection or a
+//! sidecar read: no write lock, no pending migration applied, no store
+//! materialised. That is safe alongside a running daemon, and it is
+//! what makes the schema check worth having here — the same verify each
+//! door already performs on the way in. A read-only open of an existing
+//! WAL database does create its `-shm`/`-wal` sidecars; what the rows
+//! must never do is bring a `.db` into being.
 //!
-//! The store rows report a library's presence, not its health: what a
-//! store holds and whether it opens is `bookrack verify`, and a running
-//! daemon reports the same through `library.info`, which `bookrack
-//! status` renders. Both need a daemon; this command does not, which is
-//! why it stays the diagnosis of last resort rather than growing into
-//! one of them.
+//! Depth stops there. What a store *holds* — intake counts, missing
+//! files, stamp drift against a rebuild — is `bookrack verify`, and a
+//! running daemon reports it through `library.info`, which `bookrack
+//! status` renders. Both of those need a daemon; this command does not,
+//! which is why it stays the diagnosis of last resort.
 //!
 //! The command runs **before** `Config::resolve`, so an unconfigured
 //! install still produces a row stating that — rather than the resolver
@@ -854,6 +856,48 @@ fn push_disk_free_row(rows: &mut Vec<Row>, cfg: &Config) {
     }
 }
 
+/// The read-only door a present store is checked through.
+///
+/// Every one of these is a `query_only` connection or a sidecar read:
+/// no write lock is taken, no migration is applied, and nothing is
+/// materialised, so the check is safe beside a running daemon. What it
+/// buys is the schema verification each door already performs on the
+/// way in — a store written by a newer binary, or corrupted, is
+/// reported here rather than at the next command that needs it.
+#[derive(Clone, Copy)]
+enum Door {
+    Catalog,
+    Corpus,
+    Refs,
+    /// The vector store's metadata sidecar. Opening LanceDB itself is
+    /// neither cheap nor synchronous; the sidecar is what carries the
+    /// build's ANN configuration and what a reader parses.
+    VectorsMeta,
+}
+
+impl Door {
+    /// Open the store at `path`, discarding the handle. `Err` carries
+    /// the flattened cause chain, which is what an operator needs to
+    /// tell a newer schema from a corrupt file.
+    fn open(self, path: &std::path::Path) -> Result<(), String> {
+        fn flatten(e: impl std::error::Error + 'static) -> String {
+            bookrack_core::error_chain(&e)
+        }
+        match self {
+            Door::Catalog => Catalog::open_read_only(path).map(drop).map_err(flatten),
+            Door::Corpus => bookrack_corpus::Corpus::open_read_only(path)
+                .map(drop)
+                .map_err(flatten),
+            Door::Refs => bookrack_refs::Refs::open_read_only(path)
+                .map(drop)
+                .map_err(flatten),
+            Door::VectorsMeta => bookrack_vectors::meta::load(path)
+                .map(drop)
+                .map_err(flatten),
+        }
+    }
+}
+
 /// What a missing store means for the library it belongs to.
 enum Absent {
     /// The library is expected to carry it, so its absence is a
@@ -866,10 +910,9 @@ enum Absent {
     Optional(&'static str),
 }
 
-/// Every store under the resolved data root, in a fixed order, each by
-/// filesystem presence only. Opening a handle is deferred to the daemon
-/// so doctor never competes with a live session for the exclusive write
-/// lock.
+/// Every store under the resolved data root, in a fixed order: present
+/// or not, and — when present — whether it opens through its read-only
+/// door. See [`Door`] for why opening one is safe beside a daemon.
 ///
 /// A vector store is expected exactly when its pipeline's corpus is
 /// there: content that is ingested but not indexed is unsearchable,
@@ -894,34 +937,53 @@ fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
         Absent::Optional("no paper vector index built yet; ingesting papers builds one")
     };
 
-    for (label, path, absent) in [
+    for (label, path, door, absent) in [
         (
             "catalog.db",
             cfg.catalog_db(),
+            Door::Catalog,
             Absent::Expected(BOOKS_ABSENT),
         ),
-        ("corpus.db", cfg.corpus_db(), Absent::Expected(BOOKS_ABSENT)),
-        ("lancedb/", cfg.lancedb_dir(), books_index),
+        (
+            "corpus.db",
+            cfg.corpus_db(),
+            Door::Corpus,
+            Absent::Expected(BOOKS_ABSENT),
+        ),
+        (
+            "lancedb/",
+            cfg.lancedb_dir(),
+            Door::VectorsMeta,
+            books_index,
+        ),
         (
             "papers_catalog.db",
             cfg.papers_catalog_db(),
+            Door::Catalog,
             Absent::Optional(PAPERS_ABSENT),
         ),
         (
             "papers_corpus.db",
             cfg.papers_corpus_db(),
+            Door::Corpus,
             Absent::Optional(PAPERS_ABSENT),
         ),
-        ("lancedb_papers/", cfg.papers_lancedb_dir(), papers_index),
+        (
+            "lancedb_papers/",
+            cfg.papers_lancedb_dir(),
+            Door::VectorsMeta,
+            papers_index,
+        ),
         (
             "reference.db",
             cfg.reference_db(),
+            Door::Refs,
             Absent::Optional(
                 "no reference books distilled yet; `bookrack distill build` creates it",
             ),
         ),
     ] {
-        rows.push(store_row(label, &path, absent));
+        rows.push(store_row(label, &path, door, absent));
     }
     rows.push(backup_dir_row(
         &cfg.backup_dir(),
@@ -929,14 +991,17 @@ fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
     ));
 }
 
-/// One store's row: its path when present, and the reading of its
-/// absence when not.
-fn store_row(label: &str, path: &std::path::Path, absent: Absent) -> Row {
+/// One store's row: its path and the outcome of opening it when
+/// present, and the reading of its absence when not.
+fn store_row(label: &str, path: &std::path::Path, door: Door, absent: Absent) -> Row {
     if path.exists() {
         return Row {
             label: label.to_string(),
             value: path.display().to_string(),
-            status: Status::Ok { note: None },
+            status: match door.open(path) {
+                Ok(()) => Status::Ok { note: None },
+                Err(reason) => Status::Fail { note: reason },
+            },
         };
     }
     match absent {
@@ -2276,6 +2341,53 @@ mod tests {
             assert!(note.is_some(), "{row:?}");
             assert_eq!(row.value, "(absent)", "{row:?}");
         }
+    }
+
+    #[test]
+    fn the_store_rows_materialise_nothing() {
+        // The rows open what is there; they must never bring a store
+        // into being. Sidecars of an existing WAL database are exempt
+        // by the same reasoning `verify`'s pinning test records, so the
+        // contract is about `.db` files.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let created: Vec<String> = std::fs::read_dir(root.path())
+            .expect("read data dir")
+            .map(|e| e.expect("dir entry").file_name().display().to_string())
+            .filter(|name| name.ends_with(".db"))
+            .collect();
+        assert!(created.is_empty(), "{created:?}");
+    }
+
+    #[test]
+    fn a_store_this_binary_cannot_open_fails_instead_of_passing_on_presence() {
+        // Presence was the whole check, so a corpus this binary cannot
+        // open -- the state that stops the daemon coming up -- drew a
+        // plain OK row naming its path.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        std::fs::write(cfg.corpus_db(), b"this is not a database").expect("write a broken store");
+
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let row = rows
+            .iter()
+            .find(|r| r.label == "corpus.db")
+            .expect("row present");
+        let Status::Fail { note } = &row.status else {
+            panic!("a store that cannot be opened is a failure: {row:?}");
+        };
+        assert!(!note.is_empty(), "{row:?}");
     }
 
     #[test]

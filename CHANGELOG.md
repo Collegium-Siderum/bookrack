@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: `doctor` opens each store it finds, rather than reporting
+  presence alone.** A store that exists but cannot be opened — written
+  by a newer binary, or corrupted — drew an `OK` row naming its path,
+  which is the state that stops the daemon coming up. Each present
+  store is now opened through its read-only door and a failure is a
+  `FAIL` carrying the reason. The doors are `query_only` connections and
+  a sidecar read: no write lock is taken, no pending migration applied,
+  and nothing materialised, so the check is safe beside a running daemon
+  and costs milliseconds. Depth stops there — what a store holds is
+  still `bookrack verify`, which needs a daemon where this command
+  does not.
+
 - **runtime: `doctor` covers every store under the data root.** The
   report stopped at `catalog.db` and `corpus.db`, so five stores the
   same root holds — the book vector store, the three paper stores, and

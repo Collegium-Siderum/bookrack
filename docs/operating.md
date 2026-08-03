@@ -218,9 +218,14 @@ does not use is reported present-and-absent rather than warned about:
 `OK` with a note saying it was looked for and is legitimately missing,
 which is a different answer from a store nobody checked. A pipeline
 whose content is ingested but whose vector index is missing is a `WARN`
-— that content answers no search. The rows report presence, not health;
-what a store holds and whether it opens is `bookrack verify` and, on a
-running daemon, `bookrack status`. One more row covers what those cannot:
+— that content answers no search. A store that is there is opened
+through its read-only door, so one written by a newer binary or
+corrupted is a `FAIL` naming the reason rather than an `OK` naming its
+path; those doors take no write lock and materialise nothing, so the
+check is safe beside a running daemon. What a store *holds* — intake
+counts, missing files, drift against a rebuild — is `bookrack verify`
+and, on a running daemon, `bookrack status`. One more row covers what
+those cannot:
 free space on the volume holding the data root, warned on below the floor
 `bookrack config fixed` reports, since a store that exists is not the same
 as a store that can grow.

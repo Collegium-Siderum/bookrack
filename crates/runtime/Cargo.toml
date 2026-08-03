@@ -27,6 +27,7 @@ bookrack-obs = { path = "../obs" }
 bookrack-ops = { path = "../ops" }
 bookrack-query = { path = "../query" }
 bookrack-cli-grammar = { path = "../cli-grammar" }
+bookrack-refs = { workspace = true }
 bookrack-session = { path = "../session" }
 bookrack-vectors = { path = "../vectors" }
 eyre.workspace = true
