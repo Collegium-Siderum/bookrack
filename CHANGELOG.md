@@ -10,6 +10,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`.env` reaches every variable name, and `config effective` now says
+  which ones it reached.** The file is applied to the real process
+  environment, so a line in it is not confined to the `BOOKRACK_*`
+  knobs `.env.example` lists: `HTTP_PROXY` routes every embedding
+  request and every installer download through a proxy, `XDG_*` moves
+  the managed directories, and `HOME` changes the prefix `bookrack
+  diagnose` redacts against. None of those is a knob, so no row in the
+  table could report one, and the questions they produce — why did my
+  embedding call leave the machine, why is this bundle unredacted — had
+  no configuration surface that could answer them.
+
+  The report ends with the variables the file named outside the prefix,
+  each marked as set in this process or as read and discarded because
+  the environment already carried one. Names only, never values: a
+  foreign variable is as likely to carry a credential as it is to be
+  `NO_COLOR`. `--json` carries the list as `dotenv_foreign` and names
+  the file as `dotenv_path`. Nothing about which variables take effect
+  changes.
+
 - **A pipeline run that dies is no longer indistinguishable from one
   that is working.** Every command registering a `pipeline_runs` row
   closed it best-effort, and nothing in the workspace ever revisited a

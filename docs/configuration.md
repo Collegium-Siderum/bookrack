@@ -251,6 +251,26 @@ where the root comes from and not what the file says. What the file
 records which keys it filled in, not the values, so a root the file
 supplied and a higher rung outranked is absent from the row.
 
+### How far `.env` reaches
+
+The file is applied to the real process environment, not to a private
+table of bookrack's own knobs, so its reach is every variable name.
+`.env.example` lists only `BOOKRACK_*` variables, which makes "this
+file configures bookrack" a natural reading and an incomplete one: a
+`HTTP_PROXY` line routes every embedding request and every installer
+download, an `XDG_*` line moves the managed directories the registry
+and the downloaded reranker live in, and a `HOME` line changes the
+prefix `bookrack diagnose` redacts against.
+
+Nothing above is a knob, so no row in the table can report it. The
+report says so separately: `config effective` ends with the variables
+the file named outside the `BOOKRACK_` prefix, each marked either as
+set in this process or as read and discarded because the environment
+already carried one. Names only — a foreign variable is as likely to
+carry a credential as it is to be `NO_COLOR`, and a report that prints
+one is a report an operator cannot paste into an issue. `--json`
+carries the same list as `dotenv_foreign`, alongside `dotenv_path`.
+
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the
 file is loaded. `scripts/test-clean.sh` is why it exists: that script

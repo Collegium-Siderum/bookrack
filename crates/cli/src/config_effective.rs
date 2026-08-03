@@ -9,7 +9,7 @@
 //! resolve produces a report with the failure at its head, not an
 //! error instead of a report.
 
-use bookrack_config::{Config, LibrarySelection};
+use bookrack_config::{Config, ForeignStatus, LibrarySelection};
 use bookrack_core::Problem;
 use bookrack_core::knob::{DotenvSupply, KnobOrigin, KnobReach};
 use eyre::Result;
@@ -55,6 +55,18 @@ struct SiteOut<'a> {
     site: &'a str,
 }
 
+/// One variable `.env` reached that no row above can account for.
+///
+/// `key` and `status` are a contract in the same way the row fields
+/// are. `status` carries the token, not the sentence: the human table
+/// words it for its own column, and a caller reading JSON wants the
+/// two cases distinguishable without matching prose.
+#[derive(Serialize)]
+struct ForeignOut<'a> {
+    key: &'a str,
+    status: ForeignStatus,
+}
+
 /// The whole report.
 #[derive(Serialize)]
 struct ReportOut<'a> {
@@ -64,6 +76,17 @@ struct ReportOut<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     problem: Option<Problem>,
     rows: Vec<RowOut<'a>>,
+    /// The `.env` this process loaded, absent when it loaded none. A
+    /// row credits the file as a `site` only when the file won that
+    /// row, so a file whose whole effect was outside the prefix would
+    /// otherwise be unnamed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dotenv_path: Option<&'a str>,
+    /// What `.env` did outside this workspace's own prefix. Always
+    /// present, empty included: an absent field would read as "the
+    /// report does not know", and on a run with no dotenv layer at all
+    /// the report knows there was nothing.
+    dotenv_foreign: Vec<ForeignOut<'a>>,
     native_dependencies: Vec<bookrack_config::NativeDependencyOrigin>,
 }
 
@@ -80,6 +103,8 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
     let rows = collect_rows(cfg);
     let scope_instance = cfg.map(|c| c.data_dir().display().to_string());
     let out: Vec<RowOut<'_>> = rows.iter().map(|r| row_out(r, &scope_instance)).collect();
+    let foreign = foreign_out();
+    let dotenv_path = bookrack_config::dotenv_load().map(|load| load.supply().path);
     let native = bookrack_config::native_dependency_origins(reranker_tag(cfg));
 
     let ctx = crate::render::ctx();
@@ -88,11 +113,13 @@ pub fn run(selection: &LibrarySelection) -> Result<()> {
             let report = ReportOut {
                 problem: problem.clone(),
                 rows: out,
+                dotenv_path,
+                dotenv_foreign: foreign,
                 native_dependencies: native,
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
-            print_human(problem.as_ref(), &out, &native);
+            print_human(problem.as_ref(), &out, dotenv_path, &foreign, &native);
         }
     }
 
@@ -175,6 +202,25 @@ fn collect_rows(cfg: Option<&Config>) -> Vec<KnobOrigin> {
     rows
 }
 
+/// What this process's `.env` did outside the workspace's own prefix.
+///
+/// Empty in a process with no dotenv layer, which is the same answer as
+/// a file that named nothing foreign: neither leaves a variable whose
+/// origin the rows above fail to explain.
+fn foreign_out() -> Vec<ForeignOut<'static>> {
+    bookrack_config::dotenv_load()
+        .map(|load| {
+            load.foreign()
+                .into_iter()
+                .map(|var| ForeignOut {
+                    key: var.key,
+                    status: var.status,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The reranker model tag the native-dependency search looks for.
 fn reranker_tag(_cfg: Option<&Config>) -> &'static str {
     bookrack_config::reranker_model_pin::RERANKER_MODEL_PINS
@@ -223,6 +269,8 @@ fn row_out<'a>(row: &'a KnobOrigin, root: &Option<String>) -> RowOut<'a> {
 fn print_human(
     problem: Option<&Problem>,
     rows: &[RowOut<'_>],
+    dotenv_path: Option<&str>,
+    foreign: &[ForeignOut<'_>],
     native: &[bookrack_config::NativeDependencyOrigin],
 ) {
     if let Some(problem) = problem {
@@ -281,6 +329,32 @@ fn print_human(
                 );
             }
         }
+    }
+
+    // A section rather than rows: these have no layer to sit in and no
+    // value to report, and the one thing they need said — that a file
+    // set them — is the thing the table above cannot say about a
+    // variable it does not own.
+    if !foreign.is_empty() {
+        println!();
+        println!(
+            "{} writes the process environment, so it also set these variables, \
+             which no row above owns:",
+            dotenv_path.unwrap_or(".env")
+        );
+        let mut table = RowTable::new(["variable", "what the file did"]);
+        for var in foreign {
+            table.push_row([
+                var.key,
+                match var.status {
+                    ForeignStatus::Set => "set it in this process",
+                    ForeignStatus::Eclipsed => {
+                        "read and discarded; the environment already had one"
+                    }
+                },
+            ]);
+        }
+        println!("{}", table.render());
     }
 
     println!();

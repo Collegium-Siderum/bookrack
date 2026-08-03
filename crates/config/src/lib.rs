@@ -214,7 +214,85 @@ pub struct DotenvLoad {
     pub eclipsed: Vec<(String, String)>,
 }
 
+/// The prefix every variable this workspace defines carries.
+///
+/// A key without it is one `.env` reaches but no knob row accounts
+/// for — see [`DotenvLoad::foreign`].
+pub const ENV_PREFIX: &str = "BOOKRACK_";
+
+/// What a dotenv load did to one variable outside [`ENV_PREFIX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignStatus {
+    /// The load put it in the process environment.
+    Set,
+    /// The real environment already carried one, so the file's line was
+    /// read and discarded.
+    Eclipsed,
+}
+
+impl ForeignStatus {
+    /// The token this status goes on the wire as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForeignStatus::Set => "set",
+            ForeignStatus::Eclipsed => "eclipsed",
+        }
+    }
+}
+
+/// Serialized as the token, so a front end cannot ship a spelling that
+/// disagrees with [`ForeignStatus::as_str`].
+impl serde::Serialize for ForeignStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// A variable a dotenv load names that lies outside [`ENV_PREFIX`].
+///
+/// The value is deliberately absent. A foreign variable is as likely to
+/// be a proxy URL carrying credentials as it is to be `NO_COLOR`, and a
+/// report that prints one is a report an operator cannot paste. The
+/// name is what answers the question the section exists for — which of
+/// this process's variables came out of a file rather than the shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignVar<'a> {
+    /// The variable's name.
+    pub key: &'a str,
+    /// What the load did with it.
+    pub status: ForeignStatus,
+}
+
 impl DotenvLoad {
+    /// Every variable this load names that lies outside [`ENV_PREFIX`],
+    /// sorted by name.
+    ///
+    /// `.env` is applied to the real process environment, so its reach
+    /// is every variable name, not the ones this workspace defines. A
+    /// proxy that redirects each embedding call, a `HOME` the diagnose
+    /// scrubber then trusts, an `XDG_*` that moves the managed
+    /// directories: each is a value no knob row can report, because no
+    /// knob owns it. This is the list that says the file set them.
+    pub fn foreign(&self) -> Vec<ForeignVar<'_>> {
+        let mut out: Vec<ForeignVar<'_>> = self
+            .supplied
+            .iter()
+            .map(|key| (key, ForeignStatus::Set))
+            .chain(
+                self.eclipsed
+                    .iter()
+                    .map(|(key, _)| (key, ForeignStatus::Eclipsed)),
+            )
+            .filter(|(key, _)| !key.starts_with(ENV_PREFIX))
+            .map(|(key, status)| ForeignVar {
+                key: key.as_str(),
+                status,
+            })
+            .collect();
+        out.sort_by_key(|var| var.key);
+        out
+    }
+
     /// This load in the borrowed form a knob row consults.
     pub fn supply(&self) -> bookrack_core::knob::DotenvSupply<'_> {
         bookrack_core::knob::DotenvSupply {
@@ -5112,6 +5190,56 @@ mod tests {
             assert!(should_load_dotenv(|_| Some(value.to_string())));
         }
         assert!(should_load_dotenv(|_| None));
+    }
+
+    /// A load reports what it did outside the workspace's prefix, and
+    /// only that: a key with the prefix has a knob row of its own, and
+    /// listing it twice would make the section look like a second
+    /// answer to the same question.
+    #[test]
+    fn foreign_lists_both_halves_of_the_load_and_skips_the_prefix() {
+        let load = DotenvLoad {
+            path: PathBuf::from("/somewhere/.env"),
+            supplied: vec![
+                "BOOKRACK_DATA_DIR".to_string(),
+                "HTTP_PROXY".to_string(),
+                "HOME".to_string(),
+            ],
+            eclipsed: vec![
+                ("BOOKRACK_LOG".to_string(), "debug".to_string()),
+                ("TMPDIR".to_string(), "/tmp/other".to_string()),
+            ],
+        };
+
+        let foreign = load.foreign();
+        assert_eq!(
+            foreign
+                .iter()
+                .map(|var| (var.key, var.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("HOME", ForeignStatus::Set),
+                ("HTTP_PROXY", ForeignStatus::Set),
+                ("TMPDIR", ForeignStatus::Eclipsed),
+            ],
+            "the section must be sorted, cover both halves, and leave \
+             the prefixed keys to their own rows",
+        );
+    }
+
+    /// A prefix match is a prefix match, not a substring one: a key
+    /// that merely contains the prefix is somebody else's variable.
+    #[test]
+    fn foreign_matches_the_prefix_at_the_start_only() {
+        let load = DotenvLoad {
+            path: PathBuf::from("/somewhere/.env"),
+            supplied: vec!["OLD_BOOKRACK_DATA_DIR".to_string()],
+            eclipsed: Vec::new(),
+        };
+        assert_eq!(
+            load.foreign().iter().map(|var| var.key).collect::<Vec<_>>(),
+            vec!["OLD_BOOKRACK_DATA_DIR"],
+        );
     }
 
     #[test]
