@@ -230,6 +230,18 @@ free space on the volume holding the data root, warned on below the floor
 `bookrack config fixed` reports, since a store that exists is not the same
 as a store that can grow.
 
+The `pipeline runs` row covers the registry's open rows — the ones
+still reading `running`. A command that dies between registering a run
+and closing it leaves a row that looks exactly like a run in flight
+and that nothing else ever revisits. To tell the two apart, an open run
+holds a lock file under `<data_root>/.run-locks/` for as long as its
+process lives; the operating system releases it however the process
+ends, so the row reports three cases: a run still owned by a live
+process, one whose record is there and unheld — abandoned, and the only
+case that warns — and one carrying no record at all, which is reported
+but never acted on, since nothing proves its owner is gone. Runs opened
+by an earlier version have no record and fall in that third case.
+
 The registry sections need a readable registry: when one is
 configured but cannot be read, they report that as a row apiece instead
 of dropping out of the report, which would be indistinguishable from an
@@ -257,8 +269,8 @@ Each row is
 on it. Pass `--json` for a machine-readable report suitable for a bug
 attachment.
 
-Four maintenance sub-commands cover one-off repairs; `--dry-run`
-computes the plan for the last two without touching disk:
+Five maintenance sub-commands cover one-off repairs; `--dry-run`
+computes the plan for the last three without touching disk:
 
 - `bookrack doctor --install-pdfium` downloads the pinned PDFium
   build, verifies its SHA-256, and unpacks it into the per-user
@@ -275,6 +287,13 @@ computes the plan for the last two without touching disk:
   provenance edge on a library upgraded across the catalog v14
   boundary (see [UPGRADE.md](UPGRADE.md)); run it once so the OCR
   worklist does not re-list already-processed sources.
+- `bookrack doctor --close-abandoned-runs` closes registry rows left
+  at `running` by a command whose process died, stamping each
+  `abandoned`. See the `pipeline runs` row below for how a run's owner
+  is judged; only rows proven ownerless are touched.
+
+The last two write the catalog directly, so both are refused while a
+daemon is serving the library — stop it with `bookrack quit` first.
 
 When something is broken, `bookrack diagnose` bundles crash reports,
 recent logs, and a scrubbed catalog snapshot into a `.tar.gz` for
@@ -310,7 +329,13 @@ The registered command names are `ingest`, `dryrun`, `papers_dryrun`,
 `distill_build`, `glean`, and the whole-library maintenance passes
 `reembed`, `reset`, `papers_reembed`, and `papers_reset`; any of them
 is a valid `--command` filter. The passes write no audit rows, so
-`runs show` renders them without the histograms. Per-item verbs such
+`runs show` renders them without the histograms.
+
+A run still reading `running` whose owning process is gone prints its
+status as `abandoned?` — the question mark marks the column as this
+command's reading of the run's liveness record rather than what the
+database stores, and the table's footer names the repair that resolves
+it. Per-item verbs such
 as `metadata reaudit` are deliberately not registered — they
 recompute one intake's rollup, and their trail lives on the
 `item_pipeline_audit` chain instead.

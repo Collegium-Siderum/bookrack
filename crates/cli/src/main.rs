@@ -276,8 +276,18 @@ enum Command {
         /// library — stop it with `bookrack quit` first.
         #[arg(long)]
         backfill_ocr_derivation: bool,
-        /// With `--rename-envelopes` or `--backfill-ocr-derivation`,
-        /// compute the plan without touching the disk or database.
+        /// Close `pipeline_runs` rows still marked running whose owning
+        /// process is gone, stamping each `abandoned`. Only rows proven
+        /// ownerless are touched: a run still in flight, and one that
+        /// kept no liveness record, are both left alone. An offline
+        /// repair: it writes the catalog directly, so it is refused
+        /// while a daemon is serving the library — stop it with
+        /// `bookrack quit` first.
+        #[arg(long)]
+        close_abandoned_runs: bool,
+        /// With `--rename-envelopes`, `--backfill-ocr-derivation`, or
+        /// `--close-abandoned-runs`, compute the plan without touching
+        /// the disk or database.
         #[arg(long)]
         dry_run: bool,
     },
@@ -1033,6 +1043,7 @@ async fn run() -> Result<()> {
         install_reranker,
         rename_envelopes,
         backfill_ocr_derivation,
+        close_abandoned_runs,
         dry_run,
     } = &cli.command
     {
@@ -1043,6 +1054,7 @@ async fn run() -> Result<()> {
             *install_reranker,
             *rename_envelopes,
             *backfill_ocr_derivation,
+            *close_abandoned_runs,
             *dry_run,
             None,
         )

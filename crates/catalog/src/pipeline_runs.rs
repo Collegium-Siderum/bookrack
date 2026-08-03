@@ -37,6 +37,20 @@ use sha2::{Digest, Sha256};
 
 use crate::{Catalog, Result};
 
+/// A run that has been registered and has not reported back.
+pub const RUN_STATUS_RUNNING: &str = "running";
+
+/// A run that finished and reported success.
+pub const RUN_STATUS_OK: &str = "ok";
+
+/// A run that finished and reported failure.
+pub const RUN_STATUS_ERROR: &str = "error";
+
+/// A run nobody closed: its process died between the two legs, and a
+/// repair stamped this in place of the outcome it never reported. It
+/// says only that the run stopped — not whether the work succeeded.
+pub const RUN_STATUS_ABANDONED: &str = "abandoned";
+
 /// The single source of truth for the `pipeline_runs` table's schema.
 /// Its DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {
@@ -57,7 +71,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .not_null()
             .comment("ISO-8601 UTC"),
         ColumnSpec::text("finished_at").comment("ISO-8601 UTC; NULL while the run is in progress"),
-        ColumnSpec::text("status").comment("running / ok / partial / error"),
+        ColumnSpec::text("status").comment("running / ok / error / abandoned"),
     ],
     composite_pk: None,
     uniques: &[],
@@ -93,7 +107,9 @@ pub struct NewPipelineRun {
     pub started_at: String,
     /// When the run returned, ISO-8601 UTC, or `None` while running.
     pub finished_at: Option<String>,
-    /// `running` / `ok` / `partial` / `error`, or `None` if unset.
+    /// One of [`RUN_STATUS_RUNNING`], [`RUN_STATUS_OK`],
+    /// [`RUN_STATUS_ERROR`], [`RUN_STATUS_ABANDONED`], or `None` if
+    /// unset.
     pub status: Option<String>,
 }
 
@@ -176,6 +192,21 @@ impl Catalog {
         Ok(rows)
     }
 
+    /// List the rows still carrying `status = 'running'`, newest first.
+    ///
+    /// An open row is either a run in flight or one whose process died
+    /// before it could be closed; the table alone cannot tell which.
+    /// [`crate::run_liveness`] is what separates them.
+    pub fn list_open_pipeline_runs(&self) -> Result<Vec<PipelineRun>> {
+        let mut stmt = self.conn.prepare(&select_sql(
+            "WHERE status = 'running' ORDER BY started_at DESC, pipeline_run_id DESC",
+        ))?;
+        let rows = stmt
+            .query_map([], PipelineRun::from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Fetch one `pipeline_runs` row by id, or `None` if the id is unknown.
     pub fn pipeline_run(&self, pipeline_run_id: &str) -> Result<Option<PipelineRun>> {
         let mut stmt = self
@@ -221,7 +252,7 @@ impl Catalog {
             library_root: library_root.map(str::to_string),
             started_at,
             finished_at: None,
-            status: Some("running".to_string()),
+            status: Some(RUN_STATUS_RUNNING.to_string()),
         })?;
         Ok(pipeline_run_id)
     }
@@ -306,6 +337,41 @@ mod tests {
         let closed = catalog.pipeline_run(&id).expect("read").expect("present");
         assert_eq!(closed.status.as_deref(), Some("ok"));
         assert!(closed.finished_at.is_some());
+    }
+
+    #[test]
+    fn list_open_pipeline_runs_returns_only_unclosed_rows_newest_first() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let mut closed = fixture("distill_build-2026-06-28T10:00:00Z-a");
+        closed.started_at = "2026-06-28T10:00:00Z".to_string();
+        let mut open_early = fixture("ingest-2026-06-28T11:00:00Z-b");
+        open_early.started_at = "2026-06-28T11:00:00Z".to_string();
+        open_early.finished_at = None;
+        open_early.status = Some("running".to_string());
+        let mut open_late = fixture("glean-2026-06-28T12:00:00Z-c");
+        open_late.started_at = "2026-06-28T12:00:00Z".to_string();
+        open_late.finished_at = None;
+        open_late.status = Some("running".to_string());
+        let mut failed = fixture("dryrun-2026-06-28T13:00:00Z-d");
+        failed.started_at = "2026-06-28T13:00:00Z".to_string();
+        failed.status = Some("error".to_string());
+        for row in [&closed, &open_early, &open_late, &failed] {
+            catalog.insert_pipeline_run(row).expect("insert");
+        }
+
+        let open: Vec<String> = catalog
+            .list_open_pipeline_runs()
+            .expect("list open")
+            .into_iter()
+            .map(|row| row.pipeline_run_id)
+            .collect();
+        assert_eq!(
+            open,
+            vec![
+                open_late.pipeline_run_id.clone(),
+                open_early.pipeline_run_id.clone()
+            ],
+        );
     }
 
     #[test]

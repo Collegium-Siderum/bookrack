@@ -192,6 +192,7 @@ pub async fn gather_with(selection: &LibrarySelection, reporter: Reporter<'_>) -
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
         push_store_rows(&mut rows, cfg);
+        push_open_runs_row(&mut rows, cfg);
         push_disk_free_row(&mut rows, cfg);
     }
     push_daemon_state_rows(&mut rows);
@@ -853,6 +854,70 @@ fn push_disk_free_row(rows: &mut Vec<Row>, cfg: &Config) {
                 note: format!("could not read free space on the data root: {e}"),
             },
         }),
+    }
+}
+
+/// Report the registry's open runs, separating the ones still owned by
+/// a live process from the ones whose owner died before the row could
+/// be closed. An abandoned row is not damage — no data is wrong and no
+/// command's exit code changed — but it reads in `bookrack runs list`
+/// exactly like a run in flight, and nothing else ever revisits it.
+fn push_open_runs_row(rows: &mut Vec<Row>, cfg: &Config) {
+    rows.push(open_runs_row(&crate::open_runs::survey(cfg)));
+}
+
+/// Word one survey as a row. Pure, so the wording of each case is
+/// tested without a data root behind it.
+fn open_runs_row(survey: &crate::open_runs::OpenRunSurvey) -> Row {
+    let label = "pipeline runs".to_string();
+    let abandoned = survey.abandoned().count();
+    let held = survey.held();
+    let unjudged = survey.unjudged();
+    let value = if survey.runs.is_empty() {
+        "none open".to_string()
+    } else {
+        format!(
+            "{} open ({held} running, {abandoned} abandoned)",
+            survey.runs.len()
+        )
+    };
+    let partial = (!survey.unreadable.is_empty()).then(|| {
+        let names: Vec<String> = survey
+            .unreadable
+            .iter()
+            .map(|(path, reason)| format!("{}: {reason}", path.display()))
+            .collect();
+        format!(
+            "The count is partial; one catalog could not be read ({}). See its own row above.",
+            names.join("; ")
+        )
+    });
+    let unjudged_note = (unjudged > 0).then(|| {
+        format!(
+            "{unjudged} open run(s) kept no liveness record, so neither verdict applies to them; \
+             runs opened before this version have none."
+        )
+    });
+    let mut notes: Vec<String> = Vec::new();
+    if abandoned > 0 {
+        notes.push(format!(
+            "{abandoned} run(s) are still marked running but no process owns them any more. \
+             Close them with `bookrack doctor --close-abandoned-runs`."
+        ));
+    }
+    notes.extend(unjudged_note);
+    notes.extend(partial);
+    let note = notes.join(" ");
+    Row {
+        label,
+        value,
+        status: if abandoned > 0 {
+            Status::Warn { note }
+        } else if note.is_empty() {
+            Status::Ok { note: None }
+        } else {
+            Status::Ok { note: Some(note) }
+        },
     }
 }
 
@@ -2312,6 +2377,86 @@ mod tests {
             ],
             "{rows:?}"
         );
+    }
+
+    /// Build a survey without a data root behind it, so each wording
+    /// case is exercised on its own.
+    fn survey_of(livenesses: &[bookrack_catalog::RunLiveness]) -> crate::open_runs::OpenRunSurvey {
+        crate::open_runs::OpenRunSurvey {
+            runs: livenesses
+                .iter()
+                .enumerate()
+                .map(|(i, liveness)| crate::open_runs::OpenRun {
+                    pipeline_run_id: format!("ingest-2026-06-28T10:00:0{i}Z-deadbeef"),
+                    command: "ingest".to_string(),
+                    started_at: format!("2026-06-28T10:00:0{i}Z"),
+                    liveness: liveness.clone(),
+                    catalog_db: std::path::PathBuf::from("/data/library/catalog.db"),
+                })
+                .collect(),
+            unreadable: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_library_with_no_open_runs_passes_without_a_note() {
+        let row = open_runs_row(&survey_of(&[]));
+        assert_eq!(row.value, "none open");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+    }
+
+    #[test]
+    fn a_run_in_flight_is_not_reported_as_a_problem() {
+        use bookrack_catalog::RunLiveness;
+        let row = open_runs_row(&survey_of(&[RunLiveness::Held, RunLiveness::Held]));
+        assert_eq!(row.value, "2 open (2 running, 0 abandoned)");
+        assert!(matches!(row.status, Status::Ok { note: None }), "{row:?}");
+    }
+
+    #[test]
+    fn an_abandoned_run_warns_and_names_the_repair() {
+        use bookrack_catalog::RunLiveness;
+        let row = open_runs_row(&survey_of(&[RunLiveness::Held, RunLiveness::Abandoned]));
+        assert_eq!(row.value, "2 open (1 running, 1 abandoned)");
+        let Status::Warn { note } = &row.status else {
+            panic!("an abandoned run must warn, got {row:?}");
+        };
+        assert!(
+            note.contains("--close-abandoned-runs"),
+            "the note must name the repair, got {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_record_is_reported_but_not_warned_about() {
+        use bookrack_catalog::RunLiveness;
+        // Nothing proves such a run died, so claiming it did would send
+        // an operator to close a row that may be doing work.
+        let row = open_runs_row(&survey_of(&[RunLiveness::NoRecord]));
+        assert_eq!(row.value, "1 open (0 running, 0 abandoned)");
+        let Status::Ok { note: Some(note) } = &row.status else {
+            panic!("an unjudged run is reported, not warned about: {row:?}");
+        };
+        assert!(note.contains("no liveness record"), "{note:?}");
+        assert!(
+            !note.contains("--close-abandoned-runs"),
+            "an unjudged run is not something the repair can act on: {note:?}"
+        );
+    }
+
+    #[test]
+    fn a_catalog_that_would_not_open_makes_the_count_partial() {
+        let mut survey = survey_of(&[bookrack_catalog::RunLiveness::Held]);
+        survey.unreadable.push((
+            std::path::PathBuf::from("/data/library/papers_catalog.db"),
+            "catalog database error: disk image is malformed".to_string(),
+        ));
+        let row = open_runs_row(&survey);
+        let Status::Ok { note: Some(note) } = &row.status else {
+            panic!("expected a note about the partial count, got {row:?}");
+        };
+        assert!(note.contains("partial"), "{note:?}");
+        assert!(note.contains("papers_catalog.db"), "{note:?}");
     }
 
     #[test]

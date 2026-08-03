@@ -75,7 +75,10 @@ pub use node_reviews::{
 };
 pub use node_role_takeovers::{NewRoleTakeover, NodeRoleTakeover};
 pub use pipeline_run_summary::{NewPipelineRunSummary, PipelineRunSummary, RunProfileBucket};
-pub use pipeline_runs::{NewPipelineRun, PipelineRun};
+pub use pipeline_runs::{
+    NewPipelineRun, PipelineRun, RUN_STATUS_ABANDONED, RUN_STATUS_ERROR, RUN_STATUS_OK,
+    RUN_STATUS_RUNNING,
+};
 pub use retrieval_call_hits::RetrievalCallHit;
 pub use retrieval_calls::{NewRetrievalCall, RetrievalCall, RetrievalCallListing};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};

@@ -10,6 +10,33 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A pipeline run that dies is no longer indistinguishable from one
+  that is working.** Every command registering a `pipeline_runs` row
+  closed it best-effort, and nothing in the workspace ever revisited a
+  row that stayed open: a process killed, panicking, or cancelled
+  mid-run left `running` in the registry forever, reading in `bookrack
+  runs list` exactly like a run in flight. An open run now holds a lock
+  file under `<data_root>/.run-locks/` for as long as its process
+  lives. The operating system releases it however the process ends, so
+  the difference is decidable without a staleness threshold and without
+  asking about a pid — and a run still in flight is never mistaken for
+  a dead one, even when the daemon checking is the one running it.
+
+  `bookrack doctor` gains a `pipeline runs` row splitting open runs
+  into owned, abandoned, and — for rows carrying no record, including
+  every run opened before this version — unjudged. Only the middle case
+  warns. `bookrack doctor --close-abandoned-runs` closes exactly those,
+  stamping the new `abandoned` status, which records that a run stopped
+  and deliberately claims nothing about whether its work succeeded; it
+  writes the catalog, so it is refused while a daemon serves the
+  library, and `--dry-run` prints the plan. `bookrack runs list` marks
+  such a row `abandoned?` and names the repair.
+
+  A close leg that cannot reach the database now keeps the run's record
+  instead of dropping it, so the row it leaves behind is one the repair
+  can still find — the path `distill`, `dryrun`, and `papers_dryrun`
+  take when their second catalog open fails.
+
 - **runtime: `doctor` opens each store it finds, rather than reporting
   presence alone.** A store that exists but cannot be opened — written
   by a newer binary, or corrupted — drew an `OK` row naming its path,
@@ -175,6 +202,14 @@ release workflow extracts the matching section verbatim from this file.
   already does for `ingest` and `dryrun`. Per-item verbs such as
   `metadata reaudit` remain outside the registry by design; their
   trail stays on `item_pipeline_audit`.
+
+### Changed
+
+- **`pipeline_runs.status` documents the states it actually has.** The
+  column comment promised `partial`, which nothing ever wrote; the four
+  values are now `running` / `ok` / `error` / `abandoned`, exported as
+  constants so the vocabulary has one definition rather than a literal
+  per call site.
 
 ### Fixed
 
