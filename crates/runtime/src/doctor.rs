@@ -159,8 +159,7 @@ pub async fn gather_with(
     push_pdfium_row(&mut rows);
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
-        push_catalog_row(&mut rows, cfg);
-        push_corpus_row(&mut rows, cfg);
+        push_store_rows(&mut rows, cfg);
     }
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
@@ -646,32 +645,152 @@ fn push_fd_limit_row(rows: &mut Vec<Row>) {
     }
 }
 
-fn push_catalog_row(rows: &mut Vec<Row>, cfg: &Config) {
-    push_store_row(rows, "catalog.db", &cfg.catalog_db());
+/// What a missing store means for the library it belongs to.
+enum Absent {
+    /// The library is expected to carry it, so its absence is a
+    /// warning: something the operator meant to have is not there.
+    Expected(&'static str),
+    /// Normal for a library that does not use that pipeline. The row
+    /// still appears, saying the store was looked for and found
+    /// missing — "checked and legitimately absent" and "never checked"
+    /// are different answers.
+    Optional(&'static str),
 }
 
-fn push_corpus_row(rows: &mut Vec<Row>, cfg: &Config) {
-    push_store_row(rows, "corpus.db", &cfg.corpus_db());
+/// Every store under the resolved data root, in a fixed order, each by
+/// filesystem presence only. Opening a handle is deferred to the daemon
+/// so doctor never competes with a live session for the exclusive write
+/// lock.
+///
+/// A vector store is expected exactly when its pipeline's corpus is
+/// there: content that is ingested but not indexed is unsearchable,
+/// while both absent is a library that pipeline was never used for.
+fn push_store_rows(rows: &mut Vec<Row>, cfg: &Config) {
+    const BOOKS_ABSENT: &str = "no books ingested yet; the first `bookrack ingest` creates it";
+    const PAPERS_ABSENT: &str =
+        "no papers ingested yet; the first `bookrack papers ingest` creates it";
+
+    let books_index = if cfg.corpus_db().exists() {
+        Absent::Expected(
+            "books are ingested but no vector index is built; run `bookrack vectors rebuild`",
+        )
+    } else {
+        Absent::Optional("no vector index built yet; ingesting books builds one")
+    };
+    let papers_index = if cfg.papers_corpus_db().exists() {
+        Absent::Expected(
+            "papers are ingested but no vector index is built; run `bookrack papers vectors rebuild`",
+        )
+    } else {
+        Absent::Optional("no paper vector index built yet; ingesting papers builds one")
+    };
+
+    for (label, path, absent) in [
+        (
+            "catalog.db",
+            cfg.catalog_db(),
+            Absent::Expected(BOOKS_ABSENT),
+        ),
+        ("corpus.db", cfg.corpus_db(), Absent::Expected(BOOKS_ABSENT)),
+        ("lancedb/", cfg.lancedb_dir(), books_index),
+        (
+            "papers_catalog.db",
+            cfg.papers_catalog_db(),
+            Absent::Optional(PAPERS_ABSENT),
+        ),
+        (
+            "papers_corpus.db",
+            cfg.papers_corpus_db(),
+            Absent::Optional(PAPERS_ABSENT),
+        ),
+        ("lancedb_papers/", cfg.papers_lancedb_dir(), papers_index),
+        (
+            "reference.db",
+            cfg.reference_db(),
+            Absent::Optional(
+                "no reference books distilled yet; `bookrack distill build` creates it",
+            ),
+        ),
+    ] {
+        rows.push(store_row(label, &path, absent));
+    }
+    rows.push(backup_dir_row(
+        &cfg.backup_dir(),
+        cfg.backup_dir() != cfg.data_dir().join("backup"),
+    ));
 }
 
-/// Report a database store by filesystem presence only. Opening a handle
-/// is deferred to the daemon so doctor never competes with a live
-/// session for the exclusive write lock.
-fn push_store_row(rows: &mut Vec<Row>, label: &str, path: &std::path::Path) {
+/// One store's row: its path when present, and the reading of its
+/// absence when not.
+fn store_row(label: &str, path: &std::path::Path, absent: Absent) -> Row {
     if path.exists() {
-        rows.push(Row {
+        return Row {
             label: label.to_string(),
             value: path.display().to_string(),
             status: Status::Ok { note: None },
-        });
-    } else {
-        rows.push(Row {
+        };
+    }
+    match absent {
+        Absent::Expected(note) => Row {
             label: label.to_string(),
             value: "(not initialised)".to_string(),
             status: Status::Warn {
-                note: "no books ingested yet; the first `bookrack ingest` creates it".to_string(),
+                note: note.to_string(),
             },
-        });
+        },
+        Absent::Optional(note) => Row {
+            label: label.to_string(),
+            value: "(absent)".to_string(),
+            status: Status::Ok {
+                note: Some(note.to_string()),
+            },
+        },
+    }
+}
+
+/// The directory a schema migration snapshots databases into before it
+/// runs. It is created on demand, so its absence is not a fault — but a
+/// destination whose parent does not exist is: the backup fails at the
+/// moment a migration is about to rewrite a store, which is the worst
+/// moment to discover it. `overridden` says the location came from
+/// `BOOKRACK_BACKUP_DIR` rather than from the data root, the case that
+/// can point somewhere unrelated to the library.
+fn backup_dir_row(dir: &std::path::Path, overridden: bool) -> Row {
+    let label = "backup dir".to_string();
+    let source = if overridden {
+        " (set by BOOKRACK_BACKUP_DIR)"
+    } else {
+        ""
+    };
+    if dir.exists() {
+        return Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Ok {
+                note: (!source.is_empty()).then(|| source.trim_start().to_string()),
+            },
+        };
+    }
+    match dir.parent() {
+        Some(parent) if !parent.exists() => Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Warn {
+                note: format!(
+                    "neither the directory{source} nor its parent exists, so the backup taken \
+                     before a schema migration would fail"
+                ),
+            },
+        },
+        _ => Row {
+            label,
+            value: dir.display().to_string(),
+            status: Status::Ok {
+                note: Some(format!(
+                    "not created yet{source}; the backup before a schema migration creates it"
+                )),
+            },
+        },
     }
 }
 
@@ -1881,6 +2000,110 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(matches!(rows[0].status, Status::Ok { .. }), "{rows:?}");
         assert_eq!(rows[0].value, "1 referenced");
+    }
+
+    #[test]
+    fn every_store_under_the_data_root_gets_a_row() {
+        // A store with no row is indistinguishable from a store that
+        // was checked and found healthy. The set is the config's path
+        // accessors; nothing under the root may be silently skipped.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "catalog.db",
+                "corpus.db",
+                "lancedb/",
+                "papers_catalog.db",
+                "papers_corpus.db",
+                "lancedb_papers/",
+                "reference.db",
+                "backup dir",
+            ],
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_unused_pipeline_is_reported_absent_rather_than_warned_about() {
+        // A book-only library legitimately has no paper stores and no
+        // reference store. Warning about them trains the operator to
+        // ignore the section; omitting them loses the distinction
+        // between "checked, absent" and "not checked".
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        for label in [
+            "papers_catalog.db",
+            "papers_corpus.db",
+            "lancedb_papers/",
+            "reference.db",
+        ] {
+            let row = rows.iter().find(|r| r.label == label).expect("row present");
+            let Status::Ok { note } = &row.status else {
+                panic!("an unused pipeline's store is not a warning: {row:?}");
+            };
+            assert!(note.is_some(), "{row:?}");
+            assert_eq!(row.value, "(absent)", "{row:?}");
+        }
+    }
+
+    #[test]
+    fn an_ingested_pipeline_without_its_vector_index_is_a_warning() {
+        // Content that is ingested but not indexed answers no search,
+        // and nothing else in the report says so.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        drop(bookrack_corpus::Corpus::open(&cfg.corpus_db()).expect("create the book corpus"));
+        let mut rows = Vec::new();
+        push_store_rows(&mut rows, &cfg);
+
+        let books = rows
+            .iter()
+            .find(|r| r.label == "lancedb/")
+            .expect("row present");
+        assert!(
+            matches!(books.status, Status::Warn { .. }),
+            "an unindexed corpus is a warning: {books:?}"
+        );
+        // The paper side is untouched, so it stays a quiet absence.
+        let papers = rows
+            .iter()
+            .find(|r| r.label == "lancedb_papers/")
+            .expect("row present");
+        assert!(matches!(papers.status, Status::Ok { .. }), "{papers:?}");
+    }
+
+    #[test]
+    fn a_backup_directory_whose_parent_is_missing_is_a_warning() {
+        // The directory is created on demand, so its absence is not a
+        // fault -- but a destination that cannot be created fails at the
+        // moment a migration is about to rewrite a store.
+        let root = tempfile::tempdir().expect("tempdir");
+        let ok = backup_dir_row(&root.path().join("backup"), false);
+        assert!(matches!(ok.status, Status::Ok { .. }), "{ok:?}");
+
+        let unreachable = backup_dir_row(&root.path().join("gone/backup"), true);
+        let Status::Warn { note } = &unreachable.status else {
+            panic!("an uncreatable backup destination is a warning: {unreachable:?}");
+        };
+        assert!(note.contains("BOOKRACK_BACKUP_DIR"), "{note}");
     }
 
     /// Seed a data root that declares the built-in profile in its

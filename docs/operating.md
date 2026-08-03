@@ -204,12 +204,25 @@ got. `--quiet` prints nothing and lets the exit code answer.
 bookrack doctor
 ```
 
-A one-screen health check: the data root resolves, the catalog and
-corpus schemas open, PDFium is on disk, the file-descriptor limit is
+A one-screen health check: the data root resolves, every store under it
+is accounted for, PDFium is on disk, the file-descriptor limit is
 sufficient, the Ollama daemon is reachable, the embed model is pulled,
 each registry entry agrees with its on-disk identity manifest, and each
 library's referenced index profile is coherent with its built index
-stamps. Those last two sections need a readable registry: when one is
+stamps.
+
+The store rows cover the whole data root — the book catalog, corpus and
+vector store, the three paper stores, the reference store, and the
+directory a schema migration backs databases up into. A store a library
+does not use is reported present-and-absent rather than warned about:
+`OK` with a note saying it was looked for and is legitimately missing,
+which is a different answer from a store nobody checked. A pipeline
+whose content is ingested but whose vector index is missing is a `WARN`
+— that content answers no search. The rows report presence, not health;
+what a store holds and whether it opens is `bookrack verify` and, on a
+running daemon, `bookrack status`.
+
+The registry sections need a readable registry: when one is
 configured but cannot be read, they report that as a row apiece instead
 of dropping out of the report, which would be indistinguishable from an
 install that has no registry at all. When the effective profile enables

@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **runtime: `doctor` covers every store under the data root.** The
+  report stopped at `catalog.db` and `corpus.db`, so five stores the
+  same root holds — the book vector store, the three paper stores, and
+  the reference store — appeared nowhere, which reads exactly like a
+  store that was checked and found healthy. Each now has a row, as does
+  the directory a schema migration backs databases up into. A store a
+  library does not use reports `OK` with a note that it was looked for
+  and is legitimately absent, rather than borrowing the book stores'
+  "no books ingested yet" warning; a pipeline whose content is ingested
+  but whose vector index is missing is a `WARN`, since that content
+  answers no search. The backup directory warns when neither it nor its
+  parent exists — including when `BOOKRACK_BACKUP_DIR` points it
+  somewhere uncreatable, which otherwise surfaces at the worst possible
+  moment, as a migration is about to rewrite a store.
+
 - **cli: `bookrack config fixed` lists the values compiled into the
   build.** The third configuration surface, for the values no layer
   moves: a page cap, a retry count, a timeout on an internal call.
