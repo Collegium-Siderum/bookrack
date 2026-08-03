@@ -235,9 +235,14 @@ Which of the two set a variable is not something a reader of the
 environment can tell, so the loader records it and `config effective`
 reports it: a value the file supplied is shown at the `dotenv` layer,
 sited at the file, and a line the real environment got to first is
-shown as a layer that offered a value and lost. This holds for the data
-root as well — a `BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of
-the ladder above and is credited to the file.
+shown as a layer that offered a value and lost. It lost at load time,
+so it stays lost — a variable that is set but blank, or set to text the
+knob cannot parse, offers nothing itself and still does not hand the
+file's line its chance back. The value in that case comes from
+`config.toml` or the built-in default, and the table shows the file's
+line beneath it. This holds for the data root as well — a
+`BOOKRACK_DATA_DIR` written into `.env` wins rung 3 of the ladder above
+and is credited to the file.
 
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the

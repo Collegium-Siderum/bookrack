@@ -2011,12 +2011,21 @@ fn dotenv_supply() -> Option<bookrack_core::knob::DotenvSupply<'static>> {
 /// The record a caller passes when it reads a knob for its value alone.
 ///
 /// The record decides which layer is *credited* for a value, never what
-/// the value is: the loader writes the file's keys into the environment,
-/// so a key it supplied is already visible to the environment getter and
-/// only the attribution moves. A caller that takes
+/// the value is. Both halves of a load hold to that. A key the file
+/// supplied was written into the environment, so it is already visible
+/// to the environment getter and only the attribution moves. A key the
+/// file names that the real environment already carried was thrown away
+/// by the loader, so it is offered as
+/// [`Standing::Discarded`](bookrack_core::knob::Standing::Discarded) and
+/// cannot be taken however unusable the text the environment carried
+/// turns out to be.
+///
+/// A caller that takes
 /// [`KnobOrigin::value`](bookrack_core::knob::KnobOrigin::value) and
 /// discards the row therefore cannot observe the difference, and naming
 /// that here is cheaper than threading a parameter no result depends on.
+/// `the_dotenv_record_never_changes_a_value_only_its_attribution` holds
+/// every knob this crate resolves to it.
 const NO_DOTENV_RECORD: Option<DotenvSupply<'static>> = None;
 
 /// An environment variable's layers followed by the layers below it,

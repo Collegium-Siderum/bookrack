@@ -265,6 +265,7 @@ mod tests {
     use crate::{
         DEFAULT_SEARCH_TOP_K, RootConfig, RootSearchConfig, SEARCH_TOP_K_ENV, SearchConfig,
     };
+    use bookrack_core::knob::Standing;
     use std::path::PathBuf;
 
     /// A `get` that answers one variable and nothing else.
@@ -470,24 +471,34 @@ mod tests {
         assert_eq!(layers[0].value.as_deref(), Some("9"));
     }
 
-    /// `dotenvy` only fills gaps, so the two layers can never both hold
-    /// a value. Pinned directly: a future loader change that started
-    /// overwriting would make the table claim a value came from two
-    /// places at once.
+    /// `dotenvy` only fills gaps, so the two layers can never both be
+    /// in the running. Pinned directly: a future loader change that
+    /// started overwriting would make the table claim a value came from
+    /// two places at once.
+    ///
+    /// Counts bidding candidates, not values: an eclipsed line does
+    /// carry a value, and that is the case the count must not be
+    /// allowed to wave through — a second value eligible to win is
+    /// exactly what a gap-filling loader cannot produce.
     #[test]
     fn a_key_is_never_offered_by_both_the_environment_and_the_dotenv_layer() {
         let cases = [
             dotenv_load("/sandbox/.env", &[SEARCH_TOP_K_ENV]),
             dotenv_load("/sandbox/.env", &[]),
+            dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7"),
         ];
         for load in cases {
             for raw in [None, Some("9".to_string())] {
                 let layers = layers_for(&load, SEARCH_TOP_K_ENV, raw.clone());
-                let offering = layers.iter().filter(|c| c.value.is_some()).count();
+                let offering = layers
+                    .iter()
+                    .filter(|c| c.value.is_some() && c.standing == Standing::Bidding)
+                    .count();
                 assert!(
                     offering <= 1,
-                    "both layers offered a value: {layers:?} (supplied={:?})",
-                    load.supplied
+                    "both layers bid a value: {layers:?} (supplied={:?}, eclipsed={:?})",
+                    load.supplied,
+                    load.eclipsed
                 );
             }
         }
@@ -991,6 +1002,89 @@ mod tests {
                 knob.chain
             );
         }
+    }
+
+    /// The dotenv record moves which layer is *credited* for a value,
+    /// never what the value is — the claim [`NO_DOTENV_RECORD`]'s doc
+    /// makes, and the one every resolver relies on when it reads a knob
+    /// for its value alone.
+    ///
+    /// Held mechanically: the table built with a record and the table
+    /// built without one must agree, row for row, on every value. The
+    /// second is the process's own path — `resolve_from` passes exactly
+    /// the `None` this passes — so a disagreement is a report
+    /// describing a process that does not exist.
+    ///
+    /// Swept over every variable the crate reads, against both halves
+    /// of a load and against the four shapes a variable's text can
+    /// take. The eclipsed half with unusable text is where it broke: an
+    /// eclipsed line carries a value the loader threw away, so it never
+    /// entered the environment and no resolver can ever see it.
+    #[test]
+    fn the_dotenv_record_never_changes_a_value_only_its_attribution() {
+        let names = crate::RESOLVER_ENV_CONSTANTS
+            .iter()
+            .chain(crate::SITE_ENV_CONSTANTS);
+        for name in names {
+            for raw in ["", "   ", "not-a-number", "7"] {
+                let get = only(name, raw);
+                let without = knob_origins_from(&get, None, None);
+                let loads = [
+                    dotenv_eclipsed("/sandbox/.env", name, "13"),
+                    dotenv_load("/sandbox/.env", &[name]),
+                ];
+                for load in &loads {
+                    let with = knob_origins_from(&get, Some(load.supply()), None);
+                    assert_eq!(with.len(), without.len(), "the two tables differ in length");
+                    for (reported, resolved) in with.iter().zip(&without) {
+                        assert_eq!(
+                            reported.key, resolved.key,
+                            "the tables list different knobs"
+                        );
+                        assert_eq!(
+                            reported.value,
+                            resolved.value,
+                            "{name}={raw:?}: the report says {:?} at layer {}, \
+                             the process uses {:?}",
+                            reported.value,
+                            reported.layer.as_str(),
+                            resolved.value,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The row an operator reads when they blanked a variable the file
+    /// also names: the file's line is visible, and it lost.
+    ///
+    /// The readable form of
+    /// `the_dotenv_record_never_changes_a_value_only_its_attribution`,
+    /// which proves the value but says nothing about what the table
+    /// tells the operator to do next. Both halves matter here — a fix
+    /// that dropped the line instead of demoting it would agree on the
+    /// value and still leave them editing a line already ignored.
+    #[test]
+    fn a_blanked_variable_the_file_also_names_reports_the_file_line_as_lost() {
+        let load = dotenv_eclipsed("/sandbox/.env", SEARCH_TOP_K_ENV, "7");
+        let rows = knob_origins_from(only(SEARCH_TOP_K_ENV, ""), Some(load.supply()), None);
+        let top_k = row(&rows, "search.top_k");
+
+        assert_eq!(
+            top_k.value.as_deref(),
+            Some(DEFAULT_SEARCH_TOP_K.to_string().as_str()),
+            "the blanked variable let the file's discarded line win"
+        );
+        assert_eq!(top_k.layer, Layer::Default);
+        assert!(
+            top_k
+                .shadowed
+                .iter()
+                .any(|s| s.layer == Layer::Dotenv && s.site == "/sandbox/.env" && s.value == "7"),
+            "the file's line is invisible, so the operator has nothing to stop editing: {:?}",
+            top_k.shadowed
+        );
     }
 
     /// A blank environment value is unset, not a losing offer: it must

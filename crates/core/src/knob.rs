@@ -4,9 +4,9 @@
 //!
 //! A knob is resolved by walking its layers from the highest authority
 //! down and taking the first that offers a value. [`resolve_knob`] does
-//! that walk and, in the same pass, records the lower layers that did
-//! hold a value and lost — the part a caller cannot reconstruct after
-//! the fact without re-running the priority chain.
+//! that walk and, in the same pass, records the layers that did hold a
+//! value and lost — the part a caller cannot reconstruct after the
+//! fact without re-running the priority chain.
 //!
 //! The layer sequence is the caller's, not this module's: knobs differ
 //! in which layers can even speak for them, so a knob passes its own
@@ -123,6 +123,20 @@ impl ReadAt {
     }
 }
 
+/// Whether a layer's value is eligible to become the effective one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    /// In the running: the highest layer offering a value wins.
+    Bidding,
+    /// The layer holds this value and something outside the priority
+    /// chain already discarded it, so the value is reported and can
+    /// never be taken. A dotenv line the real environment got to first
+    /// is the case: the loader read it, threw it away, and never wrote
+    /// it anywhere a resolver could see.
+    Discarded,
+}
+
 /// One layer's offer for a knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Candidate {
@@ -140,6 +154,9 @@ pub struct Candidate {
     /// way the layer is not [`Shadowed`]: it did not lose, it offered
     /// nothing to lose with.
     pub value: Option<String>,
+    /// Whether the value may be taken, or is reported having already
+    /// been discarded elsewhere.
+    pub standing: Standing,
 }
 
 impl Candidate {
@@ -149,6 +166,22 @@ impl Candidate {
             layer,
             site: site.into(),
             value,
+            standing: Standing::Bidding,
+        }
+    }
+
+    /// A value a layer holds that was discarded before the priority
+    /// chain ran, reported so the ladder can say the layer spoke.
+    ///
+    /// Takes the value rather than an `Option`: a layer with nothing to
+    /// report is an ordinary silent candidate, and saying "discarded
+    /// nothing" would be a row about a line that was never written.
+    pub fn discarded(layer: Layer, site: impl Into<String>, value: impl Into<String>) -> Candidate {
+        Candidate {
+            layer,
+            site: site.into(),
+            value: Some(value.into()),
+            standing: Standing::Discarded,
         }
     }
 }
@@ -163,7 +196,7 @@ pub struct KnobSite {
     pub site: String,
 }
 
-/// A lower layer that held a value and lost.
+/// A layer that held a value and did not supply the effective one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Shadowed {
     /// The layer holding the losing value.
@@ -186,8 +219,13 @@ pub struct KnobOrigin {
     pub layer: Layer,
     /// Where that layer holds it.
     pub site: String,
-    /// Every lower layer that offered a value and lost, in priority
-    /// order.
+    /// Every layer that held a value and did not supply the effective
+    /// one, in priority order.
+    ///
+    /// Usually a lower layer the winner outranked. Not always: a layer
+    /// whose value was discarded before the priority chain ran appears
+    /// here whatever won, including when the winner sits below it —
+    /// losing to a rule outside the ladder is still losing.
     pub shadowed: Vec<Shadowed>,
     /// Every layer that can speak for this knob, in priority order,
     /// including the ones that offered nothing.
@@ -241,10 +279,14 @@ impl DotenvSupply<'_> {
 
 /// The environment and dotenv layers for one variable, in that order.
 ///
-/// At most one carries a *winning* value: the loader only fills gaps.
-/// Both can carry one when the file names a key the environment
-/// already held — the file's line lost, and saying so is what
-/// distinguishes a knob set twice from one never set in the file.
+/// At most one ever bids: the loader only fills gaps. Both carry a
+/// value when the file names a key the environment already held, and
+/// the file's is then [`Standing::Discarded`] — reported, because
+/// saying so distinguishes a knob set twice from one never set in the
+/// file, and unable to win, because that value was thrown away before
+/// any resolver could read it. The environment's own text may still be
+/// blank or malformed and offer nothing; that does not hand the file's
+/// line back its chance.
 ///
 /// With no load to consult the result is a single environment
 /// candidate rather than two with the second empty — "no dotenv layer
@@ -268,11 +310,14 @@ pub fn env_layers(
     // The file names it but the real environment got there first, so
     // the file's line was read and thrown away. Reporting it as a
     // losing layer is the difference between "you set this twice" and
-    // "you never set this".
+    // "you never set this" — discarded, because that value never
+    // reached the environment and so can never be the effective one,
+    // however unusable the text the environment carried turns out to
+    // be.
     match load.eclipsed(name) {
         Some(value) => vec![
             Candidate::of(Layer::Environment, name, raw),
-            Candidate::of(Layer::Dotenv, load.path, Some(value.to_string())),
+            Candidate::discarded(Layer::Dotenv, load.path, value),
         ],
         None => vec![Candidate::of(Layer::Environment, name, raw)],
     }
@@ -294,9 +339,14 @@ pub fn env_over(
 ///
 /// `candidates` are the layers that can speak for this knob, in
 /// descending priority; the first offering a value wins and every
-/// lower one that also offered a value is recorded as [`Shadowed`].
+/// other one that also offered a value is recorded as [`Shadowed`].
 /// The order is the caller's because layer sequences differ per knob,
 /// and a debug assertion holds callers to it.
+///
+/// A candidate marked [`Standing::Discarded`] is reported and never
+/// taken, whatever the layers above it did. It carries a value that
+/// something outside this chain already threw away, so letting it win
+/// would describe a resolution no reader of the configuration performs.
 ///
 /// One layer may appear more than once, at different sites: a data
 /// root can be named by either of two flags, and PDFium's requirement
@@ -321,8 +371,14 @@ pub fn resolve_knob(
         "candidates must descend in priority, highest layer first"
     );
 
+    // The lowest layer still in the running. A discarded one is a line
+    // that was thrown away, not a fallback, so it cannot be what a knob
+    // falls back to when nothing answers.
     let backstop = candidates
-        .last()
+        .iter()
+        .rev()
+        .find(|c| c.standing == Standing::Bidding)
+        .or_else(|| candidates.last())
         .map(|c| (c.layer, c.site.clone()))
         .unwrap_or((Layer::Default, String::new()));
 
@@ -335,16 +391,17 @@ pub fn resolve_knob(
             layer: candidate.layer,
             site: candidate.site.clone(),
         });
-        match (&winner, candidate.value) {
-            (_, None) => {}
-            (None, Some(value)) => {
+        match (&winner, candidate.value, candidate.standing) {
+            (_, None, _) => {}
+            (None, Some(value), Standing::Bidding) => {
                 winner = Some(Candidate {
                     layer: candidate.layer,
                     site: candidate.site,
                     value: Some(value),
+                    standing: Standing::Bidding,
                 });
             }
-            (Some(_), Some(value)) => shadowed.push(Shadowed {
+            (_, Some(value), _) => shadowed.push(Shadowed {
                 layer: candidate.layer,
                 site: candidate.site,
                 value,
@@ -537,6 +594,101 @@ mod tests {
         );
         assert_eq!(origin.site, "XDG_RUNTIME_DIR");
         assert!(origin.shadowed.is_empty());
+    }
+
+    /// A discarded value cannot become the effective one, however
+    /// silent the layers above it are. It lost before the ladder ran,
+    /// so no amount of abstention above it turns it back into an offer.
+    #[test]
+    fn a_discarded_value_never_wins_however_silent_the_layers_above_it() {
+        let origin = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                candidate(Layer::Environment, "BOOKRACK_SEARCH_TOP_K", None),
+                Candidate::discarded(Layer::Dotenv, "/sandbox/.env", "7"),
+                candidate(Layer::File, "search.top_k", None),
+                candidate(Layer::Default, "built-in", Some("5")),
+            ],
+        );
+
+        assert_eq!(
+            origin.value.as_deref(),
+            Some("5"),
+            "a value discarded before the ladder ran was taken as the effective one"
+        );
+        assert_eq!(origin.layer, Layer::Default);
+    }
+
+    /// Discarded is reported, not dropped: the whole point of carrying
+    /// it is that an operator can see the line they wrote and stop
+    /// editing it.
+    #[test]
+    fn a_discarded_value_is_reported_as_shadowed_even_above_the_winner() {
+        let origin = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                candidate(Layer::Environment, "BOOKRACK_SEARCH_TOP_K", None),
+                Candidate::discarded(Layer::Dotenv, "/sandbox/.env", "7"),
+                candidate(Layer::Default, "built-in", Some("5")),
+            ],
+        );
+
+        assert_eq!(
+            origin.shadowed,
+            vec![Shadowed {
+                layer: Layer::Dotenv,
+                site: "/sandbox/.env".to_string(),
+                value: "7".to_string(),
+            }],
+            "the discarded line vanished from the row"
+        );
+    }
+
+    /// A row every layer abstained from names the layer that was meant
+    /// to backstop it, and a discarded layer never backstops anything:
+    /// it is a line that was thrown away, not a fallback.
+    #[test]
+    fn a_discarded_layer_is_not_the_backstop_of_a_valueless_row() {
+        let origin = resolve_knob(
+            "search.top_k",
+            KnobReach::Library,
+            ReadAt::AfterResolution,
+            vec![
+                candidate(Layer::Environment, "BOOKRACK_SEARCH_TOP_K", None),
+                Candidate::discarded(Layer::Dotenv, "/sandbox/.env", "7"),
+            ],
+        );
+
+        assert_eq!(origin.value, None);
+        assert_eq!(origin.layer, Layer::Environment);
+        assert_eq!(origin.site, "BOOKRACK_SEARCH_TOP_K");
+    }
+
+    /// The environment and dotenv layers of a key the file names and
+    /// the real environment already carried: the file's line is
+    /// reported, and reported as unable to win.
+    #[test]
+    fn an_eclipsed_dotenv_line_is_offered_as_discarded() {
+        let eclipsed = [("BOOKRACK_SEARCH_TOP_K".to_string(), "7".to_string())];
+        let supply = DotenvSupply {
+            path: "/sandbox/.env",
+            supplied: &[],
+            eclipsed: &eclipsed,
+        };
+        let layers = env_layers(Some(supply), "BOOKRACK_SEARCH_TOP_K", None);
+
+        assert_eq!(layers.len(), 2, "{layers:?}");
+        assert_eq!(layers[1].layer, Layer::Dotenv);
+        assert_eq!(layers[1].value.as_deref(), Some("7"));
+        assert_eq!(
+            layers[1].standing,
+            Standing::Discarded,
+            "the loader threw this line away, so it must not be in the running"
+        );
     }
 
     #[test]

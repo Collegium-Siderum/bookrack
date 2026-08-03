@@ -213,6 +213,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`config effective` reported a value no process uses.** With a
+  variable set but blank — `export BOOKRACK_SEARCH_TOP_K=` and nothing
+  after it — or set to text the knob cannot parse, and the same key
+  written in `.env`, the table showed the file's value at the `dotenv`
+  layer while every command went on using `config.toml` or the built-in
+  default. The loader only fills gaps, so a key the real environment
+  already carried means the file's line was read and thrown away: that
+  value never entered the environment and nothing could ever resolve to
+  it. It is now reported as a layer that lost rather than one that won,
+  so the row names both the file the operator has to stop editing and
+  the value their commands actually run with. Every knob read from a
+  variable was affected, across the configuration, search, session,
+  PDFium and CLI-prompt tables.
+
 - **runtime: `doctor` called an index coherent after comparing two of
   its four stamps.** The index-profile section ends on a summary
   promising the referenced profiles are "coherent with their built
