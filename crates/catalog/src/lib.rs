@@ -43,6 +43,7 @@ mod pipeline_runs;
 mod retrieval_call_hits;
 mod retrieval_calls;
 mod retrieval_issues;
+mod run_lock;
 mod toc_edits;
 mod works;
 
@@ -78,6 +79,9 @@ pub use pipeline_runs::{NewPipelineRun, PipelineRun};
 pub use retrieval_call_hits::RetrievalCallHit;
 pub use retrieval_calls::{NewRetrievalCall, RetrievalCall, RetrievalCallListing};
 pub use retrieval_issues::{NewRetrievalIssue, RetrievalIssue};
+pub use run_lock::{
+    RunLiveness, RunLock, discard_run_lock, run_liveness, run_lock_path, run_locks_dir,
+};
 pub use works::{NewWork, Work};
 
 bookrack_core::fixed_settings! {
