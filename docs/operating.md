@@ -220,7 +220,10 @@ which is a different answer from a store nobody checked. A pipeline
 whose content is ingested but whose vector index is missing is a `WARN`
 — that content answers no search. The rows report presence, not health;
 what a store holds and whether it opens is `bookrack verify` and, on a
-running daemon, `bookrack status`.
+running daemon, `bookrack status`. One more row covers what those cannot:
+free space on the volume holding the data root, warned on below the floor
+`bookrack config fixed` reports, since a store that exists is not the same
+as a store that can grow.
 
 The registry sections need a readable registry: when one is
 configured but cannot be read, they report that as a row apiece instead
@@ -246,7 +249,10 @@ computes the plan for the last two without touching disk:
   managed directory the loader searches.
 - `bookrack doctor --install-reranker` does the same for the pinned
   reranker artifacts — the `llama-server` binary and the cross-encoder
-  model — which only a profile with a reranker stage needs.
+  model — which only a profile with a reranker stage needs. The model
+  alone is a ~610 MiB download; the row that asks for it names the size,
+  and `bookrack config fixed` reports the free-space floor the disk row
+  warns under.
 - `bookrack doctor --rename-envelopes` migrates envelope files from
   older libraries into the kind-prefixed filename layout.
 - `bookrack doctor --backfill-ocr-derivation` recovers the OCR

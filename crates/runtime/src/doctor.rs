@@ -39,6 +39,7 @@ use bookrack_config::{
     ResolutionSource, ShadowedDefault, default_registry_path, effective_profile_reference,
     list_libraries, load_manifest, locate_pdfium, pdfium_library_filename, profile_reference_drift,
 };
+use bookrack_core::bytes_human;
 use bookrack_corpus::IndexStamps;
 use bookrack_embed::{DEFAULT_PROBE_TIMEOUT, pull_command};
 use bookrack_index_profile::{ProfileOrigin, has_errors, resolve, validate};
@@ -160,6 +161,7 @@ pub async fn gather_with(
     push_fd_limit_row(&mut rows);
     if let Some(cfg) = &cfg {
         push_store_rows(&mut rows, cfg);
+        push_disk_free_row(&mut rows, cfg);
     }
     // One resolution feeds both registry-backed sections, so they can
     // never disagree about what the registry says.
@@ -645,6 +647,44 @@ fn push_fd_limit_row(rows: &mut Vec<Row>) {
     }
 }
 
+/// Free space below which the row warns. Chosen against what an
+/// install still has ahead of it: the reranker artifacts alone are
+/// several hundred megabytes, and an index grows with every ingest.
+// setting: doctor.disk_free_floor
+pub const DISK_FREE_FLOOR: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Report free space on the filesystem holding the data root. A store
+/// row says a database is there; nothing else says whether the next
+/// ingest, index rebuild, or managed download has room to land.
+fn push_disk_free_row(rows: &mut Vec<Row>, cfg: &Config) {
+    let label = "disk free".to_string();
+    match fs2::available_space(cfg.data_dir()) {
+        Ok(free) if free >= DISK_FREE_FLOOR => rows.push(Row {
+            label,
+            value: bytes_human(free),
+            status: Status::Ok { note: None },
+        }),
+        Ok(free) => rows.push(Row {
+            label,
+            value: bytes_human(free),
+            status: Status::Warn {
+                note: format!(
+                    "below {} on the volume holding the data root; an ingest, an index \
+                     rebuild, or `bookrack doctor --install-reranker` may run out of room",
+                    bytes_human(DISK_FREE_FLOOR)
+                ),
+            },
+        }),
+        Err(e) => rows.push(Row {
+            label,
+            value: "(unknown)".to_string(),
+            status: Status::Warn {
+                note: format!("could not read free space on the data root: {e}"),
+            },
+        }),
+    }
+}
+
 /// What a missing store means for the library it belongs to.
 enum Absent {
     /// The library is expected to carry it, so its absence is a
@@ -1080,8 +1120,7 @@ fn stamp_issue(
 /// and counting the rest so a four-way divergence does not push the row
 /// off the table.
 fn summarise_findings(findings: &[String]) -> String {
-    // setting: internal -- how much of a note one table row can carry,
-    // not a value an operator tunes
+    // setting: internal -- how much of a note one table row can carry
     const SHOWN: usize = 2;
     let head = findings
         .iter()
@@ -1350,7 +1389,16 @@ fn reranker_model_row(model_tag: &str, path: Option<std::path::PathBuf>) -> Row 
             label: "reranker model".to_string(),
             value: format!("{model_tag} missing"),
             status: Status::Fail {
-                note: "install with `bookrack doctor --install-reranker`".to_string(),
+                // The size comes from the pin the installer downloads,
+                // so an operator on a metered link or a full volume
+                // learns what the command costs before running it.
+                note: match bookrack_config::reranker_model_pin::reranker_model_pin(model_tag) {
+                    Some(pin) => format!(
+                        "install with `bookrack doctor --install-reranker` ({} download)",
+                        bytes_human(pin.bytes)
+                    ),
+                    None => "install with `bookrack doctor --install-reranker`".to_string(),
+                },
             },
         },
     }
@@ -2088,6 +2136,44 @@ mod tests {
             .find(|r| r.label == "lancedb_papers/")
             .expect("row present");
         assert!(matches!(papers.status, Status::Ok { .. }), "{papers:?}");
+    }
+
+    #[test]
+    fn the_disk_row_reads_the_volume_holding_the_data_root() {
+        // Nothing else in the report answers "is there room for the
+        // next ingest": the store rows say a database is there, not
+        // that it can grow.
+        let root = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::new(
+            root.path().to_path_buf(),
+            "http://127.0.0.1:11434".to_string(),
+        );
+        let mut rows = Vec::new();
+        push_disk_free_row(&mut rows, &cfg);
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].label, "disk free");
+        // A test host with no room left is a real state, and the row is
+        // then a warning; what must never happen is a silent pass with
+        // no reading taken.
+        assert_ne!(rows[0].value, "(unknown)", "{rows:?}");
+        assert!(
+            !matches!(rows[0].status, Status::Fail { .. }),
+            "free space is a warning, not a hard failure: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_reranker_model_hint_names_what_the_install_downloads() {
+        // The install is several hundred megabytes; a hint that does not
+        // say so is one an operator on a metered link or a nearly full
+        // volume cannot act on.
+        let pin = &bookrack_config::reranker_model_pin::RERANKER_MODEL_PINS[0];
+        let row = reranker_model_row(pin.tag, None);
+        let Status::Fail { note } = &row.status else {
+            panic!("a missing model is a failure: {row:?}");
+        };
+        assert!(note.contains(&bytes_human(pin.bytes)), "{note}");
     }
 
     #[test]

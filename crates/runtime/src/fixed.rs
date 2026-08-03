@@ -21,6 +21,9 @@ bookrack_core::fixed_settings! {
     "daemon.nofile_target" = crate::rlimit::NOFILE_TARGET,
         "open files the daemon raises its soft limit to at startup",
         acts on "a large batch ingest, which holds a file per index fragment";
+    "doctor.disk_free_floor" = crate::doctor::DISK_FREE_FLOOR,
+        "free space on the data root's volume below which the health check warns",
+        acts on "doctor, whose disk row turns WARN under it";
     "dryrun.paper_reports_kept" = crate::cmd::papers_dryrun::PAPERS_DRYRUN_KEEP,
         "paper dry-run reports kept under the data root before the oldest is pruned",
         acts on "papers dryrun";

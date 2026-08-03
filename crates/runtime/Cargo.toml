@@ -42,6 +42,9 @@ clap.workspace = true
 # `pdfium_install` downloads the pinned PDFium archive over HTTPS and
 # unpacks it (gzip + tar) into the managed directory.
 flate2.workspace = true
+# `doctor`'s free-space row: `available_space` on the data root, which
+# has no std equivalent and would otherwise be a per-platform syscall.
+fs2.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

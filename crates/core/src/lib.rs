@@ -8,6 +8,7 @@
 //! value-type helpers needed to express its public surface (`serde`,
 //! `chrono`).
 
+mod bytes;
 mod error_chain;
 pub mod fixed;
 mod item_kind;
@@ -19,6 +20,7 @@ mod problem;
 pub mod queue;
 mod scope;
 
+pub use bytes::bytes_human;
 pub use error_chain::error_chain;
 pub use item_kind::ItemKind;
 pub use kinded_node_id::KindedNodeId;

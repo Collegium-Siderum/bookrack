@@ -25,6 +25,16 @@ release workflow extracts the matching section verbatim from this file.
   somewhere uncreatable, which otherwise surfaces at the worst possible
   moment, as a migration is about to rewrite a store.
 
+- **runtime: `doctor` reports free space on the data root's volume.**
+  Every row said whether something exists; none said whether there is
+  room for the next one. The disk row warns below the floor
+  `bookrack config fixed` lists as `doctor.disk_free_floor`, naming the
+  operations that would run out — an ingest, an index rebuild, the
+  reranker install. That install's own rows now say what they cost: the
+  hint under a missing reranker model names the pinned download size
+  rather than sending the operator into several hundred megabytes
+  unannounced.
+
 - **cli: `bookrack config fixed` lists the values compiled into the
   build.** The third configuration surface, for the values no layer
   moves: a page cap, a retry count, a timeout on an internal call.
