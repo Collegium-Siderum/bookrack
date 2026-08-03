@@ -15,7 +15,7 @@ use eyre::{Context, Result};
 use crate::cmd::input_error::CmdInputError;
 use crate::cmd::vectors::parse_ann_kind;
 use crate::embed_helpers::embedder;
-use crate::pipeline_run_helpers::{close_pass_run, open_pass_run};
+use crate::pipeline_run_helpers::{close_run, open_run};
 
 /// Render `bookrack papers vectors rebuild` — build or rebuild the ANN
 /// index over `lancedb_papers` from CLI flags, falling back to the
@@ -192,7 +192,12 @@ where
 
     // Registered past the confirmation prompt: a declined reset is not
     // a pass and leaves no row behind.
-    let pipeline_run_id = open_pass_run(&catalog, "papers_reset", cfg.data_dir().to_str());
+    let run = open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_reset",
+        cfg.data_dir().to_str(),
+    );
     let outcome = bookrack_glean::reset::reset_and_rechunk(
         &catalog,
         &mut corpus,
@@ -202,7 +207,7 @@ where
         resume,
     )
     .await;
-    close_pass_run(&catalog, pipeline_run_id.as_deref(), outcome.is_ok());
+    close_run(&catalog, run, outcome.is_ok());
 
     let report = match outcome {
         Ok(report) => report,
@@ -259,7 +264,12 @@ pub async fn execute_reembed_from_plan(
     let mut corpus = Corpus::open(&cfg.papers_corpus_db()).context("open papers corpus")?;
     let embed_cfg = crate::profile::effective_embed_config(cfg)?;
     let embedder_client = embedder(cfg, &embed_cfg)?;
-    let pipeline_run_id = open_pass_run(&catalog, "papers_reembed", cfg.data_dir().to_str());
+    let run = open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_reembed",
+        cfg.data_dir().to_str(),
+    );
     let result = bookrack_glean::reembed::reembed_all(
         &catalog,
         &mut corpus,
@@ -272,7 +282,7 @@ pub async fn execute_reembed_from_plan(
     )
     .await
     .context("papers reembed_all");
-    close_pass_run(&catalog, pipeline_run_id.as_deref(), result.is_ok());
+    close_run(&catalog, run, result.is_ok());
     result
 }
 

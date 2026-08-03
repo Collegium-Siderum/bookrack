@@ -19,6 +19,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::cmd::input_error::CmdInputError;
+use crate::pipeline_run_helpers::{RunHandle, close_run, open_run};
 
 /// How many paper dryrun JSONL artifacts to keep under
 /// `<data_root>/dryruns/` before pruning the oldest. Independent of
@@ -45,9 +46,9 @@ pub fn run(
     out: Option<&Path>,
     skip_chunks: bool,
 ) -> Result<PapersDryrunRunOutcome> {
-    let pipeline_run_id = open_papers_dryrun_pipeline_run(cfg);
+    let run = open_papers_dryrun_pipeline_run(cfg);
     let result = run_inner(cfg, path, out, skip_chunks);
-    close_papers_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    close_papers_dryrun_pipeline_run(cfg, run, result.is_ok());
     result
 }
 
@@ -57,7 +58,7 @@ pub fn run(
 /// missing catalog skips tracking — a preview must not materialise a
 /// database for one lifecycle row — and an open failure demotes to a
 /// NULL run id.
-fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<String> {
+fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<RunHandle> {
     if !cfg.papers_catalog_db().exists() {
         return None;
     }
@@ -72,26 +73,30 @@ fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<String> {
             return None;
         }
     };
-    catalog
-        .open_pipeline_run("papers_dryrun", None, cfg.data_dir().to_str())
-        .ok()
+    open_run(
+        &catalog,
+        &cfg.papers_catalog_db(),
+        "papers_dryrun",
+        cfg.data_dir().to_str(),
+    )
 }
 
-fn close_papers_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
-    let Some(id) = pipeline_run_id else {
+/// Close the row through a second open of the paper catalog. A failure
+/// there abandons the run — the row stays `running` and keeps the
+/// liveness record a repair reads — rather than dropping it silently.
+fn close_papers_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
+    let Some(run) = run else {
         return;
     };
     let catalog = match bookrack_catalog::Catalog::open(&cfg.papers_catalog_db()) {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close path catalog open failed");
+            tracing::warn!(error = %err, pipeline_run_id = run.id(), "papers_dryrun: close path catalog open failed");
+            run.abandon();
             return;
         }
     };
-    let status = if ok { "ok" } else { "error" };
-    if let Err(err) = catalog.close_pipeline_run(id, status) {
-        tracing::warn!(error = %err, pipeline_run_id = id, "papers_dryrun: close_pipeline_run failed");
-    }
+    close_run(&catalog, Some(run), ok);
 }
 
 fn run_inner(

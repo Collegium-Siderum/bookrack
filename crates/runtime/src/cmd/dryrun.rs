@@ -21,6 +21,7 @@ use eyre::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::cmd::input_error::CmdInputError;
+use crate::pipeline_run_helpers::{RunHandle, close_run, open_run};
 
 /// How many dryrun JSONL artifacts to keep under `<data_root>/dryruns/`
 /// before pruning the oldest. Matches the catalog backup retention so
@@ -49,9 +50,9 @@ pub fn run(
     no_chunk: bool,
     profile_name: Option<&str>,
 ) -> Result<DryrunRunOutcome> {
-    let pipeline_run_id = open_dryrun_pipeline_run(cfg, "dryrun");
+    let run = open_dryrun_pipeline_run(cfg, "dryrun");
     let result = run_inner(cfg, path, out, no_chunk, profile_name);
-    close_dryrun_pipeline_run(cfg, pipeline_run_id.as_deref(), result.is_ok());
+    close_dryrun_pipeline_run(cfg, run, result.is_ok());
     result
 }
 
@@ -60,7 +61,7 @@ pub fn run(
 /// materialise and migrate a database for one lifecycle row — and a
 /// catalog-open failure logs and demotes to a NULL run id; the dryrun
 /// itself proceeds unchanged either way.
-fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
+fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<RunHandle> {
     if !cfg.catalog_db().exists() {
         return None;
     }
@@ -75,29 +76,35 @@ fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<String> {
             return None;
         }
     };
-    catalog
-        .open_pipeline_run(command, None, cfg.data_dir().to_str())
-        .ok()
+    open_run(
+        &catalog,
+        &cfg.catalog_db(),
+        command,
+        cfg.data_dir().to_str(),
+    )
 }
 
 /// Close the dryrun's `pipeline_runs` row. No summary is computed:
 /// dryrun does not write `book_distill_audit` / `node_paper_audit`, so
 /// the rollup would be empty.
-fn close_dryrun_pipeline_run(cfg: &Config, pipeline_run_id: Option<&str>, ok: bool) {
-    let Some(id) = pipeline_run_id else {
+///
+/// The close leg opens the catalog a second time, which is a failure
+/// point the open leg already survived. When it fails the run is
+/// abandoned rather than silently forgotten, so the row it leaves at
+/// `running` is one a repair can still find.
+fn close_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
+    let Some(run) = run else {
         return;
     };
     let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close path catalog open failed");
+            tracing::warn!(error = %err, pipeline_run_id = run.id(), "dryrun: close path catalog open failed");
+            run.abandon();
             return;
         }
     };
-    let status = if ok { "ok" } else { "error" };
-    if let Err(err) = catalog.close_pipeline_run(id, status) {
-        tracing::warn!(error = %err, pipeline_run_id = id, "dryrun: close_pipeline_run failed");
-    }
+    close_run(&catalog, Some(run), ok);
 }
 
 fn run_inner(

@@ -41,6 +41,7 @@ use bookrack_cli_grammar::{
 use bookrack_config::Config;
 use bookrack_distill::{BookToml, Coverage, EntryDraft, StageReport, load_pipeline};
 use bookrack_refs::{IndexKind, IndexSpec, NewBook, NewEntry, Refs};
+use bookrack_runtime::pipeline_run_helpers::{RunHandle, close_run, open_run};
 use eyre::{Context as _, Result, bail, eyre};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
@@ -256,20 +257,16 @@ fn visit_book_tomls(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
 fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
     let books = resolve_paths(&args.paths, args.recursive)?;
     let distill_run_id = chrono::Utc::now().to_rfc3339();
-    let pipeline_run_id = open_distill_pipeline_run(paths, &args)?;
-    let mut run_status = "ok";
+    let run = open_distill_pipeline_run(paths, &args)?;
     let outcome = run_books(
         paths,
         &books,
         &args,
         &distill_run_id,
-        pipeline_run_id.as_deref(),
+        run.as_ref().map(RunHandle::id),
     );
-    if outcome.is_err() {
-        run_status = "error";
-    }
-    if let Some(pipeline_run_id) = pipeline_run_id.as_deref() {
-        finalize_pipeline_run(paths, pipeline_run_id, run_status);
+    if let Some(run) = run {
+        finalize_pipeline_run(paths, run, outcome.is_ok());
     }
     outcome
 }
@@ -281,7 +278,7 @@ fn build(paths: &DistillPaths, args: DistillBuildArgs) -> Result<()> {
 fn open_distill_pipeline_run(
     paths: &DistillPaths,
     args: &DistillBuildArgs,
-) -> Result<Option<String>> {
+) -> Result<Option<RunHandle>> {
     if args.no_audit_write {
         return Ok(None);
     }
@@ -301,15 +298,22 @@ fn open_distill_pipeline_run(
         .parent()
         .and_then(|p| p.to_str())
         .map(str::to_string);
-    let id = catalog
-        .open_pipeline_run("distill_build", None, library_root.as_deref())
-        .context("open pipeline run")?;
-    Ok(Some(id))
+    Ok(open_run(
+        &catalog,
+        &paths.catalog_path,
+        "distill_build",
+        library_root.as_deref(),
+    ))
 }
 
 /// Close the run row and refresh its rollup. Best-effort: any error
 /// here logs and the build's exit status stays untouched.
-fn finalize_pipeline_run(paths: &DistillPaths, pipeline_run_id: &str, status: &str) {
+///
+/// The catalog opens a second time here, so this leg can fail where the
+/// open leg succeeded. It abandons the run when it does, leaving the
+/// `running` row together with the liveness record that lets a repair
+/// close it.
+fn finalize_pipeline_run(paths: &DistillPaths, run: RunHandle, ok: bool) {
     let catalog = match Catalog::open(&paths.catalog_path) {
         Ok(c) => c,
         Err(err) => {
@@ -318,13 +322,13 @@ fn finalize_pipeline_run(paths: &DistillPaths, pipeline_run_id: &str, status: &s
                 path = %paths.catalog_path.display(),
                 "distill: failed to open catalog.db to close pipeline run",
             );
+            run.abandon();
             return;
         }
     };
-    if let Err(err) = catalog.close_pipeline_run(pipeline_run_id, status) {
-        tracing::warn!(error = %err, pipeline_run_id, "distill: close_pipeline_run failed");
-    }
-    if let Err(err) = catalog.compute_run_summary(pipeline_run_id) {
+    let pipeline_run_id = run.id().to_string();
+    close_run(&catalog, Some(run), ok);
+    if let Err(err) = catalog.compute_run_summary(&pipeline_run_id) {
         tracing::warn!(error = %err, pipeline_run_id, "distill: compute_run_summary failed");
     }
 }

@@ -74,6 +74,9 @@ pub struct RunLock {
     /// Owns the lock: releasing it is the file handle closing, which
     /// the kernel also does for a process that dies.
     _file: File,
+    /// Set by [`RunLock::abandon`]: the record outlives the process
+    /// instead of being cleaned up on drop.
+    keep_record: bool,
 }
 
 impl RunLock {
@@ -89,7 +92,11 @@ impl RunLock {
             .truncate(false)
             .open(&path)?;
         match file.try_lock() {
-            Ok(()) => Ok(RunLock { path, _file: file }),
+            Ok(()) => Ok(RunLock {
+                path,
+                _file: file,
+                keep_record: false,
+            }),
             Err(TryLockError::WouldBlock) => Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!("run lock at {} is already held", path.display()),
@@ -102,11 +109,63 @@ impl RunLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Release the lock but leave the record behind, so the run reads
+    /// as [`RunLiveness::Abandoned`] afterwards rather than as a run
+    /// that kept no record.
+    ///
+    /// This is for the close leg that could not stamp the row: the row
+    /// stays `running`, and the record it keeps is what lets a repair
+    /// close it later. An orderly close does the opposite and takes the
+    /// record with it.
+    pub fn abandon(mut self) {
+        self.keep_record = true;
+    }
 }
 
 impl Drop for RunLock {
     fn drop(&mut self) {
+        if self.keep_record {
+            return;
+        }
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// An open registry row together with the liveness record held for it.
+///
+/// Carried by the command that opened the run and consumed when the
+/// run's terminal status is stamped, so the record cannot outlive the
+/// work nor disappear before it. Every command's own lifecycle helper
+/// wraps this; the type itself logs nothing and decides nothing.
+#[derive(Debug)]
+pub struct RunHandle {
+    pipeline_run_id: String,
+    lock: Option<RunLock>,
+}
+
+impl RunHandle {
+    /// Pair a freshly opened run with the record taken for it. `None`
+    /// means no record could be taken and the run is untracked.
+    pub fn new(pipeline_run_id: String, lock: Option<RunLock>) -> RunHandle {
+        RunHandle {
+            pipeline_run_id,
+            lock,
+        }
+    }
+
+    /// The id downstream audit rows carry.
+    pub fn id(&self) -> &str {
+        &self.pipeline_run_id
+    }
+
+    /// Give up on closing this run's row and leave its record behind,
+    /// so what could not be stamped can still be found. See
+    /// [`RunLock::abandon`].
+    pub fn abandon(self) {
+        if let Some(lock) = self.lock {
+            lock.abandon();
+        }
     }
 }
 
@@ -194,6 +253,17 @@ mod tests {
         };
         assert!(!path.exists());
         assert_eq!(run_liveness(dir.path(), RUN_ID), RunLiveness::NoRecord);
+    }
+
+    /// Abandoning keeps the record where an orderly drop would remove
+    /// it, so a run whose close leg failed still reads as abandoned.
+    #[test]
+    fn abandoning_the_lock_keeps_the_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        RunLock::acquire(dir.path(), RUN_ID)
+            .expect("acquire")
+            .abandon();
+        assert_eq!(run_liveness(dir.path(), RUN_ID), RunLiveness::Abandoned);
     }
 
     /// A file left behind unlocked is what a killed process leaves, and
