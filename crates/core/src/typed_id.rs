@@ -327,7 +327,7 @@ impl Explain for TypedIdParseError {
                     "{written:?} does not apply to the {namespace} namespace"
                 ))
                 .hint(format!(
-                    "Pass it as `{}:{payload}`, drop the prefix, or use the top-level form.",
+                    "Pass it as `{}:{payload}`, or drop the prefix.",
                     expected.as_scope_str()
                 ))
             }

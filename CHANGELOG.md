@@ -272,6 +272,12 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A paper's intake id may be written with its pipeline in front of
+  it.** Every `bookrack papers` command that takes an intake id now
+  takes `paper:101` as well as `101`; a `book:12` there names the other
+  catalog, whose ids number independently, and is refused while
+  arguments are read. See [Naming an item](docs/operating.md#naming-an-item).
+
 - **A book or paper answers the title it is shown under.** The registry
   filters compared against the values extraction wrote, while every row
   they return reports those values with the curator's corrections
