@@ -327,7 +327,7 @@ async fn run_metadata_action(
 ) -> Result<Value, RpcError> {
     let handle = ctx.registry.get(library).map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         run_metadata(&cfg, action, profile_name.as_deref())
             .await
             .map_err(|e| write_err("metadata.write", e))?;

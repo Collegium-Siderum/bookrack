@@ -101,7 +101,7 @@ async fn remove_dry_run(
         dry_run: true,
         yes: parsed.yes,
     };
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         let plan = plan_remove(&cfg, &args)
             .await
             .map_err(|e| write_err("papers.remove", e))?;
@@ -146,7 +146,7 @@ async fn remove_execute_from_plan(
         .map_err(plan_lookup_err)?;
     let plan: RegisteredPapersRemovePlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         let outcome = execute_remove_from_plan(
             &cfg,
             plan.intake_id,

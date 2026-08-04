@@ -386,3 +386,95 @@ async fn a_write_method_acts_on_the_library_its_parameter_names() -> Result<()> 
     );
     Ok(())
 }
+
+/// The `library.changed` event a write publishes names the library the
+/// write touched.
+///
+/// Subscribers refresh their view of a library on this event. Under a
+/// daemon serving several libraries, one that always names the
+/// bring-up-selected library tells every subscriber to refresh the
+/// wrong one — and says nothing about the library that actually
+/// changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_announces_the_library_it_changed() -> Result<()> {
+    let sandbox = world();
+    let runtime_root = tempfile::tempdir()?;
+    let book_dir = tempfile::tempdir()?;
+    let book_path = book_dir.path().join("synthetic-ledger.txt");
+    std::fs::write(&book_path, BOOK_TEXT)?;
+    let _ = sandbox.data_root("beta-root");
+
+    let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
+    opts.no_mcp = true;
+    opts.spawn_queue_worker = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut obs_reader, mut obs_w) = connect(&sock).await?;
+        send(
+            &mut obs_w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe"}"#,
+        )
+        .await?;
+        let _ = recv(&mut obs_reader).await?;
+        // Drain the snapshot bundle, which carries a `library.changed`
+        // of its own — the primary, by design, since a fresh
+        // subscriber has not yet seen any write. `daemon.version` is
+        // its last channel, so draining to it leaves only live
+        // broadcasts without pinning the bundle's size.
+        loop {
+            let frame = recv(&mut obs_reader).await?;
+            if frame["params"]["channel"].as_str() == Some("daemon.version") {
+                break;
+            }
+        }
+
+        let (mut wr_reader, mut wr_w) = connect(&sock).await?;
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "dryrun",
+            "params": {"path": book_path, "library": "beta"},
+        });
+        send(&mut wr_w, &req.to_string()).await?;
+        let resp = recv(&mut wr_reader).await?;
+        assert!(
+            resp["error"].is_null(),
+            "dryrun against beta failed: {resp}"
+        );
+
+        let deadline = tokio::time::sleep(Duration::from_secs(20));
+        tokio::pin!(deadline);
+        let changed = loop {
+            tokio::select! {
+                _ = &mut deadline => panic!("no library.changed after the write"),
+                frame = recv(&mut obs_reader) => {
+                    let frame = frame?;
+                    if frame["params"]["channel"].as_str() == Some("library.changed") {
+                        break frame["params"]["value"]["library"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                    }
+                }
+            }
+        };
+        assert_eq!(
+            changed, "beta",
+            "the event named another library than the one written",
+        );
+
+        send(
+            &mut wr_w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut wr_reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}

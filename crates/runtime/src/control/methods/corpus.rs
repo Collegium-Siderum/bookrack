@@ -96,7 +96,7 @@ async fn run_dry_run(parsed: CorpusRebuildParams, ctx: &MethodContext) -> Result
     let include_vectors = parsed.include_vectors;
     let book = parsed.book;
     let stale_only = parsed.stale_only;
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         let report = corpus::plan_rebuild(&cfg, book, stale_only)
             .map_err(|e| write_err("corpus.rebuild", e))?;
         let registered = RegisteredRebuildPlan {
@@ -137,7 +137,7 @@ async fn run_execute_from_plan(
         .map_err(plan_lookup_err)?;
     let plan: RegisteredRebuildPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         let outcome =
             corpus::execute_rebuild_from_plan(&cfg, plan.pinned_ids, plan.include_vectors)
                 .await

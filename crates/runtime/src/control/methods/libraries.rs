@@ -91,7 +91,7 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let cfg = handle.cfg_arc();
     let target = parsed.data_dir.clone();
     let new_name = parsed.new_name.clone();
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })

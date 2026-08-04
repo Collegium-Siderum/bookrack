@@ -52,7 +52,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         let outcome = tokio::task::spawn_blocking(move || {
             papers_dryrun::run(&cfg, &parsed.path, parsed.out.as_deref(), parsed.no_chunk)
         })

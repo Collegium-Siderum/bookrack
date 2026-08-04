@@ -293,6 +293,15 @@ release workflow extracts the matching section verbatim from this file.
   handle it is routed to. Libraries whose profiles and overlays match
   see no change.
 
+- **`library.changed` named the wrong library.** Every write
+  published the event under the bring-up-selected library's name, so a
+  subscriber watching a multi-library daemon was told to refresh the
+  primary whatever library had actually been written — and was never
+  told about the one that had. The event now carries the library the
+  write touched. The `library.changed` in the `events.subscribe`
+  snapshot still names the primary, which is correct there: a fresh
+  subscriber has not yet seen any write.
+
 - **A library declaring a reranker was served without one.** One
   supervised reranker backend serves every mounted library, and
   bring-up asked the bring-up-selected library's index profile for it.

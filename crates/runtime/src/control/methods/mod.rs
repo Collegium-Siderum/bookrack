@@ -96,9 +96,12 @@ pub struct MethodContext {
     pub started_at_rfc3339: String,
     pub selection: LibrarySelection,
     /// Name of the primary (bring-up-selected) library. A single-value
-    /// snapshot consumed by the `library.changed` event and the queue
-    /// worker's no-name fallback; per-library status surfaces are a
-    /// later milestone.
+    /// snapshot consumed by the queue worker's no-name fallback, the
+    /// `status` card, and the `library.changed` snapshot a subscriber
+    /// receives on connect; per-library status surfaces are a later
+    /// milestone. A `library.changed` published *by a write* names the
+    /// library that write touched instead — [`run_write`] takes it
+    /// from the handler's own handle.
     pub library_name: String,
     /// Cached MCP tool list, populated by the daemon at startup from
     /// `bookrack_mcp::list_tools()`. Empty in entry points that do
@@ -451,7 +454,11 @@ impl Drop for WriteSession {
 /// cannot leave the daemon stranded with the write source raised and
 /// MCP paused, or allow a second writer to enter while the blocking
 /// work is still running.
-pub(crate) async fn run_write<F, Fut>(ctx: &MethodContext, op: F) -> Result<Value, RpcError>
+pub(crate) async fn run_write<F, Fut>(
+    ctx: &MethodContext,
+    library: &str,
+    op: F,
+) -> Result<Value, RpcError>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<Value, RpcError>>,
@@ -469,7 +476,7 @@ where
         _guard: guard,
     };
     let event_stream = ctx.event_stream.clone();
-    let library_name = ctx.library_name.clone();
+    let library_name = library.to_string();
     let join = tokio::task::spawn_blocking(move || {
         let handle = tokio::runtime::Handle::current();
         let result = handle.block_on(op());

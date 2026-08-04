@@ -41,7 +41,7 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
         .get(parsed.library.as_deref())
         .map_err(registry_err)?;
     let cfg = handle.cfg_arc();
-    run_write(ctx, move || async move {
+    run_write(ctx, handle.name(), move || async move {
         stamps::reconcile(&cfg)
             .await
             .map_err(|e| write_err("stamps.reconcile", e))?;
