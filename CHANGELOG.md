@@ -390,6 +390,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The wizard refuses a data root inside a macOS application bundle.**
+  On macOS the binary ships inside `Bookrack.app`, so the directory
+  "next to the binary" that portable mode invites — and the path a
+  Finder-driven first run most easily types — is inside the bundle.
+  An upgrade replaces the bundle whole: a library kept there is
+  deleted by the act of installing the next version, with no warning
+  and nothing to recover from.
+
+  `bookrack init` now refuses any path with a `*.app` ancestor,
+  whether it arrived through `--data-dir`, the prompt, or the portable
+  default, and names the bundle it found. `--force` does not override
+  it: that flag says an existing library at the root is acceptable,
+  which is a different statement from accepting that the root
+  disappears on the next upgrade. The way out is a path outside the
+  bundle.
+
 - **A paper's intake id may be written with its pipeline in front of
   it.** Every `bookrack papers` command that takes an intake id now
   takes `paper:101` as well as `101`; a `book:12` there names the other

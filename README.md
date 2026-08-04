@@ -175,10 +175,10 @@ root is then movable to any disk along with the tarball, no
 environment variable needed.
 
 On macOS the binary lives inside `Bookrack.app`, so "next to the
-binary" is inside the bundle. Do not put a data root there: upgrading
-replaces the whole bundle, and every book, index, and log under it
-goes with it. Pick a data root outside the bundle and let the pointer
-`init` writes find it.
+binary" is inside the bundle. Upgrading replaces the whole bundle, and
+every book, index, and log under it goes with it, so the wizard
+refuses a data root anywhere inside `Bookrack.app`. Pick one outside
+the bundle and let the pointer `init` writes find it.
 
 **From source** — Rust 1.95.0, edition 2024. Clone the repo and
 build:

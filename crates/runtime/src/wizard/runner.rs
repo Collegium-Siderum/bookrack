@@ -143,11 +143,46 @@ fn resolve_ollama_target() -> (String, String) {
     (url, EmbedConfig::resolve(None).model)
 }
 
+/// The macOS application bundle a path sits inside, if any.
+///
+/// Upgrading replaces a bundle wholesale, so every component under a
+/// `*.app` directory is transient storage regardless of what put it
+/// there. The check runs on every platform: the shape is a path, not a
+/// syscall, and a bundle copied onto another host reads the same.
+pub(crate) fn enclosing_app_bundle(path: &Path) -> Option<PathBuf> {
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        if prefix
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+        {
+            return Some(prefix);
+        }
+    }
+    None
+}
+
 /// Refuse to write into an existing populated data root unless the
 /// operator passed `force`. The marker tested is `catalog.db`: an
 /// empty directory the user just made by hand is fine, but a directory
 /// that already holds a library must not be silently re-init'd.
+///
+/// A path inside a macOS application bundle is refused outright, ahead
+/// of the other two judgements and regardless of `force`: that flag
+/// says the operator accepts an existing library at the root, which is
+/// a different statement from accepting that the root disappears on the
+/// next upgrade.
 pub(super) fn validate_unused_or_force(path: &Path, force: bool) -> Result<()> {
+    if let Some(bundle) = enclosing_app_bundle(path) {
+        eyre::bail!(
+            "{} is inside the application bundle {}; upgrading replaces the \
+             whole bundle, and every book, index, and log under it goes with \
+             it -- pick a data root outside the bundle",
+            path.display(),
+            bundle.display(),
+        );
+    }
     if path.exists() && !path.is_dir() {
         eyre::bail!("{} exists but is not a directory", path.display());
     }
@@ -385,6 +420,62 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join("catalog.db"), b"fake").expect("seed catalog");
         validate_unused_or_force(tmp.path(), true).expect("--force overrides");
+    }
+
+    #[test]
+    fn enclosing_app_bundle_finds_the_outermost_bundle() {
+        let cases: [(&str, Option<&str>); 7] = [
+            (
+                "/Applications/Bookrack.app/Contents/Resources/data",
+                Some("/Applications/Bookrack.app"),
+            ),
+            // The bundle need not be the `Contents` layout: anything
+            // under the directory goes with the replaced bundle.
+            (
+                "/Applications/Bookrack.app/bookrack-data",
+                Some("/Applications/Bookrack.app"),
+            ),
+            // macOS filesystems are case-insensitive by default.
+            (
+                "/Applications/Bookrack.APP/data",
+                Some("/Applications/Bookrack.APP"),
+            ),
+            // The outermost bundle wins over a nested one.
+            (
+                "/Applications/Outer.app/Inner.app/data",
+                Some("/Applications/Outer.app"),
+            ),
+            // The bundle directory itself, named as the data root.
+            (
+                "/Applications/Bookrack.app",
+                Some("/Applications/Bookrack.app"),
+            ),
+            ("/srv/bookrack/library", None),
+            // A relative path is judged on the same shape.
+            ("Bookrack.app/data", Some("Bookrack.app")),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                enclosing_app_bundle(Path::new(input)).as_deref(),
+                expected.map(Path::new),
+                "wrong bundle for {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_unused_or_force_refuses_a_path_inside_an_app_bundle() {
+        let path = Path::new("/Applications/Bookrack.app/Contents/Resources/bookrack-data");
+        let err = validate_unused_or_force(path, false).expect_err("should refuse");
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("/Applications/Bookrack.app"),
+            "refusal must name the bundle: {rendered}"
+        );
+        assert!(
+            rendered.contains("outside the bundle"),
+            "refusal must give the way out: {rendered}"
+        );
     }
 
     #[test]
