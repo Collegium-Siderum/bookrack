@@ -147,9 +147,14 @@ async fn a_variable_outside_the_admitted_set_never_reaches_the_process() -> Resu
 
     // Removed rather than left alone: on a host that exports `CI`, the
     // file's line would lose to the environment and this would pass
-    // without the admission rule doing anything.
+    // without the admission rule doing anything. `BOOKRACK_REQUIRE_PDFIUM`
+    // goes with it — it is a passthrough name that outranks `CI` on the
+    // same row, so a host that sets it decides the row's value before the
+    // file's line is ever weighed.
     let mut spawn = bookrack_cmd!(&sandbox).without_data_dir().without_env("CI");
-    spawn = spawn.without_env("EXAMPLE_FOREIGN_KNOB");
+    spawn = spawn
+        .without_env("EXAMPLE_FOREIGN_KNOB")
+        .without_env("BOOKRACK_REQUIRE_PDFIUM");
     let out = tokio::process::Command::from(spawn.build())
         .args(["config", "effective", "--json"])
         .stdin(Stdio::null())
