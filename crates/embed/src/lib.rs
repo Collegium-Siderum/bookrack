@@ -251,13 +251,17 @@ impl OllamaEmbedClient {
         max_retries: u32,
         backoff_base: Duration,
     ) -> Result<OllamaEmbedClient> {
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if bookrack_core::net::bypasses_proxy(&base_url) {
+            builder = builder.no_proxy();
+        }
+        let http = builder
             .build()
             .map_err(|e| EmbedError::Unreachable(format!("HTTP client init failed: {e}")))?;
         Ok(OllamaEmbedClient {
             http,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             model: model.into(),
             max_retries,
             backoff_base,

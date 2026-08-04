@@ -183,13 +183,17 @@ impl RerankClient {
         max_retries: u32,
         backoff_base: Duration,
     ) -> Result<RerankClient> {
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let mut builder = reqwest::Client::builder().timeout(timeout);
+        if bookrack_core::net::bypasses_proxy(&base_url) {
+            builder = builder.no_proxy();
+        }
+        let http = builder
             .build()
             .map_err(|e| RerankError::Unreachable(format!("HTTP client init failed: {e}")))?;
         Ok(RerankClient {
             http,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             model: model.into(),
             max_retries,
             backoff_base,
@@ -321,7 +325,11 @@ pub async fn probe_health(base_url: &str) -> ServerHealth {
 /// value, so readiness loops and doctor rows consume it directly.
 pub async fn probe_health_with_timeout(base_url: &str, timeout: Duration) -> ServerHealth {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
-    let client = match reqwest::Client::builder().timeout(timeout).build() {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if bookrack_core::net::bypasses_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+    let client = match builder.build() {
         Ok(client) => client,
         Err(e) => return ServerHealth::Unreachable(format!("HTTP client init failed: {e}")),
     };

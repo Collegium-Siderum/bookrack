@@ -131,7 +131,11 @@ pub async fn probe_endpoint(addr: &str, timeout: Duration) -> McpEndpointState {
 /// a completed exchange is classified into a state.
 async fn initialize_round_trip(addr: &str) -> Result<McpEndpointState, reqwest::Error> {
     let url = format!("http://{addr}/mcp");
-    let client = reqwest::Client::builder().build()?;
+    let mut builder = reqwest::Client::builder();
+    if bookrack_core::net::bypasses_proxy(&url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder.build()?;
     let response = client
         .post(&url)
         .header("content-type", "application/json")

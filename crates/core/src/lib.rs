@@ -14,6 +14,7 @@ pub mod fixed;
 mod item_kind;
 mod kinded_node_id;
 pub mod knob;
+pub mod net;
 mod node_type;
 mod partition;
 mod problem;

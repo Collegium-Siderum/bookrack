@@ -70,8 +70,11 @@ pub async fn probe_ollama_with_timeout(
     base_url: &str,
     timeout: Duration,
 ) -> Result<ProbeReport, ProbeError> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    if bookrack_core::net::bypasses_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+    let client = builder
         .build()
         .map_err(|e| ProbeError::ClientInit(e.to_string()))?;
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));

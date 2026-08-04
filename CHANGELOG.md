@@ -232,6 +232,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **An `HTTP_PROXY` in the environment captured the calls to this
+  machine's own services.** `reqwest` reads the system proxy variables
+  when a client is built, and the matcher underneath it exempts nothing
+  on its own — not `localhost`, not `127.0.0.1`. On a machine with a
+  proxy exported, or with one written into `.env`, every probe and
+  every embedding request aimed at a locally served model was handed to
+  a host that cannot reach this machine's loopback. It surfaced as
+  `Ollama unreachable`, which is the same thing bookrack says when
+  nothing is running at all.
+
+  Clients aimed at `localhost` or a loopback address are now built with
+  proxies off — the Ollama client and its probe, the reranker client
+  and its health probe, and the MCP endpoint probe. The rule is the
+  destination's: a model served from another host still goes through
+  the configured proxy, as does every installer download, and
+  `NO_PROXY` still exempts whatever else an operator names.
+
 - **`config effective` reported a value no process uses.** With a
   variable set but blank — `export BOOKRACK_SEARCH_TOP_K=` and nothing
   after it — or set to text the knob cannot parse, and the same key

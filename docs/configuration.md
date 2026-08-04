@@ -257,10 +257,19 @@ The file is applied to the real process environment, not to a private
 table of bookrack's own knobs, so its reach is every variable name.
 `.env.example` lists only `BOOKRACK_*` variables, which makes "this
 file configures bookrack" a natural reading and an incomplete one: a
-`HTTP_PROXY` line routes every embedding request and every installer
-download, an `XDG_*` line moves the managed directories the registry
-and the downloaded reranker live in, and a `HOME` line changes the
-prefix `bookrack diagnose` redacts against.
+`HTTP_PROXY` line routes every installer download and every call to a
+model served from another host, an `XDG_*` line moves the managed
+directories the registry and the downloaded reranker live in, and a
+`HOME` line changes the prefix `bookrack diagnose` redacts against.
+
+Proxies are the one place bookrack overrides the environment rather
+than reading it: a client aimed at `localhost` or a loopback address is
+built with proxies off, whichever variable names one and whichever case
+it is spelled in. A proxy is a hop on the way somewhere else, and a
+request for this machine handed to one arrives at the proxy host's own
+loopback — so a locally served model would otherwise report itself
+unreachable on any machine with a proxy exported. `NO_PROXY` stays the
+way to exempt anything further.
 
 Nothing above is a knob, so no row in the table can report it. The
 report says so separately: `config effective` ends with the variables
