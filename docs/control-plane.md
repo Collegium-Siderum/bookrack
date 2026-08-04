@@ -498,9 +498,14 @@ the exit-code bucket does not distinguish the two.
   abstract) and the predicted STRUCTURE node shape per file.
 - `papers.metadata.reaudit` — `{ intake_id, audit_profile?,
   library? }`. Re-runs the paper-side metadata audit against the
-  intake's cached extraction envelope and writes only the
-  `confidence` / `audit_verdict` rollup on
-  `node_publication_attrs`. The named profile (`default` /
+  intake's cached extraction envelope and writes back everything the
+  judgement produced: the `confidence` / `audit_verdict` rollup on
+  `node_publication_attrs`, the whole audit projection row
+  `library.show_paper` reports from, and the report JSON in the review
+  row's notes. The base attrs, the contributors, and the review
+  *status* stay as they are. The projection row is attributed to no
+  pipeline run — a per-item re-audit does not open one. The named
+  profile (`default` /
   `trust-source` / `strict`) takes precedence; absent it, the
   `<data_root>/audit-rules/paper_audit_profile.local.toml` overlay
   applies on top of the shipped default. A name outside the set is

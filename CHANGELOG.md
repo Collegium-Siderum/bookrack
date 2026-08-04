@@ -270,6 +270,47 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Re-auditing a paper changed nothing anyone could see.**
+  `papers.metadata.reaudit` wrote the two-scalar `confidence` /
+  `audit_verdict` rollup and stopped there, while `papers show` and
+  every other read surface report from the `node_paper_audit`
+  projection — the row glean writes once, at ingest. A curator could
+  correct a field, re-audit, be told the verdict had changed, and find
+  the same judgement, the same per-field grades, and the same flags on
+  every surface that displays one. The two CHANGELOG entries below
+  that end "until their papers are re-audited" were, on that reading,
+  not true when written: the verb they name could not deliver what
+  they promised.
+
+  A re-audit now rewrites the whole projection row and refreshes the
+  stored report JSON. The review *status* is untouched — a
+  recomputation is not a reviewer, and an approved paper stays
+  approved. The row is attributed to no pipeline run, since a per-item
+  re-audit does not open one.
+
+  Two consequences worth stating. A re-audit that cannot write now
+  fails instead of reporting success, which is the whole point: the
+  glean path's tolerance of an audit-row failure exists so an ingest
+  is not rolled back by one, and a verb whose only product *is* the
+  judgement has the opposite need. And papers re-audited before this
+  version still carry a rollup and a projection row that disagree;
+  they converge on their next re-audit, which today means one call per
+  intake.
+
+- **The paper audit ignored a corrected `csl_type`.** It graded every
+  field off the effective metadata but picked the required-field
+  matrix off the extracted type. Correcting a paper misidentified as a
+  journal article to `thesis` showed the new type everywhere except
+  where it decides anything: the audit went on requiring a container
+  title and not requiring the institution, so a thesis could audit
+  clean without one, and a corrected paper could stay `needs_work`
+  over a field its real type does not require. The matrix now follows
+  the same effective value every grade does, falling back to the
+  extracted type when the stored one is not a CSL type the workspace
+  knows — the write surface validates field names, not values. The
+  `csl_type` column on an audit row now records the type that
+  judgement actually used.
+
 - **Paper metadata curation wrote outside the daemon's write path.**
   Every other paper-side write method went through it; the ten
   `papers.metadata.*` methods opened the catalog beside it. Three

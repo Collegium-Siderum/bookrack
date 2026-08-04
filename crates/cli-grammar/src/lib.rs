@@ -854,8 +854,9 @@ pub enum PapersMetadataAction {
     /// Re-run the paper-side metadata audit on an existing intake's
     /// cached extraction.
     ///
-    /// Writes only the `confidence` / `audit_verdict` rollup; the base
-    /// attrs, contributors, and review status all stay as they are.
+    /// Rewrites the whole audit projection and the stored report; the
+    /// base attrs, contributors, and review status all stay as they
+    /// are.
     #[command(after_long_help = crate::examples![
         "papers metadata reaudit 101",
         "papers metadata reaudit 101 --audit-profile strict",
