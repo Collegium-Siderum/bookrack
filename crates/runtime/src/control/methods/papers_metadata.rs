@@ -137,8 +137,12 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
     )
     .map_err(input_err)?;
-    let profile = load_paper_audit_profile(&ctx.cfg, parsed.audit_profile.as_deref());
-    let data = load_paper_audit_data(&ctx.cfg);
+    // Both overlays live under the target library's data root, so they
+    // are read from the handle this call resolved — the catalog below
+    // is that library's, and auditing it under another library's rules
+    // is the asymmetry this pairing removes.
+    let profile = load_paper_audit_profile(handle.cfg(), parsed.audit_profile.as_deref());
+    let data = load_paper_audit_data(handle.cfg());
     let outcome = handle
         .reaudit_paper(parsed.intake_id, &profile, &data)
         .await

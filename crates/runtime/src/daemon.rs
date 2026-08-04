@@ -532,25 +532,7 @@ impl DaemonRuntime {
         );
 
         // 9. LibraryInfoContext
-        let info_context = LibraryInfoContext {
-            data_dir: cfg.data_dir().display().to_string(),
-            library_name: cfg.library().map(str::to_string),
-            resolution_source: resolution_source_label(cfg.source()).to_string(),
-            shadowed_default: cfg.shadowed_default().map(|shadowed| {
-                format!(
-                    "registry default '{}' is shadowed by {}",
-                    shadowed.name,
-                    resolution_source_label(cfg.source())
-                )
-            }),
-            library_identification: cfg
-                .library_identification()
-                .and_then(library_identification_label)
-                .map(str::to_string),
-            ollama_url: cfg.ollama_url().to_string(),
-            embed_model_configured: embed_cfg.model.clone(),
-            mcp_addr: mcp_label.clone(),
-        };
+        let info_context = library_info_context(&cfg, &embed_cfg.model, &mcp_label);
 
         // 10. broadcast::channel; signal_task::spawn
         let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(8);
@@ -1186,6 +1168,36 @@ fn build_glean_params_template(cfg: &Config, embed_cfg: &EmbedConfig) -> GleanPa
         paper_audit_profile: load_paper_audit_profile(cfg, None),
         paper_audit_data: load_paper_audit_data(cfg),
         ..Default::default()
+    }
+}
+
+/// The static half of a library's status card: where it lives, what it
+/// is called, how it was resolved, and what it embeds with.
+///
+/// Derived from one library's [`Config`], so a caller holding a handle
+/// builds the card's identity from that library rather than from a
+/// bring-up snapshot of the selected one. `mcp_addr` is the exception
+/// and is passed in: the listener is a property of the process, not of
+/// any library it serves.
+pub fn library_info_context(cfg: &Config, embed_model: &str, mcp_addr: &str) -> LibraryInfoContext {
+    LibraryInfoContext {
+        data_dir: cfg.data_dir().display().to_string(),
+        library_name: cfg.library().map(str::to_string),
+        resolution_source: resolution_source_label(cfg.source()).to_string(),
+        shadowed_default: cfg.shadowed_default().map(|shadowed| {
+            format!(
+                "registry default '{}' is shadowed by {}",
+                shadowed.name,
+                resolution_source_label(cfg.source())
+            )
+        }),
+        library_identification: cfg
+            .library_identification()
+            .and_then(library_identification_label)
+            .map(str::to_string),
+        ollama_url: cfg.ollama_url().to_string(),
+        embed_model_configured: embed_model.to_string(),
+        mcp_addr: mcp_addr.to_string(),
     }
 }
 

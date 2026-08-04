@@ -268,7 +268,23 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
         .registry
         .get(parsed.name.as_deref())
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("registry: {e}")))?;
-    let info = show_library_info(handle.ops(), ctx.info_context.clone())
+    // The card's identity is built from the library the handle names,
+    // not from the bring-up snapshot in `ctx`: the counts below already
+    // come from this handle, and a card pairing one library's counts
+    // with another's root is the one an operator cannot read. The MCP
+    // address is the exception — a property of the process — and is
+    // carried over from the snapshot.
+    let embed_model = crate::profile::effective_embed_config(handle.cfg())
+        .map_err(|e| {
+            RpcError::new(
+                INTERNAL_ERROR,
+                format!("resolve the library's embed configuration: {e}"),
+            )
+        })?
+        .model;
+    let info_context =
+        crate::daemon::library_info_context(handle.cfg(), &embed_model, &ctx.info_context.mcp_addr);
+    let info = show_library_info(handle.ops(), info_context)
         .await
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("library info failed: {e}")))?;
     serde_json::to_value(info)

@@ -242,3 +242,64 @@ async fn a_job_targeting_a_library_runs_under_that_librarys_parameters() -> Resu
     );
     Ok(())
 }
+
+/// `library.info { name }` answers with that library's identity, not
+/// the primary's.
+///
+/// The counts on the card already come from the named library's
+/// handle; the static half — root, name, and configured embedding
+/// model — came from a snapshot taken at bring-up from the
+/// bring-up-selected library. The card is where an operator confirms
+/// which library they are addressing, so a card mixing one library's
+/// counts with another's identity is the one that cannot be allowed to
+/// disagree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_card_reports_the_named_librarys_identity() -> Result<()> {
+    let sandbox = world();
+    let runtime_root = tempfile::tempdir()?;
+    let beta_root = sandbox.data_root("beta-root");
+
+    let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.info","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let card = &resp["result"];
+
+        assert_eq!(
+            card["library_name"].as_str(),
+            Some("beta"),
+            "the card names another library: {resp}"
+        );
+        assert_eq!(
+            card["data_dir"].as_str(),
+            Some(beta_root.display().to_string().as_str()),
+            "the card reports another library's root: {resp}"
+        );
+        assert_eq!(
+            card["embed_model_configured"].as_str(),
+            Some(DEFAULT_EMBED_MODEL),
+            "the card reports another library's embedding model: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
