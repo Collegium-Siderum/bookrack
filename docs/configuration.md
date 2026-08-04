@@ -494,3 +494,10 @@ shipped-default-plus-overlay merge:
 
 All overlays are user-supplied; bookrack falls through to the shipped
 defaults when an overlay is absent or omits a field.
+
+The directory is per data root, and so per library: a daemon serving
+several libraries reads each one's overlays from that library's own
+root, for both the queue jobs it runs and the `metadata.*` /
+`papers.metadata.*` re-audits it serves. A library with no
+`audit-rules/` of its own gets the shipped defaults — never another
+library's overlay.
