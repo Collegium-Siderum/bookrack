@@ -270,6 +270,97 @@ release workflow extracts the matching section verbatim from this file.
   accepted, rather than dropped — a dropped filter answers with
   everything, which reads like a filter that matched everything.
 
+- **cli: `bookrack glean`, the top-level paper ingest verb.**
+  Equivalent to `bookrack papers ingest` — same arguments, same
+  pipeline — promoted to the top level so the paper side has a
+  pipeline verb symmetric with the book side's `bookrack ingest`.
+  `papers ingest` keeps working.
+
+- **cli: `bookrack rpc`, the typed control-plane escape hatch.**
+  `bookrack rpc list` prints the method table the running daemon
+  answers alongside its MCP endpoint tools; `bookrack rpc call
+  <method> [<json>]` sends one method by name, with the optional
+  second token as the JSON params object (`null` when omitted). Both
+  are ordinary clap subcommands, so `--help` carries examples and a
+  mistyped action gets clap's own did-you-mean tip instead of being
+  forwarded to the daemon as a method name.
+
+- **runtime: `daemon.status`, the canonical name for the `status`
+  RPC.** The daemon-wide snapshot now answers under the same
+  `daemon.*` namespace as `daemon.version`, `daemon.methods`, and
+  `daemon.shutdown`, so every control-plane method name carries a
+  namespace. The bare `status` name stays live as an alias on the same
+  handler; both appear in `daemon.methods`.
+
+- **cli: leaf commands start carrying an `Examples:` block in `--help`.**
+  Each covered leaf's long help ends with at least two copy-pasteable
+  invocations — one minimal, one non-trivial — rendered after the
+  options. The block lives in `after_long_help`, so `-h` is unchanged: a
+  gate in `bookrack-cli-grammar`'s `help_gate` module holds every leaf
+  to the format, keeps the example values inside a fixed synthetic
+  corpus, and a companion test in the binary crate re-parses every
+  example so one that names a dropped command or flag fails the build.
+
+- **runtime: `bookrack run` refuses to start when the embed backend
+  cannot serve.** Before any library is opened — and before the
+  reranker backend is started, which is the most expensive step in
+  bring-up — every mounted library's `(Ollama URL, embed model)` pair
+  is checked against the daemon's model list. An unusable backend
+  ends the run with one sentence, one command to fix it, and exit 2,
+  instead of failing several seconds later inside library warm-up.
+  The check runs per mount, so a registry whose libraries name
+  different models or different Ollama hosts is covered for all of
+  them. `bookrack doctor` and the refusal now share one judgement, so
+  the two can no longer disagree about whether the backend is usable.
+  The desktop shell goes through the same bring-up and gains the same
+  refusal.
+
+- **embed: `EmbedError::ModelNotFound`.** A 404 carrying Ollama's
+  error envelope is now its own variant, naming the model this
+  process is configured with, rather than a generic `BadRequest`
+  holding a raw response body. The judgement is the status code plus
+  the envelope shape — Ollama's wording for this case differs between
+  its own call sites, so matching on the text was never sound, and
+  requiring the envelope keeps an unrelated service's 404 page from
+  being reported as a missing model.
+
+- **query, mcp: the book reads finish reporting the source file.**
+  `library.list_books` / `library.find_books` rows carry
+  `source_filename`, the basename of the path recorded at intake, so a
+  book whose title is missing or is an export-tool placeholder can be
+  identified without a second call; the full path and the source hash
+  stay in the detail read, which a list row reaches by `intake_id`.
+  `library.show_book` adds `page_count` and `byte_size` alongside the
+  source path and identity it already carried, completing the intake
+  record it reports. Both project from the `Intake` row the reads
+  already load, so neither issues an extra query. `library.show_book`'s
+  tool description now lists the source-side fields, which it had not
+  since they landed, and the book block that
+  `library.show_metadata_audit` and `metadata show` embed widens with
+  the detail read.
+
+- **query, cli, mcp: the paper reads report the source file too.**
+  `library.list_papers` / `library.find_papers` rows carry
+  `source_filename` and `library.show_paper` the full source-side
+  record — `source_path`, `source_filename`, `source_sha256`,
+  `intake_at`, `page_count`, `byte_size` — the same six fields
+  `library.show_book` reports. A paper whose title the identify pass
+  did not extract is now identifiable from a list page, and a paper
+  whose source copy was not archived, which `papers.fetch_source`
+  cannot reach at all, still reports where it came from. Both project
+  from the `Intake` row the reads already load, so neither issues an
+  extra query. `bookrack papers show` gains one `source_filename` row;
+  the rest of the record stays in `--json`, and a `bookrack papers
+  list` / `find` row without a title shows its source filename in the
+  title cell instead of a dash.
+
+- **distill: `partition_body_around_match` takes `skip_inner`.** A book
+  can spell two kinds of tag with one bracket shape, in which case the
+  leftmost-match rule writes the wrong one into the payload key. The
+  new list names the captured values that are not the tag the stage is
+  after, so matching walks past them. Omitting it leaves the
+  leftmost-match rule unchanged.
+
 ### Changed
 
 - **A paper's intake id may be written with its pipeline in front of
@@ -323,6 +414,153 @@ release workflow extracts the matching section verbatim from this file.
   line that stopped working says so instead of failing silently. A
   setup that relied on `.env` for something else — a `HOME` override, a
   `TMPDIR` — must export it from the environment that starts bookrack.
+
+- **cli: `bookrack rpc call` usage failures print the three-part
+  diagnostic.** Bad params JSON used to be one long line that mixed
+  the fact, the example, and serde's own message; it is now a summary
+  (`` `<method>`: params are not valid JSON ``) with the parser's
+  message as detail and the fix as hint, so `--json` carries them as
+  separate fields and a terse renderer prints a true line. A method
+  name with no namespace is refused locally with the same shape
+  instead of being spent on a round trip that could only answer
+  `-32601`.
+
+- **distill, mcp: the reference-book surface states its own reasons.**
+  The `reference.overlay_set` tool description, the `min_severity`
+  argument description, and the two loader errors for `@script::` /
+  `@llm::` stage references each pointed at a section number of a
+  document that is not in the repository, so nothing they cited could
+  be looked up. Each now carries the fact itself: `reason` is a
+  free-text edit summary recorded on the overlay row, the `@script::`
+  hatch is reserved for a future embedded scripting engine, and the
+  `@llm::` hook is deferred past v1. The three distill catalog TOMLs
+  lose the same pointers, which moves
+  `Catalogs::embedded_fingerprint()` — audit rows written from here on
+  carry a new `profile_ref`, and existing rows group under the old one.
+
+- **cli: a session lock that cannot be read is reported instead of
+  skipped.** The library pre-flight treats two very different states
+  the same way — nobody holds the lock, which is every machine without
+  a daemon, and the lock could not be examined at all, which means the
+  check did not run. The first stays silent; the second now says so on
+  stderr. The command still runs either way: a lock that cannot be
+  read is no evidence that a daemon is serving a different library.
+
+- **index-profile: a resolved profile says which file defined it.**
+  `index-profile current` reports `defined by: user` or `defined by:
+  built-in` alongside the reference source it already showed, and
+  `--json` carries the same under `profile.defined_by`. A user profile
+  and a built-in of the same name resolved identically before, so
+  "the profile I wrote is not being used" and "the profile I wrote is
+  being used" produced the same output.
+
+  With it, the per-user profile directory is no longer stood in for by
+  a path relative to the working directory when no config location can
+  be found. A run started in a directory that happened to contain an
+  `index-profiles/` folder used to pick those files up; an
+  unlocatable directory is now stated as such and only built-ins
+  resolve.
+
+- **`.env` is loaded by the binaries, not by the configuration
+  library.** `bookrack`, `bookrack-mcp`, and the desktop shell each
+  load it as their first statement; `Config::resolve` no longer does.
+  Two things change. Every variable a process reads is now read against
+  one environment — previously anything that ran before the first
+  `Config::resolve`, including the log-filter setup, the PDFium lookup,
+  and the runtime-directory resolution, saw a world the file had not
+  been applied to, so one variable could hold two values in one
+  process. And a caller that embeds a bookrack crate as a library no
+  longer gets a `.env` out of its own working directory: taking a file
+  from there is a program's decision to make about itself.
+
+  `BOOKRACK_NO_DOTENV` turns the load off. Non-blank is on, with `0`,
+  `false`, `no`, and `off` turning it back off, matching
+  `BOOKRACK_REQUIRE_PDFIUM`. It has to be set in the real environment,
+  since a value inside `.env` is only read once the file has been
+  loaded.
+
+- **config: `BOOKRACK_REGISTRY` names the only registry that is
+  consulted.** Setting it to a non-blank value now suppresses the
+  platform-default registry at `<config_dir>/bookrack/registry.toml`
+  entirely: it is not read, so its `default` cannot win the last rung
+  of the resolution ladder and its entries cannot annotate a
+  resolution that a pinned registry had already answered. This makes
+  the resolver agree with the two readers that were already env-wins,
+  `libraries list` and the registry write path. Observable where a
+  machine has both: a run that pins a registry no longer reports a
+  shadowed default, or a library name claimed, out of the other file.
+
+- **config: an unreadable registry no longer vetoes a resolution that
+  does not need one.** A data root fixed by `--data-dir`,
+  `BOOKRACK_DATA_DIR`, or the portable layout consults no registry, so
+  a missing or malformed registry file now leaves it alone: the
+  resolution succeeds and only the annotations that would have come
+  from the registry are absent. `bookrack doctor` consequently reports
+  a resolved data root — and runs the catalog, corpus, and reranker
+  checks that were being skipped behind an unresolved one — where it
+  previously failed the whole row. A selection that *does* need the
+  registry (`--library`, or falling through to a registry `default`)
+  still fails, and it now names the registry rather than reporting
+  that no library is configured.
+
+  One signal is lost with it: a `BOOKRACK_REGISTRY` pointing at a file
+  that does not exist used to be reported through that failing
+  data-root row, and nothing reports it yet in the resolved case. A
+  registry that exists but does not parse is still reported by
+  `doctor`'s own registry probe.
+
+- **errors now say what to do next, and stop losing their root
+  cause.** Operator-facing failures are split three ways — a one-line
+  summary of what failed, the implementation-level detail behind it,
+  and a suggested next step — following PostgreSQL's message style.
+  The CLI stacks the three on stderr, with the suggestion last;
+  `--json` gains a structured failure path, so a scripted caller no
+  longer has to parse JSON on success and prose on failure; the
+  control plane and the MCP server carry the parts in the `data` slot
+  their error envelopes always had and never filled, alongside a
+  `retryable` flag an agent can branch on without reading the
+  wording. `data` is additive: a client that ignores it sees what it
+  saw before.
+
+  Separately, every error crossing those two wire boundaries is now
+  flattened first. A wrapper error's own text is its module's name, so
+  a failure that used to arrive as `"query error"` — root cause gone —
+  now arrives naming the thing that actually broke. A repository gate
+  (`scripts/error-boundary-check.sh`, run in CI) holds the boundary
+  files to it.
+
+- **cli: the root help trailer points at `doctor` for the prerequisite
+  check.** The block `bookrack --help` prints after the options used to
+  restate the Ollama setup, embed-model name included, and spelled out
+  the `exec library.<tool>` form for library reads. It now hands the
+  runtime check to `bookrack doctor`, which knows the configured model,
+  and points at `bookrack run` / `bookrack rpc list` — the two entry
+  points that stay correct as the control-plane surface evolves. The
+  environment-variable listing is unchanged.
+
+- **cli: `-h` prints a one-line summary and `--help` the full text.**
+  Nineteen command summaries and the `--data-dir` / `--library` /
+  `--audit-profile` global flags used to print their whole description
+  in the short help, where clap does not wrap the `Commands` column —
+  the longest ran to 379 characters on a single line. Each is now split
+  at a sentence boundary, so `-h` prints the summary and `--help` prints
+  the full text, unchanged and complete. `--audit-profile` keeps the
+  three built-in names — `default`, `trust-source`, `strict` — in the
+  summary, since they are what an operator needs at the prompt.
+  `bookrack init --data-dir`, which shadows the global flag on the page
+  a new install opens first, splits the same way.
+
+### Removed
+
+- **cli: `bookrack exec` is gone; `bookrack rpc` replaces it.** No
+  alias, no forwarding shim, no deprecation window. Each of its four
+  actions has a destination: `exec info` → `bookrack status`, whose
+  full card now carries the `lock` row it was the only source of;
+  `exec tools` → `bookrack rpc list`; `exec logs follow` /
+  `exec logs tail [<n>]` → `bookrack logs` / `bookrack logs --tail
+  <n>`, which additionally take `--level` and warn on a lagged
+  subscription; `exec <method> [<json>]` → `bookrack rpc call
+  <method> [<json>]`.
 
 ### Fixed
 
@@ -853,118 +1091,6 @@ release workflow extracts the matching section verbatim from this file.
   list` reads both catalogs and merges, so nothing disappears from the
   listing.
 
-### Changed
-
-- **cli: `bookrack rpc call` usage failures print the three-part
-  diagnostic.** Bad params JSON used to be one long line that mixed
-  the fact, the example, and serde's own message; it is now a summary
-  (`` `<method>`: params are not valid JSON ``) with the parser's
-  message as detail and the fix as hint, so `--json` carries them as
-  separate fields and a terse renderer prints a true line. A method
-  name with no namespace is refused locally with the same shape
-  instead of being spent on a round trip that could only answer
-  `-32601`.
-
-### Removed
-
-- **cli: `bookrack exec` is gone; `bookrack rpc` replaces it.** No
-  alias, no forwarding shim, no deprecation window. Each of its four
-  actions has a destination: `exec info` → `bookrack status`, whose
-  full card now carries the `lock` row it was the only source of;
-  `exec tools` → `bookrack rpc list`; `exec logs follow` /
-  `exec logs tail [<n>]` → `bookrack logs` / `bookrack logs --tail
-  <n>`, which additionally take `--level` and warn on a lagged
-  subscription; `exec <method> [<json>]` → `bookrack rpc call
-  <method> [<json>]`.
-
-### Added
-
-- **cli: `bookrack glean`, the top-level paper ingest verb.**
-  Equivalent to `bookrack papers ingest` — same arguments, same
-  pipeline — promoted to the top level so the paper side has a
-  pipeline verb symmetric with the book side's `bookrack ingest`.
-  `papers ingest` keeps working.
-
-- **cli: `bookrack rpc`, the typed control-plane escape hatch.**
-  `bookrack rpc list` prints the method table the running daemon
-  answers alongside its MCP endpoint tools; `bookrack rpc call
-  <method> [<json>]` sends one method by name, with the optional
-  second token as the JSON params object (`null` when omitted). Both
-  are ordinary clap subcommands, so `--help` carries examples and a
-  mistyped action gets clap's own did-you-mean tip instead of being
-  forwarded to the daemon as a method name.
-
-- **runtime: `daemon.status`, the canonical name for the `status`
-  RPC.** The daemon-wide snapshot now answers under the same
-  `daemon.*` namespace as `daemon.version`, `daemon.methods`, and
-  `daemon.shutdown`, so every control-plane method name carries a
-  namespace. The bare `status` name stays live as an alias on the same
-  handler; both appear in `daemon.methods`.
-
-- **cli: leaf commands start carrying an `Examples:` block in `--help`.**
-  Each covered leaf's long help ends with at least two copy-pasteable
-  invocations — one minimal, one non-trivial — rendered after the
-  options. The block lives in `after_long_help`, so `-h` is unchanged: a
-  gate in `bookrack-cli-grammar`'s `help_gate` module holds every leaf
-  to the format, keeps the example values inside a fixed synthetic
-  corpus, and a companion test in the binary crate re-parses every
-  example so one that names a dropped command or flag fails the build.
-
-- **runtime: `bookrack run` refuses to start when the embed backend
-  cannot serve.** Before any library is opened — and before the
-  reranker backend is started, which is the most expensive step in
-  bring-up — every mounted library's `(Ollama URL, embed model)` pair
-  is checked against the daemon's model list. An unusable backend
-  ends the run with one sentence, one command to fix it, and exit 2,
-  instead of failing several seconds later inside library warm-up.
-  The check runs per mount, so a registry whose libraries name
-  different models or different Ollama hosts is covered for all of
-  them. `bookrack doctor` and the refusal now share one judgement, so
-  the two can no longer disagree about whether the backend is usable.
-  The desktop shell goes through the same bring-up and gains the same
-  refusal.
-
-- **embed: `EmbedError::ModelNotFound`.** A 404 carrying Ollama's
-  error envelope is now its own variant, naming the model this
-  process is configured with, rather than a generic `BadRequest`
-  holding a raw response body. The judgement is the status code plus
-  the envelope shape — Ollama's wording for this case differs between
-  its own call sites, so matching on the text was never sound, and
-  requiring the envelope keeps an unrelated service's 404 page from
-  being reported as a missing model.
-
-- **query, mcp: the book reads finish reporting the source file.**
-  `library.list_books` / `library.find_books` rows carry
-  `source_filename`, the basename of the path recorded at intake, so a
-  book whose title is missing or is an export-tool placeholder can be
-  identified without a second call; the full path and the source hash
-  stay in the detail read, which a list row reaches by `intake_id`.
-  `library.show_book` adds `page_count` and `byte_size` alongside the
-  source path and identity it already carried, completing the intake
-  record it reports. Both project from the `Intake` row the reads
-  already load, so neither issues an extra query. `library.show_book`'s
-  tool description now lists the source-side fields, which it had not
-  since they landed, and the book block that
-  `library.show_metadata_audit` and `metadata show` embed widens with
-  the detail read.
-
-- **query, cli, mcp: the paper reads report the source file too.**
-  `library.list_papers` / `library.find_papers` rows carry
-  `source_filename` and `library.show_paper` the full source-side
-  record — `source_path`, `source_filename`, `source_sha256`,
-  `intake_at`, `page_count`, `byte_size` — the same six fields
-  `library.show_book` reports. A paper whose title the identify pass
-  did not extract is now identifiable from a list page, and a paper
-  whose source copy was not archived, which `papers.fetch_source`
-  cannot reach at all, still reports where it came from. Both project
-  from the `Intake` row the reads already load, so neither issues an
-  extra query. `bookrack papers show` gains one `source_filename` row;
-  the rest of the record stays in `--json`, and a `bookrack papers
-  list` / `find` row without a title shows its source filename in the
-  title cell instead of a dash.
-
-### Fixed
-
 - **search: a `kind=all` search runs both stores at once and embeds the
   query once.** The unified search recalled the book side to completion
   before it started the paper side, and each side embedded the query
@@ -1021,142 +1147,6 @@ release workflow extracts the matching section verbatim from this file.
   in the body, and an entry that arrives without markers records its
   body under the same payload key the paired branch uses instead of
   losing it at the finalize stage.
-
-### Added
-
-- **distill: `partition_body_around_match` takes `skip_inner`.** A book
-  can spell two kinds of tag with one bracket shape, in which case the
-  leftmost-match rule writes the wrong one into the payload key. The
-  new list names the captured values that are not the tag the stage is
-  after, so matching walks past them. Omitting it leaves the
-  leftmost-match rule unchanged.
-
-### Changed
-
-- **distill, mcp: the reference-book surface states its own reasons.**
-  The `reference.overlay_set` tool description, the `min_severity`
-  argument description, and the two loader errors for `@script::` /
-  `@llm::` stage references each pointed at a section number of a
-  document that is not in the repository, so nothing they cited could
-  be looked up. Each now carries the fact itself: `reason` is a
-  free-text edit summary recorded on the overlay row, the `@script::`
-  hatch is reserved for a future embedded scripting engine, and the
-  `@llm::` hook is deferred past v1. The three distill catalog TOMLs
-  lose the same pointers, which moves
-  `Catalogs::embedded_fingerprint()` — audit rows written from here on
-  carry a new `profile_ref`, and existing rows group under the old one.
-
-- **cli: a session lock that cannot be read is reported instead of
-  skipped.** The library pre-flight treats two very different states
-  the same way — nobody holds the lock, which is every machine without
-  a daemon, and the lock could not be examined at all, which means the
-  check did not run. The first stays silent; the second now says so on
-  stderr. The command still runs either way: a lock that cannot be
-  read is no evidence that a daemon is serving a different library.
-
-- **index-profile: a resolved profile says which file defined it.**
-  `index-profile current` reports `defined by: user` or `defined by:
-  built-in` alongside the reference source it already showed, and
-  `--json` carries the same under `profile.defined_by`. A user profile
-  and a built-in of the same name resolved identically before, so
-  "the profile I wrote is not being used" and "the profile I wrote is
-  being used" produced the same output.
-
-  With it, the per-user profile directory is no longer stood in for by
-  a path relative to the working directory when no config location can
-  be found. A run started in a directory that happened to contain an
-  `index-profiles/` folder used to pick those files up; an
-  unlocatable directory is now stated as such and only built-ins
-  resolve.
-
-- **`.env` is loaded by the binaries, not by the configuration
-  library.** `bookrack`, `bookrack-mcp`, and the desktop shell each
-  load it as their first statement; `Config::resolve` no longer does.
-  Two things change. Every variable a process reads is now read against
-  one environment — previously anything that ran before the first
-  `Config::resolve`, including the log-filter setup, the PDFium lookup,
-  and the runtime-directory resolution, saw a world the file had not
-  been applied to, so one variable could hold two values in one
-  process. And a caller that embeds a bookrack crate as a library no
-  longer gets a `.env` out of its own working directory: taking a file
-  from there is a program's decision to make about itself.
-
-  `BOOKRACK_NO_DOTENV` turns the load off. Non-blank is on, with `0`,
-  `false`, `no`, and `off` turning it back off, matching
-  `BOOKRACK_REQUIRE_PDFIUM`. It has to be set in the real environment,
-  since a value inside `.env` is only read once the file has been
-  loaded.
-
-- **config: `BOOKRACK_REGISTRY` names the only registry that is
-  consulted.** Setting it to a non-blank value now suppresses the
-  platform-default registry at `<config_dir>/bookrack/registry.toml`
-  entirely: it is not read, so its `default` cannot win the last rung
-  of the resolution ladder and its entries cannot annotate a
-  resolution that a pinned registry had already answered. This makes
-  the resolver agree with the two readers that were already env-wins,
-  `libraries list` and the registry write path. Observable where a
-  machine has both: a run that pins a registry no longer reports a
-  shadowed default, or a library name claimed, out of the other file.
-
-- **config: an unreadable registry no longer vetoes a resolution that
-  does not need one.** A data root fixed by `--data-dir`,
-  `BOOKRACK_DATA_DIR`, or the portable layout consults no registry, so
-  a missing or malformed registry file now leaves it alone: the
-  resolution succeeds and only the annotations that would have come
-  from the registry are absent. `bookrack doctor` consequently reports
-  a resolved data root — and runs the catalog, corpus, and reranker
-  checks that were being skipped behind an unresolved one — where it
-  previously failed the whole row. A selection that *does* need the
-  registry (`--library`, or falling through to a registry `default`)
-  still fails, and it now names the registry rather than reporting
-  that no library is configured.
-
-  One signal is lost with it: a `BOOKRACK_REGISTRY` pointing at a file
-  that does not exist used to be reported through that failing
-  data-root row, and nothing reports it yet in the resolved case. A
-  registry that exists but does not parse is still reported by
-  `doctor`'s own registry probe.
-
-- **errors now say what to do next, and stop losing their root
-  cause.** Operator-facing failures are split three ways — a one-line
-  summary of what failed, the implementation-level detail behind it,
-  and a suggested next step — following PostgreSQL's message style.
-  The CLI stacks the three on stderr, with the suggestion last;
-  `--json` gains a structured failure path, so a scripted caller no
-  longer has to parse JSON on success and prose on failure; the
-  control plane and the MCP server carry the parts in the `data` slot
-  their error envelopes always had and never filled, alongside a
-  `retryable` flag an agent can branch on without reading the
-  wording. `data` is additive: a client that ignores it sees what it
-  saw before.
-
-  Separately, every error crossing those two wire boundaries is now
-  flattened first. A wrapper error's own text is its module's name, so
-  a failure that used to arrive as `"query error"` — root cause gone —
-  now arrives naming the thing that actually broke. A repository gate
-  (`scripts/error-boundary-check.sh`, run in CI) holds the boundary
-  files to it.
-
-- **cli: the root help trailer points at `doctor` for the prerequisite
-  check.** The block `bookrack --help` prints after the options used to
-  restate the Ollama setup, embed-model name included, and spelled out
-  the `exec library.<tool>` form for library reads. It now hands the
-  runtime check to `bookrack doctor`, which knows the configured model,
-  and points at `bookrack run` / `bookrack rpc list` — the two entry
-  points that stay correct as the control-plane surface evolves. The
-  environment-variable listing is unchanged.
-
-- **cli: `-h` prints a one-line summary and `--help` the full text.**
-  Nineteen command summaries and the `--data-dir` / `--library` /
-  `--audit-profile` global flags used to print their whole description
-  in the short help, where clap does not wrap the `Commands` column —
-  the longest ran to 379 characters on a single line. Each is now split
-  at a sentence boundary, so `-h` prints the summary and `--help` prints
-  the full text, unchanged and complete. `--audit-profile` keeps the
-  three built-in names — `default`, `trust-source`, `strict` — in the
-  summary, since they are what an operator needs at the prompt.
-  `bookrack init --data-dir`, which shadows the global flag on the page
-  a new install opens first, splits the same way.
 
 ### Security
 
