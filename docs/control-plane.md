@@ -541,6 +541,13 @@ the exit-code bucket does not distinguish the two.
   the one method with nothing to check — it carries no `intake_id`, so
   it still reports `{ removed: false }` for a row it cannot find.
 
+  Every `papers.metadata.*` method runs through the same write path as
+  its book-side peer: the daemon's write mutex serializes it against a
+  concurrent ingest or glean on the same catalog, MCP is paused for the
+  duration, and a successful call broadcasts `library.changed` naming
+  the library it wrote. None of them enqueue work, so all of them serve
+  on a headless `bookrack-mcp` without `--with-queue-worker`.
+
 - `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id?, library? }`.
   Exactly
   one of `intake_id` or `sha` must be set on the dry-run leg; the

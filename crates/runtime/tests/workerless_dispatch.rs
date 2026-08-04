@@ -21,6 +21,7 @@ use bookrack_test_support::{ProcessEnv, process_env};
 
 const QUEUE_WORKER_DISABLED: i64 = -32002;
 const INVALID_LIBRARY: i64 = -32010;
+const INVALID_PARAMS: i64 = -32602;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_bound_writes_short_circuit_without_a_worker() -> Result<()> {
@@ -83,6 +84,38 @@ async fn queue_bound_writes_short_circuit_without_a_worker() -> Result<()> {
             Some(INVALID_LIBRARY),
             "non-queue writes must dispatch normally: {resp}"
         );
+
+        // Paper metadata curation queues nothing — no line on its path
+        // touches the queue — so headless must not refuse it, and
+        // certainly not with a reason unrelated to why it failed. The
+        // empty params reach the handler's own validation, which is
+        // the proof the short-circuit did not fire.
+        for (id, method) in [
+            (20, "papers.metadata.set"),
+            (21, "papers.metadata.clear"),
+            (22, "papers.metadata.void"),
+            (23, "papers.metadata.ack"),
+            (24, "papers.metadata.approve"),
+            (25, "papers.metadata.reject"),
+            (26, "papers.metadata.reopen"),
+            (27, "papers.metadata.reaudit"),
+            (28, "papers.metadata.contributor_add"),
+            (29, "papers.metadata.contributor_remove"),
+        ] {
+            let req = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": {}});
+            send(&mut w, &req.to_string()).await?;
+            let resp = recv(&mut reader).await?;
+            assert_ne!(
+                resp["error"]["code"].as_i64(),
+                Some(QUEUE_WORKER_DISABLED),
+                "{method} does not queue and must not be refused as if it did: {resp}"
+            );
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(INVALID_PARAMS),
+                "{method} must reach its own parameter validation: {resp}"
+            );
+        }
 
         send(
             &mut w,

@@ -270,6 +270,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Paper metadata curation wrote outside the daemon's write path.**
+  Every other paper-side write method went through it; the ten
+  `papers.metadata.*` methods opened the catalog beside it. Three
+  things followed. Nothing serialized a curation edit against an
+  ingest or glean writing the same catalog. No `library.changed` was
+  broadcast, so a desktop shell went on showing the paper metadata as
+  it was before the edit, while the same edit on a book refreshed.
+  MCP was not paused for the write. The synchronous sqlite work also
+  ran on an async thread rather than a blocking one.
+
+  The same ten were marked queue-bound in the dispatch table although
+  no line on their path touches the queue, so a headless
+  `bookrack-mcp` without `--with-queue-worker` refused them all with
+  `-32002 queue worker disabled` — a reason unrelated to anything
+  about them. They dispatch normally there now.
+
 - **A removed item left its audit verdict behind.** The cascade behind
   `bookrack remove` and `bookrack papers remove` covered the metadata
   and lifecycle tables but not `node_paper_audit`, which carries one

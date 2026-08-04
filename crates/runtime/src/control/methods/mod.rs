@@ -317,16 +317,16 @@ methods! {
     write  queue    async   "papers.dryrun"             => papers_dryrun::run,
 
     // paper metadata curation
-    write  queue    async   "papers.metadata.reaudit"            => papers_metadata::reaudit,
-    write  queue    async   "papers.metadata.set"                => papers_metadata::set,
-    write  queue    async   "papers.metadata.clear"              => papers_metadata::clear,
-    write  queue    async   "papers.metadata.void"               => papers_metadata::void,
-    write  queue    async   "papers.metadata.ack"                => papers_metadata::ack,
-    write  queue    async   "papers.metadata.approve"            => papers_metadata::approve,
-    write  queue    async   "papers.metadata.reject"             => papers_metadata::reject,
-    write  queue    async   "papers.metadata.reopen"             => papers_metadata::reopen,
-    write  queue    async   "papers.metadata.contributor_add"    => papers_metadata::contributor_add,
-    write  queue    async   "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
+    write  no_queue async   "papers.metadata.reaudit"            => papers_metadata::reaudit,
+    write  no_queue async   "papers.metadata.set"                => papers_metadata::set,
+    write  no_queue async   "papers.metadata.clear"              => papers_metadata::clear,
+    write  no_queue async   "papers.metadata.void"               => papers_metadata::void,
+    write  no_queue async   "papers.metadata.ack"                => papers_metadata::ack,
+    write  no_queue async   "papers.metadata.approve"            => papers_metadata::approve,
+    write  no_queue async   "papers.metadata.reject"             => papers_metadata::reject,
+    write  no_queue async   "papers.metadata.reopen"             => papers_metadata::reopen,
+    write  no_queue async   "papers.metadata.contributor_add"    => papers_metadata::contributor_add,
+    write  no_queue async   "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
 
     // verify / diagnose / tray / logs
     read   no_queue async   "verify.run"     => verify::run_rpc,
@@ -678,6 +678,20 @@ mod tests {
             "metadata.ack",
             "metadata.approve",
             "metadata.reject",
+            // The paper-side peers of the five above. Named here
+            // because no list named them before, which is how they
+            // drifted into the queue-bound column nothing on their
+            // path ever used.
+            "papers.metadata.reaudit",
+            "papers.metadata.set",
+            "papers.metadata.clear",
+            "papers.metadata.void",
+            "papers.metadata.ack",
+            "papers.metadata.approve",
+            "papers.metadata.reject",
+            "papers.metadata.reopen",
+            "papers.metadata.contributor_add",
+            "papers.metadata.contributor_remove",
             "verify.run",
             "diagnose.run",
             "tray.focus",

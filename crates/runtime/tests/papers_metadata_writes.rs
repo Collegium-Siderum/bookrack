@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Control-plane integration test for the paper-side metadata write
+//! Control-plane integration tests for the paper-side metadata write
 //! surface: every method that addresses an intake must refuse an id
-//! the paper catalog does not hold, and must refuse it *before*
-//! writing.
+//! the paper catalog does not hold and must refuse it *before*
+//! writing, and every method must go through the daemon's write path
+//! rather than opening the catalog beside it.
 //!
 //! The paper override, review, and contributor tables carry no foreign
 //! key onto `intakes`, so a write against a phantom id used to succeed
@@ -203,6 +204,117 @@ async fn paper_metadata_writes_refuse_an_intake_the_catalog_does_not_hold() -> R
     assert!(
         catalog.review(PHANTOM, ItemKind::Paper)?.is_none(),
         "a refused review verb must leave no review row behind"
+    );
+    Ok(())
+}
+
+/// A paper-metadata curation write announces the library it changed.
+///
+/// Subscribers refresh their view of a library on `library.changed`,
+/// and a write that opens the catalog beside the daemon's write path
+/// publishes nothing: the desktop shell shows stale paper metadata
+/// until something else happens to touch that library. The event is
+/// also the observable end of the rest of the write path — the write
+/// mutex against a concurrent ingest, and the MCP pause — so it is the
+/// signal worth pinning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_metadata_write_announces_the_library_it_changed() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+
+    // Seed one real intake before bring-up: the event only fires on a
+    // write that succeeds, and a phantom id is refused before any.
+    let intake_id = {
+        let mut catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+            .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+        catalog
+            .register_intake(
+                ItemKind::Paper,
+                &bookrack_catalog::NewIntake::new("sha-announce").format("pdf"),
+            )
+            .map_err(|e| eyre!("seed intake: {e}"))?
+            .into_intake()
+            .intake_id
+    };
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut obs_reader, mut obs_w) = connect(&sock).await?;
+        send(
+            &mut obs_w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"events.subscribe"}"#,
+        )
+        .await?;
+        let _ = recv(&mut obs_reader).await?;
+        // Drain the snapshot bundle a fresh subscriber receives, which
+        // carries a `library.changed` of its own. `daemon.version` is
+        // its last channel, so draining to it leaves only live
+        // broadcasts without pinning the bundle's size.
+        loop {
+            let frame = recv(&mut obs_reader).await?;
+            if frame["params"]["channel"].as_str() == Some("daemon.version") {
+                break;
+            }
+        }
+
+        let (mut wr_reader, mut wr_w) = connect(&sock).await?;
+        let resp = call(
+            &mut wr_reader,
+            &mut wr_w,
+            2,
+            "papers.metadata.set",
+            json!({"intake_id": intake_id, "field": "title", "value": "Announced"}),
+        )
+        .await?;
+        assert!(
+            resp["error"].is_null(),
+            "the seeded intake must accept a set: {resp}"
+        );
+
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(20));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    panic!("no library.changed after papers.metadata.set")
+                }
+                frame = recv(&mut obs_reader) => {
+                    if frame?["params"]["channel"].as_str() == Some("library.changed") {
+                        break;
+                    }
+                }
+            }
+        }
+
+        send(
+            &mut wr_w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut wr_reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    // The write itself landed — an event published by a body that then
+    // failed would satisfy the loop above and nothing else.
+    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    assert!(
+        !catalog
+            .overrides_for_address(intake_id, ItemKind::Paper)?
+            .is_empty(),
+        "the announced write left no override row"
     );
     Ok(())
 }

@@ -5,10 +5,13 @@
 //! Exposes the same nine actions the books pipeline does — `reaudit`,
 //! `set`, `clear`, `void`, `ack`, `approve`, `reject`,
 //! `contributor_add`, `contributor_remove` — but with paper-shape
-//! semantics and paper-only stores. Each method opens the paper
-//! catalog via the library handle and dispatches to a thin
-//! `bookrack-catalog` write. An audit trail row will land in a
-//! follow-up; the writes themselves are durable.
+//! semantics and paper-only stores. Each method runs its body through
+//! [`super::run_write`], which holds the daemon's write mutex, raises
+//! the write source, pauses MCP for the duration, drives the body on a
+//! blocking executor, and announces the library it changed. Inside
+//! that, the method opens the paper catalog via the library handle and
+//! dispatches to a thin `bookrack-catalog` write. An audit trail row
+//! will land in a follow-up; the writes themselves are durable.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -21,7 +24,7 @@ use bookrack_core::ItemKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{MethodContext, input_err};
+use super::{MethodContext, input_err, run_write};
 use crate::audit_helpers::{
     load_paper_audit_data, load_paper_audit_profile, require_known_profile,
 };
@@ -67,11 +70,35 @@ fn parse<T: for<'de> Deserialize<'de>>(
     }
 }
 
-fn open_paper_catalog(ctx: &MethodContext, library: Option<&str>) -> Result<Catalog, RpcError> {
+/// Run one paper-metadata curation write through the daemon's write
+/// path, with the target library's paper catalog already open.
+///
+/// Everything a write needs beyond the SQL itself comes from
+/// [`run_write`]: the mutex that serializes this against an ingest or
+/// glean writing the same catalog, the MCP pause, the blocking
+/// executor the synchronous sqlite work belongs on, and the
+/// `LibraryChanged` broadcast that tells a subscriber to refresh the
+/// library this call named.
+///
+/// The catalog is opened inside the write body rather than handed in,
+/// so the handle is not held across the mutex acquisition.
+async fn run_paper_metadata_write<F>(
+    ctx: &MethodContext,
+    library: Option<&str>,
+    op: F,
+) -> Result<Value, RpcError>
+where
+    F: FnOnce(Catalog) -> Result<Value, RpcError> + Send + 'static,
+{
     let handle = ctx.registry.get(library).map_err(registry_err)?;
-    handle
-        .open_paper_catalog()
-        .map_err(|e| write_err("papers.metadata", e))
+    let library_name = handle.name().to_string();
+    run_write(ctx, &library_name, move || async move {
+        let catalog = handle
+            .open_paper_catalog()
+            .map_err(|e| write_err("papers.metadata", e))?;
+        op(catalog)
+    })
+    .await
 }
 
 /// Refuse a write addressed at an intake the paper catalog does not
@@ -137,23 +164,33 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
     )
     .map_err(input_err)?;
-    // Both overlays live under the target library's data root, so they
-    // are read from the handle this call resolved — the catalog below
-    // is that library's, and auditing it under another library's rules
-    // is the asymmetry this pairing removes.
-    let profile = load_paper_audit_profile(handle.cfg(), parsed.audit_profile.as_deref());
-    let data = load_paper_audit_data(handle.cfg());
-    let outcome = handle
-        .reaudit_paper(parsed.intake_id, &profile, &data)
-        .await
-        .map_err(|e| write_err("papers.metadata.reaudit", e))?;
-    Ok(json!({
-        "intake_id": outcome.intake_id,
-        "verdict": outcome.verdict,
-        "previous_verdict": outcome.previous_verdict,
-        "confidence": outcome.confidence,
-        "previous_confidence": outcome.previous_confidence,
-    }))
+    let library_name = handle.name().to_string();
+    let PapersMetadataReauditParams {
+        intake_id,
+        audit_profile,
+        ..
+    } = parsed;
+    run_write(ctx, &library_name, move || async move {
+        // Both overlays live under the target library's data root, so
+        // they are read from the handle this call resolved — the
+        // catalog below is that library's, and auditing it under
+        // another library's rules is the asymmetry this pairing
+        // removes.
+        let profile = load_paper_audit_profile(handle.cfg(), audit_profile.as_deref());
+        let data = load_paper_audit_data(handle.cfg());
+        let outcome = handle
+            .reaudit_paper(intake_id, &profile, &data)
+            .await
+            .map_err(|e| write_err("papers.metadata.reaudit", e))?;
+        Ok(json!({
+            "intake_id": outcome.intake_id,
+            "verdict": outcome.verdict,
+            "previous_verdict": outcome.previous_verdict,
+            "confidence": outcome.confidence,
+            "previous_confidence": outcome.previous_confidence,
+        }))
+    })
+    .await
 }
 
 // ─── set / clear / void ─────────────────────────────────────────────
@@ -172,26 +209,29 @@ pub struct PapersMetadataSetParams {
 pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: PapersMetadataSetParams = parse(params, "papers.metadata.set")?;
     require_editable(&parsed.field)?;
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    require_paper_intake(&catalog, parsed.intake_id)?;
-    catalog
-        .set_override(
-            &NewOverride::new(
-                parsed.intake_id,
-                ItemKind::Paper,
-                &parsed.field,
-                Some(parsed.value.clone()),
-                "human",
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        require_paper_intake(&catalog, parsed.intake_id)?;
+        catalog
+            .set_override(
+                &NewOverride::new(
+                    parsed.intake_id,
+                    ItemKind::Paper,
+                    &parsed.field,
+                    Some(parsed.value.clone()),
+                    "human",
+                )
+                .confirmed(parsed.confirmed),
             )
-            .confirmed(parsed.confirmed),
-        )
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("set_override: {e}")))?;
-    Ok(json!({
-        "intake_id": parsed.intake_id,
-        "field": parsed.field,
-        "value": parsed.value,
-        "confirmed": parsed.confirmed,
-    }))
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("set_override: {e}")))?;
+        Ok(json!({
+            "intake_id": parsed.intake_id,
+            "field": parsed.field,
+            "value": parsed.value,
+            "confirmed": parsed.confirmed,
+        }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,16 +244,19 @@ pub struct PapersMetadataClearParams {
 
 pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: PapersMetadataClearParams = parse(params, "papers.metadata.clear")?;
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    require_paper_intake(&catalog, parsed.intake_id)?;
-    let removed = catalog
-        .clear_override(parsed.intake_id, ItemKind::Paper, &parsed.field)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("clear_override: {e}")))?;
-    Ok(json!({
-        "intake_id": parsed.intake_id,
-        "field": parsed.field,
-        "removed": removed,
-    }))
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        require_paper_intake(&catalog, parsed.intake_id)?;
+        let removed = catalog
+            .clear_override(parsed.intake_id, ItemKind::Paper, &parsed.field)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("clear_override: {e}")))?;
+        Ok(json!({
+            "intake_id": parsed.intake_id,
+            "field": parsed.field,
+            "removed": removed,
+        }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,22 +270,25 @@ pub struct PapersMetadataVoidParams {
 pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: PapersMetadataVoidParams = parse(params, "papers.metadata.void")?;
     require_editable(&parsed.field)?;
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    require_paper_intake(&catalog, parsed.intake_id)?;
-    catalog
-        .set_override(&NewOverride::new(
-            parsed.intake_id,
-            ItemKind::Paper,
-            &parsed.field,
-            None,
-            "human",
-        ))
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("set_override: {e}")))?;
-    Ok(json!({
-        "intake_id": parsed.intake_id,
-        "field": parsed.field,
-        "voided": true,
-    }))
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        require_paper_intake(&catalog, parsed.intake_id)?;
+        catalog
+            .set_override(&NewOverride::new(
+                parsed.intake_id,
+                ItemKind::Paper,
+                &parsed.field,
+                None,
+                "human",
+            ))
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("set_override: {e}")))?;
+        Ok(json!({
+            "intake_id": parsed.intake_id,
+            "field": parsed.field,
+            "voided": true,
+        }))
+    })
+    .await
 }
 
 // ─── ack / approve / reject ─────────────────────────────────────────
@@ -258,26 +304,29 @@ pub struct PapersReviewParams {
     library: Option<String>,
 }
 
-fn write_review_status(
+async fn write_review_status(
     ctx: &MethodContext,
     parsed: PapersReviewParams,
-    status: &str,
+    status: &'static str,
 ) -> Result<Value, RpcError> {
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    require_paper_intake(&catalog, parsed.intake_id)?;
-    let reviewer = parsed.reviewer.as_deref().unwrap_or("human");
-    let mut review = NewReview::new(parsed.intake_id, ItemKind::Paper, reviewer, status);
-    if let Some(notes) = parsed.notes.as_deref() {
-        review = review.notes(notes);
-    }
-    catalog
-        .upsert_review(&review)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("upsert_review: {e}")))?;
-    Ok(json!({
-        "intake_id": parsed.intake_id,
-        "status": status,
-        "reviewer": reviewer,
-    }))
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        require_paper_intake(&catalog, parsed.intake_id)?;
+        let reviewer = parsed.reviewer.as_deref().unwrap_or("human");
+        let mut review = NewReview::new(parsed.intake_id, ItemKind::Paper, reviewer, status);
+        if let Some(notes) = parsed.notes.as_deref() {
+            review = review.notes(notes);
+        }
+        catalog
+            .upsert_review(&review)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("upsert_review: {e}")))?;
+        Ok(json!({
+            "intake_id": parsed.intake_id,
+            "status": status,
+            "reviewer": reviewer,
+        }))
+    })
+    .await
 }
 
 pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -286,6 +335,7 @@ pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
         parse(params, "papers.metadata.ack")?,
         STATUS_ACKNOWLEDGED,
     )
+    .await
 }
 
 pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -294,6 +344,7 @@ pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         parse(params, "papers.metadata.approve")?,
         STATUS_APPROVED,
     )
+    .await
 }
 
 pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -302,6 +353,7 @@ pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         parse(params, "papers.metadata.reject")?,
         STATUS_REJECTED,
     )
+    .await
 }
 
 /// Demote the review row back to `pending`. Useful when an
@@ -313,6 +365,7 @@ pub async fn reopen(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
         parse(params, "papers.metadata.reopen")?,
         STATUS_PENDING,
     )
+    .await
 }
 
 // ─── contributor_add / contributor_remove ───────────────────────────
@@ -354,43 +407,46 @@ pub async fn contributor_add(
     ctx: &MethodContext,
 ) -> Result<Value, RpcError> {
     let parsed: PapersContributorAddParams = parse(params, "papers.metadata.contributor_add")?;
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    require_paper_intake(&catalog, parsed.intake_id)?;
-    // Place curator-added contributors after every other row in the
-    // same role. Computing `existing.len()` instead would collide on
-    // the `(intake_id, scope, role, ordinal, origin)` UNIQUE key as
-    // soon as any prior row had been removed: the length no longer
-    // matches the next free position.
-    let existing = catalog
-        .contributors_for_address(parsed.intake_id, ItemKind::Paper)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("contributors_for_address: {e}")))?;
-    let ordinal = next_contributor_ordinal(&existing, &parsed.role);
-    let mut new = NewContributor::new(
-        parsed.intake_id,
-        ItemKind::Paper,
-        &parsed.role,
-        ordinal,
-        "human",
-        &parsed.name,
-    );
-    if let Some(family) = parsed.family.as_deref() {
-        new = new.family(family);
-    }
-    if let Some(given) = parsed.given.as_deref() {
-        new = new.given(given);
-    }
-    if let Some(orcid) = parsed.orcid.as_deref() {
-        new = new.orcid(orcid);
-    }
-    let contributor_id = catalog
-        .add_contributor(&new)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("add_contributor: {e}")))?;
-    Ok(json!({
-        "intake_id": parsed.intake_id,
-        "contributor_id": contributor_id,
-        "role": parsed.role,
-        "name": parsed.name,
-    }))
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        require_paper_intake(&catalog, parsed.intake_id)?;
+        // Place curator-added contributors after every other row in the
+        // same role. Computing `existing.len()` instead would collide on
+        // the `(intake_id, scope, role, ordinal, origin)` UNIQUE key as
+        // soon as any prior row had been removed: the length no longer
+        // matches the next free position.
+        let existing = catalog
+            .contributors_for_address(parsed.intake_id, ItemKind::Paper)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("contributors_for_address: {e}")))?;
+        let ordinal = next_contributor_ordinal(&existing, &parsed.role);
+        let mut new = NewContributor::new(
+            parsed.intake_id,
+            ItemKind::Paper,
+            &parsed.role,
+            ordinal,
+            "human",
+            &parsed.name,
+        );
+        if let Some(family) = parsed.family.as_deref() {
+            new = new.family(family);
+        }
+        if let Some(given) = parsed.given.as_deref() {
+            new = new.given(given);
+        }
+        if let Some(orcid) = parsed.orcid.as_deref() {
+            new = new.orcid(orcid);
+        }
+        let contributor_id = catalog
+            .add_contributor(&new)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("add_contributor: {e}")))?;
+        Ok(json!({
+            "intake_id": parsed.intake_id,
+            "contributor_id": contributor_id,
+            "role": parsed.role,
+            "name": parsed.name,
+        }))
+    })
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,14 +462,17 @@ pub async fn contributor_remove(
 ) -> Result<Value, RpcError> {
     let parsed: PapersContributorRemoveParams =
         parse(params, "papers.metadata.contributor_remove")?;
-    let catalog = open_paper_catalog(ctx, parsed.library.as_deref())?;
-    let removed = catalog
-        .remove_contributor(parsed.contributor_id)
-        .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("remove_contributor: {e}")))?;
-    Ok(json!({
-        "contributor_id": parsed.contributor_id,
-        "removed": removed,
-    }))
+    let library = parsed.library.clone();
+    run_paper_metadata_write(ctx, library.as_deref(), move |catalog| {
+        let removed = catalog
+            .remove_contributor(parsed.contributor_id)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("remove_contributor: {e}")))?;
+        Ok(json!({
+            "contributor_id": parsed.contributor_id,
+            "removed": removed,
+        }))
+    })
+    .await
 }
 
 /// Marker so the unused-`PAPER_SCOPE` constant can be removed in a
