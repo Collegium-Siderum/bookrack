@@ -39,12 +39,23 @@ metadata workflows are still being hardened for production use.
    | Linux x86_64 | `bookrack-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
    | Windows x86_64 | `bookrack-X.Y.Z-x86_64-pc-windows-msvc.zip` |
 
-   Intel macOS users run the Apple Silicon binary under Rosetta 2; a
-   native `x86_64-apple-darwin` build is not shipped.
+   Intel macOS is not supported by the release artefacts: only an
+   arm64 macOS build is shipped, and an Intel machine cannot execute
+   it. Build from source on that machine instead — see "Other ways
+   to install".
 
 3. **Extract and run the wizard.**
 
-   macOS / Linux:
+   macOS — the tarball holds a `Bookrack.app` bundle and the binaries
+   live inside it:
+
+   ```
+   tar -xzf bookrack-*.tar.gz
+   cd bookrack-*/Bookrack.app/Contents/Resources
+   ./bookrack init
+   ```
+
+   Linux:
 
    ```
    tar -xzf bookrack-*.tar.gz
@@ -63,15 +74,48 @@ metadata workflows are still being hardened for production use.
    `init` is a five-step wizard: it picks a data root, checks the
    PDFium library, probes Ollama, runs an end-to-end smoke test
    against a tempdir, then writes `<data_root>/config.toml` and a
-   pointer in your platform's config directory so subsequent
-   `bookrack` invocations work from any shell.
+   pointer in your platform's config directory, so any later
+   `bookrack` command finds the same data root without a `--data-dir`
+   flag. The pointer records where the data lives; it does not put
+   `bookrack` on your `PATH`. Keep invoking it by path, or add its
+   directory to `PATH` yourself.
 
-4. **Start the daemon and ingest a book.** `bookrack run` starts a
-   foreground daemon: it serves MCP over streamable-HTTP at
-   `127.0.0.1:8765/mcp` and a local control socket where the write
-   commands arrive. From a second shell, submit work with the
-   one-shot subcommands — `bookrack ingest` streams the queue
-   worker's progress until the job lands.
+4. **If the first run is blocked** — only when you downloaded the
+   archive with a browser. Browsers tag downloads and the release
+   artefacts are unsigned, so macOS refuses to run them until you
+   approve once and Windows shows a SmartScreen warning. Downloading
+   with `curl` or `wget` sets no tag and skips this step.
+
+   macOS:
+
+   1. Run `./bookrack init`. macOS refuses and offers no override in
+      the dialog.
+   2. Open System Settings -> Privacy & Security, scroll to
+      Security, and choose "Open Anyway" next to the blocked binary.
+   3. Run the command again and confirm.
+
+   The right-click -> Open shortcut older guides describe was removed
+   in macOS 15; on Sequoia and later the System Settings route is the
+   only one through the interface. From a terminal, the equivalent
+   is:
+
+   ```
+   xattr -dr com.apple.quarantine bookrack-*/
+   ```
+
+   Windows — choose "More info" then "Run anyway" when SmartScreen
+   appears, or clear the tag before extracting:
+
+   ```
+   Unblock-File bookrack-*.zip
+   ```
+
+5. **Start the daemon and ingest a book.** Run these from the same
+   directory as step 3. `bookrack run` starts a foreground daemon: it
+   serves MCP over streamable-HTTP at `127.0.0.1:8765/mcp` and a local
+   control socket where the write commands arrive. From a second
+   shell, submit work with the one-shot subcommands — `bookrack
+   ingest` streams the queue worker's progress until the job lands.
 
    macOS / Linux:
 
@@ -129,6 +173,12 @@ welcome via issues.
 binary. The wizard detects it and offers it as a default; the data
 root is then movable to any disk along with the tarball, no
 environment variable needed.
+
+On macOS the binary lives inside `Bookrack.app`, so "next to the
+binary" is inside the bundle. Do not put a data root there: upgrading
+replaces the whole bundle, and every book, index, and log under it
+goes with it. Pick a data root outside the bundle and let the pointer
+`init` writes find it.
 
 **From source** — Rust 1.95.0, edition 2024. Clone the repo and
 build:
