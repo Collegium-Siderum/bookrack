@@ -238,8 +238,6 @@ release workflow extracts the matching section verbatim from this file.
 
   Callers that omit the parameter behave exactly as before.
 
-### Added
-
 - **The review listing can be searched by what extraction wrote.**
   `library.list_metadata` returned every book in the library and took
   no filter at all, so finding the record with the typo meant paging
@@ -299,8 +297,6 @@ release workflow extracts the matching section verbatim from this file.
   values are now `running` / `ok` / `error` / `abandoned`, exported as
   constants so the vocabulary has one definition rather than a literal
   per call site.
-
-### Changed
 
 - **`.env` may no longer set any variable it likes.** The file is
   applied to the real process environment, and dotenv finds it by
