@@ -304,6 +304,9 @@ pub struct IntakeFilter<'a> {
     /// `node_categories`, joined on the item scope. An empty slice
     /// means "no filter".
     pub categories: &'a [&'a str],
+    /// Match the root publication-attrs `language` column against this
+    /// set, comparing as text. An empty slice means "no filter".
+    pub language: &'a [&'a str],
 }
 
 /// The list of `intake` columns qualified with the `i.` alias used by
@@ -329,6 +332,7 @@ fn overridden_columns(filter: &IntakeFilter<'_>) -> Vec<&'static str> {
         ("year", filter.year.is_some()),
         ("container_title", filter.venue_substring.is_some()),
         ("doi", filter.doi.is_some()),
+        ("language", !filter.language.is_empty()),
     ];
     active
         .into_iter()
@@ -368,7 +372,8 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
         || !filter.confidence_in.is_empty()
         || filter.year.is_some()
         || filter.venue_substring.is_some()
-        || filter.doi.is_some();
+        || filter.doi.is_some()
+        || !filter.language.is_empty();
     if need_npa {
         joins.push_str(
             " LEFT JOIN node_publication_attrs npa \
@@ -475,6 +480,21 @@ fn build_filter_fragments(filter: &IntakeFilter<'_>) -> (String, String, Vec<Box
     if let Some(doi) = filter.doi {
         where_parts.push(format!("{} = ?", attr_expr(filter, "doi")));
         params.push(Box::new(doi.to_string()));
+    }
+    if !filter.language.is_empty() {
+        debug_assert!(
+            filter.language.len() <= 8,
+            "IntakeFilter.language takes at most 8 entries, got {}",
+            filter.language.len()
+        );
+        let placeholders = vec!["?"; filter.language.len()].join(", ");
+        where_parts.push(format!(
+            "{} IN ({placeholders})",
+            attr_expr(filter, "language")
+        ));
+        for value in filter.language {
+            params.push(Box::new((*value).to_string()));
+        }
     }
     if !filter.categories.is_empty() {
         debug_assert!(
@@ -2454,6 +2474,121 @@ mod tests {
         assert_eq!(
             titles_matching(&catalog, MatchLayer::Base, "Curated"),
             Vec::<i64>::new()
+        );
+    }
+
+    /// Register one book carrying `base` as its stored language, and
+    /// optionally record the curator's correction to it: `Some` to
+    /// replace it, `None` for the explicit NULL that removes the
+    /// field. Returns the intake id.
+    fn book_with_language(
+        catalog: &mut Catalog,
+        sha: &str,
+        base: &str,
+        override_value: Option<Option<&str>>,
+    ) -> i64 {
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register")
+            .intake()
+            .intake_id;
+        let mut attrs = crate::NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.language = Some(base.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
+        if let Some(value) = override_value {
+            catalog
+                .set_override(&crate::NewOverride::new(
+                    intake_id,
+                    ItemKind::Book,
+                    "language",
+                    value.map(str::to_string),
+                    "human",
+                ))
+                .expect("write override");
+        }
+        intake_id
+    }
+
+    /// Ids whose language is one of `wanted` on `layer`, holding the
+    /// paged find and the count to the same answer.
+    fn languages_matching(catalog: &Catalog, layer: MatchLayer, wanted: &[&str]) -> Vec<i64> {
+        let filter = IntakeFilter {
+            layer,
+            language: wanted,
+            ..IntakeFilter::default()
+        };
+        let hits = catalog.find_intakes(&filter, 100, 0).expect("find");
+        let ids: Vec<i64> = hits.iter().map(|i| i.intake_id).collect();
+        assert_eq!(
+            catalog.count_find_intakes(&filter).expect("count") as usize,
+            ids.len(),
+            "the count and the page disagree about how many rows match"
+        );
+        ids
+    }
+
+    #[test]
+    fn language_selects_one_book_out_of_two_on_either_layer() {
+        let mut catalog = catalog();
+        let german = book_with_language(&mut catalog, "sha-de", "de", None);
+        let latin = book_with_language(&mut catalog, "sha-la", "la", None);
+
+        for layer in [MatchLayer::Base, MatchLayer::Effective] {
+            assert_eq!(
+                languages_matching(&catalog, layer, &["de"]),
+                vec![german],
+                "the latin book ({latin}) must not match a german filter on {layer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn language_takes_several_values_and_excludes_the_rest() {
+        let mut catalog = catalog();
+        let german = book_with_language(&mut catalog, "sha-de", "de", None);
+        let latin = book_with_language(&mut catalog, "sha-la", "la", None);
+        let english = book_with_language(&mut catalog, "sha-en", "en", None);
+
+        for layer in [MatchLayer::Base, MatchLayer::Effective] {
+            assert_eq!(
+                languages_matching(&catalog, layer, &["de", "la"]),
+                vec![german, latin],
+                "a multi-value filter must match either listed language and \
+                 nothing else; the english book ({english}) must stay out on {layer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_effective_layer_matches_the_curated_language() {
+        let mut catalog = catalog();
+        let book = book_with_language(&mut catalog, "sha-curated", "de", Some(Some("la")));
+
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["la"]),
+            vec![book],
+            "a language the curator corrected is not reachable by the corrected value"
+        );
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["de"]),
+            Vec::<i64>::new(),
+            "a value the curator replaced still answers the filter, so a hit \
+             renders a language the filter did not ask for"
+        );
+    }
+
+    #[test]
+    fn an_explicit_null_language_override_removes_the_field_from_the_match() {
+        let mut catalog = catalog();
+        book_with_language(&mut catalog, "sha-nulled", "de", Some(None));
+
+        assert_eq!(
+            languages_matching(&catalog, MatchLayer::Effective, &["de"]),
+            Vec::<i64>::new(),
+            "an override that deliberately nullifies the language still matches on \
+             the base value, so a deletion reads as an untouched field"
         );
     }
 
