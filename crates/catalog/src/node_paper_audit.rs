@@ -131,7 +131,7 @@ pub(crate) const SPEC: TableSpec = TableSpec {
             .not_null()
             .default("0"),
         ColumnSpec::text("pipeline_run_id")
-            .comment("run group; NULL for rows written before M[12]"),
+            .comment("run group; NULL when the judgement is not attributable to a run"),
         ColumnSpec::text("profile_fingerprint")
             .comment("stable fingerprint of the effective profile; NULL before M[14]"),
         ColumnSpec::text("profile_toggle_summary")

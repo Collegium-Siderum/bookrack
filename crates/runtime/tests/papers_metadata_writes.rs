@@ -208,6 +208,250 @@ async fn paper_metadata_writes_refuse_an_intake_the_catalog_does_not_hold() -> R
     Ok(())
 }
 
+/// Seed one paper the re-audit path can actually run over: an intake,
+/// its extraction envelope on disk, the base attrs glean derives from
+/// that extraction, and the `node_paper_audit` row glean writes at
+/// ingest time.
+///
+/// The audit projection is what `library.show_paper` reports, so a
+/// fixture without it could not tell a re-audit that rewrites the row
+/// from one that never wrote it.
+fn seed_audited_paper(data_root: &std::path::Path) -> Result<i64> {
+    use bookrack_catalog::{NewIntake, NewPublicationAttrs, NewReview, STATUS_PENDING};
+    use bookrack_extract::envelope::{envelope_filename, write_envelope};
+    use bookrack_extract::{
+        Biblio, Block, BlockKind, Contributor, ContributorRole, CslType, Extraction, Provenance,
+        TextLayerQuality, Toc,
+    };
+    use bookrack_glean::audit::{
+        PaperAuditData, PaperAuditProfile, paper_report_to_audit_row, signals,
+    };
+
+    let biblio = Biblio {
+        title: Some("Synthetic Findings in Test Spaces".to_string()),
+        subtitle: None,
+        publisher: None,
+        year: Some(2019),
+        year_raw: Some("2019".to_string()),
+        isbn: None,
+        series: None,
+        language: Some("en".to_string()),
+        contributors: vec![Contributor {
+            name: "Alex Sample".to_string(),
+            role: ContributorRole::Author,
+            family: Some("Sample".to_string()),
+            given: Some("Alex".to_string()),
+            orcid: None,
+        }],
+        doi: Some("10.18653/v1/n19-1423".to_string()),
+        arxiv_id: None,
+        issn: None,
+        container_title: Some("Journal of Synthetic Results".to_string()),
+        abstract_text: Some(
+            "A synthetic abstract long enough to clear the minimum length \
+             the default profile requires for the abstract field."
+                .to_string(),
+        ),
+        csl_type: Some(CslType::ArticleJournal),
+    };
+    let extraction = Extraction {
+        biblio: biblio.clone(),
+        blocks: vec![Block {
+            kind: BlockKind::Body,
+            text: "A synthetic body sample in English.".to_string(),
+            source_unit: 0,
+            style: None,
+        }],
+        toc: Toc::default(),
+        provenance: Provenance {
+            adapter: "pdf".to_string(),
+            extractor_version: 1,
+            text_layer_quality: TextLayerQuality::Usable,
+            skipped_units: Vec::new(),
+            derived_from_sha256: None,
+            partial_pages: None,
+            source_of_structure: None,
+            fallbacks: Vec::new(),
+        },
+    };
+
+    let sha = "5eed5eed".to_string();
+    let mut catalog = Catalog::open(&data_root.join("papers_catalog.db"))
+        .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+    let intake_id = catalog
+        .register_intake(ItemKind::Paper, &NewIntake::new(sha.clone()).format("pdf"))
+        .map_err(|e| eyre!("seed intake: {e}"))?
+        .into_intake()
+        .intake_id;
+
+    let papers_dir = data_root.join("papers");
+    std::fs::create_dir_all(&papers_dir)?;
+    let envelope_path = papers_dir.join(envelope_filename(ItemKind::Paper, intake_id));
+    write_envelope(&envelope_path, &extraction, intake_id, &sha)
+        .map_err(|e| eyre!("write envelope: {e}"))?;
+    catalog
+        .set_stored_path(
+            ItemKind::Paper,
+            intake_id,
+            envelope_path.to_string_lossy().as_ref(),
+        )
+        .map_err(|e| eyre!("stored path: {e}"))?;
+
+    let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+    attrs.title = biblio.title.clone();
+    attrs.year = biblio.year.map(|y| y.to_string());
+    attrs.doi = biblio.doi.clone();
+    attrs.container_title = biblio.container_title.clone();
+    attrs.abstract_text = biblio.abstract_text.clone();
+    attrs.language = biblio.language.clone();
+    attrs.csl_type = Some("article-journal".to_string());
+    catalog
+        .upsert_publication_attrs(&attrs)
+        .map_err(|e| eyre!("attrs: {e}"))?;
+
+    let effective = catalog
+        .effective_publication_attrs(intake_id, ItemKind::Paper)
+        .map_err(|e| eyre!("effective: {e}"))?;
+    let profile = PaperAuditProfile::default_profile();
+    let input = signals::PaperAuditInput {
+        biblio: &extraction.biblio,
+        provenance: &extraction.provenance,
+        effective: &effective,
+        body_sample: "A synthetic body sample in English.",
+        source_stem: None,
+    };
+    let report = signals::audit_paper(&input, &profile, &PaperAuditData::default_data());
+    let audited_at = catalog.now_iso().map_err(|e| eyre!("now: {e}"))?;
+    let row = paper_report_to_audit_row(
+        &report,
+        intake_id,
+        ItemKind::Paper.as_scope_str(),
+        &profile,
+        Some("article-journal"),
+        &audited_at,
+        "1",
+        Some("glean_paper-2026-08-04T00:00:00Z-seed"),
+    );
+    catalog
+        .upsert_node_paper_audit(&row)
+        .map_err(|e| eyre!("seed audit row: {e}"))?;
+    catalog
+        .upsert_review(
+            &NewReview::new(intake_id, ItemKind::Paper, "pipeline", STATUS_PENDING)
+                .notes(report.to_json()),
+        )
+        .map_err(|e| eyre!("seed review: {e}"))?;
+
+    // `show_paper` reads the corpus for the node shape alongside the
+    // catalog, and opens it read-only, so the store has to exist.
+    let mut corpus = bookrack_corpus::Corpus::open(&data_root.join("papers_corpus.db"))
+        .map_err(|e| eyre!("open paper corpus to seed: {e}"))?;
+    let partition = corpus
+        .allocate_partition(intake_id)
+        .map_err(|e| eyre!("allocate partition: {e}"))?;
+    corpus
+        .insert_node(
+            &bookrack_corpus::NewNode::root(partition.book_root_id, bookrack_core::NodeType::Work)
+                .title("Synthetic Findings in Test Spaces"),
+        )
+        .map_err(|e| eyre!("root node: {e}"))?;
+    Ok(intake_id)
+}
+
+/// A re-audit through the control plane changes what `show_paper`
+/// reports.
+///
+/// The verb wrote only the two-scalar rollup, and `show_paper` reads
+/// its verdict off the audit projection — so a curator could correct a
+/// field, re-audit, be told the verdict had changed, and see the same
+/// judgement on every read surface. The two halves are asserted
+/// together here because either one alone was already true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reaudit_changes_what_show_paper_reports() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let before = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.show_paper",
+            json!({ "intake_id": intake_id }),
+        )
+        .await?;
+        assert_eq!(
+            before["result"]["audit"]["verdict"].as_str(),
+            Some("clean"),
+            "the seeded paper must start clean or the flip proves nothing: {before}",
+        );
+
+        // Void the DOI: with no arXiv id and no ISSN either, the paper
+        // is left with no stable identifier.
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "papers.metadata.void",
+            json!({"intake_id": intake_id, "field": "doi"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "void failed: {resp}");
+
+        let resp = call(
+            &mut reader,
+            &mut w,
+            3,
+            "papers.metadata.reaudit",
+            json!({ "intake_id": intake_id }),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "reaudit failed: {resp}");
+        assert_eq!(
+            resp["result"]["verdict"].as_str(),
+            Some("needs_work"),
+            "the re-audit must report the new judgement: {resp}",
+        );
+
+        let after = call(
+            &mut reader,
+            &mut w,
+            4,
+            "library.show_paper",
+            json!({ "intake_id": intake_id }),
+        )
+        .await?;
+        assert_eq!(
+            after["result"]["audit"]["verdict"].as_str(),
+            Some("needs_work"),
+            "show_paper still reports the ingest-time judgement: {after}",
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// A paper-metadata curation write announces the library it changed.
 ///
 /// Subscribers refresh their view of a library on `library.changed`,
