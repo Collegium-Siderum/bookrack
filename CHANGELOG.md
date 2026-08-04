@@ -270,6 +270,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A preview migrated the database it was previewing against.** Both
+  dryrun commands record that they ran by opening a `pipeline_runs` row
+  in the catalog, and they opened it through the door that migrates a
+  database behind this binary's schema revision — without the backup
+  the ordinary write path takes first. Migration is forward-only, so a
+  command that reads a directory and writes a report could move a
+  library to a revision an older build can no longer open, and it did
+  so for the sake of one bookkeeping row.
+
+  A catalog that would have to be migrated is now left alone, exactly
+  as a missing one already was: the dryrun runs and reports as before,
+  and the only thing lost is its row in `bookrack runs list`.
+
 - **Planning an index-profile apply built the vector store it was
   supposed to only measure.** The plan is documented as offline and
   read-only, and it reports how many chunk rows a planned re-embed

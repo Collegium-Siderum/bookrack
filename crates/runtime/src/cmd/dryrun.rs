@@ -57,16 +57,16 @@ pub fn run(
 }
 
 /// Open a `pipeline_runs` row labeled `command` for tracking. A
-/// missing catalog skips tracking entirely — a preview must not
-/// materialise and migrate a database for one lifecycle row — and a
-/// catalog-open failure logs and demotes to a NULL run id; the dryrun
-/// itself proceeds unchanged either way.
+/// catalog this preview may not write — one that is missing, or one
+/// behind a revision an open would migrate — skips tracking entirely:
+/// a preview must not materialise a database, nor advance one through
+/// a forward-only migration, for a single lifecycle row. An open
+/// failure logs and demotes to a NULL run id; the dryrun itself
+/// proceeds unchanged either way.
 fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<RunHandle> {
-    if !cfg.catalog_db().exists() {
-        return None;
-    }
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -91,13 +91,19 @@ fn open_dryrun_pipeline_run(cfg: &Config, command: &str) -> Option<RunHandle> {
 /// The close leg opens the catalog a second time, which is a failure
 /// point the open leg already survived. When it fails the run is
 /// abandoned rather than silently forgotten, so the row it leaves at
-/// `running` is one a repair can still find.
+/// `running` is one a repair can still find. The same holds for a
+/// catalog that stopped being writable between the two opens: the
+/// close does not migrate its way back in.
 fn close_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
     let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            run.abandon();
+            return;
+        }
         Err(err) => {
             tracing::warn!(error = %err, pipeline_run_id = run.id(), "dryrun: close path catalog open failed");
             run.abandon();
@@ -398,6 +404,36 @@ fn prune_old_dryruns(dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A `catalog.db` the preview would have to migrate before it could
+    /// record anything is left without a schema. The fixture is an
+    /// empty file, which reads as schema revision 0 and so takes the
+    /// same verdict an outdated database takes — without pinning a
+    /// historical schema into the test. The witness is that a read-only
+    /// open still finds no tables: a migrated file opens cleanly here.
+    #[test]
+    fn a_catalog_that_would_need_migrating_is_left_untouched() {
+        let dir = tempdir().expect("tempdir");
+        let cfg = Config::new(
+            dir.path().to_path_buf(),
+            "http://localhost:11434".to_string(),
+        );
+        fs::write(cfg.catalog_db(), b"").expect("seed an uninitialised catalog.db");
+        let input = dir.path().join("no-books");
+        fs::create_dir_all(&input).expect("create input dir");
+
+        // No supported files under the input path, so `run_inner`
+        // fails — but the lifecycle legs around it have already run.
+        let _ = run(&cfg, &input, None, false, None);
+
+        let err = bookrack_catalog::Catalog::open_read_only(&cfg.catalog_db())
+            .err()
+            .expect("preview migrated catalog.db");
+        assert!(
+            matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+            "{err:?}"
+        );
+    }
 
     #[test]
     fn unix_epoch_renders_as_1970_01_01() {

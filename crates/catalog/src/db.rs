@@ -114,6 +114,29 @@ impl Catalog {
         )
     }
 
+    /// Open the `catalog.db` at `path` for writing, but only when its
+    /// schema is already at this binary's revision.
+    ///
+    /// `Ok(None)` means the database is not one this call may write:
+    /// either no file is there, or the file is behind and opening it
+    /// through [`Catalog::open`] would migrate it. Migration is
+    /// forward-only, so a caller whose write is incidental to its real
+    /// work — a preview recording that it ran, a probe noting its own
+    /// pass — has no business triggering one; it takes the `None` and
+    /// does without the row. A database newer than this binary is
+    /// still an error, not a `None`: that one no caller can proceed on.
+    pub fn open_if_current(path: &Path) -> Result<Option<Catalog>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = bookrack_dbkit::open_production(path)?;
+        let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        match decide(current) {
+            OpenDecision::Migrate { .. } => Ok(None),
+            _ => Catalog::from_connection(conn, None).map(Some),
+        }
+    }
+
     /// Open an ephemeral, private `catalog.db` held entirely in memory.
     /// The database vanishes when the handle is dropped.
     pub fn open_in_memory() -> Result<Catalog> {
@@ -410,6 +433,47 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn open_if_current_writes_a_current_database_and_declines_the_rest() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Absent: nothing to open, and nothing created by asking.
+        let absent = dir.path().join("absent.db");
+        assert!(
+            Catalog::open_if_current(&absent)
+                .expect("an absent file is not an error")
+                .is_none()
+        );
+        assert!(!absent.exists(), "asking must not create the file");
+
+        // Behind: an empty file reads as revision 0, which `open` would
+        // migrate forward. The handle is declined and the recorded
+        // revision does not move. `user_version` is the witness rather
+        // than the file size: opening a connection at all writes a page
+        // header, so bytes cannot tell a declined open from a migrated
+        // one.
+        let behind = dir.path().join("behind.db");
+        std::fs::write(&behind, b"").expect("seed an uninitialised file");
+        assert!(
+            Catalog::open_if_current(&behind)
+                .expect("a database behind is not an error")
+                .is_none()
+        );
+        let version: i64 = Connection::open(&behind)
+            .expect("reopen the declined file")
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("read user_version");
+        assert_eq!(version, 0, "declining must not migrate");
+
+        // Current: opens, and the handle can actually write.
+        let current = dir.path().join("current.db");
+        drop(Catalog::open(&current).expect("build a current database"));
+        let catalog = Catalog::open_if_current(&current)
+            .expect("a current database opens")
+            .expect("a current database yields a handle");
+        assert!(!catalog.is_read_only());
     }
 
     #[test]

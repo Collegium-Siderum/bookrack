@@ -55,15 +55,14 @@ pub fn run(
 /// Open the papers dryrun's `pipeline_runs` row on the paper catalog,
 /// where the paper-side audit rows a rollup would aggregate live: the
 /// `pipeline_run_summary` foreign key does not cross databases. A
-/// missing catalog skips tracking — a preview must not materialise a
-/// database for one lifecycle row — and an open failure demotes to a
-/// NULL run id.
+/// catalog this preview may not write — missing, or behind a revision
+/// an open would migrate — skips tracking, since neither materialising
+/// a database nor migrating one is a price a preview may pay for a
+/// single lifecycle row. An open failure demotes to a NULL run id.
 fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<RunHandle> {
-    if !cfg.papers_catalog_db().exists() {
-        return None;
-    }
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.papers_catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
         Err(err) => {
             tracing::warn!(
                 error = %err,
@@ -82,14 +81,19 @@ fn open_papers_dryrun_pipeline_run(cfg: &Config) -> Option<RunHandle> {
 }
 
 /// Close the row through a second open of the paper catalog. A failure
-/// there abandons the run — the row stays `running` and keeps the
+/// there, or a catalog that stopped being writable between the two
+/// opens, abandons the run — the row stays `running` and keeps the
 /// liveness record a repair reads — rather than dropping it silently.
 fn close_papers_dryrun_pipeline_run(cfg: &Config, run: Option<RunHandle>, ok: bool) {
     let Some(run) = run else {
         return;
     };
-    let catalog = match bookrack_catalog::Catalog::open(&cfg.papers_catalog_db()) {
-        Ok(c) => c,
+    let catalog = match bookrack_catalog::Catalog::open_if_current(&cfg.papers_catalog_db()) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            run.abandon();
+            return;
+        }
         Err(err) => {
             tracing::warn!(error = %err, pipeline_run_id = run.id(), "papers_dryrun: close path catalog open failed");
             run.abandon();
@@ -396,6 +400,30 @@ mod tests {
         assert!(
             !cfg.papers_catalog_db().exists(),
             "preview must not materialise papers_catalog.db",
+        );
+    }
+
+    /// The companion to the case above: a paper catalog that is there
+    /// but would have to be migrated before the row could be written is
+    /// left without a schema. An empty file stands in for an outdated
+    /// one — both read as schema revision 0 — so the test does not
+    /// carry a historical schema of its own. A migrated file would open
+    /// read-only cleanly, which is what the refusal below rules out.
+    #[test]
+    fn a_paper_catalog_that_would_need_migrating_is_left_untouched() {
+        let (tmp, cfg) = temp_cfg();
+        fs::write(cfg.papers_catalog_db(), b"").expect("seed an uninitialised catalog");
+        let empty = tmp.path().join("no-papers");
+        fs::create_dir_all(&empty).expect("create input dir");
+
+        let _ = run(&cfg, &empty, None, false);
+
+        let err = Catalog::open_read_only(&cfg.papers_catalog_db())
+            .err()
+            .expect("preview migrated papers_catalog.db");
+        assert!(
+            matches!(err, bookrack_catalog::CatalogError::Verify(_)),
+            "{err:?}"
         );
     }
 }
