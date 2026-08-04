@@ -188,9 +188,8 @@ pub struct FindBooksArgs {
     /// Exact-equality match against the file format (`epub`, `pdf`).
     #[serde(default)]
     pub format: Option<String>,
-    /// Reserved hook for category-based filtering. Accepted on the
-    /// wire today but not honoured server-side; will be enabled in a
-    /// future release.
+    /// Match books carrying at least one of these category tags. An
+    /// empty list, like an absent one, imposes no category filter.
     #[serde(default)]
     pub categories: Option<Vec<String>>,
     /// Maximum number of books in this page.
@@ -2497,5 +2496,33 @@ mod tests {
             },
         ));
         assert_eq!(mapped.code, ErrorCode::INTERNAL_ERROR);
+    }
+
+    #[test]
+    fn the_find_books_schema_does_not_disclaim_the_category_filter() {
+        // A field's doc comment becomes that parameter's `description`
+        // in the published tool schema, which is all a client reads
+        // before deciding whether a parameter is worth sending. A
+        // disclaimer there makes an implemented, tested filter
+        // unreachable in practice, however the tool description and
+        // `docs/control-plane.md` word it.
+        let tool = super::BookrackServer::tool_router()
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == "library.find_books")
+            .expect("library.find_books is a published tool");
+        let schema = serde_json::to_string(&tool.input_schema).expect("serialise input schema");
+
+        for disclaimer in ["not honoured", "Reserved hook", "future release"] {
+            assert!(
+                !schema.contains(disclaimer),
+                "the parameter schema says {disclaimer:?} about a filter the server applies: \
+                 {schema}"
+            );
+        }
+        assert!(
+            schema.contains("categories"),
+            "the schema carries no `categories` parameter at all: {schema}"
+        );
     }
 }
