@@ -425,6 +425,16 @@ release workflow extracts the matching section verbatim from this file.
   A scripted install that silently picks a data root is worse than one
   that fails.
 
+- **A rejected answer to that question is asked again.** Typing a path
+  the wizard refuses — one inside an application bundle, one already
+  holding a library, one that is a file — ended the run, and the
+  operator's next move was to rerun all five steps to correct a typo.
+  The question is now re-asked, up to three times, printing the reason
+  each time; the third refusal ends the run with that reason, unchanged
+  by the fact that it was the last try. Only the interactive prompt
+  re-asks: `--data-dir` and `--non-interactive` still decide once,
+  because there is nobody there to ask.
+
 - **`doctor` warns when the data root already sits inside a bundle.**
   The guard above speaks only while the wizard runs, and the roots at
   risk were established before it existed. The `data root` row now

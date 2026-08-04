@@ -63,6 +63,12 @@ pub struct CliWizardDriver {
     console: Box<dyn Console>,
 }
 
+/// How many times step 1 asks before it gives up. A refused path is
+/// usually a typo, and retyping it beats rerunning the whole wizard;
+/// an unbounded loop would spin against a stdin already at end of file.
+// setting: internal -- how many tries one prompt allows, not a value to tune
+const MAX_DATA_ROOT_ATTEMPTS: usize = 3;
+
 impl CliWizardDriver {
     /// Drive the wizard against the process's own terminal.
     pub fn terminal(non_interactive: bool) -> Self {
@@ -70,6 +76,30 @@ impl CliWizardDriver {
             non_interactive,
             console: Box::new(TerminalConsole),
         }
+    }
+
+    /// Ask the data-root question once and judge the answer. An empty
+    /// answer takes `offered`; anything else is resolved against the
+    /// working directory. Renders nothing on success — the caller
+    /// echoes the choice, so a refused root never gets a `Using` line.
+    fn answer_data_root(
+        &self,
+        question: &str,
+        offered: Option<&PathBuf>,
+        force: bool,
+    ) -> Result<PathBuf> {
+        let typed = self.console.prompt(question)?;
+        let chosen = if typed.is_empty() {
+            offered.cloned().context(
+                "a data root path is required (this host has no portable layout \
+                 and no platform data directory to default to)",
+            )?
+        } else {
+            PathBuf::from(typed)
+        };
+        let abs = absolutise(&chosen)?;
+        validate_unused_or_force(&abs, force)?;
+        Ok(abs)
     }
 }
 
@@ -115,18 +145,23 @@ impl WizardDriver for CliWizardDriver {
             ),
             (None, None) => "      Where should books, indexes, and logs live? Path: ".to_string(),
         };
-        let typed = console.prompt(&question)?;
-        let chosen = if typed.is_empty() {
-            offered
-                .cloned()
-                .context("a data root path is required (this host has no portable layout and no platform data directory to default to)")?
-        } else {
-            PathBuf::from(typed)
-        };
-        let abs = absolutise(&chosen)?;
-        validate_unused_or_force(&abs, hint.force)?;
-        console.line(&format!("      Using {}", abs.display()));
-        Ok(abs)
+        let mut attempt = 1;
+        loop {
+            match self.answer_data_root(&question, offered, hint.force) {
+                Ok(abs) => {
+                    console.line(&format!("      Using {}", abs.display()));
+                    return Ok(abs);
+                }
+                // The last reason stands as the failure: re-asking is a
+                // convenience, and running out of tries must not reword
+                // what was wrong with the final answer.
+                Err(e) if attempt >= MAX_DATA_ROOT_ATTEMPTS => return Err(e),
+                Err(e) => {
+                    console.warn(&format!("      {e}"));
+                    attempt += 1;
+                }
+            }
+        }
     }
 
     /// Step 2: report the PDFium search. Warn-only: ingest of EPUB and
@@ -346,6 +381,10 @@ mod tests {
             self.captured.lock().expect("captured").clone()
         }
 
+        fn answers_left(&self) -> usize {
+            self.answers.lock().expect("answers").len()
+        }
+
         /// How many rendered lines contain `needle`. Counting rather
         /// than testing presence is what tells a re-ask from a single
         /// question.
@@ -470,7 +509,9 @@ mod tests {
     /// platform data directory could not be located at all.
     #[tokio::test]
     async fn an_empty_answer_fails_only_when_there_is_nothing_to_default_to() {
-        let script = Script::with_answers([""]);
+        // One answer per attempt: an empty answer is refused the same
+        // way each round, and the bound is what ends the question.
+        let script = Script::with_answers(["", "", ""]);
         let driver = scripted_driver(&script);
 
         let err = driver
@@ -491,13 +532,73 @@ mod tests {
         );
     }
 
+    /// A refused path is usually a typo. Retyping it beats rerunning
+    /// all five steps, which is what a bail from step 1 costs.
+    #[tokio::test]
+    async fn first_question_re_asks_after_a_refused_path() {
+        let script = Script::with_answers([
+            "/Applications/Bookrack.app/Contents/Resources/bookrack-data",
+            "/srv/books",
+        ]);
+        let driver = scripted_driver(&script);
+
+        let chosen = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect("the second answer is accepted");
+
+        assert_eq!(chosen, PathBuf::from("/srv/books"));
+        assert_eq!(
+            script.times_rendered("Press Enter to use"),
+            2,
+            "the question must be asked again: {:?}",
+            script.captured()
+        );
+        assert_eq!(
+            script.times_rendered("/Applications/Bookrack.app"),
+            1,
+            "the refusal must say why before re-asking: {:?}",
+            script.captured()
+        );
+    }
+
+    /// Bounded, so a driver reading a stdin already at end-of-file
+    /// stops rather than spins, and the reason the operator is left
+    /// with is the one from their last attempt.
+    #[tokio::test]
+    async fn the_first_question_gives_up_after_a_bounded_number_of_refusals() {
+        let script = Script::with_answers([
+            "/Applications/First.app/data",
+            "/Applications/Second.app/data",
+            "/Applications/Third.app/data",
+            "/srv/books",
+        ]);
+        let driver = scripted_driver(&script);
+
+        let err = driver
+            .step_data_root(interactive_hint(Some("/opt/state/bookrack/library")))
+            .await
+            .expect_err("the bound is reached");
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("/Applications/Third.app"),
+            "the last reason must be the one that stands: {rendered}"
+        );
+        assert_eq!(
+            script.answers_left(),
+            1,
+            "a fourth answer must never be asked for"
+        );
+    }
+
     /// The guard judges the offered default too. Were the suggested
     /// root ever moved beside the running binary, on macOS that lands
     /// inside `Bookrack.app`, and the wizard must refuse it rather than
     /// quietly write a library that the next upgrade deletes.
     #[tokio::test]
     async fn an_offered_default_inside_a_bundle_is_refused_not_used() {
-        let script = Script::with_answers([""]);
+        let script = Script::with_answers(["", "", ""]);
         let driver = scripted_driver(&script);
         let inside = "/Applications/Bookrack.app/Contents/Resources/bookrack-data";
 
