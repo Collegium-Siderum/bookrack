@@ -391,9 +391,12 @@ the exit-code bucket does not distinguish the two.
   scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
   catalog snapshot for a bug attachment. Scrubbed of local paths and
   titles unless `no_scrub` is set. `scrub_gaps` names the redactions
-  that had no input to work from — `["home_dir"]` when the host
-  exposed no home directory — so a caller can warn before the bundle
-  leaves the machine; it is empty on full coverage and empty when
+  that had no input to work from, or had one worth doubting:
+  `["home_dir"]` when the host exposed no home directory at all, and
+  `["home_dir_unverified"]` when `HOME` named a directory that does not
+  exist, which leaves rule 3 folding a prefix nothing in the bundle
+  begins with. Either way a caller can warn before the bundle leaves
+  the machine; the list is empty on full coverage and empty when
   `scrubbed` is `false`.
 - `tray.focus` — no params; `{ ok: true }`. Signals one waiter on the
   daemon's focus notification, which a GUI host attached in-process

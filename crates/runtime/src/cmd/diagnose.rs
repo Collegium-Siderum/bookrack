@@ -31,14 +31,23 @@ pub fn run(cfg: &Config, out: Option<PathBuf>, days: u32, no_scrub: bool) -> Res
 /// gap has to be visible before it is sent, not discoverable inside
 /// the tarball afterwards.
 fn scrub_gap_warning(gaps: &[&str]) -> Option<String> {
-    if !gaps.contains(&bookrack_diagnose::SCRUB_GAP_HOME_DIR) {
-        return None;
+    let mut warning = String::new();
+    if gaps.contains(&bookrack_diagnose::SCRUB_GAP_HOME_DIR) {
+        warning.push_str(
+            "warning: cannot determine the home directory; home paths are not redacted\n  \
+             Set HOME and run again, or review the bundle before sending it.\n",
+        );
     }
-    Some(
-        "warning: cannot determine the home directory; home paths are not redacted\n  \
-         Set HOME and run again, or review the bundle before sending it.\n"
-            .to_string(),
-    )
+    if gaps.contains(&bookrack_diagnose::SCRUB_GAP_HOME_DIR_UNVERIFIED) {
+        warning.push_str(
+            "warning: HOME names a directory that does not exist; home paths outside \
+             the generic user roots are not redacted\n  \
+             The redaction folded the path HOME gave, which nothing on this machine \
+             lives under. Correct HOME and run again, or review the bundle before \
+             sending it.\n",
+        );
+    }
+    (!warning.is_empty()).then_some(warning)
 }
 
 #[cfg(test)]
@@ -55,6 +64,45 @@ mod tests {
         let summary = warning.lines().next().unwrap();
         assert!(!summary.contains("Set HOME"));
         assert!(warning.contains("Set HOME and run again"));
+    }
+
+    /// The redaction ran here, against a prefix the host does not
+    /// have, so the warning must not repeat the "cannot determine"
+    /// wording: the operator's next step is different, and a bundle
+    /// that claims full coverage while carrying home paths is worse
+    /// than one that admits it found no home at all.
+    #[test]
+    fn an_unverified_home_warns_in_its_own_words() {
+        let warning = scrub_gap_warning(&[bookrack_diagnose::SCRUB_GAP_HOME_DIR_UNVERIFIED])
+            .expect("an unverified home warns");
+        let summary = warning.lines().next().expect("a summary line");
+        assert!(
+            summary.contains("HOME") && summary.contains("does not exist"),
+            "the summary must state which input is doubted: {summary:?}"
+        );
+        assert!(
+            !summary.contains("cannot determine the home directory"),
+            "a home that resolved is not a home that could not be found: {summary:?}"
+        );
+        assert!(
+            warning.contains("home paths"),
+            "the consequence for the bundle is the point: {warning:?}"
+        );
+    }
+
+    /// Both shortfalls cannot occur together — a home is either
+    /// unresolved or resolved from somewhere — but the renderer takes
+    /// a list, and a list it silently drops half of is the failure
+    /// mode worth pinning.
+    #[test]
+    fn every_gap_in_the_list_reaches_the_operator() {
+        let warning = scrub_gap_warning(&[
+            bookrack_diagnose::SCRUB_GAP_HOME_DIR,
+            bookrack_diagnose::SCRUB_GAP_HOME_DIR_UNVERIFIED,
+        ])
+        .expect("two gaps warn");
+        assert!(warning.contains("cannot determine the home directory"));
+        assert!(warning.contains("does not exist"));
     }
 
     #[test]

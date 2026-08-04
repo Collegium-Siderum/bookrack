@@ -303,10 +303,14 @@ issue attachments. The scrubber removes local paths and book titles;
 A redaction whose input the host does not expose is reported rather
 than skipped quietly: the command warns on stderr, and the bundle's
 `manifest.json` lists the shortfall under `scrub_gaps` next to
-`scrubbed`. The one case today is a host that exposes no home
-directory at all — neither `HOME` nor the platform lookup — which
-leaves home paths outside the generic user-root patterns unredacted.
-Fix it by setting `HOME` and running again, or read the bundle before
+`scrubbed`. There are two cases, and both leave home paths outside the
+generic user-root patterns unredacted. A host that exposes no home
+directory at all — neither `HOME` nor the platform lookup — reports
+`home_dir`. A `HOME` that names a directory this machine does not have
+reports `home_dir_unverified`: the redaction ran, against a prefix
+nothing lives under, and `HOME` is writable by anything that can start
+the process, a `.env` above the working directory included. Fix either
+by correcting `HOME` and running again, or read the bundle before
 attaching it.
 
 ## Observability

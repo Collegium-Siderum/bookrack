@@ -232,6 +232,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A wrong `HOME` made `bookrack diagnose` claim a coverage it did not
+  have.** The scrubber takes its home-directory prefix from `HOME`
+  first, and reported a gap only when no home could be found at all. A
+  `HOME` naming somewhere else — a stale export, a `.env` above the
+  working directory — therefore had rule 3 folding a prefix nothing in
+  the bundle begins with, while `manifest.json` said `scrubbed: true`
+  with an empty `scrub_gaps`. The receiver read that as full coverage.
+
+  A `HOME` that names a directory this machine does not have now
+  reports the `home_dir_unverified` gap, and `bookrack diagnose` warns
+  in its own words before the bundle is attached anywhere. The narrower
+  case stays unclaimed on purpose: a `HOME` pointing at some other
+  directory that does exist cannot be told from a correct one without a
+  passwd lookup.
+
 - **An `HTTP_PROXY` in the environment captured the calls to this
   machine's own services.** `reqwest` reads the system proxy variables
   when a client is built, and the matcher underneath it exempts nothing

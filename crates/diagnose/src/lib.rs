@@ -22,7 +22,7 @@ pub mod scrub;
 pub mod tarball;
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bookrack_config::Config;
@@ -91,6 +91,16 @@ pub enum HomeSource {
 /// The `scrub_gaps` token naming an unresolved home directory.
 pub const SCRUB_GAP_HOME_DIR: &str = "home_dir";
 
+/// The `scrub_gaps` token naming a home directory taken from `HOME`
+/// that does not exist on this machine.
+///
+/// The redaction ran, so it is not the same shortfall as
+/// [`SCRUB_GAP_HOME_DIR`]: rule 3 folded a prefix, just not one this
+/// host has. Whatever the real home directory is, it went through
+/// unredacted except where the generic user-root patterns of rule 1
+/// happened to catch it.
+pub const SCRUB_GAP_HOME_DIR_UNVERIFIED: &str = "home_dir_unverified";
+
 /// Summary returned by [`collect`].
 #[derive(Debug)]
 pub struct CollectReport {
@@ -120,7 +130,7 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
     let bundle_dir = staging.path().join(format!("diagnose-{unix_ms}"));
     std::fs::create_dir_all(&bundle_dir)?;
 
-    let (scrubber, home_source) = if opts.scrub {
+    let (scrubber, home_source, home_prefix) = if opts.scrub {
         let (home, source) = resolve_home(std::env::var_os("HOME"), dirs::home_dir);
         let data = bookrack_audit_profile::AuditData::load_from(&cfg.audit_rules_dir())
             .unwrap_or_else(|_| bookrack_audit_profile::AuditData::default_data());
@@ -129,11 +139,11 @@ pub fn collect(cfg: &Config, opts: &Options) -> Result<CollectReport> {
             home.as_deref(),
             data.scrub_book_extensions,
         );
-        (scrubber, Some(source))
+        (scrubber, Some(source), home)
     } else {
-        (Scrubber::passthrough(), None)
+        (Scrubber::passthrough(), None, None)
     };
-    let gaps = scrub_gaps(home_source);
+    let gaps = scrub_gaps(home_source, home_prefix.as_deref(), |p| p.is_dir());
 
     let since = since_ts(now, opts.days);
 
@@ -189,13 +199,34 @@ fn resolve_home(
     }
 }
 
-/// Name every redaction the scrubber could not perform. `None` means
-/// the scrubber did not run at all, which `scrubbed: false` already
+/// Name every redaction the scrubber could not perform, or performed
+/// against a prefix worth doubting. `home` of `None` means the
+/// scrubber did not run at all, which `scrubbed: false` already
 /// states — a bundle nobody redacted has no partial coverage to
 /// report.
-fn scrub_gaps(home: Option<HomeSource>) -> Vec<&'static str> {
+///
+/// `prefix` is the path rule 3 substitutes and `is_dir` decides
+/// whether it names a directory here, injected so the judgement is
+/// testable without a home directory to arrange.
+fn scrub_gaps(
+    home: Option<HomeSource>,
+    prefix: Option<&Path>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Vec<&'static str> {
     match home {
         Some(HomeSource::Unresolved) => vec![SCRUB_GAP_HOME_DIR],
+        // Only the environment's value is doubted, and only for
+        // naming nothing. `HOME` is writable by anyone who can start
+        // the process — a shell export, a `.env` two directories up —
+        // and a wrong one leaves rule 3 folding a prefix no path in
+        // the bundle begins with, silently. A `HOME` pointing at some
+        // other directory that does exist is indistinguishable from a
+        // correct one without a passwd lookup, so it is not claimed
+        // here; what is caught is the shape a mistyped or stale value
+        // usually takes.
+        Some(HomeSource::Env) if prefix.is_some_and(|p| !is_dir(p)) => {
+            vec![SCRUB_GAP_HOME_DIR_UNVERIFIED]
+        }
         _ => Vec::new(),
     }
 }
@@ -254,16 +285,59 @@ mod tests {
         assert_eq!(source, HomeSource::Unresolved);
     }
 
+    /// A home directory that is there, from either source, is full
+    /// coverage.
     #[test]
-    fn an_unresolved_home_is_the_only_state_that_reports_a_gap() {
-        assert_eq!(scrub_gaps(Some(HomeSource::Env)), Vec::<&str>::new());
-        assert_eq!(scrub_gaps(Some(HomeSource::Platform)), Vec::<&str>::new());
+    fn a_home_directory_that_exists_reports_no_gap() {
+        let home = Some(Path::new(FAKE_HOME));
+        let exists = |_: &Path| true;
         assert_eq!(
-            scrub_gaps(Some(HomeSource::Unresolved)),
+            scrub_gaps(Some(HomeSource::Env), home, exists),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            scrub_gaps(Some(HomeSource::Platform), home, exists),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_home_at_all_reports_the_unredacted_gap() {
+        assert_eq!(
+            scrub_gaps(Some(HomeSource::Unresolved), None, |_| false),
             vec![SCRUB_GAP_HOME_DIR]
         );
         // `--no-scrub`: nothing was redacted, so nothing is a gap.
-        assert_eq!(scrub_gaps(None), Vec::<&str>::new());
+        assert_eq!(scrub_gaps(None, None, |_| false), Vec::<&str>::new());
+    }
+
+    /// The case the environment opens: `HOME` names a path this host
+    /// does not have, so rule 3 folds a prefix nothing in the bundle
+    /// starts with, and the real home directory is left in the text.
+    /// A manifest reporting no gap here tells the receiver the bundle
+    /// is covered when it is not.
+    #[test]
+    fn a_home_from_the_environment_that_does_not_exist_reports_a_gap() {
+        assert_eq!(
+            scrub_gaps(Some(HomeSource::Env), Some(Path::new(FAKE_HOME)), |_| false),
+            vec![SCRUB_GAP_HOME_DIR_UNVERIFIED],
+        );
+    }
+
+    /// The platform lookup reads the passwd database, not a variable
+    /// anyone can set, so a path it returns is not doubted for merely
+    /// being absent — an unwritable or not-yet-created home is not the
+    /// wrong prefix, it is the right one.
+    #[test]
+    fn a_platform_resolved_home_is_not_doubted_for_being_absent() {
+        assert_eq!(
+            scrub_gaps(
+                Some(HomeSource::Platform),
+                Some(Path::new(FAKE_HOME)),
+                |_| false
+            ),
+            Vec::<&str>::new(),
+        );
     }
 
     #[test]
