@@ -167,31 +167,74 @@ pub fn load_dotenv() -> Option<DotenvLoad> {
     let before: BTreeSet<String> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .collect();
-    let path = dotenvy::dotenv().ok()?;
+    let path = find_dotenv(&std::env::current_dir().ok()?)?;
     let entries: Vec<(String, String)> = dotenvy::from_path_iter(&path)
         .ok()?
         .filter_map(Result::ok)
         .collect();
-    let supplied: BTreeSet<String> = entries
-        .iter()
-        .filter(|(key, _)| !before.contains(key))
-        .map(|(key, _)| key.clone())
-        .collect();
-    let mut eclipsed: Vec<(String, String)> = entries
-        .into_iter()
-        .filter(|(key, _)| before.contains(key))
-        .collect();
+
+    let mut supplied: BTreeSet<String> = BTreeSet::new();
+    let mut rejected: BTreeSet<String> = BTreeSet::new();
+    let mut eclipsed: Vec<(String, String)> = Vec::new();
+    for (key, value) in entries {
+        if !admits(&key) {
+            rejected.insert(key);
+            continue;
+        }
+        if before.contains(&key) {
+            eclipsed.push((key, value));
+            continue;
+        }
+        // A repeated key keeps its first line: by the time the second
+        // is seen the environment already holds the first, which is
+        // the same rule a gap-filling load follows anywhere else.
+        if supplied.insert(key.clone()) {
+            // SAFETY: this runs as the entry point's first statement,
+            // before the program spawns a thread or a task and before
+            // anything reads a variable. That placement is the whole
+            // contract of this function and is why it may not be
+            // called from a library.
+            unsafe { std::env::set_var(&key, &value) };
+        }
+    }
     eclipsed.sort();
     eclipsed.dedup_by(|a, b| a.0 == b.0);
-    let supplied = supplied.into_iter().collect();
 
     let load = DotenvLoad {
         path,
-        supplied,
+        supplied: supplied.into_iter().collect(),
         eclipsed,
+        rejected: rejected.into_iter().collect(),
     };
     let _ = DOTENV_LOAD.set(load.clone());
     Some(load)
+}
+
+/// The nearest `.env` at or above `from`, as `dotenvy` would find it.
+///
+/// The search is here rather than in the library because admission
+/// happens per key: a loader that let `dotenvy` apply the file first
+/// would have to take variables back out of the environment, and a
+/// variable briefly set is one another thread can read.
+fn find_dotenv(from: &Path) -> Option<PathBuf> {
+    from.ancestors()
+        .map(|dir| dir.join(".env"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Whether `key` may be written into the process environment.
+///
+/// [`ENV_PREFIX`] is this workspace's own surface, and
+/// [`ADMITTED_FOREIGN_ENV`] is the short list of variables that belong
+/// to somebody else and are still worth setting here. Everything else
+/// is read and dropped: `.env` is found by searching upward from the
+/// working directory, so admitting every name means any directory a
+/// command is run from can rewrite `HOME`, `TMPDIR`, or `CI` for the
+/// process — none of which anyone sets on purpose in a project's
+/// configuration file, and each of which changes an answer somewhere
+/// far from configuration.
+fn admits(key: &str) -> bool {
+    key.starts_with(ENV_PREFIX) || ADMITTED_FOREIGN_ENV.contains(&key)
 }
 
 /// What a dotenv load did: which file, and which keys it supplied
@@ -212,6 +255,14 @@ pub struct DotenvLoad {
     /// set in both places reports only the winner, and the file's line
     /// looks like it was never written rather than like it lost.
     pub eclipsed: Vec<(String, String)>,
+    /// The keys the file declares that [`admits`] refused, sorted and
+    /// without repeats.
+    ///
+    /// The value is not kept: it was never applied to anything, and a
+    /// refused line is as likely to be a mistyped variable name as a
+    /// deliberate one. What the operator needs is that the line had no
+    /// effect, which the name alone says.
+    pub rejected: Vec<String>,
 }
 
 /// The prefix every variable this workspace defines carries.
@@ -219,6 +270,38 @@ pub struct DotenvLoad {
 /// A key without it is one `.env` reaches but no knob row accounts
 /// for — see [`DotenvLoad::foreign`].
 pub const ENV_PREFIX: &str = "BOOKRACK_";
+
+/// The variables outside [`ENV_PREFIX`] that `.env` may still set.
+///
+/// Each is one this program's own behaviour depends on, and each has a
+/// surface where the shell is not available to set it: a desktop shell
+/// started from a file manager inherits no `export`, and `.env` is then
+/// the only place a proxy or a certificate bundle can be named at all.
+///
+/// The proxy and certificate names are read by the HTTP stack rather
+/// than by this workspace, and both spellings are listed because the
+/// matcher underneath `reqwest` reads both. `NO_COLOR` is read by the
+/// CLI's own renderer, and `RUST_BACKTRACE` by the panic hook the CLI
+/// installs — which prints its name as the remedy, so a file that
+/// dropped it would contradict the program's own advice.
+///
+/// The list is deliberately short and deliberately not open-ended:
+/// growing it is a decision, and the cost of leaving a name off it is
+/// a line in `config effective`, not a silent failure.
+pub const ADMITTED_FOREIGN_ENV: &[&str] = &[
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_COLOR",
+    "NO_PROXY",
+    "RUST_BACKTRACE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+];
 
 /// What a dotenv load did to one variable outside [`ENV_PREFIX`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +311,9 @@ pub enum ForeignStatus {
     /// The real environment already carried one, so the file's line was
     /// read and discarded.
     Eclipsed,
+    /// The name is not one `.env` may set, so the line was read and
+    /// dropped without ever reaching the environment.
+    Rejected,
 }
 
 impl ForeignStatus {
@@ -236,6 +322,7 @@ impl ForeignStatus {
         match self {
             ForeignStatus::Set => "set",
             ForeignStatus::Eclipsed => "eclipsed",
+            ForeignStatus::Rejected => "rejected",
         }
     }
 }
@@ -267,12 +354,10 @@ impl DotenvLoad {
     /// Every variable this load names that lies outside [`ENV_PREFIX`],
     /// sorted by name.
     ///
-    /// `.env` is applied to the real process environment, so its reach
-    /// is every variable name, not the ones this workspace defines. A
-    /// proxy that redirects each embedding call, a `HOME` the diagnose
-    /// scrubber then trusts, an `XDG_*` that moves the managed
-    /// directories: each is a value no knob row can report, because no
-    /// knob owns it. This is the list that says the file set them.
+    /// `.env` names variables this workspace does not define — a proxy
+    /// it is allowed to set, a `HOME` it is not — and no knob row can
+    /// report one, because no knob owns the name. This is the list that
+    /// says what the file did with each.
     pub fn foreign(&self) -> Vec<ForeignVar<'_>> {
         let mut out: Vec<ForeignVar<'_>> = self
             .supplied
@@ -282,6 +367,11 @@ impl DotenvLoad {
                 self.eclipsed
                     .iter()
                     .map(|(key, _)| (key, ForeignStatus::Eclipsed)),
+            )
+            .chain(
+                self.rejected
+                    .iter()
+                    .map(|key| (key, ForeignStatus::Rejected)),
             )
             .filter(|(key, _)| !key.starts_with(ENV_PREFIX))
             .map(|(key, status)| ForeignVar {
@@ -5192,23 +5282,20 @@ mod tests {
         assert!(should_load_dotenv(|_| None));
     }
 
-    /// A load reports what it did outside the workspace's prefix, and
-    /// only that: a key with the prefix has a knob row of its own, and
-    /// listing it twice would make the section look like a second
-    /// answer to the same question.
+    /// A load reports each of its three outcomes outside the
+    /// workspace's prefix, and only those: a key with the prefix has a
+    /// knob row of its own, and listing it twice would make the
+    /// section look like a second answer to the same question.
     #[test]
-    fn foreign_lists_both_halves_of_the_load_and_skips_the_prefix() {
+    fn foreign_lists_every_outcome_and_skips_the_prefix() {
         let load = DotenvLoad {
             path: PathBuf::from("/somewhere/.env"),
-            supplied: vec![
-                "BOOKRACK_DATA_DIR".to_string(),
-                "HTTP_PROXY".to_string(),
-                "HOME".to_string(),
-            ],
+            supplied: vec!["BOOKRACK_DATA_DIR".to_string(), "HTTP_PROXY".to_string()],
             eclipsed: vec![
                 ("BOOKRACK_LOG".to_string(), "debug".to_string()),
-                ("TMPDIR".to_string(), "/tmp/other".to_string()),
+                ("NO_COLOR".to_string(), "1".to_string()),
             ],
+            rejected: vec!["HOME".to_string(), "TMPDIR".to_string()],
         };
 
         let foreign = load.foreign();
@@ -5218,12 +5305,13 @@ mod tests {
                 .map(|var| (var.key, var.status))
                 .collect::<Vec<_>>(),
             vec![
-                ("HOME", ForeignStatus::Set),
+                ("HOME", ForeignStatus::Rejected),
                 ("HTTP_PROXY", ForeignStatus::Set),
-                ("TMPDIR", ForeignStatus::Eclipsed),
+                ("NO_COLOR", ForeignStatus::Eclipsed),
+                ("TMPDIR", ForeignStatus::Rejected),
             ],
-            "the section must be sorted, cover both halves, and leave \
-             the prefixed keys to their own rows",
+            "the section must be sorted, cover all three outcomes, and \
+             leave the prefixed keys to their own rows",
         );
     }
 
@@ -5233,13 +5321,56 @@ mod tests {
     fn foreign_matches_the_prefix_at_the_start_only() {
         let load = DotenvLoad {
             path: PathBuf::from("/somewhere/.env"),
-            supplied: vec!["OLD_BOOKRACK_DATA_DIR".to_string()],
+            supplied: Vec::new(),
             eclipsed: Vec::new(),
+            rejected: vec!["OLD_BOOKRACK_DATA_DIR".to_string()],
         };
         assert_eq!(
             load.foreign().iter().map(|var| var.key).collect::<Vec<_>>(),
             vec!["OLD_BOOKRACK_DATA_DIR"],
         );
+        assert!(
+            !admits("OLD_BOOKRACK_DATA_DIR"),
+            "the admission rule must read the prefix at the start too",
+        );
+    }
+
+    /// The workspace's own surface, and the short list of names that
+    /// belong to somebody else.
+    #[test]
+    fn admission_covers_the_prefix_and_the_named_exceptions() {
+        for key in [
+            "BOOKRACK_DATA_DIR",
+            "BOOKRACK_ANYTHING_NOT_DEFINED_YET",
+            "HTTP_PROXY",
+            "http_proxy",
+            "NO_PROXY",
+            "SSL_CERT_FILE",
+            "NO_COLOR",
+            "RUST_BACKTRACE",
+        ] {
+            assert!(admits(key), "{key} must be admitted");
+        }
+    }
+
+    /// The names the file has no business setting — every one of them
+    /// a variable that changes an answer far from configuration.
+    #[test]
+    fn admission_refuses_the_variables_that_reach_past_configuration() {
+        for key in [
+            "HOME",
+            "TMPDIR",
+            "CI",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "PATH",
+            // Case is not normalised: an admitted name is admitted as
+            // spelled, and these two spellings are nobody's convention.
+            "Http_Proxy",
+            "no_color",
+        ] {
+            assert!(!admits(key), "{key} must not be admitted");
+        }
     }
 
     #[test]

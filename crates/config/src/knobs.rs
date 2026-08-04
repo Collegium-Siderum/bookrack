@@ -418,6 +418,7 @@ mod tests {
             path: PathBuf::from(path),
             supplied: supplied.iter().map(|k| k.to_string()).collect(),
             eclipsed: Vec::new(),
+            rejected: Vec::new(),
         }
     }
 
@@ -428,6 +429,7 @@ mod tests {
             path: PathBuf::from(path),
             supplied: Vec::new(),
             eclipsed: vec![(key.to_string(), value.to_string())],
+            rejected: Vec::new(),
         }
     }
 

@@ -10,24 +10,19 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
-- **`.env` reaches every variable name, and `config effective` now says
-  which ones it reached.** The file is applied to the real process
-  environment, so a line in it is not confined to the `BOOKRACK_*`
-  knobs `.env.example` lists: `HTTP_PROXY` routes every embedding
-  request and every installer download through a proxy, `XDG_*` moves
-  the managed directories, and `HOME` changes the prefix `bookrack
-  diagnose` redacts against. None of those is a knob, so no row in the
-  table could report one, and the questions they produce — why did my
-  embedding call leave the machine, why is this bundle unredacted — had
-  no configuration surface that could answer them.
+- **`config effective` reports what `.env` did outside bookrack's own
+  prefix.** The file is applied to the real process environment, so a
+  line in it need not name a `BOOKRACK_*` knob — a proxy is the common
+  case, and a proxy is not a knob, so no row in the table could report
+  one. The question it produces, why did that call go where it went,
+  had no configuration surface that could answer it.
 
   The report ends with the variables the file named outside the prefix,
-  each marked as set in this process or as read and discarded because
-  the environment already carried one. Names only, never values: a
-  foreign variable is as likely to carry a credential as it is to be
-  `NO_COLOR`. `--json` carries the list as `dotenv_foreign` and names
-  the file as `dotenv_path`. Nothing about which variables take effect
-  changes.
+  each marked `set` in this process, `eclipsed` because the environment
+  already carried one, or `rejected` because the name is not one `.env`
+  may set. Names only, never values: a foreign variable is as likely to
+  carry a credential as it is to be `NO_COLOR`. `--json` carries the
+  list as `dotenv_foreign` and names the file as `dotenv_path`.
 
 - **A pipeline run that dies is no longer indistinguishable from one
   that is working.** Every command registering a `pipeline_runs` row
@@ -229,6 +224,28 @@ release workflow extracts the matching section verbatim from this file.
   values are now `running` / `ok` / `error` / `abandoned`, exported as
   constants so the vocabulary has one definition rather than a literal
   per call site.
+
+### Changed
+
+- **`.env` may no longer set any variable it likes.** The file is
+  applied to the real process environment, and dotenv finds it by
+  searching *upward from the working directory* — so an unrestricted
+  file let whichever directory a command was run from rewrite `HOME`,
+  `TMPDIR`, `XDG_CONFIG_HOME`, or `CI` for that process. Each of those
+  changes an answer far from configuration: which paths a diagnose
+  bundle redacts, where the registry and the downloaded reranker live,
+  whether a missing native dependency is a skip or a failure.
+
+  Admitted now: every `BOOKRACK_*` name, the proxy variables
+  (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, in either
+  case), `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NO_COLOR`, and
+  `RUST_BACKTRACE`. Those stay because there is a surface with no other
+  way to reach them — a desktop shell started from a file manager
+  inherits no `export`. Every other name is read out of the file and
+  dropped, and appears in `config effective` marked `rejected`, so a
+  line that stopped working says so instead of failing silently. A
+  setup that relied on `.env` for something else — a `HOME` override, a
+  `TMPDIR` — must export it from the environment that starts bookrack.
 
 ### Fixed
 

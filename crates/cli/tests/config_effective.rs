@@ -72,14 +72,15 @@ fn foreign_status(report: &serde_json::Value, key: &str) -> Option<String> {
         .and_then(|e| e["status"].as_str().map(str::to_string))
 }
 
-/// `.env` writes the real process environment, so it reaches variables
-/// no knob row can account for. The report names them: without this
-/// section a proxy or a `HOME` the file installed is invisible on every
-/// configuration surface the program has.
+/// `.env` reaches variables no knob row can account for. The report
+/// names them: without this section a proxy the file installed is
+/// invisible on every configuration surface the program has.
 ///
 /// Both halves are asserted, because they are different facts about the
 /// file: a line that reached the environment, and a line the
-/// environment got to first and that was therefore discarded.
+/// environment got to first and that was therefore discarded. Both
+/// names are admitted ones, so what is under test is the reporting and
+/// not the admission rule.
 #[tokio::test]
 async fn the_report_names_the_process_variables_dotenv_set_outside_the_prefix() -> Result<()> {
     let sandbox = Sandbox::new();
@@ -87,27 +88,22 @@ async fn the_report_names_the_process_variables_dotenv_set_outside_the_prefix() 
     std::fs::write(
         sandbox.cwd().join(".env"),
         format!(
-            "BOOKRACK_DATA_DIR={}\nEXAMPLE_FOREIGN_KNOB=from-the-file\n\
-             EXAMPLE_ECLIPSED_KNOB=from-the-file\n",
+            "BOOKRACK_DATA_DIR={}\nHTTP_PROXY=http://127.0.0.1:9\nNO_COLOR=from-the-file\n",
             root.display()
         ),
     )?;
+    let env = [("NO_COLOR", "from-the-environment")];
 
-    let out = run(
-        &sandbox,
-        &["--json"],
-        &[("EXAMPLE_ECLIPSED_KNOB", "from-the-environment")],
-    )
-    .await?;
+    let out = run(&sandbox, &["--json"], &env).await?;
     let report = report(&out)?;
 
     assert_eq!(
-        foreign_status(&report, "EXAMPLE_FOREIGN_KNOB").as_deref(),
+        foreign_status(&report, "HTTP_PROXY").as_deref(),
         Some("set"),
         "a variable the file installed in the process is unreported: {report}"
     );
     assert_eq!(
-        foreign_status(&report, "EXAMPLE_ECLIPSED_KNOB").as_deref(),
+        foreign_status(&report, "NO_COLOR").as_deref(),
         Some("eclipsed"),
         "a line the environment outranked is unreported: {report}"
     );
@@ -119,16 +115,93 @@ async fn the_report_names_the_process_variables_dotenv_set_outside_the_prefix() 
          variable: {report}"
     );
 
-    let human = run(
-        &sandbox,
-        &[],
-        &[("EXAMPLE_ECLIPSED_KNOB", "from-the-environment")],
-    )
-    .await?;
+    let human = run(&sandbox, &[], &env).await?;
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(
-        text.contains("EXAMPLE_FOREIGN_KNOB"),
+        text.contains("HTTP_PROXY"),
         "the human report omits what the JSON one carries:\n{text}"
+    );
+
+    Ok(())
+}
+
+/// A variable outside the admitted set is read out of the file and
+/// then dropped, rather than installed in the process.
+///
+/// `CI` is the case with a consequence this report can show: the PDFium
+/// gate reads it, so a `CI` that reached the environment turns up as
+/// the winning layer of the `pdfium.required` row. The row is the
+/// independent witness here — the reach section alone would only be
+/// the loader repeating its own claim.
+#[tokio::test]
+async fn a_variable_outside_the_admitted_set_never_reaches_the_process() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("main");
+    std::fs::write(
+        sandbox.cwd().join(".env"),
+        format!(
+            "BOOKRACK_DATA_DIR={}\nCI=1\nEXAMPLE_FOREIGN_KNOB=from-the-file\n",
+            root.display()
+        ),
+    )?;
+
+    // Removed rather than left alone: on a host that exports `CI`, the
+    // file's line would lose to the environment and this would pass
+    // without the admission rule doing anything.
+    let mut spawn = bookrack_cmd!(&sandbox).without_data_dir().without_env("CI");
+    spawn = spawn.without_env("EXAMPLE_FOREIGN_KNOB");
+    let out = tokio::process::Command::from(spawn.build())
+        .args(["config", "effective", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let report = report(&out)?;
+
+    let pdfium = row(&report, "pdfium.required").expect("no pdfium.required row");
+    assert_ne!(
+        pdfium["site"], "CI",
+        "the file's CI line reached the process: {pdfium}"
+    );
+    assert_eq!(
+        pdfium["value"], "false",
+        "the file's CI line reached the process and flipped the gate: {pdfium}"
+    );
+
+    for key in ["CI", "EXAMPLE_FOREIGN_KNOB"] {
+        assert_eq!(
+            foreign_status(&report, key).as_deref(),
+            Some("rejected"),
+            "{key} must be reported as read and dropped: {report}"
+        );
+    }
+
+    Ok(())
+}
+
+/// The admitted names are admitted: a proxy is the reason `.env` is
+/// the only configuration surface a desktop launch has, and it still
+/// reaches the process.
+#[tokio::test]
+async fn an_admitted_variable_outside_the_prefix_still_reaches_the_process() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let root = sandbox.data_root("main");
+    std::fs::write(
+        sandbox.cwd().join(".env"),
+        format!(
+            "BOOKRACK_DATA_DIR={}\nHTTP_PROXY=http://127.0.0.1:9\n",
+            root.display()
+        ),
+    )?;
+
+    let out = run(&sandbox, &["--json"], &[]).await?;
+    let report = report(&out)?;
+
+    assert_eq!(
+        foreign_status(&report, "HTTP_PROXY").as_deref(),
+        Some("set"),
+        "a proxy written into .env must still take effect: {report}"
     );
 
     Ok(())

@@ -338,8 +338,7 @@ fn print_human(
     if !foreign.is_empty() {
         println!();
         println!(
-            "{} writes the process environment, so it also set these variables, \
-             which no row above owns:",
+            "{} also names these variables, which no row above owns:",
             dotenv_path.unwrap_or(".env")
         );
         let mut table = RowTable::new(["variable", "what the file did"]);
@@ -351,6 +350,7 @@ fn print_human(
                     ForeignStatus::Eclipsed => {
                         "read and discarded; the environment already had one"
                     }
+                    ForeignStatus::Rejected => "dropped; .env may not set this name",
                 },
             ]);
         }

@@ -69,6 +69,7 @@ pub struct Spawn {
     daemon_state_dir: PathBuf,
     ollama_url: Option<String>,
     extra: Vec<(OsString, OsString)>,
+    removed: Vec<OsString>,
     stdin_pipe: bool,
 }
 
@@ -91,6 +92,7 @@ impl Spawn {
             daemon_state_dir: sandbox.daemon_state_dir(),
             ollama_url: None,
             extra: Vec::new(),
+            removed: Vec::new(),
             stdin_pipe: false,
         }
     }
@@ -148,6 +150,21 @@ impl Spawn {
     pub fn extra_env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Spawn {
         self.extra
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Keep `key` out of the child's environment, whatever the parent
+    /// carries.
+    ///
+    /// The sweep covers the `BOOKRACK_*` names, because those are the
+    /// ones this project keeps adding. A test whose subject is what
+    /// happens when some *other* variable is absent — `CI`, a proxy —
+    /// cannot state that as a fixture otherwise: it would pass on a
+    /// developer's machine and prove nothing on a host that exports
+    /// the variable. Removal is applied after every value this builder
+    /// sets, so naming a key here and setting it too leaves it unset.
+    pub fn without_env(mut self, key: impl AsRef<OsStr>) -> Spawn {
+        self.removed.push(key.as_ref().to_os_string());
         self
     }
 
@@ -219,6 +236,9 @@ impl Spawn {
         }
         for (key, value) in vars {
             cmd.env(key, value);
+        }
+        for key in self.removed {
+            cmd.env_remove(key);
         }
         cmd.current_dir(self.cwd);
         if self.stdin_pipe {
@@ -321,6 +341,36 @@ mod tests {
                 "{key} reached the child instead of being swept",
             );
         }
+    }
+
+    /// A named removal reaches a variable the sweep does not: no
+    /// prefix, and the parent carrying it is exactly the case the
+    /// method exists for.
+    #[test]
+    fn a_named_removal_takes_out_a_variable_the_sweep_leaves_alone() {
+        let sandbox = Sandbox::new();
+        let host =
+            hostile_host().chain(std::iter::once((OsString::from("CI"), OsString::from("1"))));
+        let envs = envs(&spawn(&sandbox).without_env("CI").build_from(host));
+        assert_eq!(
+            envs.get("CI"),
+            Some(&None),
+            "a named removal must reach the child as a removal",
+        );
+    }
+
+    /// Removal is the last word, so a test that removes a variable it
+    /// also set does not silently get the value back.
+    #[test]
+    fn a_named_removal_outranks_a_value_the_builder_set() {
+        let sandbox = Sandbox::new();
+        let envs = envs(
+            &spawn(&sandbox)
+                .extra_env("CI", "1")
+                .without_env("CI")
+                .build_from(hostile_host()),
+        );
+        assert_eq!(envs.get("CI"), Some(&None));
     }
 
     /// The passthrough list is exactly the two PDFium names: they are

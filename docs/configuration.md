@@ -253,14 +253,33 @@ supplied and a higher rung outranked is absent from the row.
 
 ### How far `.env` reaches
 
-The file is applied to the real process environment, not to a private
-table of bookrack's own knobs, so its reach is every variable name.
-`.env.example` lists only `BOOKRACK_*` variables, which makes "this
-file configures bookrack" a natural reading and an incomplete one: a
-`HTTP_PROXY` line routes every installer download and every call to a
-model served from another host, an `XDG_*` line moves the managed
-directories the registry and the downloaded reranker live in, and a
-`HOME` line changes the prefix `bookrack diagnose` redacts against.
+The file is applied to the real process environment, so a line in it is
+not confined to a private table of bookrack's own settings. Which
+names it may set is a fixed list:
+
+| Admitted | Why |
+|---|---|
+| `BOOKRACK_*` | this project's own surface, every name in the tables above |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and each in lower case | the outbound HTTP stack reads them, in both spellings |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR` | the certificate bundle, on Linux |
+| `NO_COLOR` | the CLI's own renderer reads it |
+| `RUST_BACKTRACE` | the panic hook prints its name as the remedy |
+
+Everything else is read out of the file and dropped without reaching
+the environment. The reason is where the file comes from: dotenv
+searches *upward from the working directory*, so an unrestricted file
+lets any directory a command is run from rewrite `HOME`, `TMPDIR`,
+`XDG_CONFIG_HOME`, or `CI` for that process — a `HOME` that changes
+which paths `bookrack diagnose` redacts, an `XDG_*` that moves the
+managed directories the registry and the downloaded reranker live in, a
+`CI` that turns a skipped dependency check into a hard failure. None of
+those is something a project's configuration file is written to do.
+
+The admitted foreign names are admitted because there is a surface with
+no other way to set them: a desktop shell started from a file manager
+inherits no `export`, and `.env` is then the only place a proxy or a
+certificate bundle can be named at all. The list is matched exactly, so
+`Http_Proxy` is not `HTTP_PROXY`.
 
 Proxies are the one place bookrack overrides the environment rather
 than reading it: a client aimed at `localhost` or a loopback address is
@@ -271,14 +290,19 @@ loopback — so a locally served model would otherwise report itself
 unreachable on any machine with a proxy exported. `NO_PROXY` stays the
 way to exempt anything further.
 
-Nothing above is a knob, so no row in the table can report it. The
-report says so separately: `config effective` ends with the variables
-the file named outside the `BOOKRACK_` prefix, each marked either as
-set in this process or as read and discarded because the environment
-already carried one. Names only — a foreign variable is as likely to
-carry a credential as it is to be `NO_COLOR`, and a report that prints
-one is a report an operator cannot paste into an issue. `--json`
-carries the same list as `dotenv_foreign`, alongside `dotenv_path`.
+None of these names is a knob, so no row in the table can report one.
+The report says so separately: `config effective` ends with the
+variables the file named outside the `BOOKRACK_` prefix, each marked
+`set` in this process, `eclipsed` because the environment already
+carried one, or `rejected` because the name is not admitted. A refused
+line is silent otherwise — the load happens before there is anywhere
+to log to — so this section is where a `.env` line that did nothing
+becomes visible instead of being mistaken for one that worked.
+
+Names only, never values: a foreign variable is as likely to carry a
+credential as it is to be `NO_COLOR`, and a report that prints one is a
+report an operator cannot paste into an issue. `--json` carries the
+same list as `dotenv_foreign`, alongside `dotenv_path`.
 
 `BOOKRACK_NO_DOTENV` turns the load off. It has to come from the real
 environment, since a value written inside `.env` is only read if the
