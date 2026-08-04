@@ -5,6 +5,8 @@
 
 use std::path::PathBuf;
 
+use bookrack_core::{ItemKind, TypedIdParseError, TypedItemId};
+
 #[doc(hidden)]
 pub mod help_gate;
 
@@ -726,6 +728,36 @@ pub enum StampsAction {
     Reconcile,
 }
 
+/// Accept a paper's catalog intake id either bare or kind-prefixed.
+///
+/// Parsing here rather than in the command body keeps the field an
+/// `i64`, so what reaches the control plane is the bare number the wire
+/// has always carried. A `book:` prefix names the other catalog, whose
+/// ids number independently, so clap reports it and exits 2 before any
+/// dispatch.
+fn paper_intake_id(raw: &str) -> Result<i64, String> {
+    if let Ok(intake_id) = raw.parse::<i64>() {
+        return Ok(intake_id);
+    }
+    match raw.parse::<TypedItemId>() {
+        Ok(TypedItemId::Paper(intake_id)) => Ok(intake_id),
+        // Well formed, wrong catalog. The payload is read back off the
+        // input so the message can offer it under this namespace's own
+        // kind.
+        Ok(other) => Err(TypedIdParseError::NamespaceMismatch {
+            kind: other.kind(),
+            payload: raw
+                .split_once(':')
+                .map_or(raw, |(_, rest)| rest)
+                .to_string(),
+            expected: ItemKind::Paper,
+            namespace: "papers",
+        }
+        .to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 #[derive(clap::Subcommand, Debug)]
 pub enum PapersAction {
     /// Submit a paper file to the glean pipeline.
@@ -754,18 +786,22 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers show 101",
         "papers show 101 --json",
+        "papers show paper:101",
     ])]
     Show {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Print the table of contents of one paper.
     #[command(after_long_help = crate::examples![
         "papers toc 101",
         "papers toc 101 --json",
+        "papers toc paper:101",
     ])]
     Toc {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Project one paper's stored bibliographic row onto CSL-JSON and
@@ -773,9 +809,11 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers export-csl 101",
         "papers export-csl 101 --library demo",
+        "papers export-csl paper:101",
     ])]
     ExportCsl {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Print the locator of one paper's archived source PDF.
@@ -786,9 +824,11 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers source 101",
         "papers source 101 --json",
+        "papers source paper:101",
     ])]
     Source {
         /// The intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
     },
     /// Drop one paper from every paper-side store.
@@ -799,6 +839,7 @@ pub enum PapersAction {
     #[command(after_long_help = crate::examples![
         "papers remove 101",
         "papers remove --sha a1b2c3d4 --yes",
+        "papers remove paper:101 --dry-run",
     ])]
     Remove(PapersRemoveArgs),
     /// Write the paper-side corpus.
@@ -863,6 +904,7 @@ pub enum PapersMetadataAction {
     ])]
     Reaudit {
         /// The intake id of the paper to re-audit.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional named audit profile. When absent the daemon's
         /// effective profile (default + overlay) is used.
@@ -876,6 +918,7 @@ pub enum PapersMetadataAction {
     ])]
     Set {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Column on the paper attrs row to override (e.g. `title`,
         /// `year`, `container_title`, `doi`).
@@ -896,6 +939,7 @@ pub enum PapersMetadataAction {
     ])]
     Clear {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// The field whose override is removed.
         #[arg(long)]
@@ -908,6 +952,7 @@ pub enum PapersMetadataAction {
     ])]
     Void {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// The field whose extracted value is suppressed.
         #[arg(long)]
@@ -921,6 +966,7 @@ pub enum PapersMetadataAction {
     ])]
     Ack {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -933,6 +979,7 @@ pub enum PapersMetadataAction {
     ])]
     Approve {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -945,6 +992,7 @@ pub enum PapersMetadataAction {
     ])]
     Reject {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -958,6 +1006,7 @@ pub enum PapersMetadataAction {
     ])]
     Reopen {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -970,6 +1019,7 @@ pub enum PapersMetadataAction {
     ])]
     ContributorAdd {
         /// Intake id of the paper.
+        #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
         /// Contribution role (author / editor / translator / other).
         #[arg(long)]
@@ -1280,6 +1330,7 @@ pub struct LogsArgs {
 pub struct PapersRemoveArgs {
     /// The intake id of the paper to drop. Mutually exclusive with
     /// `--sha`; exactly one of the two must be supplied.
+    #[arg(value_parser = paper_intake_id)]
     pub intake_id: Option<i64>,
     /// Drop the paper whose source SHA-256 starts with this hex
     /// prefix. Mutually exclusive with the positional intake id.
@@ -1509,6 +1560,117 @@ mod tests {
             PapersAction::ExportCsl { intake_id } => assert_eq!(intake_id, 42),
             other => panic!("expected papers export-csl, got {other:?}"),
         }
+    }
+
+    /// Every papers position that takes an intake id, paired with the
+    /// arguments it cannot parse without. A position that never grew a
+    /// `value_parser` fails here rather than only in whichever leaf
+    /// happened to gain an example.
+    const PAPERS_INTAKE_ID_POSITIONS: &[(&[&str], &[&str])] = &[
+        (&["show"], &[]),
+        (&["toc"], &[]),
+        (&["export-csl"], &[]),
+        (&["source"], &[]),
+        (&["remove"], &[]),
+        (&["metadata", "reaudit"], &[]),
+        (
+            &["metadata", "set"],
+            &["--field", "title", "--value", "Sample Title"],
+        ),
+        (&["metadata", "clear"], &["--field", "title"]),
+        (&["metadata", "void"], &["--field", "publisher"]),
+        (&["metadata", "ack"], &[]),
+        (&["metadata", "approve"], &[]),
+        (&["metadata", "reject"], &[]),
+        (&["metadata", "reopen"], &[]),
+        (
+            &["metadata", "contributor-add"],
+            &["--role", "author", "--name", "Doe, Jane"],
+        ),
+    ];
+
+    fn papers_argv<'a>(leaf: &[&'a str], id: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = vec!["papers"];
+        argv.extend_from_slice(leaf);
+        argv.push(id);
+        argv.extend_from_slice(rest);
+        argv
+    }
+
+    /// The prefixed form projects onto the same parsed command as the
+    /// bare one — the prefix is read and dropped, not carried further.
+    #[test]
+    fn every_papers_intake_id_position_accepts_both_forms() {
+        for (leaf, rest) in PAPERS_INTAKE_ID_POSITIONS {
+            let bare = papers_argv(leaf, "101", rest);
+            let typed = papers_argv(leaf, "paper:101", rest);
+            let parsed = |argv: &Vec<&str>| {
+                format!(
+                    "{:?}",
+                    TestCli::try_parse_from(argv.iter().copied())
+                        .unwrap_or_else(|err| panic!("{argv:?} must parse: {err}"))
+                        .command
+                )
+            };
+            assert_eq!(parsed(&bare), parsed(&typed), "{leaf:?}");
+        }
+    }
+
+    /// A book id is well formed and names the other catalog, whose ids
+    /// number independently. Accepting it here would act on whichever
+    /// paper happens to carry that number.
+    #[test]
+    fn every_papers_intake_id_position_rejects_a_book_id() {
+        for (leaf, rest) in PAPERS_INTAKE_ID_POSITIONS {
+            let argv = papers_argv(leaf, "book:12", rest);
+            let Err(err) = TestCli::try_parse_from(argv.iter().copied()) else {
+                panic!("{argv:?} must not resolve a book id");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The refusal names the namespace it was typed under and rewrites
+    /// the id for it, rather than reporting only that a value was bad.
+    #[test]
+    fn a_book_id_in_the_papers_namespace_names_both_kinds() {
+        let Err(err) = TestCli::try_parse_from(["papers", "show", "book:12"]) else {
+            panic!("a book id must not resolve in the papers namespace");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("papers namespace"), "{rendered}");
+        assert!(rendered.contains("`paper:12`"), "{rendered}");
+    }
+
+    /// A `value_parser` can only return one line, so the three-part
+    /// wording is flattened into it. The next step has to survive that
+    /// flattening — it is the whole reason the summary stays terse.
+    #[test]
+    fn a_malformed_id_reaches_clap_with_its_next_step_attached() {
+        let Err(err) = TestCli::try_parse_from(["papers", "show", "chapter:1"]) else {
+            panic!("an unknown kind must not resolve");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("unknown item kind"), "{rendered}");
+        assert!(rendered.contains("`paper`"), "{rendered}");
+    }
+
+    /// The parser hangs off the group member, so the two locators stay
+    /// mutually exclusive in the prefixed form too.
+    #[test]
+    fn papers_remove_keeps_its_exclusive_group_with_a_typed_id() {
+        TestCli::try_parse_from(["papers", "remove", "paper:101"])
+            .expect("a typed id is a locator");
+        let Err(err) =
+            TestCli::try_parse_from(["papers", "remove", "paper:101", "--sha", "deadbeef"])
+        else {
+            panic!("the two selectors must not be combined");
+        };
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
