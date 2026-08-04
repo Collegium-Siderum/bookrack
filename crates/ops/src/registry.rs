@@ -79,16 +79,64 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 pub struct LibraryHandle<E: Embedder> {
     name: String,
     cfg: Arc<Config>,
+    templates: JobTemplates,
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
     glean_lock: AsyncMutex<()>,
 }
 
+/// The pipeline parameters a queue job for this library starts from.
+///
+/// Resolved once per library, from that library's own configuration and
+/// data root: the audit profile and data overlays under
+/// `<data_root>/audit-rules/`, the heading patterns, and the embedding
+/// model its index profile declares. A job then patches only what the
+/// job itself carries (`force`, `hold_for_metadata`, a named
+/// `audit_profile`).
+///
+/// They live on the handle because the alternative is a process-wide
+/// template, and a process serving several libraries has no single
+/// right answer for one: whichever library the daemon was started
+/// under would decide how every other library's books are ingested.
+#[derive(Debug, Clone, Default)]
+pub struct JobTemplates {
+    /// Book-side ingest parameters.
+    pub ingest: IngestParams,
+    /// Paper-side glean parameters.
+    pub glean: GleanParams,
+}
+
 impl<E: Embedder> LibraryHandle<E> {
     /// Wrap an already-warm [`Ops`] under the given short name, paired
     /// with the configuration that library resolves to.
+    ///
+    /// Job templates default; a host that runs pipeline jobs builds
+    /// them from the library's own configuration and passes them to
+    /// [`LibraryHandle::with_templates`] instead.
     pub fn new(name: impl Into<String>, cfg: Arc<Config>, ops: Ops<E>) -> Arc<LibraryHandle<E>> {
         LibraryHandle::from_arc(name, cfg, Arc::new(ops))
+    }
+
+    /// [`LibraryHandle::new`] with the pipeline parameters queue jobs
+    /// for this library start from.
+    pub fn with_templates(
+        name: impl Into<String>,
+        cfg: Arc<Config>,
+        ops: Ops<E>,
+        templates: JobTemplates,
+    ) -> Arc<LibraryHandle<E>> {
+        let handle = LibraryHandle::from_arc(name, cfg, Arc::new(ops));
+        // `from_arc` owns the construction guard; rebuilding the value
+        // here would duplicate it, so take the checked handle apart
+        // through its own fields.
+        Arc::new(LibraryHandle {
+            name: handle.name.clone(),
+            cfg: Arc::clone(&handle.cfg),
+            templates,
+            ops: Arc::clone(&handle.ops),
+            ingest_lock: AsyncMutex::new(()),
+            glean_lock: AsyncMutex::new(()),
+        })
     }
 
     /// Wrap a pre-shared [`Arc<Ops>`] under the given short name.
@@ -115,6 +163,7 @@ impl<E: Embedder> LibraryHandle<E> {
         Arc::new(LibraryHandle {
             name: name.into(),
             cfg,
+            templates: JobTemplates::default(),
             ops,
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
@@ -139,6 +188,11 @@ impl<E: Embedder> LibraryHandle<E> {
     /// caller that has to move it into a task or a template.
     pub fn cfg_arc(&self) -> Arc<Config> {
         Arc::clone(&self.cfg)
+    }
+
+    /// The pipeline parameters a job for this library starts from.
+    pub fn templates(&self) -> &JobTemplates {
+        &self.templates
     }
 
     /// The warm [`Ops`] driving this library's stores.

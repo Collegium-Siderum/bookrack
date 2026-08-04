@@ -249,6 +249,29 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Books ingested into one library were processed under another
+  library's configuration.** An eager multi-mount daemon resolved the
+  ingest and glean parameter templates once, from the library it was
+  started under, and every queue job reused them however it was
+  routed. The job went into the right library — its handle was picked
+  by name — but the rules it ran under came from the wrong one.
+
+  Three consequences, all silent. The `audit-rules/` overlays and
+  heading patterns came from the starting library's data root, against
+  the documented promise that they are read per root. And the
+  embedding model in the parameters was the starting library's, so the
+  index stamp written into the target library's corpus recorded that
+  model beside a dimension measured from the target library's own
+  embedder — a stamp that contradicts itself, and that every later
+  check trusts. A library with no stamp yet took it silently; one
+  already stamped refused the ingest, naming a model its operator
+  never configured for it.
+
+  Every mounted library now carries its own templates, resolved at
+  bring-up from its own configuration, and a job takes them from the
+  handle it is routed to. Libraries whose profiles and overlays match
+  see no change.
+
 - **A library declaring a reranker was served without one.** One
   supervised reranker backend serves every mounted library, and
   bring-up asked the bring-up-selected library's index profile for it.

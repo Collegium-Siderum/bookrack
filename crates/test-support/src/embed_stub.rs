@@ -55,7 +55,9 @@ impl EmbedFailure {
 /// touches: `POST /api/embed` returns one [`EmbedStub::DIMENSION`]-wide
 /// vector per input, and every other path returns a model list holding
 /// [`bookrack_config::DEFAULT_EMBED_MODEL`], which the bring-up
-/// pre-flight requires before it will start.
+/// pre-flight requires before it will start, plus
+/// [`EmbedStub::ALTERNATE_MODEL`] so a fixture can give two libraries
+/// different embedding models and still pass that pre-flight.
 ///
 /// One stub serves a whole test binary; the listener runs on detached
 /// threads for the process's lifetime.
@@ -72,6 +74,14 @@ impl EmbedStub {
     /// Vector width the stub reports for every input.
     // setting: internal -- the stub embedder's vector width, fixed by the fixtures reading it
     pub const DIMENSION: usize = 8;
+
+    /// A second model tag the stub reports as available, at the same
+    /// [`EmbedStub::DIMENSION`]. Exists so a multi-library fixture can
+    /// declare two libraries with different embedding models: the
+    /// bring-up pre-flight refuses a model the backend does not hold,
+    /// so a one-model stub cannot express that case at all.
+    // setting: internal -- the stub embedder's second model tag, fixed by the fixtures naming it
+    pub const ALTERNATE_MODEL: &'static str = "stub-embedding:alternate";
 
     /// Make the embed arm answer `failure` from the next request on.
     /// Takes effect for requests already in flight only after they are
@@ -187,7 +197,12 @@ fn respond(request_line: &str, body: &[u8], failure: EmbedFailure) -> (u16, serd
     } else {
         (
             200,
-            serde_json::json!({ "models": [{ "name": DEFAULT_EMBED_MODEL }] }),
+            serde_json::json!({
+                "models": [
+                    { "name": DEFAULT_EMBED_MODEL },
+                    { "name": EmbedStub::ALTERNATE_MODEL },
+                ],
+            }),
         )
     }
 }
@@ -217,9 +232,13 @@ mod tests {
 
         let (status, tags) = respond("GET /api/tags HTTP/1.1", b"", EmbedFailure::None);
         assert_eq!(status, 200);
-        let models = tags["models"].as_array().expect("models array");
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0]["name"].as_str(), Some(DEFAULT_EMBED_MODEL));
+        let models: Vec<&str> = tags["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .collect();
+        assert_eq!(models, [DEFAULT_EMBED_MODEL, EmbedStub::ALTERNATE_MODEL]);
     }
 
     /// A failure mode is confined to the embed arm. The tags assertion

@@ -39,7 +39,7 @@ use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
+use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -153,7 +153,6 @@ pub struct DaemonRuntime {
     pub log_stream: LogStreamHandle,
     pub queue_state: Arc<Mutex<QueueState>>,
     pub queue_state_path: PathBuf,
-    pub queue_params_template: IngestParams,
     pub shutdown_tx: broadcast::Sender<()>,
     pub runtime_dir: PathBuf,
     pub lock_path: PathBuf,
@@ -577,9 +576,6 @@ impl DaemonRuntime {
             queue::load(&queue_state_path).context("load persistent queue state")?;
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
-        let queue_params_template = build_queue_params_template(&cfg, &embed_cfg);
-        let glean_params_template = build_glean_params_template(&cfg, &embed_cfg);
-
         let write_guard = Arc::new(tokio::sync::Mutex::new(()));
         let selection_for_doctor = LibrarySelection {
             data_dir: opts.selection.data_dir.clone(),
@@ -590,9 +586,6 @@ impl DaemonRuntime {
             let registry = Arc::clone(&registry);
             let state = Arc::clone(&queue_state);
             let state_path = queue_state_path.clone();
-            let params_template = queue_params_template.clone();
-            let glean_template = glean_params_template.clone();
-            let cfg_for_worker = Arc::clone(&cfg);
             let shutdown_rx = shutdown_tx.subscribe();
             let library_default = library_name.clone();
             let events_for_loop = event_stream.clone();
@@ -604,9 +597,6 @@ impl DaemonRuntime {
                 shutdown_rx,
                 move |job| {
                     let registry = Arc::clone(&registry);
-                    let params_template = params_template.clone();
-                    let glean_template = glean_template.clone();
-                    let cfg_for_job = Arc::clone(&cfg_for_worker);
                     let library_default = library_default.clone();
                     let sink = EventProgressSink::new(job.id.clone(), events_for_runner.clone());
                     async move {
@@ -630,8 +620,8 @@ impl DaemonRuntime {
                                     .map_err(|e| queue::JobError::Book(format!("registry: {e}")))?;
                                 if let Some(ocr) = intake_ocr {
                                     let params = prepare_book_params(
-                                        &params_template,
-                                        &cfg_for_job,
+                                        &handle.templates().ingest,
+                                        handle.cfg(),
                                         force,
                                         hold_for_metadata,
                                         audit_profile.as_deref(),
@@ -655,8 +645,8 @@ impl DaemonRuntime {
                                 match job_kind {
                                     bookrack_core::ItemKind::Book => {
                                         let params = prepare_book_params(
-                                            &params_template,
-                                            &cfg_for_job,
+                                            &handle.templates().ingest,
+                                            handle.cfg(),
                                             force,
                                             hold_for_metadata,
                                             audit_profile.as_deref(),
@@ -700,7 +690,7 @@ impl DaemonRuntime {
                                         // per-job override is enqueued as
                                         // `None` for paper kinds and is
                                         // intentionally not consulted here.
-                                        let mut params = glean_template;
+                                        let mut params = handle.templates().glean.clone();
                                         params.force = force;
                                         let report = handle
                                             .glean_paper(&path, &params)
@@ -811,7 +801,6 @@ impl DaemonRuntime {
             log_stream,
             queue_state,
             queue_state_path,
-            queue_params_template,
             shutdown_tx,
             runtime_dir,
             lock_path,
@@ -1082,7 +1071,19 @@ async fn build_library_handle(
         Some(stage) => ops.with_reranker(stage.clone()),
         None => ops,
     };
-    Ok(LibraryHandle::new(name, Arc::clone(&cfg_arc), ops))
+    // Job templates resolve from this library's own configuration:
+    // its `audit-rules/` overlays, its heading patterns, and the
+    // embedding model its index profile declares.
+    let templates = JobTemplates {
+        ingest: build_queue_params_template(cfg, &embed_cfg),
+        glean: build_glean_params_template(cfg, &embed_cfg),
+    };
+    Ok(LibraryHandle::with_templates(
+        name,
+        Arc::clone(&cfg_arc),
+        ops,
+        templates,
+    ))
 }
 
 /// Move a queue snapshot left under a library's data root by an older
