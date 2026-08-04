@@ -167,6 +167,7 @@ fn serialize_counts(c: &bookrack_catalog::ItemRemovalCounts) -> Value {
         "categories": c.node_categories,
         "reviews": c.node_reviews,
         "role_takeovers": c.node_role_takeovers,
+        "paper_audit": c.node_paper_audit,
         "toc_edits": c.toc_edits,
     })
 }

@@ -270,6 +270,7 @@ impl RemovePaperPlan {
             self.counts.node_categories,
             self.counts.node_reviews,
             self.counts.node_role_takeovers,
+            self.counts.node_paper_audit,
             self.counts.toc_edits,
         ] {
             h.update(v.to_be_bytes());
@@ -434,6 +435,31 @@ mod tests {
             .expect("write user_version");
     }
 
+    /// One `node_paper_audit` row for the paper's own scope, filled
+    /// with values the projection writer would produce.
+    fn paper_audit_row(intake_id: i64) -> bookrack_catalog::NewNodePaperAudit {
+        use bookrack_catalog::{FLAG_COLUMNS, GRADE_COLUMNS};
+        let mut grades: [String; GRADE_COLUMNS.len()] = Default::default();
+        for g in grades.iter_mut() {
+            *g = "medium".to_string();
+        }
+        bookrack_catalog::NewNodePaperAudit {
+            intake_id,
+            scope: ItemKind::Paper.as_scope_str().to_string(),
+            profile_name: "default".to_string(),
+            verdict: "clean".to_string(),
+            confidence: "medium".to_string(),
+            csl_type: Some("article-journal".to_string()),
+            audited_at: "2026-06-04T00:00:00Z".to_string(),
+            extractor_version: "0.0.0-test".to_string(),
+            grades,
+            flags: [0; FLAG_COLUMNS.len()],
+            pipeline_run_id: None,
+            profile_fingerprint: None,
+            profile_toggle_summary: None,
+        }
+    }
+
     fn plan_args(intake_id: i64) -> RemovePaperArgs {
         RemovePaperArgs {
             intake_id: Some(intake_id),
@@ -477,6 +503,40 @@ mod tests {
         assert!(
             dir_entries(&cfg.backup_dir()).is_empty(),
             "plan-only must not write a catalog backup",
+        );
+    }
+
+    /// A count that reaches the dry-run output but not the fingerprint
+    /// is a table the drift check cannot see between two RPCs.
+    #[tokio::test]
+    async fn the_plan_fingerprint_covers_the_paper_audit_projection() {
+        let (_tmp, cfg) = temp_cfg();
+        let intake_id = {
+            let mut catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
+            let mut corpus = Corpus::open(&cfg.papers_corpus_db()).expect("corpus");
+            seed_paper(&cfg, &mut catalog, &mut corpus, "sha-fingerprint")
+        };
+
+        let before = plan_remove(&cfg, &plan_args(intake_id))
+            .await
+            .expect("plan without a projection row")
+            .fingerprint();
+
+        {
+            let catalog = Catalog::open(&cfg.papers_catalog_db()).expect("catalog");
+            catalog
+                .upsert_node_paper_audit(&paper_audit_row(intake_id))
+                .expect("projection row");
+        }
+
+        let after = plan_remove(&cfg, &plan_args(intake_id))
+            .await
+            .expect("plan with a projection row")
+            .fingerprint();
+
+        assert_ne!(
+            before, after,
+            "the fingerprint did not move when the audit projection gained a row",
         );
     }
 

@@ -270,6 +270,7 @@ impl RemovePlan {
             self.counts.node_categories,
             self.counts.node_reviews,
             self.counts.node_role_takeovers,
+            self.counts.node_paper_audit,
             self.counts.toc_edits,
         ] {
             h.update(v.to_be_bytes());

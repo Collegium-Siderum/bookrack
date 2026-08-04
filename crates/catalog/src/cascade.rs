@@ -8,12 +8,16 @@
 //!
 //! Two classes of catalog tables hold per-book rows:
 //!
-//! - Seven tables keyed by `intake_id` (the metadata and lifecycle
-//!   layers): `item_state`, `node_publication_attrs`, `node_overrides`,
-//!   `node_contributors`, `node_categories`, `node_reviews`,
-//!   `node_role_takeovers`.
+//! - Eight tables keyed by `intake_id` (the metadata, lifecycle, and
+//!   audit-projection layers): `item_state`, `node_publication_attrs`,
+//!   `node_overrides`, `node_contributors`, `node_categories`,
+//!   `node_reviews`, `node_role_takeovers`, `node_paper_audit`.
 //! - One table keyed by `book_root_id` (the manual TOC overlay):
 //!   `toc_edits`.
+//!
+//! `node_paper_audit` holds one row per `(intake_id, scope)` carrying
+//! the current audit verdict, so it is a projection of live state, not
+//! a history: the cascade drops every scope of the removed intake.
 //!
 //! The audit tables `metadata_audit` and `item_pipeline_audit` are
 //! denormalized by design — `item_pipeline_audit` even carries
@@ -45,6 +49,9 @@ pub struct ItemRemovalCounts {
     pub node_reviews: u64,
     /// Rows in `node_role_takeovers` keyed by `intake_id`.
     pub node_role_takeovers: u64,
+    /// Rows in `node_paper_audit` keyed by `intake_id`, across every
+    /// `scope`.
+    pub node_paper_audit: u64,
     /// Rows in `toc_edits` keyed by `book_root_id`.
     pub toc_edits: u64,
 }
@@ -59,6 +66,7 @@ impl ItemRemovalCounts {
             + self.node_categories
             + self.node_reviews
             + self.node_role_takeovers
+            + self.node_paper_audit
             + self.toc_edits
     }
 }
@@ -71,6 +79,7 @@ const COUNT_BY_INTAKE_ID_TABLES: &[&str] = &[
     "node_categories",
     "node_reviews",
     "node_role_takeovers",
+    "node_paper_audit",
 ];
 
 const DELETE_BOOK_STATE_SQL: &str = "DELETE FROM item_state WHERE intake_id = :intake_id";
@@ -83,6 +92,10 @@ const DELETE_NODE_CATEGORIES_SQL: &str = "DELETE FROM node_categories WHERE inta
 const DELETE_NODE_REVIEWS_SQL: &str = "DELETE FROM node_reviews WHERE intake_id = :intake_id";
 const DELETE_NODE_ROLE_TAKEOVERS_SQL: &str =
     "DELETE FROM node_role_takeovers WHERE intake_id = :intake_id";
+/// No `scope` predicate: the other half of the composite primary key
+/// names a facet of the same intake, and every facet goes with it.
+const DELETE_NODE_PAPER_AUDIT_SQL: &str =
+    "DELETE FROM node_paper_audit WHERE intake_id = :intake_id";
 const DELETE_TOC_EDITS_SQL: &str = "DELETE FROM toc_edits WHERE book_root_id = :book_root_id";
 
 const COUNT_TOC_EDITS_SQL: &str =
@@ -98,7 +111,7 @@ impl Catalog {
         intake_id: i64,
         book_root_id: i64,
     ) -> Result<ItemRemovalCounts> {
-        let mut by_intake = [0u64; 7];
+        let mut by_intake = [0u64; 8];
         for (i, table) in COUNT_BY_INTAKE_ID_TABLES.iter().enumerate() {
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE intake_id = :intake_id");
             let n: i64 =
@@ -121,6 +134,7 @@ impl Catalog {
             node_categories: by_intake[4],
             node_reviews: by_intake[5],
             node_role_takeovers: by_intake[6],
+            node_paper_audit: by_intake[7],
             toc_edits: count_as_u64(toc_edits_n)?,
         })
     }
@@ -164,6 +178,10 @@ impl Catalog {
             DELETE_NODE_ROLE_TAKEOVERS_SQL,
             named_params! { ":intake_id": intake_id },
         )? as u64;
+        let node_paper_audit = tx.execute(
+            DELETE_NODE_PAPER_AUDIT_SQL,
+            named_params! { ":intake_id": intake_id },
+        )? as u64;
         let toc_edits = tx.execute(
             DELETE_TOC_EDITS_SQL,
             named_params! { ":book_root_id": book_root_id },
@@ -177,6 +195,7 @@ impl Catalog {
             node_categories,
             node_reviews,
             node_role_takeovers,
+            node_paper_audit,
             toc_edits,
         })
     }
@@ -199,8 +218,9 @@ mod tests {
     use bookrack_core::ItemKind;
 
     use crate::{
-        ActorKind, NewContributor, NewIntake, NewItemPipelineAudit, NewItemState, NewMetadataAudit,
-        NewOverride, NewPublicationAttrs, NewReview, NewRoleTakeover, STATUS_APPROVED,
+        ActorKind, FLAG_COLUMNS, GRADE_COLUMNS, NewContributor, NewIntake, NewItemPipelineAudit,
+        NewItemState, NewMetadataAudit, NewNodePaperAudit, NewOverride, NewPublicationAttrs,
+        NewReview, NewRoleTakeover, STATUS_APPROVED,
     };
 
     fn book_root_id_of(intake_id: i64) -> i64 {
@@ -213,6 +233,28 @@ mod tests {
             .expect("register")
             .into_intake()
             .intake_id
+    }
+
+    fn paper_audit_row(intake_id: i64) -> NewNodePaperAudit {
+        let mut grades: [String; GRADE_COLUMNS.len()] = Default::default();
+        for g in grades.iter_mut() {
+            *g = "medium".to_string();
+        }
+        NewNodePaperAudit {
+            intake_id,
+            scope: ItemKind::Paper.as_scope_str().to_string(),
+            profile_name: "default".to_string(),
+            verdict: "clean".to_string(),
+            confidence: "medium".to_string(),
+            csl_type: Some("article-journal".to_string()),
+            audited_at: "2026-06-04T00:00:00Z".to_string(),
+            extractor_version: "0.0.0-test".to_string(),
+            grades,
+            flags: [0; FLAG_COLUMNS.len()],
+            pipeline_run_id: None,
+            profile_fingerprint: None,
+            profile_toggle_summary: None,
+        }
     }
 
     fn seed_full_book(catalog: &mut Catalog, sha: &str, title: &str, author: &str) -> i64 {
@@ -289,6 +331,12 @@ mod tests {
             ))
             .expect("role takeover");
 
+        // paper audit projection — the cascade is shared by both
+        // pipelines, so the fixture seeds the table, not a book
+        catalog
+            .upsert_node_paper_audit(&paper_audit_row(intake_id))
+            .expect("paper audit");
+
         // toc edit — the one cascaded table keyed by book_root_id
         catalog
             .conn
@@ -334,8 +382,36 @@ mod tests {
         assert_eq!(counts.node_categories, 1);
         assert_eq!(counts.node_reviews, 1);
         assert_eq!(counts.node_role_takeovers, 1);
+        assert_eq!(counts.node_paper_audit, 1);
         assert_eq!(counts.toc_edits, 1);
-        assert_eq!(counts.total(), 8);
+        assert_eq!(counts.total(), 9);
+    }
+
+    #[test]
+    fn delete_book_derived_clears_the_paper_audit_projection() {
+        let mut catalog = Catalog::open_in_memory().expect("open");
+        let kept = seed_full_book(&mut catalog, "sha-keep", "Keep", "Kim");
+        let gone = seed_full_book(&mut catalog, "sha-gone", "Gone", "Gus");
+        let scope = ItemKind::Paper.as_scope_str();
+
+        catalog
+            .delete_book_derived(gone, book_root_id_of(gone))
+            .expect("delete");
+
+        assert!(
+            catalog
+                .node_paper_audit(gone, scope)
+                .expect("lookup")
+                .is_none(),
+            "the removed intake's audit projection row is still there",
+        );
+        assert!(
+            catalog
+                .node_paper_audit(kept, scope)
+                .expect("lookup")
+                .is_some(),
+            "another intake's audit projection row was swept up",
+        );
     }
 
     #[test]

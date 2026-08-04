@@ -270,6 +270,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A removed item left its audit verdict behind.** The cascade behind
+  `bookrack remove` and `bookrack papers remove` covered the metadata
+  and lifecycle tables but not `node_paper_audit`, which carries one
+  row per item holding its current audit verdict. That table is a
+  projection of live state rather than a forensic record — unlike
+  `metadata_audit` and `item_pipeline_audit`, which are preserved on
+  purpose — so an item that no longer exists went on contributing its
+  last verdict to everything read off the projection. Removal now drops
+  every scope of the removed intake, and the per-table tallies both
+  commands print gain a `paper_audit` key.
+
 - **A preview migrated the database it was previewing against.** Both
   dryrun commands record that they ran by opening a `pipeline_runs` row
   in the catalog, and they opened it through the door that migrates a
