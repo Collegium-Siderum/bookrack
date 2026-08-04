@@ -841,7 +841,7 @@ pub async fn plan_apply(
         let plan = derive_pipeline_plan(&profile, &stamps_target, &state);
         let reembed_chunks = match &plan {
             PipelinePlan::Run(actions) if actions.contains(&PlannedAction::Reembed) => {
-                count_chunks(&pipeline.lancedb_dir(target.data_dir()), profile.embed.dim).await
+                count_chunks(&pipeline.lancedb_dir(target.data_dir())).await
             }
             _ => None,
         };
@@ -859,11 +859,13 @@ pub async fn plan_apply(
     })
 }
 
-/// Best-effort chunk-row count for the plan's scale hint. Read-only;
-/// any failure (a dimension mismatch, a locked store) degrades to "no
-/// count" rather than blocking the plan.
-async fn count_chunks(lancedb_dir: &Path, dim: u32) -> Option<usize> {
-    let store = ChunkStore::open(lancedb_dir, dim as usize).await.ok()?;
+/// Best-effort chunk-row count for the plan's scale hint. Read-only:
+/// a store that was never built yields no count rather than being
+/// materialized by the probe, and any failure on one that exists (a
+/// locked store, a reader-version refusal) degrades to "no count"
+/// rather than blocking the plan.
+async fn count_chunks(lancedb_dir: &Path) -> Option<usize> {
+    let store = ChunkStore::try_open(lancedb_dir).await.ok().flatten()?;
     store.count_rows().await.ok()
 }
 

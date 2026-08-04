@@ -270,6 +270,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Planning an index-profile apply built the vector store it was
+  supposed to only measure.** The plan is documented as offline and
+  read-only, and it reports how many chunk rows a planned re-embed
+  would touch. Asking for that count opened the store in the mode that
+  creates one, so on a library whose corpus is stamped but whose
+  vectors were never built — an ingest that has not been embedded yet,
+  or a store deleted by hand — merely planning left an empty LanceDB
+  layout on disk, and the count it produced was zero because the plan
+  itself had just created the thing it counted. The probe is now the
+  read-only one: an unbuilt store reports no count and stays unbuilt.
+
 - **Books ingested into one library were processed under another
   library's configuration.** An eager multi-mount daemon resolved the
   ingest and glean parameter templates once, from the library it was
