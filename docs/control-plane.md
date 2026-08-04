@@ -355,7 +355,10 @@ the exit-code bucket does not distinguish the two.
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
   `params.name` selects which.
-- `library.fork` — `{ new_name, data_dir }` → the fork report. Clones
+- `library.fork` — `{ new_name, data_dir, library? }` → the fork
+  report. `library` names the *source* — the one method that holds two
+  libraries at once, so it is written out rather than inherited.
+  Clones
   the served library into a sibling registry entry: the envelope store is
   hardlinked where the filesystem allows, the catalog and corpus are
   copied, and the vector store is deliberately not carried over, so the
@@ -383,7 +386,7 @@ the exit-code bucket does not distinguish the two.
   oldest first. `n` defaults to 100 and is capped server-side at
   1024. Peer of the `session.logs_tail` MCP tool; same backing
   buffer.
-- `verify.run` — no params; the cross-store verify report. Read-only:
+- `verify.run` — `{ library? }`; the cross-store verify report. Read-only:
   each store is opened through its own read-only door, which takes no
   write lock, so the report answers alongside a write in flight rather
   than queueing behind the write mutex.
@@ -446,8 +449,8 @@ the exit-code bucket does not distinguish the two.
 - `metadata.set` / `metadata.clear` / `metadata.void` /
   `metadata.reaudit` / `metadata.ack` / `metadata.approve` /
   `metadata.reject` / `metadata.advance` — same params as the
-  `bookrack metadata` REPL subcommands; return `{ ok: true }` on
-  success. `metadata.reaudit` and `metadata.advance` additionally
+  `bookrack metadata` REPL subcommands, plus `library?`; return
+  `{ ok: true }` on success. `metadata.reaudit` and `metadata.advance` additionally
   accept `audit_profile?`, which routes through the same built-in set
   as `ingest.submit` for the re-audit they trigger, and is refused
   with `-32602` when it names nothing in that set. The other writes
@@ -470,9 +473,11 @@ the exit-code bucket does not distinguish the two.
 - `vectors.rebuild` / `vectors.reembed` / `vectors.reset` /
   `vectors.drop` — mirror the matching `bookrack vectors` actions.
   `vectors.drop` takes `{ yes? }`; the daemon rejects the call
-  without `yes = true`.
-- `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?, yes? }`.
-- `stamps.reconcile` — no params; rewrites the corpus index stamps.
+  without `yes = true`. All four take `library?`.
+- `corpus.rebuild` — `{ include_vectors?, book?, stale_only?, dry_run?,
+  yes?, library? }`.
+- `stamps.reconcile` — `{ library? }`; rewrites the corpus index
+  stamps.
 - `papers.corpus_rebuild` —
   `{ include_vectors?, paper?, stale_only?, dry_run?, yes? }`. Peer of
   `corpus.rebuild` for the paper pipeline; reconstructs
@@ -484,9 +489,9 @@ the exit-code bucket does not distinguish the two.
   reembed variant takes `paper?` instead of `book?`, and
   `papers.vectors_drop` takes `{ yes? }` with the same
   `-32012` gate as `vectors.drop`.
-- `papers.stamps_reconcile` — no params; rewrites the
+- `papers.stamps_reconcile` — `{ library? }`; rewrites the
   `papers_corpus.db` index stamps from the active embedder.
-- `papers.dryrun` — `{ path, out?, no_chunk? }`. Peer of `dryrun` for
+- `papers.dryrun` — `{ path, out?, no_chunk?, library? }`. Peer of `dryrun` for
   the paper pipeline; writes a paper-shaped JSONL plus a summary
   sidecar under `<data_root>/dryruns/dryrun-paper-...`. Reports
   IDENTIFY hit rates (DOI / arXiv / ISSN / venue / title / year /
@@ -536,7 +541,8 @@ the exit-code bucket does not distinguish the two.
   the one method with nothing to check — it carries no `intake_id`, so
   it still reports `{ removed: false }` for a row it cannot find.
 
-- `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id? }`. Exactly
+- `remove` — `{ intake_id?, sha?, dry_run?, yes?, plan_id?, library? }`.
+  Exactly
   one of `intake_id` or `sha` must be set on the dry-run leg; the
   execute leg presents the `plan_id` returned by dry-run and the
   daemon rejects the call without `yes = true`. A selector that
@@ -547,12 +553,27 @@ the exit-code bucket does not distinguish the two.
   matches the fingerprint the plan pinned; the plan id is consumed
   either way, so recovery is a fresh dry-run leg. Paper-side peer:
   `papers.remove`, with the same three refusals.
-- `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile? }`.
+- `dryrun` — `{ path, out?, stdout?, no_chunk?, audit_profile?,
+  library? }`.
   Writes the JSONL plus a summary sidecar under `<data_root>/dryruns/`.
   `audit_profile`, when set to a built-in, resolves through the shared
   set for this dryrun only; absent means the daemon's overlay-resolved
   default profile; any other name is refused with `-32602` before the
   write session is taken.
+
+Every write method takes an optional `library`: the registry name of
+the library it acts on. Absent, it resolves to the registry's current
+default — which is the library the daemon was brought up under until
+`library.set_default` moves it. A name the registry does not know is
+refused with `-32010 invalid library` before any store is opened, and
+a plan id minted against one library is not redeemable against
+another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`
+/ `vectors.reembed` execute legs scope their plan ids the same way.
+
+`diagnose.run` is the exception among the daemon's write-path methods:
+a diagnostic bundle describes the process and the machine under it
+rather than any one mounted library, so it takes no `library` and
+resolves from the selection the daemon was started with.
 
 Every write command takes the runtime-wide write mutex on entry; a
 second concurrent write returns `-32001 busy`.

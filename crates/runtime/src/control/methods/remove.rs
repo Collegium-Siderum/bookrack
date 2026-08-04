@@ -14,7 +14,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::remove::{ExpectedFingerprint, RemoveArgs, execute_remove_from_plan, plan_remove};
-use crate::control::error_map::{plan_lookup_err, write_err};
+use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -35,6 +35,12 @@ pub struct RemoveParams {
     /// on execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 /// Serialized form of a registered `remove` plan. The `fingerprint`
@@ -66,7 +72,7 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     match parsed.plan_id.as_deref() {
         Some(id) => {
             require_yes("remove", parsed.yes, false)?;
-            remove_execute_from_plan(id.to_string(), ctx).await
+            remove_execute_from_plan(id.to_string(), parsed.library.as_deref(), ctx).await
         }
         None => Err(RpcError::new(
             INVALID_PARAMS,
@@ -77,8 +83,12 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 }
 
 async fn remove_dry_run(parsed: RemoveParams, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let cfg = ctx.cfg.clone();
-    let library_name = ctx.library_name.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
+    let library_name = handle.name().to_string();
     let registry = ctx.plan_registry.clone();
     let args = RemoveArgs {
         intake_id: parsed.intake_id,
@@ -113,14 +123,22 @@ async fn remove_dry_run(parsed: RemoveParams, ctx: &MethodContext) -> Result<Val
     .await
 }
 
-async fn remove_execute_from_plan(plan_id: String, ctx: &MethodContext) -> Result<Value, RpcError> {
+async fn remove_execute_from_plan(
+    plan_id: String,
+    library: Option<&str>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    // Resolve the target before the plan: the plan registry scopes an
+    // id to the library it was minted against, and that comparison is
+    // only meaningful against the library this call names.
+    let handle = ctx.registry.get(library).map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     let payload = ctx
         .plan_registry
-        .take(&PlanId::from(plan_id), "remove", ctx.library_name.as_str())
+        .take(&PlanId::from(plan_id), "remove", handle.name())
         .map_err(plan_lookup_err)?;
     let plan: RegisteredRemovePlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
-    let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         let outcome = execute_remove_from_plan(
             &cfg,

@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use bookrack_config::{Config, LibrarySelection};
+#[cfg(test)]
+use bookrack_config::Config;
+use bookrack_config::LibrarySelection;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::stream::LogStreamHandle;
@@ -84,7 +86,6 @@ pub(super) fn input_err(e: CmdInputError) -> RpcError {
 /// the originals; the dispatcher only clones cheap shared handles.
 #[derive(Clone)]
 pub struct MethodContext {
-    pub cfg: Arc<Config>,
     pub registry: Arc<LibraryRegistry<OllamaEmbedClient>>,
     pub info_context: LibraryInfoContext,
     pub queue_state: Arc<Mutex<QueueState>>,
@@ -548,7 +549,6 @@ pub(crate) fn test_method_context(
     let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
     let (shutdown_tx, _) = broadcast::channel(8);
     MethodContext {
-        cfg,
         registry: LibraryRegistry::single(handle),
         info_context: LibraryInfoContext {
             data_dir: dir.display().to_string(),

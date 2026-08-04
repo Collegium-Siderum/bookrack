@@ -303,3 +303,86 @@ async fn the_status_card_reports_the_named_librarys_identity() -> Result<()> {
 
     join_with_deadline(runtime, repl_handle, driver).await
 }
+
+/// A write method acts on the library its `library` parameter names.
+///
+/// `dryrun` is the cheapest witness: it writes its JSONL and summary
+/// under `<data_root>/dryruns/`, so which root grew the directory says
+/// which library the call reached. Without the parameter the method
+/// had no way to be told, and every write method acted on the
+/// bring-up-selected library whatever the caller meant.
+///
+/// The second half is the same question from the other side: a library
+/// name the registry does not know must be refused as caller input,
+/// not silently ignored on the way to the primary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_method_acts_on_the_library_its_parameter_names() -> Result<()> {
+    let sandbox = world();
+    let runtime_root = tempfile::tempdir()?;
+    let book_dir = tempfile::tempdir()?;
+    let book_path = book_dir.path().join("synthetic-ledger.txt");
+    std::fs::write(&book_path, BOOK_TEXT)?;
+    let alpha_root = sandbox.data_root("alpha-root");
+    let beta_root = sandbox.data_root("beta-root");
+
+    let mut opts = bookrack_runtime::RuntimeOpts::headless(None, Some("alpha".to_string()));
+    opts.no_mcp = true;
+    // `dryrun` is queue-bound; a headless daemon without a worker
+    // short-circuits it before the handler runs.
+    opts.spawn_queue_worker = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = bookrack_runtime::DaemonRuntime::start(opts).await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "dryrun",
+            "params": {"path": book_path, "library": "beta"},
+        });
+        send(&mut w, &req.to_string()).await?;
+        let resp = recv(&mut reader).await?;
+        assert!(
+            resp["error"].is_null(),
+            "dryrun against beta failed: {resp}"
+        );
+
+        let unknown = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "dryrun",
+            "params": {"path": book_path, "library": "no-such-library"},
+        });
+        send(&mut w, &unknown.to_string()).await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32010),
+            "an unknown library must be refused, not routed to the primary: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    assert!(
+        beta_root.join("dryruns").exists(),
+        "the dry run did not land in the library it named",
+    );
+    assert!(
+        !alpha_root.join("dryruns").exists(),
+        "the dry run landed in the primary's root instead of the named library's",
+    );
+    Ok(())
+}

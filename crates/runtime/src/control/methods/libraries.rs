@@ -41,6 +41,14 @@ pub struct LibraryForkParams {
     /// forwards `yes: true` once the operator confirms.
     #[serde(default)]
     pub yes: bool,
+    /// The library being forked — the source of the clone. Absent
+    /// means the registry's current default. `library.fork` is the one
+    /// method that legitimately holds two libraries at once, so the
+    /// source is named explicitly rather than inherited from whichever
+    /// library the daemon came up under.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 fn default_copy_mode() -> String {
@@ -76,7 +84,11 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
              platform config directory is available",
         )
     })?;
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     let target = parsed.data_dir.clone();
     let new_name = parsed.new_name.clone();
     run_write(ctx, move || async move {

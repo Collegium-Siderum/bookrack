@@ -41,7 +41,16 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
             no_scrub: false,
         },
     };
-    let cfg = ctx.cfg.clone();
+    // Process-level, not routed: a diagnostic bundle describes this
+    // daemon and the machine under it, so it resolves from the
+    // selection the daemon was started with rather than from any one
+    // mounted library. That is why `diagnose.run` takes no `library`
+    // parameter.
+    let selection = ctx.selection.clone();
+    let cfg = std::sync::Arc::new(
+        bookrack_config::Config::resolve(&selection)
+            .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("resolve configuration: {e}")))?,
+    );
     let opts = bookrack_diagnose::Options {
         days: parsed.days,
         scrub: !parsed.no_scrub,

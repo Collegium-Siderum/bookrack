@@ -16,7 +16,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, require_yes, run_write};
 use crate::cmd::vectors;
-use crate::control::error_map::{plan_lookup_err, write_err};
+use crate::control::error_map::{plan_lookup_err, registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::control::plan_registry::PlanId;
 
@@ -36,11 +36,21 @@ pub struct VectorsRebuildParams {
     nprobes: Option<u32>,
     #[serde(default)]
     refine_factor: Option<u32>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 pub async fn rebuild(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: VectorsRebuildParams = parse(params, "vectors.rebuild")?;
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     run_write(ctx, move || async move {
         vectors::rebuild(
             &cfg,
@@ -75,6 +85,12 @@ pub struct VectorsReembedParams {
     /// execute; the call returns INVALID_PARAMS when this is absent.
     #[serde(default)]
     plan_id: Option<String>,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 /// Serialized form of a registered `vectors.reembed` plan. The
@@ -92,7 +108,7 @@ pub async fn reembed(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         return reembed_dry_run(parsed, ctx).await;
     }
     match parsed.plan_id.as_deref() {
-        Some(id) => reembed_execute_from_plan(id.to_string(), ctx).await,
+        Some(id) => reembed_execute_from_plan(id.to_string(), parsed.library.as_deref(), ctx).await,
         None => Err(RpcError::new(
             INVALID_PARAMS,
             "vectors.reembed: plan_id required on execute; call with dry_run=true first \
@@ -105,8 +121,12 @@ async fn reembed_dry_run(
     parsed: VectorsReembedParams,
     ctx: &MethodContext,
 ) -> Result<Value, RpcError> {
-    let cfg = ctx.cfg.clone();
-    let library_name = ctx.library_name.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
+    let library_name = handle.name().to_string();
     let registry = ctx.plan_registry.clone();
     let book = parsed.book;
     let stale_only = parsed.stale_only;
@@ -138,19 +158,20 @@ async fn reembed_dry_run(
 
 async fn reembed_execute_from_plan(
     plan_id: String,
+    library: Option<&str>,
     ctx: &MethodContext,
 ) -> Result<Value, RpcError> {
+    // Resolve the target before the plan: the plan registry scopes an
+    // id to the library it was minted against, and that comparison is
+    // only meaningful against the library this call names.
+    let handle = ctx.registry.get(library).map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     let payload = ctx
         .plan_registry
-        .take(
-            &PlanId::from(plan_id),
-            "vectors.reembed",
-            ctx.library_name.as_str(),
-        )
+        .take(&PlanId::from(plan_id), "vectors.reembed", handle.name())
         .map_err(plan_lookup_err)?;
     let plan: RegisteredReembedPlan = serde_json::from_slice(&payload)
         .map_err(|e| RpcError::new(INTERNAL_ERROR, format!("decode plan payload: {e}")))?;
-    let cfg = ctx.cfg.clone();
     run_write(ctx, move || async move {
         let report = vectors::execute_reembed_from_plan(&cfg, plan.pinned_ids)
             .await
@@ -177,12 +198,22 @@ pub struct VectorsResetParams {
     yes: bool,
     #[serde(default)]
     resume: bool,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: VectorsResetParams = parse(params, "vectors.reset")?;
     require_yes("vectors.reset", parsed.yes, parsed.resume)?;
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     run_write(ctx, move || async move {
         vectors::reset(&cfg, parsed.yes, parsed.resume, deny_destructive)
             .await
@@ -198,12 +229,22 @@ pub async fn reset(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 pub struct VectorsDropParams {
     #[serde(default)]
     yes: bool,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 pub async fn drop_index(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: VectorsDropParams = parse(params, "vectors.drop")?;
     require_yes("vectors.drop", parsed.yes, false)?;
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     run_write(ctx, move || async move {
         vectors::drop(&cfg)
             .await

@@ -728,7 +728,6 @@ impl DaemonRuntime {
         let tray_focus_signal = Arc::new(tokio::sync::Notify::new());
         let plan_registry = Arc::new(crate::control::plan_registry::PlanRegistry::new());
         let method_ctx = MethodContext {
-            cfg: Arc::clone(&cfg),
             registry: Arc::clone(&registry),
             info_context: info_context.clone(),
             queue_state: Arc::clone(&queue_state),

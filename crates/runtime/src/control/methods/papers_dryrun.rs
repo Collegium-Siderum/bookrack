@@ -13,7 +13,7 @@ use ts_rs::TS;
 
 use super::{MethodContext, run_write};
 use crate::cmd::papers_dryrun;
-use crate::control::error_map::write_err;
+use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize)]
@@ -27,6 +27,12 @@ pub struct PapersDryrunParams {
     out: Option<PathBuf>,
     #[serde(default)]
     no_chunk: bool,
+    /// The library this call acts on. Absent means the registry's
+    /// current default — the library the daemon was brought up under,
+    /// unless `library.set_default` has moved it since.
+    #[serde(default)]
+    #[cfg_attr(test, ts(type = "string | null"))]
+    library: Option<String>,
 }
 
 pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
@@ -41,7 +47,11 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
             ));
         }
     };
-    let cfg = ctx.cfg.clone();
+    let handle = ctx
+        .registry
+        .get(parsed.library.as_deref())
+        .map_err(registry_err)?;
+    let cfg = handle.cfg_arc();
     run_write(ctx, move || async move {
         let outcome = tokio::task::spawn_blocking(move || {
             papers_dryrun::run(&cfg, &parsed.path, parsed.out.as_deref(), parsed.no_chunk)

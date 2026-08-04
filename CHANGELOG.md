@@ -217,6 +217,27 @@ release workflow extracts the matching section verbatim from this file.
   `metadata reaudit` remain outside the registry by design; their
   trail stays on `item_pipeline_audit`.
 
+- **Every write method takes a `library` parameter.** The control
+  plane advertised per-library targeting — `ingest.submit` has taken
+  one since multi-library mounting arrived, and `-32010 invalid
+  library` has a code of its own — but the ~25 methods behind
+  `vectors.*`, `corpus.*`, `remove`, `dryrun`, `stamps.reconcile`,
+  `metadata.*`, `verify.run`, and their paper-side peers had no way to
+  be told which library to act on. They acted on the one the daemon
+  was brought up under, and a `library` handed to them was ignored
+  rather than refused.
+
+  All of them now accept `library`, and resolve the target through the
+  registry: absent means the current default, and a name the registry
+  does not know is refused with `-32010` before any store is opened. A
+  plan id minted for one library is likewise not redeemable against
+  another. `library.fork` names its *source* library explicitly, being
+  the one method that legitimately holds two at once.
+  `diagnose.run` deliberately takes none: a diagnostic bundle
+  describes the process and the machine, not a library.
+
+  Callers that omit the parameter behave exactly as before.
+
 ### Changed
 
 - **`pipeline_runs.status` documents the states it actually has.** The
