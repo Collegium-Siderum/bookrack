@@ -59,6 +59,16 @@ pub const STATUS_ACKNOWLEDGED: &str = "acknowledged";
 /// rejected outright.
 pub const STATUS_REJECTED: &str = "rejected";
 
+/// Every value `node_reviews.status` carries, built from the four
+/// constants above so a filter validating caller input and the writers
+/// cannot name different sets.
+pub const REVIEW_STATUSES: [&str; 4] = [
+    STATUS_PENDING,
+    STATUS_APPROVED,
+    STATUS_ACKNOWLEDGED,
+    STATUS_REJECTED,
+];
+
 /// The single source of truth for the `node_reviews` table's schema. Its
 /// DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {

@@ -16,6 +16,15 @@ use rusqlite::{OptionalExtension, Row, ToSql, named_params, params_from_iter};
 
 use crate::{Catalog, Result};
 
+/// Every value `node_publication_attrs.confidence` carries, in
+/// ascending order of confidence.
+///
+/// The column is written by the metadata audit, whose `Confidence`
+/// enum is the vocabulary's origin; this array is what a filter
+/// validating caller input checks against, and `bookrack-metadata`
+/// pins the two together.
+pub const CONFIDENCE_LEVELS: [&str; 3] = ["low", "medium", "high"];
+
 /// The single source of truth for the `node_publication_attrs` table's
 /// schema. Its DDL is rendered from this spec.
 pub(crate) const SPEC: TableSpec = TableSpec {

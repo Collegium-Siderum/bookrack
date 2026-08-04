@@ -18,7 +18,7 @@ use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::{BookFilter, PaperFilter, parse_statuses};
+use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, parse_statuses};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
@@ -35,7 +35,7 @@ mod error_map;
 mod reference;
 use error_map::{
     invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
-    respond_with, unknown_status_to_mcp,
+    respond_with, unknown_filter_value_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -425,6 +425,23 @@ pub struct ReadSpanArgs {
 /// differ only in which catalog rows they include.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MetadataPageArgs {
+    /// Substring match against the title as extraction and enrichment
+    /// wrote it, before any correction — the layer a review pass asks
+    /// about. To search the titles rows report, use
+    /// `library.find_books`.
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    /// Match the audit's row-level confidence against this set:
+    /// `low`, `medium`, `high`. An unrecognised name is refused rather
+    /// than dropped.
+    #[serde(default)]
+    pub confidence_in: Option<Vec<String>>,
+    /// Match the review status against this set: `pending`,
+    /// `approved`, `acknowledged`, `rejected`. A book never reviewed
+    /// counts as `pending`. An unrecognised name is refused rather
+    /// than dropped.
+    #[serde(default)]
+    pub review_status_in: Option<Vec<String>>,
     /// Maximum number of rows in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -919,7 +936,7 @@ impl BookrackServer {
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
         let statuses = parse_statuses(&args.statuses.unwrap_or_default())
-            .map_err(|unknown| unknown_status_to_mcp("library.find_books", &unknown))?;
+            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let filter = BookFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
@@ -1299,21 +1316,31 @@ impl BookrackServer {
         }
     }
 
-    /// Return every registered book with its confidence and review
-    /// status, unfiltered.
+    /// Return registered books with their confidence and review
+    /// status, optionally narrowed by the extracted title, the audit
+    /// verdict, or the review state.
     #[tool(
         name = "library.list_metadata",
-        description = "List every registered book with its current confidence and review \
-                       status, regardless of audit verdict. Paginated."
+        description = "List registered books with their current confidence and review \
+                       status, regardless of audit verdict. Filters match the metadata as \
+                       extracted, before curation, so this is the tool for finding records \
+                       that need fixing; `library.find_books` searches the corrected \
+                       values. Paginated."
     )]
     async fn library_list_metadata(
         &self,
         Parameters(args): Parameters<MetadataPageArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let filter = MetadataFilter::checked(
+            args.title_substring,
+            args.confidence_in.unwrap_or_default(),
+            args.review_status_in.unwrap_or_default(),
+        )
+        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
-        let page = reads::metadata::list_metadata(handle.ops(), limit, offset)
+        let page = reads::metadata::list_metadata(handle.ops(), filter, limit, offset)
             .map_err(ops_error_to_internal)?;
         respond_with(&page)
     }

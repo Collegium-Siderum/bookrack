@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs, parse_statuses};
+use bookrack_ops::dto::{BookFilter, MetadataFilter, PaperFilter, ShowTocArgs, parse_statuses};
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{OpsError, SearchOptions, reads};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::{rpc_from_problem, unknown_status};
+use crate::control::error_map::{rpc_from_problem, unknown_filter_value};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize, Default)]
@@ -67,6 +67,22 @@ impl ShowTocParams {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct PageParams {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListMetadataParams {
+    #[serde(default)]
+    pub title_substring: Option<String>,
+    #[serde(default)]
+    pub confidence_in: Option<Vec<String>>,
+    #[serde(default)]
+    pub review_status_in: Option<Vec<String>>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -326,7 +342,7 @@ pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
     let statuses = parse_statuses(&p.statuses.unwrap_or_default())
-        .map_err(|unknown| unknown_status(&unknown))?;
+        .map_err(|unknown| unknown_filter_value(&unknown))?;
     let filter = BookFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
@@ -432,11 +448,21 @@ pub fn show_metadata_report(
 }
 
 pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
-    let p: PageParams = parse(params, "library.list_metadata")?;
+    let p: ListMetadataParams = parse(params, "library.list_metadata")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let page =
-        reads::metadata::list_metadata(handle.ops(), p.limit.unwrap_or(0), p.offset.unwrap_or(0))
-            .map_err(ops_internal)?;
+    let filter = MetadataFilter::checked(
+        p.title_substring,
+        p.confidence_in.unwrap_or_default(),
+        p.review_status_in.unwrap_or_default(),
+    )
+    .map_err(|unknown| unknown_filter_value(&unknown))?;
+    let page = reads::metadata::list_metadata(
+        handle.ops(),
+        filter,
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
     to_value(&page)
 }
 

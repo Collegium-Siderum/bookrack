@@ -40,14 +40,13 @@
 //! here would drop the root cause at the process boundary.
 //! `scripts/error-boundary-check.sh` enforces that.
 
-use bookrack_catalog::IntakeStatus;
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem};
 use bookrack_embed::EmbedError;
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
-use bookrack_ops::dto::UnknownStatus;
+use bookrack_ops::dto::UnknownFilterValue;
 use bookrack_ops::registry::RegistryError;
 use eyre::Report;
 
@@ -144,25 +143,24 @@ pub(crate) fn plan_lookup_err(e: PlanLookupError) -> RpcError {
     }
 }
 
-/// Map a rejected lifecycle-status name to `INVALID_PARAMS`.
+/// Map a refused filter value to `INVALID_PARAMS`.
 ///
-/// The accepted set is rendered from [`IntakeStatus::ALL`] rather than
-/// spelled out, so a state added to the lifecycle cannot leave a stale
+/// The accepted set travels with the refusal rather than being spelled
+/// out here, so a vocabulary that gains a value cannot leave a stale
 /// list behind on this surface.
-pub(crate) fn unknown_status(unknown: &UnknownStatus) -> RpcError {
-    let accepted = IntakeStatus::ALL
-        .iter()
-        .map(|status| status.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+pub(crate) fn unknown_filter_value(unknown: &UnknownFilterValue) -> RpcError {
     rpc_from_problem(
         INVALID_PARAMS,
-        Problem::new(format!("cannot filter on lifecycle status {:?}", unknown.0))
-            .detail(
-                "The filter names a status no book can be in, so it was refused \
-                 rather than applied without it.",
-            )
-            .hint(format!("Use one of: {accepted}.")),
+        Problem::new(format!(
+            "cannot filter on {} value {:?}",
+            unknown.parameter, unknown.value
+        ))
+        .detail(format!(
+            "The {} filter names a value no row carries, so it was refused rather \
+             than applied without it.",
+            unknown.parameter
+        ))
+        .hint(format!("Use one of: {}.", unknown.accepted.join(", "))),
     )
 }
 

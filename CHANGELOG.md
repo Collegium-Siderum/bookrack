@@ -240,6 +240,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **The review listing can be searched by what extraction wrote.**
+  `library.list_metadata` returned every book in the library and took
+  no filter at all, so finding the record with the typo meant paging
+  through the shelf. It now accepts `title_substring`, `confidence_in`
+  and `review_status_in`, and its title filter reads the metadata as
+  extracted — the layer under review — which is the opposite of what
+  `library.find_books` searches. A value outside the confidence or
+  review vocabulary is refused, naming what would be accepted.
+
+  Each row also carries `title_raw` alongside `title`: what extraction
+  wrote and what the book is shown as. Reviewing a correction meant
+  fetching the record again to see what it replaced.
+
+  `library.list_pending_reviews` is unchanged — the same listing under
+  a preset, now sharing the filter shape rather than a second query.
+
 - **`library.find_books` can ask for books at a given point in the
   pipeline.** The filter existed from the catalog up to the facade, but
   neither front end passed it, so every caller received the whole

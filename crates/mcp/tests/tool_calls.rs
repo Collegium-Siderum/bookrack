@@ -409,3 +409,55 @@ async fn find_books_refuses_a_status_no_book_can_be_in() {
     let _ = client.cancel().await;
     fx.stop().await;
 }
+
+#[tokio::test]
+async fn list_metadata_refuses_a_confidence_grade_no_audit_writes() {
+    // The two vocabularies this listing filters on are closed sets. A
+    // value outside one is refused with what would have been accepted,
+    // rather than dropped into an unfiltered listing.
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "library.list_metadata",
+            serde_json::json!({ "confidence_in": ["quite-sure"] }),
+        ))
+        .await
+        .expect_err("a confidence grade outside the audit's set must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("quite-sure") && data.message.contains("confidence_in"),
+        "the refusal must name the parameter and the value: {}",
+        data.message
+    );
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a refused value has a next step");
+    for level in bookrack_catalog::CONFIDENCE_LEVELS {
+        assert!(
+            hint.contains(level),
+            "the hint must state the accepted set, missing {level}: {hint}"
+        );
+    }
+
+    // The same shape holds for the review-status vocabulary.
+    let err = client
+        .call_tool(call(
+            "library.list_metadata",
+            serde_json::json!({ "review_status_in": ["maybe"] }),
+        ))
+        .await
+        .expect_err("a review status outside the set must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("review_status_in"),
+        "the refusal must name the parameter: {}",
+        data.message
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}

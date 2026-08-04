@@ -147,8 +147,13 @@ impl MetadataAuditReport {
 pub struct MetadataListRow {
     /// Catalog intake id of the book.
     pub intake_id: i64,
-    /// Best-effort title.
+    /// Best-effort title as reported elsewhere: the extracted value
+    /// with the curator's corrections applied.
     pub title: Option<String>,
+    /// The title as extraction and enrichment wrote it, before any
+    /// correction. Equal to [`Self::title`] on a book no one has
+    /// edited; `None` when the base layer never carried one.
+    pub title_raw: Option<String>,
     /// Confidence the audit assigned (`high` / `medium` / `low`).
     pub confidence: Option<String>,
     /// Current review status (`pending` / `acknowledged` / ...).

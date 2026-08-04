@@ -642,7 +642,15 @@ carry is reported as `-32602 invalid params`, not `-32010`.
   stored audit verdict and the recomputed per-field plausibility
   report.
 - `library.list_metadata` / `library.list_pending_reviews` —
-  paginated review-queue browse.
+  paginated review-queue browse. `library.list_metadata` accepts
+  `title_substring`, `confidence_in` (`low` / `medium` / `high`) and
+  `review_status_in` (`pending` / `approved` / `acknowledged` /
+  `rejected`); a value outside either set is refused with `-32602`.
+  Its title filter matches the metadata **as extracted**, before
+  curation — the opposite layer from `library.find_books` — and each
+  row carries both, `title_raw` as extracted and `title` as reported.
+  `library.list_pending_reviews` is the preset for low / medium
+  confidence still pending or acknowledged.
 - `library.show_audit_trail` / `library.show_pipeline_trail` —
   per-book metadata-edit and pipeline-step audit trails.
 - `library.list_papers` / `library.find_papers` — paginated

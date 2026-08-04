@@ -14,7 +14,7 @@ use crate::dto::audit::AuditTrailEntry;
 use crate::dto::metadata_report::{
     MetadataAuditReport, MetadataListPage, MetadataListRow, MetadataReport,
 };
-use crate::dto::{BookDetail, TocStats, clamp_limit};
+use crate::dto::{BookDetail, MetadataFilter, TocStats, clamp_limit};
 use crate::recorder::record_call_sync;
 
 /// Read the metadata-status record for one book: bibliographic detail
@@ -101,23 +101,61 @@ pub fn show_metadata_report<E: Embedder>(
     )
 }
 
-/// List every registered book with its current confidence and review
-/// status. Paginated; no audit / review filtering.
+/// The confidence grades a book on the review queue carries.
+const NEEDS_REVIEW_CONFIDENCE: &[&str] = &["low", "medium"];
+
+/// The review states a book on the review queue carries. A book never
+/// reviewed counts as `pending`.
+const NEEDS_REVIEW_STATUS: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
+
+/// List registered books with their current confidence and review
+/// status, narrowed by `filter`. Paginated.
+///
+/// The title predicate reads the base layer — what extraction and
+/// enrichment wrote — so a row reached by its extracted title is the
+/// one a review pass is looking for. Each row carries both layers:
+/// [`MetadataListRow::title_raw`] as extracted, and
+/// [`MetadataListRow::title`] as reported everywhere else. To search
+/// the reported titles, use
+/// [`reads::books::find_books`](crate::reads::books::find_books).
 pub fn list_metadata<E: Embedder>(
     ops: &Ops<E>,
+    filter: MetadataFilter,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
     record_call_sync!(
         ops,
         "library.list_metadata",
-        serde_json::json!({ "limit": limit, "offset": offset }),
-        { list_metadata_inner(ops, IntakeFilter::default(), limit, offset) }
+        serde_json::json!({
+            "title_substring": filter.title_substring,
+            "confidence_in": filter.confidence_in,
+            "review_status_in": filter.review_status_in,
+            "limit": limit,
+            "offset": offset,
+        }),
+        {
+            let confidence_in: Vec<&str> =
+                filter.confidence_in.iter().map(String::as_str).collect();
+            let review_status_in: Vec<&str> =
+                filter.review_status_in.iter().map(String::as_str).collect();
+            let catalog_filter = IntakeFilter {
+                title_substring: filter.title_substring.as_deref(),
+                confidence_in: confidence_in.as_slice(),
+                review_status_in: review_status_in.as_slice(),
+                ..IntakeFilter::default()
+            };
+            list_metadata_inner(ops, catalog_filter, limit, offset)
+        }
     )
 }
 
 /// List books still on the review queue: low / medium confidence plus
 /// pending / acknowledged review status. Paginated.
+///
+/// A preset over the same listing [`list_metadata`] serves: it is the
+/// one question asked often enough to earn its own verb, and it shares
+/// that function's filter shape rather than a second query.
 pub fn list_pending_reviews<E: Embedder>(
     ops: &Ops<E>,
     limit: u32,
@@ -128,11 +166,9 @@ pub fn list_pending_reviews<E: Embedder>(
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
-            let needs_review_confidence: &[&str] = &["low", "medium"];
-            let needs_review_status: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
             let filter = IntakeFilter {
-                confidence_in: needs_review_confidence,
-                review_status_in: needs_review_status,
+                confidence_in: NEEDS_REVIEW_CONFIDENCE,
+                review_status_in: NEEDS_REVIEW_STATUS,
                 ..IntakeFilter::default()
             };
             list_metadata_inner(ops, filter, limit, offset)
@@ -162,6 +198,7 @@ fn list_metadata_inner<E: Embedder>(
             let title = effective
                 .get(&intake.intake_id)
                 .and_then(|e| e.get("title").map(str::to_string));
+            let title_raw = attrs.get(&intake.intake_id).and_then(|a| a.title.clone());
             let confidence = attrs
                 .get(&intake.intake_id)
                 .and_then(|a| a.confidence.clone());
@@ -169,6 +206,7 @@ fn list_metadata_inner<E: Embedder>(
             MetadataListRow {
                 intake_id: intake.intake_id,
                 title,
+                title_raw,
                 confidence,
                 review_status,
             }

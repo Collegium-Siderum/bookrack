@@ -28,7 +28,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use bookrack_catalog::{
-    EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride, OcrPending,
+    CONFIDENCE_LEVELS, EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride,
+    OcrPending, REVIEW_STATUSES,
 };
 use bookrack_corpus::{Node, TocQuery};
 
@@ -535,15 +536,21 @@ pub struct BookFilter {
     pub categories: Vec<String>,
 }
 
-/// A status string no lifecycle state carries, carrying the value as
-/// received.
+/// A filter value outside the vocabulary its parameter accepts,
+/// carrying what was received and what would have been accepted.
 ///
 /// The caller words its own message: a JSON-RPC error and an MCP tool
-/// error are not the same sentence, and the accepted set each renders
-/// comes from [`IntakeStatus::ALL`] rather than from a list written
-/// out here.
+/// error are not the same sentence. What is shared is this triple, so
+/// neither front end writes out a vocabulary of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownStatus(pub String);
+pub struct UnknownFilterValue {
+    /// The wire parameter that carried the value.
+    pub parameter: &'static str,
+    /// The value as received.
+    pub value: String,
+    /// Every value that parameter accepts.
+    pub accepted: Vec<&'static str>,
+}
 
 /// Parse wire status strings into [`IntakeStatus`], failing on the
 /// first one no lifecycle state carries.
@@ -551,11 +558,79 @@ pub struct UnknownStatus(pub String);
 /// The wire vocabulary is the stored form — `"embedded"`,
 /// `"needs_ocr"` — so what a caller reads back in a row is what it
 /// sends to filter on.
-pub fn parse_statuses(values: &[String]) -> Result<Vec<IntakeStatus>, UnknownStatus> {
+pub fn parse_statuses(values: &[String]) -> Result<Vec<IntakeStatus>, UnknownFilterValue> {
     values
         .iter()
-        .map(|value| IntakeStatus::from_db_str(value).ok_or_else(|| UnknownStatus(value.clone())))
+        .map(|value| {
+            IntakeStatus::from_db_str(value).ok_or_else(|| UnknownFilterValue {
+                parameter: "statuses",
+                value: value.clone(),
+                accepted: IntakeStatus::ALL.iter().map(|s| s.as_str()).collect(),
+            })
+        })
         .collect()
+}
+
+/// Check every value against `accepted`, failing on the first one
+/// outside it.
+///
+/// For the vocabularies that stay strings all the way to the SQL —
+/// audit confidence, review status — where there is no enum to parse
+/// into but the same refusal is owed.
+pub fn checked_vocabulary(
+    parameter: &'static str,
+    values: Vec<String>,
+    accepted: &[&'static str],
+) -> Result<Vec<String>, UnknownFilterValue> {
+    if let Some(bad) = values.iter().find(|v| !accepted.contains(&v.as_str())) {
+        return Err(UnknownFilterValue {
+            parameter,
+            value: bad.clone(),
+            accepted: accepted.to_vec(),
+        });
+    }
+    Ok(values)
+}
+
+/// Facade-level filter for the metadata listings.
+///
+/// Its attribute predicate reads the **base** layer — what extraction
+/// and enrichment wrote — because that is the layer a review pass asks
+/// about. The registry filters (`find_books`, `find_papers`) read the
+/// curated values instead.
+#[derive(Debug, Default, Clone)]
+pub struct MetadataFilter {
+    /// Substring match against the extracted title.
+    pub title_substring: Option<String>,
+    /// Match the audit's row-level confidence against this set. Empty
+    /// means no filter.
+    pub confidence_in: Vec<String>,
+    /// Match the review status against this set, where a book never
+    /// reviewed counts as `pending`. Empty means no filter.
+    pub review_status_in: Vec<String>,
+}
+
+impl MetadataFilter {
+    /// Build the filter from wire values, refusing a confidence grade
+    /// or review status outside the vocabulary the column carries.
+    ///
+    /// Both front ends build it through here, so neither can accept a
+    /// value the other refuses.
+    pub fn checked(
+        title_substring: Option<String>,
+        confidence_in: Vec<String>,
+        review_status_in: Vec<String>,
+    ) -> Result<MetadataFilter, UnknownFilterValue> {
+        Ok(MetadataFilter {
+            title_substring,
+            confidence_in: checked_vocabulary("confidence_in", confidence_in, &CONFIDENCE_LEVELS)?,
+            review_status_in: checked_vocabulary(
+                "review_status_in",
+                review_status_in,
+                &REVIEW_STATUSES,
+            )?,
+        })
+    }
 }
 
 /// The basename of a path recorded at intake time. `None` when no path

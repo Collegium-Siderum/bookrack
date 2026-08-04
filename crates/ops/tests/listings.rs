@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT};
+use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT, MetadataFilter};
 use bookrack_ops::reads::books::find_books;
-use bookrack_ops::reads::metadata::list_metadata;
+use bookrack_ops::reads::metadata::{list_metadata, list_pending_reviews};
 use bookrack_ops::{Caller, Ops};
 use tempfile::TempDir;
 
@@ -77,6 +77,20 @@ impl Fixture {
                 "human",
             ))
             .expect("tag category");
+    }
+
+    /// Write the audit's row-level confidence for one book.
+    fn set_confidence(&self, intake_id: i64, confidence: &str) {
+        let catalog = self.catalog();
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.title = catalog
+            .publication_attrs(intake_id, ItemKind::Book)
+            .expect("read attrs")
+            .and_then(|a| a.title);
+        attrs.confidence = Some(confidence.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("write confidence");
     }
 
     /// Record the user's title override: `Some` replaces the stored
@@ -306,8 +320,88 @@ fn list_metadata_reports_not_truncated_when_the_clamped_page_covers_everything()
     let _ = fx.seed_book("sha-b", "Bravo");
 
     let request_over_max = MAX_LIST_LIMIT + 1;
-    let page = list_metadata(&fx.ops, request_over_max, 0).expect("list");
+    let page =
+        list_metadata(&fx.ops, MetadataFilter::default(), request_over_max, 0).expect("list");
     assert_eq!(page.total, 2);
     assert_eq!(page.rows.len(), 2);
     assert!(!page.truncated);
+}
+
+#[test]
+fn the_two_listings_read_opposite_layers_of_the_same_book() {
+    // One book, one correction, one needle: the registry answers the
+    // title it reports, the review listing answers the title
+    // extraction wrote. Both are right, and each is the only way to
+    // reach the book by the value its caller holds.
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-typo", "Handbook of Widgts");
+    fx.override_title(book, Some("Handbook of Widgets"));
+    // A second book the needle must never reach, so a filter that is
+    // dropped rather than applied fails instead of coincidentally
+    // returning the right single row.
+    let _other = fx.seed_book("sha-other", "Manual of Gadgets");
+
+    assert_eq!(
+        books_titled(&fx, "Widgts"),
+        Vec::<i64>::new(),
+        "the registry must not answer the value curation replaced"
+    );
+
+    let filter = MetadataFilter {
+        title_substring: Some("Widgts".to_string()),
+        ..MetadataFilter::default()
+    };
+    let page = list_metadata(&fx.ops, filter, 100, 0).expect("list");
+    let ids: Vec<i64> = page.rows.iter().map(|r| r.intake_id).collect();
+    assert_eq!(
+        ids,
+        vec![book],
+        "the review listing must answer the extracted title"
+    );
+
+    let row = &page.rows[0];
+    assert_eq!(
+        row.title_raw.as_deref(),
+        Some("Handbook of Widgts"),
+        "the row must carry what extraction wrote"
+    );
+    assert_eq!(
+        row.title.as_deref(),
+        Some("Handbook of Widgets"),
+        "the row must carry what the book is shown as"
+    );
+}
+
+#[test]
+fn the_review_queue_preset_matches_the_filter_that_spells_it_out() {
+    // `list_pending_reviews` is a preset over the same listing. Held
+    // to the equivalent explicit filter, so the preset cannot drift
+    // into asking a different question.
+    let fx = Fixture::build();
+    let low = fx.seed_book("sha-low", "Low");
+    let high = fx.seed_book("sha-high", "High");
+    fx.set_confidence(low, "low");
+    fx.set_confidence(high, "high");
+
+    let preset = list_pending_reviews(&fx.ops, 100, 0).expect("preset");
+    let spelled_out = list_metadata(
+        &fx.ops,
+        MetadataFilter {
+            confidence_in: vec!["low".to_string(), "medium".to_string()],
+            review_status_in: vec!["pending".to_string(), "acknowledged".to_string()],
+            ..MetadataFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("explicit");
+
+    let preset_ids: Vec<i64> = preset.rows.iter().map(|r| r.intake_id).collect();
+    let explicit_ids: Vec<i64> = spelled_out.rows.iter().map(|r| r.intake_id).collect();
+    assert_eq!(preset_ids, explicit_ids);
+    assert_eq!(
+        preset_ids,
+        vec![low],
+        "the queue must hold the low-confidence book and not the high-confidence one"
+    );
 }
