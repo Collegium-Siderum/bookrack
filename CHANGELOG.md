@@ -270,7 +270,32 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
-- **Re-auditing a paper changed nothing anyone could see.**
+- **A queue document from a newer version is refused instead of being
+  quietly truncated.** `docs/UPGRADE.md` promised that the queue
+  schema's bump is one-way — that an older binary will not read a
+  document a newer one wrote — and no code anywhere upheld it. The
+  document was read with plain deserialization: keys the binary had no
+  field for were dropped without a word, and the next write persisted
+  the truncated document over the original. Since the document lives in
+  the daemon state directory rather than under a data root, no library
+  snapshot covered it and swapping data roots did not avoid it.
+
+  The version is now read on its own before the document is parsed, and
+  anything above this binary's is refused: `bookrack run` exits 2 with
+  both version numbers and the two ways forward, and the document is
+  left byte-for-byte as it was found, so the version that wrote it still
+  reads every job in it. The probe runs first because a schema bump
+  covers new job states as well as new fields — parsed in full, such a
+  document fails as malformed, which tells the operator the wrong thing.
+
+  `bookrack doctor`'s `queue snapshot` row grew the matching case: the
+  value column reports the version on disk and the note names the
+  version this binary reads. It previously graded such a document `OK`,
+  which is precisely the report an operator sees right after a
+  downgrade. `queue.list` gains `binary_schema_version` alongside the
+  document's own `schema_version`, and `docs/UPGRADE.md` gains a
+  *Downgrading* section for the case where the older binary predates
+  this gate.
   `papers.metadata.reaudit` wrote the two-scalar `confidence` /
   `audit_verdict` rollup and stopped there, while `papers show` and
   every other read surface report from the `node_paper_audit`
