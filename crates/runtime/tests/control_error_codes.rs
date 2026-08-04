@@ -967,6 +967,84 @@ async fn an_unknown_id_reads_as_null_and_writes_as_caller_input() -> Result<()> 
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// `library.find_books` applies the lifecycle-status filter it accepts,
+/// and refuses a status no book can be in rather than answering with
+/// the whole shelf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_books_applies_the_status_filter_and_refuses_an_unknown_one() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let catalog_db = data_root.path().join("catalog.db");
+    let embedded = seed_intake(&catalog_db, ItemKind::Book, "sha-embedded")?;
+    let pending = seed_intake(&catalog_db, ItemKind::Book, "sha-pending")?;
+    Catalog::open(&catalog_db)?.set_intake_status(
+        ItemKind::Book,
+        embedded,
+        bookrack_catalog::IntakeStatus::Embedded,
+    )?;
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let resp = call(
+            &mut w,
+            &mut reader,
+            1,
+            "library.find_books",
+            json!({ "statuses": ["embedded"] }),
+        )
+        .await?;
+        let ids: Vec<i64> = resp["result"]["books"]
+            .as_array()
+            .ok_or_else(|| eyre!("expected a books array, got {resp}"))?
+            .iter()
+            .filter_map(|book| book["intake_id"].as_i64())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![embedded],
+            "the status filter did not reach the catalog: {resp}"
+        );
+        assert_ne!(
+            embedded, pending,
+            "the fixture must hold two distinct books for the filter to discriminate"
+        );
+
+        let (code, msg) = rpc_code(
+            &mut w,
+            &mut reader,
+            2,
+            "library.find_books",
+            json!({ "statuses": ["embeded"] }),
+        )
+        .await?;
+        assert_eq!(code, INVALID_PARAMS, "misspelled status: {msg}");
+        assert!(
+            msg.contains("embeded"),
+            "the refusal must name the status it rejected: {msg}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// `library.fork` refuses a fork it cannot perform. Its validation ran
 /// before any of this — what changes is that the refusal now reaches
 /// the caller as caller input rather than as a fault.

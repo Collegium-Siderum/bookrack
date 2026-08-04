@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_catalog::{Catalog, IntakeStatus, NewIntake};
 use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_core::queue::QueueState;
@@ -132,6 +132,21 @@ impl Fixture {
             shutdown_tx,
             server,
         }
+    }
+
+    /// Register one book and drive it to `status`, returning its
+    /// intake id.
+    fn seed_book(&self, sha: &str, status: IntakeStatus) -> i64 {
+        let mut catalog = Catalog::open(&self.catalog_db).expect("open catalog");
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha).format("epub"))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        catalog
+            .set_intake_status(ItemKind::Book, intake_id, status)
+            .expect("set status");
+        intake_id
     }
 
     async fn connect(&self) -> RunningService<RoleClient, ()> {
@@ -312,6 +327,84 @@ async fn search_distinguishes_caller_input_from_environmental_faults() {
         .await
         .expect_err("search without a backend must fail");
     assert_eq!(rpc_error(err).code, ErrorCode::INTERNAL_ERROR);
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn find_books_filters_on_the_requested_lifecycle_statuses() {
+    // Only an embedded book can be recalled by search. Without this
+    // filter a client cannot tell a book with nothing to find from one
+    // that has not reached the vector store yet.
+    let fx = Fixture::start().await;
+    let embedded = fx.seed_book("sha-embedded", IntakeStatus::Embedded);
+    let _pending = fx.seed_book("sha-pending", IntakeStatus::Pending);
+    let client = fx.connect().await;
+
+    let result = client
+        .call_tool(call(
+            "library.find_books",
+            serde_json::json!({ "statuses": ["embedded"] }),
+        ))
+        .await
+        .expect("find_books with a status filter");
+    let body = body_json(&result);
+    let ids: Vec<i64> = body["books"]
+        .as_array()
+        .expect("books array")
+        .iter()
+        .map(|b| b["intake_id"].as_i64().expect("intake_id"))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![embedded],
+        "the status filter did not reach the catalog: {body}"
+    );
+    assert_eq!(
+        body["total"].as_u64(),
+        Some(1),
+        "`total` counts the unfiltered shelf: {body}"
+    );
+
+    let _ = client.cancel().await;
+    fx.stop().await;
+}
+
+#[tokio::test]
+async fn find_books_refuses_a_status_no_book_can_be_in() {
+    // Dropping an unrecognised status would answer with the whole
+    // shelf, which reads as a successful filter that matched
+    // everything.
+    let fx = Fixture::start().await;
+    let client = fx.connect().await;
+
+    let err = client
+        .call_tool(call(
+            "library.find_books",
+            serde_json::json!({ "statuses": ["embeded"] }),
+        ))
+        .await
+        .expect_err("a misspelled status must be rejected");
+    let data = rpc_error(err);
+    assert_eq!(data.code, ErrorCode::INVALID_PARAMS, "{}", data.message);
+    assert!(
+        data.message.contains("embeded"),
+        "the message must name the rejected status: {}",
+        data.message
+    );
+    // The accepted set is the remedy, so it belongs in the hint rather
+    // than in the summary line.
+    let problem: bookrack_core::ProblemData =
+        serde_json::from_value(data.data.expect("data slot filled")).expect("ProblemData");
+    let hint = problem.hint.expect("a rejected status has a next step");
+    for status in IntakeStatus::ALL {
+        assert!(
+            hint.contains(status.as_str()),
+            "the hint must state the accepted set, missing {}: {hint}",
+            status.as_str(),
+        );
+    }
 
     let _ = client.cancel().await;
     fx.stop().await;

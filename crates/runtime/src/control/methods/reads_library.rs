@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use bookrack_core::{Explain, ItemKind, KindedNodeId, NodeId, Problem};
 use bookrack_embed::OllamaEmbedClient;
-use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs};
+use bookrack_ops::dto::{BookFilter, PaperFilter, ShowTocArgs, parse_statuses};
 use bookrack_ops::registry::LibraryHandle;
 use bookrack_ops::{OpsError, SearchOptions, reads};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::rpc_from_problem;
+use crate::control::error_map::{rpc_from_problem, unknown_status};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize, Default)]
@@ -85,6 +85,8 @@ pub struct FindBooksParams {
     pub contributor_role: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
     #[serde(default)]
     pub categories: Option<Vec<String>>,
     #[serde(default)]
@@ -323,13 +325,15 @@ pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<V
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
+    let statuses = parse_statuses(&p.statuses.unwrap_or_default())
+        .map_err(|unknown| unknown_status(&unknown))?;
     let filter = BookFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
         contributor_role: p.contributor_role,
         format: p.format,
+        statuses,
         categories: p.categories.unwrap_or_default(),
-        ..BookFilter::default()
     };
     let page = reads::books::find_books(
         handle.ops(),

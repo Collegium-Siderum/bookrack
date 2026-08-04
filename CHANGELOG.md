@@ -238,6 +238,24 @@ release workflow extracts the matching section verbatim from this file.
 
   Callers that omit the parameter behave exactly as before.
 
+### Added
+
+- **`library.find_books` can ask for books at a given point in the
+  pipeline.** The filter existed from the catalog up to the facade, but
+  neither front end passed it, so every caller received the whole
+  shelf: books still queued, held for a duplicate check, aborted, or
+  waiting on OCR, mixed in with the ones that finished. Only an
+  embedded book has vectors, so only an embedded book can be recalled
+  by the search tools — and an agent had no way to tell a book with
+  nothing to find from one that has not been embedded yet.
+
+  `statuses` accepts the states in the form a row reports them
+  (`pending`, `extracted`, `dedup_hold`, `embedded`, `aborted`,
+  `needs_ocr`), over both MCP and the control socket. A name outside
+  that set is refused, naming what was rejected and what would be
+  accepted, rather than dropped — a dropped filter answers with
+  everything, which reads like a filter that matched everything.
+
 ### Changed
 
 - **A book or paper answers the title it is shown under.** The registry

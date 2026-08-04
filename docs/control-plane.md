@@ -625,11 +625,15 @@ carry is reported as `-32602 invalid params`, not `-32010`.
 - `library.list_books` / `library.find_books` — paginated registry
   browse and filter. `library.find_books` accepts a `categories`
   list that matches books tagged with at least one of the listed
-  category strings in `node_categories`. Its `title_substring`
-  matches the title the row reports — the extracted value with the
-  curator's corrections applied — so a book answers the title it is
-  shown under. To filter on what the pipeline extracted, which is the
-  question a review pass asks, use `library.list_metadata`.
+  category strings in `node_categories`, and a `statuses` list naming
+  lifecycle states in the form a row reports them (`pending`,
+  `extracted`, `dedup_hold`, `embedded`, `aborted`, `needs_ocr`) — a
+  name outside that set is refused with `-32602` rather than dropped.
+  Its `title_substring` matches the title the row reports — the
+  extracted value with the curator's corrections applied — so a book
+  answers the title it is shown under. To filter on what the pipeline
+  extracted, which is the question a review pass asks, use
+  `library.list_metadata`.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
   record and paginated TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by

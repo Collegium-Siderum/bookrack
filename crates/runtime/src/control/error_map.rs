@@ -40,12 +40,14 @@
 //! here would drop the root cause at the process boundary.
 //! `scripts/error-boundary-check.sh` enforces that.
 
+use bookrack_catalog::IntakeStatus;
 use bookrack_config::ConfigError;
 use bookrack_core::{Explain, Problem};
 use bookrack_embed::EmbedError;
 use bookrack_glean::GleanError;
 use bookrack_ingest::IngestError;
 use bookrack_ops::OpsError;
+use bookrack_ops::dto::UnknownStatus;
 use bookrack_ops::registry::RegistryError;
 use eyre::Report;
 
@@ -140,6 +142,28 @@ pub(crate) fn plan_lookup_err(e: PlanLookupError) -> RpcError {
             format!("plan_id was registered against library {actual:?}, not {expected:?}"),
         ),
     }
+}
+
+/// Map a rejected lifecycle-status name to `INVALID_PARAMS`.
+///
+/// The accepted set is rendered from [`IntakeStatus::ALL`] rather than
+/// spelled out, so a state added to the lifecycle cannot leave a stale
+/// list behind on this surface.
+pub(crate) fn unknown_status(unknown: &UnknownStatus) -> RpcError {
+    let accepted = IntakeStatus::ALL
+        .iter()
+        .map(|status| status.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    rpc_from_problem(
+        INVALID_PARAMS,
+        Problem::new(format!("cannot filter on lifecycle status {:?}", unknown.0))
+            .detail(
+                "The filter names a status no book can be in, so it was refused \
+                 rather than applied without it.",
+            )
+            .hint(format!("Use one of: {accepted}.")),
+    )
 }
 
 /// Build the wire envelope from a rendered [`Problem`]: the summary

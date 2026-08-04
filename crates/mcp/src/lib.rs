@@ -18,7 +18,7 @@ use bookrack_core::queue::{JobState, QueueState};
 use bookrack_core::{ItemKind, KindedNodeId, NodeId};
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::{LogEvent, LogStreamHandle};
-use bookrack_ops::dto::{BookFilter, PaperFilter};
+use bookrack_ops::dto::{BookFilter, PaperFilter, parse_statuses};
 use bookrack_ops::reads::info::LibraryInfoContext;
 use bookrack_ops::registry::{LibraryHandle, LibraryRegistry};
 use bookrack_ops::{Caller, OpsError, SearchOptions, reads, with_caller_override, writes};
@@ -35,7 +35,7 @@ mod error_map;
 mod reference;
 use error_map::{
     invalid_params_err, ops_error_to_edit_error, ops_error_to_internal, reference_error_to_mcp,
-    respond_with,
+    respond_with, unknown_status_to_mcp,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -189,6 +189,14 @@ pub struct FindBooksArgs {
     /// Exact-equality match against the file format (`epub`, `pdf`).
     #[serde(default)]
     pub format: Option<String>,
+    /// Match books whose lifecycle status is one of these, named as
+    /// they are reported in a row's `status`: `pending`, `extracted`,
+    /// `dedup_hold`, `embedded`, `aborted`, `needs_ocr`. Only an
+    /// `embedded` book has vectors, so only an `embedded` book can be
+    /// recalled by the search tools. An unrecognised name is refused
+    /// rather than dropped.
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
     /// Match books carrying at least one of these category tags. An
     /// empty list, like an absent one, imposes no category filter.
     #[serde(default)]
@@ -897,8 +905,8 @@ impl BookrackServer {
         respond_with(&page)
     }
 
-    /// Find books by title substring, contributor, format, status,
-    /// or category tags.
+    /// Find books by title substring, contributor, format, lifecycle
+    /// status, or category tags.
     #[tool(
         name = "library.find_books",
         description = "Search the book registry by title substring (fuzzy), contributor \
@@ -910,13 +918,15 @@ impl BookrackServer {
         Parameters(args): Parameters<FindBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let statuses = parse_statuses(&args.statuses.unwrap_or_default())
+            .map_err(|unknown| unknown_status_to_mcp("library.find_books", &unknown))?;
         let filter = BookFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
             contributor_role: args.contributor_role,
             format: args.format,
+            statuses,
             categories: args.categories.unwrap_or_default(),
-            ..BookFilter::default()
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);

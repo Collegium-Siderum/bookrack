@@ -535,6 +535,29 @@ pub struct BookFilter {
     pub categories: Vec<String>,
 }
 
+/// A status string no lifecycle state carries, carrying the value as
+/// received.
+///
+/// The caller words its own message: a JSON-RPC error and an MCP tool
+/// error are not the same sentence, and the accepted set each renders
+/// comes from [`IntakeStatus::ALL`] rather than from a list written
+/// out here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownStatus(pub String);
+
+/// Parse wire status strings into [`IntakeStatus`], failing on the
+/// first one no lifecycle state carries.
+///
+/// The wire vocabulary is the stored form — `"embedded"`,
+/// `"needs_ocr"` — so what a caller reads back in a row is what it
+/// sends to filter on.
+pub fn parse_statuses(values: &[String]) -> Result<Vec<IntakeStatus>, UnknownStatus> {
+    values
+        .iter()
+        .map(|value| IntakeStatus::from_db_str(value).ok_or_else(|| UnknownStatus(value.clone())))
+        .collect()
+}
+
 /// The basename of a path recorded at intake time. `None` when no path
 /// was recorded or the path ends in a separator.
 fn source_filename(path: Option<&str>) -> Option<String> {

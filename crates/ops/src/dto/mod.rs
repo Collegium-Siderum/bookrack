@@ -17,5 +17,6 @@ pub use bookrack_query::dto::{
     LibraryStats, ListBooksResult, ListPapersResult, MAX_CONTEXT_RADIUS, MAX_LIST_LIMIT,
     MAX_READ_CHARS, MAX_SPAN_LEAVES, MAX_TOC_NODES, OcrPendingItem, OcrPendingResult,
     PaperAuditInfo, PaperDetail, PaperFilter, PaperSource, PaperSummary, PapersStats, Passage,
-    ShowTocArgs, SpanText, Toc, TocNode, TocNodes, TocSlimEntry, TocStats, clamp_limit,
+    ShowTocArgs, SpanText, Toc, TocNode, TocNodes, TocSlimEntry, TocStats, UnknownStatus,
+    clamp_limit, parse_statuses,
 };

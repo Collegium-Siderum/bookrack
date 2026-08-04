@@ -14,8 +14,10 @@
 //! where the caller can no longer reach it.
 //! `scripts/error-boundary-check.sh` enforces that for this file.
 
+use bookrack_catalog::IntakeStatus;
 use bookrack_core::{Explain, Problem};
 use bookrack_ops::OpsError;
+use bookrack_ops::dto::UnknownStatus;
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResult, Content, ErrorCode};
 use serde::Serialize;
@@ -55,6 +57,31 @@ pub(crate) fn mcp_from_problem(code: ErrorCode, problem: Problem) -> ErrorData {
 /// unguarded exit.
 pub(crate) fn invalid_params_err<E: std::error::Error + 'static>(e: &E) -> ErrorData {
     mcp_from_problem(ErrorCode::INVALID_PARAMS, Problem::from_error_chain(e))
+}
+
+/// Map a rejected lifecycle-status name to an MCP `invalid_params`.
+///
+/// The accepted set is rendered from [`IntakeStatus::ALL`] rather than
+/// spelled out, so a state added to the lifecycle cannot leave a stale
+/// list behind on this surface.
+pub(crate) fn unknown_status_to_mcp(tool: &str, unknown: &UnknownStatus) -> ErrorData {
+    let accepted = IntakeStatus::ALL
+        .iter()
+        .map(|status| status.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    mcp_from_problem(
+        ErrorCode::INVALID_PARAMS,
+        Problem::new(format!(
+            "cannot filter on lifecycle status \"{}\"",
+            unknown.0
+        ))
+        .detail(format!(
+            "{tool} received a status no book can be in, so the filter was refused \
+                 rather than applied without it."
+        ))
+        .hint(format!("Use one of: {accepted}.")),
+    )
 }
 
 /// Map a generic [`OpsError`] to an MCP internal error.
