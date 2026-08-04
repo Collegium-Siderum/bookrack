@@ -310,6 +310,15 @@ release workflow extracts the matching section verbatim from this file.
   as a missing one already was: the dryrun runs and reports as before,
   and the only thing lost is its row in `bookrack runs list`.
 
+  `bookrack distill build --dry-run` is the third preview with the same
+  bookkeeping and was left out of that fix. It opens `catalog.db` three
+  times — the run row, the audit row, and the close — all before it
+  reaches the point where `--dry-run` changes anything, and all through
+  the migrating door. The three now take the same refusal, and a dry
+  run against a catalog that is absent or behind records nothing rather
+  than creating or migrating one. A real `distill build` still migrates,
+  as the command that owns the write.
+
 - **Planning an index-profile apply built the vector store it was
   supposed to only measure.** The plan is documented as offline and
   read-only, and it reports how many chunk rows a planned re-embed
