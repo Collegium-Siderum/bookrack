@@ -60,7 +60,9 @@ pub use csl::{
 pub use db::{Catalog, SCHEMA_VERSION};
 pub use effective::{EDITABLE_FIELDS, EffectiveAttrs};
 pub use expressions::{Expression, NewExpression};
-pub use intake::{Intake, IntakeFilter, IntakeStatus, NewIntake, OcrPending, Registration};
+pub use intake::{
+    Intake, IntakeFilter, IntakeStatus, MatchLayer, NewIntake, OcrPending, Registration,
+};
 pub use item_pipeline_audit::{ItemPipelineAudit, NewItemPipelineAudit};
 pub use item_state::{ItemState, NewItemState};
 pub use mcp_tool_calls::{McpToolCall, NewMcpToolCall};
