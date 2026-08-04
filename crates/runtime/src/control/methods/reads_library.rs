@@ -341,7 +341,7 @@ pub fn list_ocr_pending(params: &Option<Value>, ctx: &MethodContext) -> Result<V
 pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindBooksParams = parse(params, "library.find_books")?;
     let handle = resolve(ctx, p.library.as_deref())?;
-    let statuses = parse_statuses(&p.statuses.unwrap_or_default())
+    let statuses = parse_statuses(ItemKind::Book, &p.statuses.unwrap_or_default())
         .map_err(|unknown| unknown_filter_value(&unknown))?;
     let filter = BookFilter {
         title_substring: p.title_substring,

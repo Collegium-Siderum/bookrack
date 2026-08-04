@@ -172,6 +172,34 @@ impl IntakeStatus {
         IntakeStatus::NeedsOcr,
     ];
 
+    /// The statuses the `glean` pipeline can write. `NeedsOcr` and
+    /// `Aborted` are reached only from the OCR quality gate, which is
+    /// book-side; `DedupHold` has no writer at all.
+    pub const PAPER_REACHABLE: [IntakeStatus; 3] = [
+        IntakeStatus::Pending,
+        IntakeStatus::Extracted,
+        IntakeStatus::Embedded,
+    ];
+
+    /// The statuses a filter over `kind` may be given.
+    ///
+    /// This is a snapshot of what each pipeline writes today, not an
+    /// invariant the type enforces: teaching `glean` to park a
+    /// suspected duplicate would make `DedupHold` reachable for
+    /// papers, and this array is where that has to be recorded. **No
+    /// test guards the drift** — one can pin that a refusal happens,
+    /// not that the set refused is the right one.
+    ///
+    /// `Reference` yields an empty slice: `distill` registers no
+    /// intake rows, so no status is reachable through it.
+    pub const fn accepted_for(kind: ItemKind) -> &'static [IntakeStatus] {
+        match kind {
+            ItemKind::Book => &Self::ALL,
+            ItemKind::Paper => &Self::PAPER_REACHABLE,
+            ItemKind::Reference => &[],
+        }
+    }
+
     /// The database string form.
     pub const fn as_str(self) -> &'static str {
         match self {

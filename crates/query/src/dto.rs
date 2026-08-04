@@ -31,6 +31,7 @@ use bookrack_catalog::{
     CONFIDENCE_LEVELS, EffectiveAttrs, Intake, IntakeStatus, NodeContributor, NodeOverride,
     OcrPending, REVIEW_STATUSES,
 };
+use bookrack_core::ItemKind;
 use bookrack_corpus::{Node, TocQuery};
 
 /// Server-side ceiling on a single list page. Larger requests are
@@ -553,20 +554,34 @@ pub struct UnknownFilterValue {
 }
 
 /// Parse wire status strings into [`IntakeStatus`], failing on the
-/// first one no lifecycle state carries.
+/// first one `kind`'s pipeline cannot reach.
 ///
 /// The wire vocabulary is the stored form — `"embedded"`,
 /// `"needs_ocr"` — so what a caller reads back in a row is what it
 /// sends to filter on.
-pub fn parse_statuses(values: &[String]) -> Result<Vec<IntakeStatus>, UnknownFilterValue> {
+///
+/// The accepted set narrows with `kind`: a status no pipeline writes
+/// for that item is refused rather than accepted into a filter that
+/// can only ever match nothing. Membership and the `accepted` list in
+/// the refusal read the same binding, so the set reported is by
+/// construction the set applied.
+pub fn parse_statuses(
+    kind: ItemKind,
+    values: &[String],
+) -> Result<Vec<IntakeStatus>, UnknownFilterValue> {
+    let accepted = IntakeStatus::accepted_for(kind);
     values
         .iter()
         .map(|value| {
-            IntakeStatus::from_db_str(value).ok_or_else(|| UnknownFilterValue {
-                parameter: "statuses",
-                value: value.clone(),
-                accepted: IntakeStatus::ALL.iter().map(|s| s.as_str()).collect(),
-            })
+            accepted
+                .iter()
+                .copied()
+                .find(|status| status.as_str() == value)
+                .ok_or_else(|| UnknownFilterValue {
+                    parameter: "statuses",
+                    value: value.clone(),
+                    accepted: accepted.iter().map(|s| s.as_str()).collect(),
+                })
         })
         .collect()
 }
@@ -999,5 +1014,41 @@ impl PaperDetail {
             audit,
             toc_stats,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wire(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn paper_statuses_refuse_a_book_only_state_and_report_the_reachable_set() {
+        let err = parse_statuses(ItemKind::Paper, &wire(&["needs_ocr"]))
+            .expect_err("needs_ocr is book-side only, so the paper filter must refuse it");
+
+        assert_eq!(err.parameter, "statuses");
+        assert_eq!(err.value, "needs_ocr");
+        assert_eq!(
+            err.accepted,
+            vec!["pending", "extracted", "embedded"],
+            "the refusal must list exactly the states glean can write"
+        );
+    }
+
+    #[test]
+    fn book_statuses_still_accept_every_state() {
+        let parsed = parse_statuses(ItemKind::Book, &wire(&["needs_ocr"]))
+            .expect("needs_ocr stays valid on the book side");
+        assert_eq!(parsed, vec![IntakeStatus::NeedsOcr]);
+
+        assert_eq!(
+            IntakeStatus::accepted_for(ItemKind::Book),
+            IntakeStatus::ALL.as_slice(),
+            "narrowing the published book-side vocabulary would be a behaviour regression"
+        );
     }
 }

@@ -935,7 +935,7 @@ impl BookrackServer {
         Parameters(args): Parameters<FindBooksArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
-        let statuses = parse_statuses(&args.statuses.unwrap_or_default())
+        let statuses = parse_statuses(ItemKind::Book, &args.statuses.unwrap_or_default())
             .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let filter = BookFilter {
             title_substring: args.title_substring,
