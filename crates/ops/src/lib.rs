@@ -364,7 +364,11 @@ impl<E: Embedder> Ops<E> {
         &self.corpus_db
     }
 
-    pub(crate) fn catalog_db(&self) -> &Path {
+    /// The catalog database this `Ops` opens. Identifies which library
+    /// the stores belong to, so a caller pairing it with a
+    /// [`bookrack_config::Config`] can check the two are the same
+    /// library's.
+    pub fn catalog_db(&self) -> &Path {
         &self.catalog_db
     }
 

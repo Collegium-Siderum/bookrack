@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use bookrack_catalog::{Catalog, RunHandle, RunLock};
+use bookrack_config::Config;
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
 use bookrack_glean::{GleanParams, GleanReport};
@@ -77,23 +78,43 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 /// the catalog/corpus write path in parallel against the same library.
 pub struct LibraryHandle<E: Embedder> {
     name: String,
+    cfg: Arc<Config>,
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
     glean_lock: AsyncMutex<()>,
 }
 
 impl<E: Embedder> LibraryHandle<E> {
-    /// Wrap an already-warm [`Ops`] under the given short name.
-    pub fn new(name: impl Into<String>, ops: Ops<E>) -> Arc<LibraryHandle<E>> {
-        LibraryHandle::from_arc(name, Arc::new(ops))
+    /// Wrap an already-warm [`Ops`] under the given short name, paired
+    /// with the configuration that library resolves to.
+    pub fn new(name: impl Into<String>, cfg: Arc<Config>, ops: Ops<E>) -> Arc<LibraryHandle<E>> {
+        LibraryHandle::from_arc(name, cfg, Arc::new(ops))
     }
 
     /// Wrap a pre-shared [`Arc<Ops>`] under the given short name.
     /// Useful when the caller already holds a shared handle and wants to
     /// register it without bumping the strong-count more than necessary.
-    pub fn from_arc(name: impl Into<String>, ops: Arc<Ops<E>>) -> Arc<LibraryHandle<E>> {
+    ///
+    /// `cfg` must be the configuration `ops` was opened from: the two
+    /// travel together from here on, and a handler that resolves a
+    /// handle takes both from it. Pairing a library's stores with
+    /// another library's configuration is the defect this pairing
+    /// exists to make impossible, so a mismatched pair trips a
+    /// debug assertion at the construction site rather than surfacing
+    /// as a library served under the wrong declaration.
+    pub fn from_arc(
+        name: impl Into<String>,
+        cfg: Arc<Config>,
+        ops: Arc<Ops<E>>,
+    ) -> Arc<LibraryHandle<E>> {
+        debug_assert_eq!(
+            cfg.catalog_db(),
+            ops.catalog_db(),
+            "a library handle's configuration and stores must be the same library's",
+        );
         Arc::new(LibraryHandle {
             name: name.into(),
+            cfg,
             ops,
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
@@ -103,6 +124,21 @@ impl<E: Embedder> LibraryHandle<E> {
     /// The short name this library is registered under.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The configuration this library resolves to.
+    ///
+    /// The one way a caller holding a handle reaches that library's
+    /// configuration: a `Config` taken from anywhere else is some
+    /// other library's under an eager multi-mount daemon.
+    pub fn cfg(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// A new strong reference to this library's configuration, for a
+    /// caller that has to move it into a task or a template.
+    pub fn cfg_arc(&self) -> Arc<Config> {
+        Arc::clone(&self.cfg)
     }
 
     /// The warm [`Ops`] driving this library's stores.
@@ -561,6 +597,8 @@ mod tests {
     use bookrack_glean::GleanParams;
     use bookrack_ingest::IngestParams;
 
+    use bookrack_config::Config;
+
     use crate::{Caller, Ops};
 
     use super::{LibraryHandle, LibraryRegistry, RegistryError};
@@ -579,19 +617,47 @@ mod tests {
         }
     }
 
-    fn fake_ops() -> Ops<FakeEmbedder> {
+    /// A configuration over a root that is never opened. Paths are
+    /// derived from it rather than written out, so the stores below and
+    /// the handle's configuration name the same library.
+    fn fake_cfg(root: &str) -> std::sync::Arc<Config> {
+        std::sync::Arc::new(Config::new(
+            PathBuf::from(root),
+            "http://127.0.0.1:11434".to_string(),
+        ))
+    }
+
+    fn fake_ops(cfg: &Config) -> Ops<FakeEmbedder> {
         Ops::catalog_only(
-            PathBuf::from("/dev/null/corpus.db"),
-            PathBuf::from("/dev/null/catalog.db"),
-            Path::new("/dev/null/lancedb"),
-            PathBuf::from("/dev/null/books"),
-            PathBuf::from("/dev/null/backup"),
+            cfg.corpus_db(),
+            cfg.catalog_db(),
+            &cfg.lancedb_dir(),
+            cfg.books_dir(),
+            cfg.backup_dir(),
             Caller::cli(),
         )
     }
 
     fn handle(name: &str) -> std::sync::Arc<LibraryHandle<FakeEmbedder>> {
-        LibraryHandle::new(name, fake_ops())
+        let cfg = fake_cfg(&format!("/dev/null/{name}"));
+        let ops = fake_ops(&cfg);
+        LibraryHandle::new(name, cfg, ops)
+    }
+
+    /// The construction guard is the whole point of pairing a handle's
+    /// configuration with its stores: a pair naming two different
+    /// libraries is the defect this pairing exists to prevent, so it
+    /// must not be constructible in a debug build.
+    ///
+    /// `debug_assert` compiles out under `--release`; this test asserts
+    /// the guard, so it is a debug-profile test by nature.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the same library's")]
+    fn a_handle_pairing_two_libraries_trips_the_construction_guard() {
+        let cfg = fake_cfg("/dev/null/alpha");
+        let ops = fake_ops(&fake_cfg("/dev/null/beta"));
+        let _ = LibraryHandle::new("alpha", cfg, ops);
     }
 
     /// A paper catalog on disk, since the run's liveness record lives

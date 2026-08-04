@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_config::Config;
 use bookrack_core::ItemKind;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
@@ -70,15 +71,18 @@ impl Fixture {
         // Deliberately a CLI-surface Ops: the `source = "mcp"`
         // assertion can then only pass through the `call_tool`
         // caller override.
+        // The configuration names the same root the catalog above was
+        // opened under, so the handle's two halves are one library's.
+        let cfg = Arc::new(Config::new(root.clone(), "http://127.0.0.1:1".to_string()));
         let ops = Ops::<OllamaEmbedClient>::catalog_only(
-            root.join("corpus.db"),
-            catalog_db.clone(),
-            &root.join("lancedb"),
-            root.join("books"),
-            root.join("backup"),
+            cfg.corpus_db(),
+            cfg.catalog_db(),
+            &cfg.lancedb_dir(),
+            cfg.books_dir(),
+            cfg.backup_dir(),
             Caller::cli(),
         );
-        let registry = LibraryRegistry::single(LibraryHandle::new("fixture", ops));
+        let registry = LibraryRegistry::single(LibraryHandle::new("fixture", cfg, ops));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");

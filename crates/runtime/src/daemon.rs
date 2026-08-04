@@ -511,7 +511,7 @@ impl DaemonRuntime {
         let mut handles = Vec::with_capacity(mounts.len());
         for (name, lib_cfg) in &mounts {
             let handle = build_library_handle(
-                lib_cfg,
+                Arc::clone(lib_cfg),
                 name,
                 reranker.as_ref().map(|r| &r.stage),
                 opts.caller.clone(),
@@ -987,11 +987,12 @@ fn claim_unique_root(seen: &mut HashMap<PathBuf, String>, root: &Path, name: &st
 /// unlike an `Ops::catalog_only` handle, whose pipeline entry points
 /// report an error.
 async fn build_library_handle(
-    cfg: &Config,
+    cfg_arc: Arc<Config>,
     name: &str,
     reranker_stage: Option<&bookrack_ops::RerankStage>,
     caller: Caller,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
+    let cfg = cfg_arc.as_ref();
     // The embed model resolves per library by the full chain
     // (env > config.toml > index profile > default); a conflict or an
     // undefined profile refuses the handle with the repair spelled
@@ -1081,7 +1082,7 @@ async fn build_library_handle(
         Some(stage) => ops.with_reranker(stage.clone()),
         None => ops,
     };
-    Ok(LibraryHandle::new(name, ops))
+    Ok(LibraryHandle::new(name, Arc::clone(&cfg_arc), ops))
 }
 
 /// Move a queue snapshot left under a library's data root by an older

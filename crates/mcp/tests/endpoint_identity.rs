@@ -19,6 +19,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bookrack_config::Config;
 use bookrack_core::queue::QueueState;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_obs::LogStreamHandle;
@@ -33,15 +34,16 @@ use tokio::sync::broadcast;
 /// into the OS temp dir and are never created or opened.
 fn stub_registry() -> Arc<LibraryRegistry<OllamaEmbedClient>> {
     let root = std::env::temp_dir().join("bookrack-mcp-identity-stub");
+    let cfg = Arc::new(Config::new(root, "http://127.0.0.1:1".to_string()));
     let ops = Ops::<OllamaEmbedClient>::catalog_only(
-        root.join("corpus.db"),
-        root.join("catalog.db"),
-        &root.join("lancedb"),
-        root.join("books"),
-        root.join("backup"),
+        cfg.corpus_db(),
+        cfg.catalog_db(),
+        &cfg.lancedb_dir(),
+        cfg.books_dir(),
+        cfg.backup_dir(),
         Caller::mcp(),
     );
-    LibraryRegistry::single(LibraryHandle::new("identity-stub", ops))
+    LibraryRegistry::single(LibraryHandle::new("identity-stub", cfg, ops))
 }
 
 fn stub_info_context(addr: &str) -> LibraryInfoContext {

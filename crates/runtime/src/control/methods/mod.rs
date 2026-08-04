@@ -540,14 +540,15 @@ pub(crate) fn test_method_context(
         dir.join("backup"),
         Caller::cli(),
     );
-    let handle = LibraryHandle::new(library_name.unwrap_or("default"), ops);
+    let cfg = Arc::new(Config::new(
+        dir.to_path_buf(),
+        "http://127.0.0.1:11434".to_string(),
+    ));
+    let handle = LibraryHandle::new(library_name.unwrap_or("default"), Arc::clone(&cfg), ops);
     let state = Arc::new(DaemonStateFlag::new(DaemonState::Idle));
     let (shutdown_tx, _) = broadcast::channel(8);
     MethodContext {
-        cfg: Arc::new(Config::new(
-            dir.to_path_buf(),
-            "http://127.0.0.1:11434".to_string(),
-        )),
+        cfg,
         registry: LibraryRegistry::single(handle),
         info_context: LibraryInfoContext {
             data_dir: dir.display().to_string(),
