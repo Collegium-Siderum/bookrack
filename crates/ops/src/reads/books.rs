@@ -83,6 +83,7 @@ pub fn find_books<E: Embedder>(
             .map(|s| s.as_str())
             .collect::<Vec<_>>(),
         "categories": filter.categories,
+        "language": filter.language,
         "limit": limit,
         "offset": offset,
     });
@@ -90,6 +91,7 @@ pub fn find_books<E: Embedder>(
         let (effective_limit, _) = clamp_limit(limit);
         let catalog = Catalog::open_read_only(ops.catalog_db())?;
         let categories_refs: Vec<&str> = filter.categories.iter().map(String::as_str).collect();
+        let language_refs: Vec<&str> = filter.language.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
             layer: MatchLayer::Effective,
             title_substring: filter.title_substring.as_deref(),
@@ -98,6 +100,7 @@ pub fn find_books<E: Embedder>(
             statuses: filter.statuses.as_slice(),
             format: filter.format.as_deref(),
             categories: categories_refs.as_slice(),
+            language: language_refs.as_slice(),
             ..IntakeFilter::default()
         };
         let (intakes, total) =

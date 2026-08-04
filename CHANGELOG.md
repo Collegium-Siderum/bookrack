@@ -10,6 +10,18 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **Both registries can be filtered by language.** `find_books` and
+  `find_papers` take a `language` list and match a row whose reported
+  language is any one of the values named — the ordinary question in a
+  mixed-language library, and until now one that had to be asked by
+  reading every row. It reads the effective layer like the other
+  bibliographic filters, so a language the curator corrected answers
+  the corrected value, and one they removed answers nothing.
+
+  The tag is compared as text against what the row carries. The
+  pipeline does not normalise it to any standard, so filter on what
+  the row reports rather than on the form the standard would use.
+
 - **The paper registry can be filtered by lifecycle status and by
   contributor role.** `library.find_papers` and the `find_papers` tool
   took the four bibliographic filters only; their book-side peers have

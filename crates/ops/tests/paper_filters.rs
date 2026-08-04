@@ -11,7 +11,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, IntakeStatus, NewContributor, NewIntake};
+use bookrack_catalog::{Catalog, IntakeStatus, NewContributor, NewIntake, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
@@ -100,6 +100,23 @@ impl Fixture {
         catalog
             .set_intake_status(ItemKind::Paper, intake_id, status)
             .expect("set intake status");
+        intake_id
+    }
+
+    /// Register one paper carrying a stored language, so a language
+    /// filter has two rows to tell apart.
+    fn seed_paper_in_language(&self, sha: &str, language: &str) -> i64 {
+        let mut catalog = Catalog::open(&self.papers_catalog_db).expect("open paper catalog");
+        let intake_id = catalog
+            .register_intake(ItemKind::Paper, &NewIntake::new(sha))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+        attrs.language = Some(language.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
         intake_id
     }
 
@@ -203,5 +220,26 @@ async fn contributor_role_alone_is_ignored() {
         matched,
         vec![authored, edited],
         "without a contributor name the role qualifier takes no effect"
+    );
+}
+
+#[tokio::test]
+async fn language_selects_one_paper_out_of_two() {
+    let fx = Fixture::build().await;
+    let german = fx.seed_paper_in_language("sha-de", "de");
+    let latin = fx.seed_paper_in_language("sha-la", "la");
+
+    let matched = papers_matching(
+        &fx,
+        PaperFilter {
+            language: vec!["de".to_string()],
+            ..PaperFilter::default()
+        },
+    );
+
+    assert_eq!(
+        matched,
+        vec![german],
+        "the latin paper ({latin}) must not answer a german filter"
     );
 }

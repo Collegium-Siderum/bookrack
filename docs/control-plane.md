@@ -633,7 +633,10 @@ carry is reported as `-32602 invalid params`, not `-32010`.
   extracted value with the curator's corrections applied — so a book
   answers the title it is shown under. To filter on what the pipeline
   extracted, which is the question a review pass asks, use
-  `library.list_metadata`.
+  `library.list_metadata`. A `language` list matches the reported
+  language, hitting on any one of the values named; the tag is
+  compared as text and is not normalised, so match what the row
+  reports.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
   record and paginated TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by
@@ -664,7 +667,8 @@ carry is reported as `-32602 invalid params`, not `-32010`.
   `needs_ocr` and `aborted` are written only by the OCR quality gate
   and `dedup_hold` has no writer at all. Naming one of those, or any
   unrecognised state, is refused with `-32602` rather than answered
-  with the empty page it could only ever match.
+  with the empty page it could only ever match. It takes the same
+  `language` list as `library.find_books`, on the same rule.
 - `library.show_paper` / `library.show_paper_toc` — per-paper
   bibliographic record and paginated section outline; `null` when the
   intake id is unknown.

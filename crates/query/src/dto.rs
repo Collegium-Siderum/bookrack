@@ -535,6 +535,9 @@ pub struct BookFilter {
     /// Match books carrying at least one of these category tags.
     /// Empty means no filter.
     pub categories: Vec<String>,
+    /// Match the reported language against this set. Empty means no
+    /// filter.
+    pub language: Vec<String>,
 }
 
 /// A filter value outside the vocabulary its parameter accepts,
@@ -932,6 +935,9 @@ pub struct PaperFilter {
     pub venue_substring: Option<String>,
     /// Exact-equality match against the DOI.
     pub doi: Option<String>,
+    /// Match the reported language against this set. Empty means no
+    /// filter.
+    pub language: Vec<String>,
 }
 
 /// Result page for `library.list_papers` / `library.find_papers`.

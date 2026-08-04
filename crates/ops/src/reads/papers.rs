@@ -55,6 +55,7 @@ pub fn find_papers<E: Embedder>(
         "year": filter.year,
         "venue_substring": filter.venue_substring,
         "doi": filter.doi,
+        "language": filter.language,
         "limit": limit,
         "offset": offset,
     });
@@ -64,6 +65,7 @@ pub fn find_papers<E: Embedder>(
             .ok_or(OpsError::PapersBackendNotConfigured)?;
         let (effective_limit, _) = clamp_limit(limit);
         let catalog = Catalog::open_read_only(papers_db)?;
+        let language_refs: Vec<&str> = filter.language.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
             kind: ItemKind::Paper,
             layer: MatchLayer::Effective,
@@ -74,6 +76,7 @@ pub fn find_papers<E: Embedder>(
             year: filter.year.as_deref(),
             venue_substring: filter.venue_substring.as_deref(),
             doi: filter.doi.as_deref(),
+            language: language_refs.as_slice(),
             ..IntakeFilter::default()
         };
         let (intakes, total) =

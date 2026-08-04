@@ -106,6 +106,8 @@ pub struct FindBooksParams {
     #[serde(default)]
     pub categories: Option<Vec<String>>,
     #[serde(default)]
+    pub language: Option<Vec<String>>,
+    #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
     pub offset: Option<u32>,
@@ -196,6 +198,8 @@ pub struct FindPapersParams {
     pub contributor_role: Option<String>,
     #[serde(default)]
     pub statuses: Option<Vec<String>>,
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     #[serde(default)]
     pub year: Option<String>,
     #[serde(default)]
@@ -354,6 +358,7 @@ pub fn find_books(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
         format: p.format,
         statuses,
         categories: p.categories.unwrap_or_default(),
+        language: p.language.unwrap_or_default(),
     };
     let page = reads::books::find_books(
         handle.ops(),
@@ -582,6 +587,7 @@ pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
         year: p.year,
         venue_substring: p.venue_substring,
         doi: p.doi,
+        language: p.language.unwrap_or_default(),
     };
     let page = reads::papers::find_papers(
         handle.ops(),

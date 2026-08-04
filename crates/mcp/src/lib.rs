@@ -201,6 +201,12 @@ pub struct FindBooksArgs {
     /// empty list, like an absent one, imposes no category filter.
     #[serde(default)]
     pub categories: Option<Vec<String>>,
+    /// Match books whose reported language is one of these, compared
+    /// as text against the value the row carries (`de`, `en`, ...).
+    /// The pipeline does not normalise the tag, so match what
+    /// `show_book` reports.
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     /// Maximum number of books in this page.
     #[serde(default)]
     pub limit: Option<u32>,
@@ -312,6 +318,12 @@ pub struct FindPapersArgs {
     /// refused, as is an unrecognised name.
     #[serde(default)]
     pub statuses: Option<Vec<String>>,
+    /// Match papers whose reported language is one of these, compared
+    /// as text against the value the row carries (`de`, `en`, ...).
+    /// The pipeline does not normalise the tag, so match what
+    /// `show_paper` reports.
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
     /// Exact-equality match against the reported year.
     #[serde(default)]
     pub year: Option<String>,
@@ -957,6 +969,7 @@ impl BookrackServer {
             format: args.format,
             statuses,
             categories: args.categories.unwrap_or_default(),
+            language: args.language.unwrap_or_default(),
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);
@@ -1081,6 +1094,7 @@ impl BookrackServer {
             year: args.year,
             venue_substring: args.venue_substring,
             doi: args.doi,
+            language: args.language.unwrap_or_default(),
         };
         let limit = args.limit.unwrap_or(0);
         let offset = args.offset.unwrap_or(0);

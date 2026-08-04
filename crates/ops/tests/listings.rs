@@ -67,6 +67,24 @@ impl Fixture {
         intake_id
     }
 
+    /// Register one book carrying a stored language alongside its
+    /// title, so a language filter has two rows to tell apart.
+    fn seed_book_in_language(&self, sha: &str, title: &str, language: &str) -> i64 {
+        let mut catalog = self.catalog();
+        let intake_id = catalog
+            .register_intake(ItemKind::Book, &NewIntake::new(sha))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Book);
+        attrs.title = Some(title.into());
+        attrs.language = Some(language.into());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed attrs");
+        intake_id
+    }
+
     fn tag(&self, intake_id: i64, category: &str) {
         self.catalog()
             .add_category(&NewCategory::new(
@@ -403,5 +421,30 @@ fn the_review_queue_preset_matches_the_filter_that_spells_it_out() {
         preset_ids,
         vec![low],
         "the queue must hold the low-confidence book and not the high-confidence one"
+    );
+}
+
+#[test]
+fn find_books_filters_on_language() {
+    let fx = Fixture::build();
+    let german = fx.seed_book_in_language("sha-de", "Widget Design", "de");
+    let latin = fx.seed_book_in_language("sha-la", "Widget Design", "la");
+
+    let page = find_books(
+        &fx.ops,
+        BookFilter {
+            language: vec!["de".to_string()],
+            ..BookFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("find");
+    let ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+
+    assert_eq!(
+        ids,
+        vec![german],
+        "the latin book ({latin}) must not answer a german filter"
     );
 }
