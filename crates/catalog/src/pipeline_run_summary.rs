@@ -218,6 +218,14 @@ impl Catalog {
     /// NULL (or `''` on `book_distill_audit`) come back with
     /// `profile_fingerprint = None`, so a mixed run is visible at a
     /// glance. Ordered by kind, then descending count.
+    ///
+    /// This counts live projection rows at call time, not what the run
+    /// judged when it ran. Both audit tables hold one row per item, so
+    /// a row belongs to whichever run last judged that item: after a
+    /// `glean --force` or a per-item re-audit, rows this run wrote are
+    /// attributed elsewhere, or carry no run at all. The buckets can
+    /// therefore disagree with `n_papers` / `n_books` on the same run,
+    /// which were materialised once at close and do not move.
     pub fn run_profile_buckets(&self, pipeline_run_id: &str) -> Result<Vec<RunProfileBucket>> {
         let mut buckets = Vec::new();
         let mut papers = self.conn.prepare(
@@ -538,6 +546,50 @@ mod tests {
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].profile_fingerprint.as_deref(), Some("cccc"));
         assert_eq!(books[0].n, 1);
+    }
+
+    /// The buckets read live projection rows; `n_papers` was
+    /// materialised at close. Re-judging an item moves its row to
+    /// another run and the two answers part company — which is why the
+    /// method's doc says so rather than letting a caller read the pair
+    /// as one consistent snapshot.
+    #[test]
+    fn buckets_follow_the_last_judgement_while_the_rollup_stays_put() {
+        let catalog = Catalog::open_in_memory().expect("open");
+        let first = "glean_review-2026-06-28T10:00:00Z-first";
+        let second = "glean_review-2026-06-28T11:00:00Z-second";
+        seed_parent_run(&catalog, first);
+        seed_parent_run(&catalog, second);
+        for intake_id in [1, 2] {
+            catalog
+                .upsert_node_paper_audit(&paper_audit(intake_id, "clean", Some(first), None))
+                .expect("write paper");
+        }
+        let summary = catalog.compute_run_summary(first).expect("materialise");
+        assert_eq!(summary.n_papers, 2);
+        assert_eq!(catalog.run_profile_buckets(first).expect("buckets")[0].n, 2);
+
+        // The second run re-judges one of the two. The projection holds
+        // one row per item, so that row now belongs to the second run.
+        catalog
+            .upsert_node_paper_audit(&paper_audit(2, "needs_work", Some(second), None))
+            .expect("re-judge paper 2");
+
+        let buckets = catalog.run_profile_buckets(first).expect("buckets");
+        assert_eq!(
+            buckets.iter().map(|b| b.n).sum::<i64>(),
+            1,
+            "the re-judged row must have left the first run's buckets: {buckets:?}",
+        );
+        assert_eq!(
+            catalog
+                .pipeline_run_summary(first)
+                .expect("read rollup")
+                .expect("the rollup was materialised")
+                .n_papers,
+            2,
+            "the materialised rollup must not move when a row is re-judged",
+        );
     }
 
     #[test]

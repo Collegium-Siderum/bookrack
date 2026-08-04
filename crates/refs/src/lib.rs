@@ -137,8 +137,9 @@ impl Refs {
 
     /// Register a reference book or update its existing registration in
     /// place. `entry_count` and `parse_warnings` are left at their
-    /// current values (or default 0 on first insert); distill updates
-    /// them through dedicated CRUD as entries are upserted.
+    /// current values, which is 0 on first insert and 0 thereafter:
+    /// nothing writes those two columns. See [`crate::types::NewBook`]
+    /// for what reads the count instead.
     pub fn upsert_book(&self, book: &NewBook) -> RefsResult<()> {
         self.conn.execute(
             "INSERT INTO reference_books (\
@@ -563,6 +564,50 @@ mod refs_tests {
             )
             .expect("query sqlite_master");
         count > 0
+    }
+
+    /// `entry_count` and `parse_warnings` stay at 0 no matter what is
+    /// written through this crate's public surface.
+    ///
+    /// Both column docs describe them as counters `Refs` maintains as
+    /// entries are upserted, which no code path does. The test holds
+    /// the docs to what the code actually guarantees, so a future
+    /// writer either updates them or fails here.
+    #[test]
+    fn the_entry_counters_on_reference_books_are_never_written() {
+        let mut refs = fresh_refs();
+        refs.upsert_book(&sample_book("fake_book", 10, "2026-06-25T00:00:00Z"))
+            .expect("upsert book");
+        for key in ["a", "b", "c"] {
+            refs.upsert_entry(&sample_entry("fake_book", key, key, json!({})))
+                .expect("upsert entry");
+        }
+        // A second registration of the same book, the other write that
+        // touches this row.
+        refs.upsert_book(&sample_book("fake_book", 20, "2026-06-26T00:00:00Z"))
+            .expect("re-upsert book");
+
+        let (entry_count, parse_warnings): (i64, i64) = refs
+            .connection()
+            .query_row(
+                "SELECT entry_count, parse_warnings FROM reference_books \
+                 WHERE book_slug = 'fake_book'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read the counter columns");
+        assert_eq!(entry_count, 0, "three entries did not move entry_count");
+        assert_eq!(parse_warnings, 0);
+
+        let live: i64 = refs
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM reference_entries WHERE book_slug = 'fake_book'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count entries");
+        assert_eq!(live, 3, "the rows a reader has to count instead are there");
     }
 
     #[test]
