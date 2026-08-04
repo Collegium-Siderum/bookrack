@@ -575,7 +575,7 @@ mod refs_tests {
     /// writer either updates them or fails here.
     #[test]
     fn the_entry_counters_on_reference_books_are_never_written() {
-        let mut refs = fresh_refs();
+        let refs = fresh_refs();
         refs.upsert_book(&sample_book("fake_book", 10, "2026-06-25T00:00:00Z"))
             .expect("upsert book");
         for key in ["a", "b", "c"] {
