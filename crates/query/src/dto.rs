@@ -919,6 +919,13 @@ pub struct PaperFilter {
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
     pub contributor_name: Option<String>,
+    /// Restrict the contributor JOIN to one role. Only takes effect
+    /// when `contributor_name` is also set; on its own it is ignored
+    /// rather than refused.
+    pub contributor_role: Option<String>,
+    /// Match against this set of lifecycle statuses. Empty means no
+    /// filter.
+    pub statuses: Vec<IntakeStatus>,
     /// Exact-equality match against the year column.
     pub year: Option<String>,
     /// Substring match against the container title.

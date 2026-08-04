@@ -299,6 +299,19 @@ pub struct FindPapersArgs {
     /// Exact-equality match against a contributor name.
     #[serde(default)]
     pub contributor_name: Option<String>,
+    /// Restrict the contributor filter to one role (`author` /
+    /// `translator` / `editor` / `other`). Only takes effect with
+    /// `contributor_name`.
+    #[serde(default)]
+    pub contributor_role: Option<String>,
+    /// Match papers whose lifecycle status is one of these, named as
+    /// they are reported in a row's `status`: `pending`, `extracted`,
+    /// `embedded`. Only an `embedded` paper has vectors, so only an
+    /// `embedded` paper can be recalled by the search tools. The book
+    /// pipeline's three further states are not reachable here and are
+    /// refused, as is an unrecognised name.
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
     /// Exact-equality match against the reported year.
     #[serde(default)]
     pub year: Option<String>,
@@ -1058,9 +1071,13 @@ impl BookrackServer {
         Parameters(args): Parameters<FindPapersArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let handle = self.resolve_handle(args.library.as_deref())?;
+        let statuses = parse_statuses(ItemKind::Paper, &args.statuses.unwrap_or_default())
+            .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
         let filter = PaperFilter {
             title_substring: args.title_substring,
             contributor_name: args.contributor_name,
+            contributor_role: args.contributor_role,
+            statuses,
             year: args.year,
             venue_substring: args.venue_substring,
             doi: args.doi,

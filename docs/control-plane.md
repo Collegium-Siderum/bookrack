@@ -657,6 +657,14 @@ carry is reported as `-32602 invalid params`, not `-32010`.
   paper-registry browse and filter, peers of the `*_books` pair. The
   `title_substring`, `year`, `venue_substring` and `doi` filters read
   the reported values, on the same rule as `library.find_books`.
+  `library.find_papers` also takes a `contributor_role` qualifier,
+  which narrows `contributor_name` and is ignored on its own, and a
+  `statuses` list. The accepted lifecycle states are `pending`,
+  `extracted` and `embedded` — three fewer than the book side, because
+  `needs_ocr` and `aborted` are written only by the OCR quality gate
+  and `dedup_hold` has no writer at all. Naming one of those, or any
+  unrecognised state, is refused with `-32602` rather than answered
+  with the empty page it could only ever match.
 - `library.show_paper` / `library.show_paper_toc` — per-paper
   bibliographic record and paginated section outline; `null` when the
   intake id is unknown.

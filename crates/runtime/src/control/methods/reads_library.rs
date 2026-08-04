@@ -193,6 +193,10 @@ pub struct FindPapersParams {
     #[serde(default)]
     pub contributor_name: Option<String>,
     #[serde(default)]
+    pub contributor_role: Option<String>,
+    #[serde(default)]
+    pub statuses: Option<Vec<String>>,
+    #[serde(default)]
     pub year: Option<String>,
     #[serde(default)]
     pub venue_substring: Option<String>,
@@ -568,9 +572,13 @@ pub fn list_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 pub fn find_papers(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: FindPapersParams = parse(params, "library.find_papers")?;
     let handle = resolve(ctx, p.library.as_deref())?;
+    let statuses = parse_statuses(ItemKind::Paper, &p.statuses.unwrap_or_default())
+        .map_err(|unknown| unknown_filter_value(&unknown))?;
     let filter = PaperFilter {
         title_substring: p.title_substring,
         contributor_name: p.contributor_name,
+        contributor_role: p.contributor_role,
+        statuses,
         year: p.year,
         venue_substring: p.venue_substring,
         doi: p.doi,

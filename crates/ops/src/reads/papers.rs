@@ -50,6 +50,8 @@ pub fn find_papers<E: Embedder>(
     let args = serde_json::json!({
         "title_substring": filter.title_substring,
         "contributor_name": filter.contributor_name,
+        "contributor_role": filter.contributor_role,
+        "statuses": filter.statuses.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
         "year": filter.year,
         "venue_substring": filter.venue_substring,
         "doi": filter.doi,
@@ -67,6 +69,8 @@ pub fn find_papers<E: Embedder>(
             layer: MatchLayer::Effective,
             title_substring: filter.title_substring.as_deref(),
             contributor_name: filter.contributor_name.as_deref(),
+            contributor_role: filter.contributor_role.as_deref(),
+            statuses: &filter.statuses,
             year: filter.year.as_deref(),
             venue_substring: filter.venue_substring.as_deref(),
             doi: filter.doi.as_deref(),

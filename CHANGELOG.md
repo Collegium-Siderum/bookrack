@@ -10,6 +10,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **The paper registry can be filtered by lifecycle status and by
+  contributor role.** `library.find_papers` and the `find_papers` tool
+  took the four bibliographic filters only; their book-side peers have
+  taken both of these since the registry existed. `statuses` names the
+  states in the form a row reports them, and `contributor_role`
+  narrows a `contributor_name` match to one role.
+
+  The paper side accepts three states — `pending`, `extracted`,
+  `embedded` — where the book side accepts six. The other three are
+  written only by the book pipeline: `needs_ocr` and `aborted` come
+  from the OCR quality gate, and `dedup_hold` has no writer at all.
+  Naming one of them is refused rather than answered with the empty
+  page it could only ever match, and the refusal lists the states that
+  would have been accepted.
+
 - **`config effective` reports what `.env` did outside bookrack's own
   prefix.** The file is applied to the real process environment, so a
   line in it need not name a `BOOKRACK_*` knob — a proxy is the common
