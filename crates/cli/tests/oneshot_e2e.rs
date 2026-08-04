@@ -702,6 +702,78 @@ async fn libraries_default_rejects_an_unknown_name_with_exit_2() -> Result<()> {
     Ok(())
 }
 
+/// How far into the binary an id got.
+enum Reached {
+    /// Past the grammar and into the control-plane client, which is as
+    /// far as anything gets without a daemon.
+    Dispatch,
+    /// Refused while parsing arguments, before dispatch exists.
+    Grammar,
+}
+
+/// A prefixed paper id survives the whole way to the control-plane
+/// client, and a book id does not get past the grammar.
+///
+/// The exit code cannot tell those apart: a subcommand that routes to
+/// an absent daemon exits 2, and so does a `clap` parse failure. What
+/// discriminates is the wording each leaves on stderr, so the negative
+/// assertions below matter as much as the positive ones — either
+/// message alone would pass a test that only asked "did it fail".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let cases: &[(&str, Reached)] = &[
+        // The prefixed form of an id this namespace addresses.
+        ("paper:101", Reached::Dispatch),
+        // The bare form the namespace has always taken.
+        ("101", Reached::Dispatch),
+        // Well formed, and names the catalog next door.
+        ("book:12", Reached::Grammar),
+    ];
+    for (id, reached) in cases {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["papers", "show", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{id:?} should exit 2 either way; stderr={stderr}",
+        );
+        match reached {
+            Reached::Dispatch => {
+                assert!(
+                    stderr.contains("bookrack daemon not running"),
+                    "{id:?} should have reached the daemon client: {stderr}",
+                );
+                assert!(
+                    !stderr.contains("invalid value"),
+                    "{id:?} should not have been refused by the grammar: {stderr}",
+                );
+            }
+            Reached::Grammar => {
+                assert!(
+                    stderr.contains("invalid value"),
+                    "{id:?} should have been refused by the grammar: {stderr}",
+                );
+                assert!(
+                    stderr.contains("papers namespace"),
+                    "{id:?} should be refused for naming another catalog: {stderr}",
+                );
+                assert!(
+                    !stderr.contains("bookrack daemon not running"),
+                    "{id:?} should not have reached the daemon client: {stderr}",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Write a minimal valid v1 identity manifest into `dir`.
 fn write_manifest(dir: &std::path::Path, name: &str) {
     std::fs::write(
