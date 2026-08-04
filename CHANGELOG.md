@@ -1158,6 +1158,18 @@ release workflow extracts the matching section verbatim from this file.
   `bookrack init --data-dir`, which shadows the global flag on the page
   a new install opens first, splits the same way.
 
+### Security
+
+- **deps: `postcss` moves to 8.5.25, clearing GHSA-fxqj-rqcc-2cmp.**
+  The advisory (medium) is an incomplete fix of GHSA-6g55-p6wh-862q,
+  cleared in 8.5.22: with `from` unset, an attacker-controlled
+  `sourceMappingURL` still reached the previous-source-map auto-loader
+  and disclosed an arbitrary `.map` file. `postcss` remains a
+  build-time dependency of the desktop shell's web assets, reached
+  transitively through `vite`, and the only stylesheet the build feeds
+  it is the shell's own; it ships nothing into the released bundle.
+  `vite` accepts the whole `^8.5.6` range, so the lockfile moves alone.
+
 ## [0.10.0] - 2026-07-27
 
 ### Added
