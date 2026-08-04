@@ -180,8 +180,15 @@ pub fn queue_list(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     if let Some(limit) = parsed.limit {
         jobs.truncate(limit as usize);
     }
+    // Two versions, because one cannot be read: `schema_version` is
+    // what the document on disk records, `binary_schema_version` what
+    // the serving binary reads. They differ whenever a document written
+    // by an earlier binary has not been rewritten yet, and a client
+    // comparing the first against its own constant would be measuring
+    // the wrong pair.
     Ok(json!({
         "schema_version": state.schema_version,
+        "binary_schema_version": bookrack_core::queue::QUEUE_SCHEMA_VERSION,
         "paused": state.paused,
         "summary": summary,
         "jobs": jobs,

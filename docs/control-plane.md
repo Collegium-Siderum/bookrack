@@ -343,8 +343,12 @@ the exit-code bucket does not distinguish the two.
   dispatches, with its read/write class. Authoritative at runtime where
   this document is authoritative at review time.
 - `daemon.mcp_tools` — the MCP tool names the daemon's listener exposes.
-- `queue.list` — `{ schema_version, paused, jobs }`. `params.limit`
-  optionally caps the jobs slice.
+- `queue.list` — `{ schema_version, binary_schema_version, paused, jobs }`.
+  `params.limit` optionally caps the jobs slice. `schema_version` is what
+  the document on disk records; `binary_schema_version` is what the
+  serving daemon reads. The first is at or below the second — a document
+  above it is refused at start-up, so a daemon serving this call never
+  holds one — and they differ until the daemon next writes the document.
 - `queue.pause` — `{ ok: true, paused: true }`. Stops the worker
   picking up new jobs; a running job finishes. The pause is persisted in
   the queue document, so it survives a restart.

@@ -21,7 +21,7 @@ use bookrack_runtime::queue::{QUEUE_SCHEMA_VERSION, QueueLoadError};
 use bookrack_test_support::{ProcessEnv, process_env};
 use eyre::Result;
 
-use crate::common::build_opts;
+use crate::common::{build_opts, connect, join_with_deadline, recv, send};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bring_up_refuses_a_newer_queue_document_and_leaves_it_on_disk() -> Result<()> {
@@ -74,4 +74,59 @@ async fn bring_up_refuses_a_newer_queue_document_and_leaves_it_on_disk() -> Resu
         "a refused bring-up must leave the document exactly as it found it"
     );
     Ok(())
+}
+
+/// The other direction: an earlier document loads, and `queue.list`
+/// has to say so in a way a client can act on. One number cannot —
+/// `schema_version` alone answers "what does the document say it is",
+/// and a client comparing it against its own idea of the version is
+/// guessing at which side is behind. The document's version and the
+/// serving binary's are reported as two fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queue_list_reports_the_document_version_and_the_binarys() -> Result<()> {
+    let sandbox = process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+
+    let queue_path = sandbox.daemon_state_dir().join("queue.json");
+    std::fs::write(
+        &queue_path,
+        br#"{"schema_version": 5, "paused": false, "jobs": []}"#,
+    )?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        false,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut writer) = connect(&sock).await?;
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"queue.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(
+            resp["result"]["schema_version"], 5,
+            "the document's own version is reported as found: {resp}"
+        );
+        assert_eq!(
+            resp["result"]["binary_schema_version"], QUEUE_SCHEMA_VERSION,
+            "the serving binary's version is reported alongside it: {resp}"
+        );
+        send(
+            &mut writer,
+            r#"{"jsonrpc":"2.0","id":2,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await
 }
