@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, NewIntake};
+use bookrack_catalog::{Catalog, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_corpus::Corpus;
 use bookrack_embed::{Embedder, Result as EmbedResult};
@@ -124,6 +124,122 @@ impl Fixture {
             .into_intake()
             .intake_id
     }
+
+    /// Register one paper carrying the bibliographic columns the
+    /// filters read, then record the curator's corrections to them.
+    /// `None` in an override position is the explicit NULL that
+    /// removes the field.
+    fn seed_curated_paper(
+        &self,
+        sha: &str,
+        base: (&str, &str),
+        curated: (Option<&str>, Option<&str>),
+    ) -> i64 {
+        let mut catalog = Catalog::open(&self.papers_catalog_db).expect("open paper catalog");
+        let intake_id = catalog
+            .register_intake(ItemKind::Paper, &NewIntake::new(sha))
+            .expect("register intake")
+            .into_intake()
+            .intake_id;
+        let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+        attrs.title = Some(base.0.to_string());
+        attrs.year = Some(base.1.to_string());
+        catalog
+            .upsert_publication_attrs(&attrs)
+            .expect("seed paper attrs");
+        for (field, value) in [("title", curated.0), ("year", curated.1)] {
+            catalog
+                .set_override(&NewOverride::new(
+                    intake_id,
+                    ItemKind::Paper,
+                    field,
+                    value.map(str::to_string),
+                    "human",
+                ))
+                .expect("write override");
+        }
+        intake_id
+    }
+}
+
+/// Ids `find_papers` returns for a filter, with the page and the total
+/// held to the same set.
+fn papers_matching(fx: &Fixture, filter: PaperFilter) -> Vec<i64> {
+    let page = find_papers(&fx.ops, filter, 100, 0).expect("find");
+    let ids: Vec<i64> = page.papers.iter().map(|p| p.intake_id).collect();
+    assert_eq!(
+        page.total as usize,
+        ids.len(),
+        "`total` and the page disagree about how many papers match"
+    );
+    ids
+}
+
+#[tokio::test]
+async fn find_papers_matches_the_bibliography_it_reports() {
+    // Every bibliographic field a paper row reports is the curated one,
+    // so a filter reading the extracted values answers with rows whose
+    // reported values do not match what was asked for. `year` is an
+    // equality match, so it cannot be satisfied by a coincidental
+    // substring the way a title can.
+    let fx = Fixture::build().await;
+    let paper = fx.seed_curated_paper(
+        "sha-curated",
+        ("A Survey of Widgt Design", "2016"),
+        (Some("A Survey of Widget Design"), Some("2017")),
+    );
+
+    assert_eq!(
+        papers_matching(
+            &fx,
+            PaperFilter {
+                title_substring: Some("Widget Design".to_string()),
+                ..PaperFilter::default()
+            }
+        ),
+        vec![paper],
+        "the corrected title does not answer the filter"
+    );
+    assert_eq!(
+        papers_matching(
+            &fx,
+            PaperFilter {
+                year: Some("2017".to_string()),
+                ..PaperFilter::default()
+            }
+        ),
+        vec![paper],
+        "the corrected year does not answer the filter"
+    );
+    assert_eq!(
+        papers_matching(
+            &fx,
+            PaperFilter {
+                year: Some("2016".to_string()),
+                ..PaperFilter::default()
+            }
+        ),
+        Vec::<i64>::new(),
+        "the replaced year still answers the filter"
+    );
+}
+
+#[tokio::test]
+async fn find_papers_does_not_match_a_field_the_user_removed() {
+    let fx = Fixture::build().await;
+    fx.seed_curated_paper("sha-nulled", ("Provisional Title", "2020"), (None, None));
+
+    assert_eq!(
+        papers_matching(
+            &fx,
+            PaperFilter {
+                title_substring: Some("Provisional".to_string()),
+                ..PaperFilter::default()
+            }
+        ),
+        Vec::<i64>::new(),
+        "a title the user deleted still answers the filter"
+    );
 }
 
 #[tokio::test]

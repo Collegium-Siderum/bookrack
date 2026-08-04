@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus};
+use bookrack_catalog::{Catalog, IntakeFilter, IntakeStatus, MatchLayer};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
@@ -59,6 +59,13 @@ pub fn list_books<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result<
 /// List books matching `filter`, paginated. The limit is clamped to
 /// [`dto::MAX_LIST_LIMIT`](crate::dto::MAX_LIST_LIMIT); `truncated` is
 /// set when the page does not cover the full filter result.
+///
+/// The title predicate matches the effective metadata — the value a
+/// row reports, with the user's corrections applied — so a book is
+/// reachable by the title it is shown under and not by one it was
+/// corrected away from. To search what the pipeline extracted, which
+/// is what a review pass asks about, use
+/// [`reads::metadata::list_metadata`](crate::reads::metadata::list_metadata).
 pub fn find_books<E: Embedder>(
     ops: &Ops<E>,
     filter: BookFilter,
@@ -84,6 +91,7 @@ pub fn find_books<E: Embedder>(
         let catalog = Catalog::open_read_only(ops.catalog_db())?;
         let categories_refs: Vec<&str> = filter.categories.iter().map(String::as_str).collect();
         let catalog_filter = IntakeFilter {
+            layer: MatchLayer::Effective,
             title_substring: filter.title_substring.as_deref(),
             contributor_name: filter.contributor_name.as_deref(),
             contributor_role: filter.contributor_role.as_deref(),

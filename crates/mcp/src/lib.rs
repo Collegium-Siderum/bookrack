@@ -174,7 +174,8 @@ pub struct ListBooksArgs {
 /// Arguments for the `library.find_books` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindBooksArgs {
-    /// Substring match against the book title.
+    /// Substring match against the book title as reported, i.e. with
+    /// the curator's corrections applied.
     #[serde(default)]
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
@@ -282,20 +283,22 @@ pub struct ListPapersArgs {
 /// Arguments for the `library.find_papers` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct FindPapersArgs {
-    /// Substring match against the paper title.
+    /// Substring match against the paper title as reported, i.e. with
+    /// the curator's corrections applied. The three bibliographic
+    /// filters below read the same layer.
     #[serde(default)]
     pub title_substring: Option<String>,
     /// Exact-equality match against a contributor name.
     #[serde(default)]
     pub contributor_name: Option<String>,
-    /// Exact-equality match against the year column.
+    /// Exact-equality match against the reported year.
     #[serde(default)]
     pub year: Option<String>,
-    /// Substring match against the container title (journal,
+    /// Substring match against the reported container title (journal,
     /// proceedings, ...).
     #[serde(default)]
     pub venue_substring: Option<String>,
-    /// Exact-equality match against the DOI.
+    /// Exact-equality match against the reported DOI.
     #[serde(default)]
     pub doi: Option<String>,
     /// Maximum number of papers in this page.

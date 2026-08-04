@@ -625,7 +625,11 @@ carry is reported as `-32602 invalid params`, not `-32010`.
 - `library.list_books` / `library.find_books` — paginated registry
   browse and filter. `library.find_books` accepts a `categories`
   list that matches books tagged with at least one of the listed
-  category strings in `node_categories`.
+  category strings in `node_categories`. Its `title_substring`
+  matches the title the row reports — the extracted value with the
+  curator's corrections applied — so a book answers the title it is
+  shown under. To filter on what the pipeline extracted, which is the
+  question a review pass asks, use `library.list_metadata`.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
   record and paginated TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by
@@ -638,7 +642,9 @@ carry is reported as `-32602 invalid params`, not `-32010`.
 - `library.show_audit_trail` / `library.show_pipeline_trail` —
   per-book metadata-edit and pipeline-step audit trails.
 - `library.list_papers` / `library.find_papers` — paginated
-  paper-registry browse and filter, peers of the `*_books` pair.
+  paper-registry browse and filter, peers of the `*_books` pair. The
+  `title_substring`, `year`, `venue_substring` and `doi` filters read
+  the reported values, on the same rule as `library.find_books`.
 - `library.show_paper` / `library.show_paper_toc` — per-paper
   bibliographic record and paginated section outline; `null` when the
   intake id is unknown.

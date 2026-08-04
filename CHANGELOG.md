@@ -240,6 +240,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A book or paper answers the title it is shown under.** The registry
+  filters compared against the values extraction wrote, while every row
+  they return reports those values with the curator's corrections
+  applied. Correcting a title therefore made the book unreachable by
+  the corrected title, and still reachable by the wrong one — a hit
+  whose displayed title did not contain what was searched for.
+
+  `library.find_books` now matches `title_substring` against the
+  reported title, and `library.find_papers` matches `title_substring`,
+  `year`, `venue_substring` and `doi` against the reported values. A
+  field a curator deliberately cleared matches nothing, rather than
+  falling back to the value it replaced. Filtering on what the pipeline
+  extracted — the question a metadata review asks — stays with
+  `library.list_metadata`.
+
+  `library.find_books`' `categories` filter has worked since it was
+  added, but its parameter description in the MCP tool schema called
+  itself a reserved hook that the server ignores. It now describes what
+  it does.
+
 - **`pipeline_runs.status` documents the states it actually has.** The
   column comment promised `partial`, which nothing ever wrote; the four
   values are now `running` / `ok` / `error` / `abandoned`, exported as

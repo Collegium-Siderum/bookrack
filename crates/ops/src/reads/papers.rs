@@ -8,7 +8,7 @@
 //! configured papers backend every function returns
 //! [`OpsError::PapersBackendNotConfigured`] before opening anything.
 
-use bookrack_catalog::{Catalog, IntakeFilter};
+use bookrack_catalog::{Catalog, IntakeFilter, MatchLayer};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
 use bookrack_embed::Embedder;
@@ -36,6 +36,11 @@ pub fn list_papers<E: Embedder>(ops: &Ops<E>, limit: u32, offset: u32) -> Result
 /// List papers matching `filter`, paginated. The limit is clamped to
 /// [`crate::dto::MAX_LIST_LIMIT`]; `truncated` is set when the page
 /// does not cover the full filter result.
+///
+/// The bibliographic predicates match the effective metadata — the
+/// values a row reports, with the user's corrections applied — so a
+/// paper is reachable by the title, year, venue and DOI it is shown
+/// under, and not by ones it was corrected away from.
 pub fn find_papers<E: Embedder>(
     ops: &Ops<E>,
     filter: PaperFilter,
@@ -59,6 +64,7 @@ pub fn find_papers<E: Embedder>(
         let catalog = Catalog::open_read_only(papers_db)?;
         let catalog_filter = IntakeFilter {
             kind: ItemKind::Paper,
+            layer: MatchLayer::Effective,
             title_substring: filter.title_substring.as_deref(),
             contributor_name: filter.contributor_name.as_deref(),
             year: filter.year.as_deref(),

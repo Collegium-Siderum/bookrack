@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewPublicationAttrs};
+use bookrack_catalog::{Catalog, NewCategory, NewIntake, NewOverride, NewPublicationAttrs};
 use bookrack_core::ItemKind;
 use bookrack_embed::OllamaEmbedClient;
 use bookrack_ops::dto::{BookFilter, MAX_LIST_LIMIT};
@@ -78,6 +78,90 @@ impl Fixture {
             ))
             .expect("tag category");
     }
+
+    /// Record the user's title override: `Some` replaces the stored
+    /// title, `None` is the explicit NULL that removes the field.
+    fn override_title(&self, intake_id: i64, title: Option<&str>) {
+        self.catalog()
+            .set_override(&NewOverride::new(
+                intake_id,
+                ItemKind::Book,
+                "title",
+                title.map(str::to_string),
+                "human",
+            ))
+            .expect("write title override");
+    }
+}
+
+/// Ids `find_books` returns for a title substring, with the page and
+/// the total held to the same set.
+fn books_titled(fx: &Fixture, needle: &str) -> Vec<i64> {
+    let filter = BookFilter {
+        title_substring: Some(needle.to_string()),
+        ..BookFilter::default()
+    };
+    let page = find_books(&fx.ops, filter, 100, 0).expect("find");
+    let ids: Vec<i64> = page.books.iter().map(|b| b.intake_id).collect();
+    assert_eq!(
+        page.total as usize,
+        ids.len(),
+        "`total` and the page disagree about how many books match"
+    );
+    ids
+}
+
+#[test]
+fn find_books_matches_the_title_it_reports() {
+    // The row carries the curated title, so filtering on the stored one
+    // answers with a book whose reported title does not contain the
+    // needle — and the operator who fixed the title cannot find the
+    // book by what they typed.
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-typo", "Handbook of Widgts");
+    fx.override_title(book, Some("Handbook of Widgets"));
+
+    assert_eq!(
+        books_titled(&fx, "Widgets"),
+        vec![book],
+        "the corrected title does not answer the filter"
+    );
+    assert_eq!(
+        books_titled(&fx, "Widgts"),
+        Vec::<i64>::new(),
+        "the replaced title still answers the filter"
+    );
+
+    let row = find_books(
+        &fx.ops,
+        BookFilter {
+            title_substring: Some("Widgets".to_string()),
+            ..BookFilter::default()
+        },
+        100,
+        0,
+    )
+    .expect("find")
+    .books
+    .remove(0);
+    assert_eq!(
+        row.title.as_deref(),
+        Some("Handbook of Widgets"),
+        "the filter and the projection read different layers"
+    );
+}
+
+#[test]
+fn find_books_does_not_match_a_title_the_user_removed() {
+    let fx = Fixture::build();
+    let book = fx.seed_book("sha-nulled", "Provisional Title");
+    fx.override_title(book, None);
+
+    assert_eq!(
+        books_titled(&fx, "Provisional"),
+        Vec::<i64>::new(),
+        "a title the user deleted still answers the filter"
+    );
 }
 
 #[test]
