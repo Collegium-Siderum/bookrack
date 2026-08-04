@@ -21,10 +21,12 @@ use std::time::Duration;
 
 use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{LibrarySelection, LogConfig};
+use bookrack_core::Explain;
 use bookrack_ops::Caller;
 use bookrack_runtime::backend_probe::PreflightRefusal;
 use bookrack_runtime::control::HealthProbe;
 use bookrack_runtime::mcp_endpoint::McpBindRefusal;
+use bookrack_runtime::queue::QueueLoadError;
 use bookrack_runtime::{DaemonRuntime, LaunchMode, RuntimeOpts};
 use eyre::{Context, Result};
 use serde_json::Value;
@@ -87,6 +89,16 @@ pub async fn run_daemon(opts: RunOpts) -> Result<()> {
             if let Some(refusal) = err.downcast_ref::<McpBindRefusal>() {
                 return Err(BookrackCliError::PreflightRefused {
                     problem: refusal.problem.clone(),
+                }
+                .into());
+            }
+            // A queue document this binary will not read is the third:
+            // the state is intact and the version that wrote it still
+            // reads it, so the operator has a next step and the failure
+            // is not a bug report.
+            if let Some(refusal) = err.downcast_ref::<QueueLoadError>() {
+                return Err(BookrackCliError::PreflightRefused {
+                    problem: refusal.explain(),
                 }
                 .into());
             }

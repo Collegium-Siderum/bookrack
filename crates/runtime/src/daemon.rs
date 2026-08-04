@@ -554,8 +554,9 @@ impl DaemonRuntime {
             &queue_state_path,
         )
         .context("migrate the queue snapshot into the daemon state directory")?;
-        let initial_queue_state =
-            queue::load(&queue_state_path).context("load persistent queue state")?;
+        // No eyre context: `QueueLoadError` is self-sufficient in the
+        // log and carries its own three-part wording to the front end.
+        let initial_queue_state = queue::load(&queue_state_path)?;
         let queue_paused = Arc::new(AtomicBool::new(initial_queue_state.paused));
         let queue_state = Arc::new(Mutex::new(initial_queue_state));
         let write_guard = Arc::new(tokio::sync::Mutex::new(()));

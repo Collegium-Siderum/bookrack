@@ -164,10 +164,12 @@ pub enum BookrackCliError {
         hint: String,
     },
 
-    /// The daemon refused to start because an external backend it
-    /// needs is unusable — the check runs before any library is
-    /// opened, so nothing was half-started. Operator input, not a
-    /// bug: exit 2, and the reporter draws the three parts.
+    /// The daemon refused to start: an external backend it needs is
+    /// unusable, an endpoint it must serve on is taken, or its queue
+    /// document was written by a newer version. Each is decided before
+    /// the daemon announces itself, so nothing was half-started.
+    /// Operator input, not a bug: exit 2, and the reporter draws the
+    /// three parts.
     #[error("{}", .problem.summary)]
     PreflightRefused { problem: Problem },
 

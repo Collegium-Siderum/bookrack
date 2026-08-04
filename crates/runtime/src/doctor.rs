@@ -780,17 +780,24 @@ fn push_daemon_state_rows(rows: &mut Vec<Row>) {
             }
         },
     });
-    let loaded = crate::queue::load(&queue_path).map_err(|e| format!("{e:#}"));
-    rows.push(queue_snapshot_row(&queue_path, loaded));
+    rows.push(queue_snapshot_row(
+        &queue_path,
+        crate::queue::load(&queue_path),
+    ));
 }
 
 /// Grade the queue snapshot from the same read the daemon performs at
 /// start-up. A missing file is the normal state of a library nothing
 /// has been queued on, and `load` reports it as an empty queue; an
 /// unparseable one is what the daemon refuses to start on.
+///
+/// A document from a newer binary fails with its own repair rather than
+/// the unparseable one's: the file is intact and the version that wrote
+/// it still reads every job in it, so removing it is a loss and running
+/// that version is not.
 fn queue_snapshot_row(
     path: &std::path::Path,
-    loaded: Result<crate::queue::QueueState, String>,
+    loaded: Result<crate::queue::QueueState, crate::queue::QueueLoadError>,
 ) -> Row {
     let label = "queue snapshot".to_string();
     match loaded {
@@ -805,6 +812,19 @@ fn queue_snapshot_row(
             label,
             value: format!("{} job(s)", state.jobs.len()),
             status: Status::Ok { note: None },
+        },
+        Err(crate::queue::QueueLoadError::SchemaTooNew {
+            found, expected, ..
+        }) => Row {
+            label,
+            value: format!("schema version {found}"),
+            status: Status::Fail {
+                note: format!(
+                    "written by a newer version of bookrack; this binary reads version \
+                     {expected} and the daemon will not come up against it. Run the newer \
+                     version, or move the file aside to start with an empty queue"
+                ),
+            },
         },
         Err(reason) => Row {
             label,
@@ -2646,13 +2666,48 @@ mod tests {
         assert_eq!(absent.value, "(absent)");
 
         std::fs::write(&path, b"{ not json").expect("write a corrupt snapshot");
-        let loaded = crate::queue::load(&path).map_err(|e| format!("{e:#}"));
+        let loaded = crate::queue::load(&path);
         assert!(loaded.is_err(), "the corrupt document must not parse");
         let row = queue_snapshot_row(&path, loaded);
         let Status::Fail { note } = &row.status else {
             panic!("an unparseable queue snapshot blocks start-up: {row:?}");
         };
         assert!(note.contains("will not come up"), "{note}");
+    }
+
+    #[test]
+    fn a_queue_snapshot_from_a_newer_binary_fails_with_its_own_repair() {
+        // Doctor is what an operator runs after a downgrade, so this is
+        // the row that has to tell them what they are looking at. The
+        // repair for a corrupt document — remove it — destroys a
+        // newer-version document's jobs, which are still readable by
+        // the version that wrote them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("queue.json");
+        let doc = format!(
+            "{{\"schema_version\": {}, \"paused\": false, \"jobs\": []}}",
+            crate::queue::QUEUE_SCHEMA_VERSION + 1
+        );
+        std::fs::write(&path, doc.as_bytes()).expect("write a newer snapshot");
+
+        let row = queue_snapshot_row(&path, crate::queue::load(&path));
+        let Status::Fail { note } = &row.status else {
+            panic!("a queue document this binary refuses blocks start-up: {row:?}");
+        };
+        assert!(
+            row.value
+                .contains(&(crate::queue::QUEUE_SCHEMA_VERSION + 1).to_string()),
+            "the value column reports the version on disk: {}",
+            row.value
+        );
+        assert!(
+            note.contains(&crate::queue::QUEUE_SCHEMA_VERSION.to_string()),
+            "the note reports the version this binary reads: {note}"
+        );
+        assert!(
+            !note.contains("removed"),
+            "removing this document destroys jobs the newer version still reads: {note}"
+        );
     }
 
     #[test]
