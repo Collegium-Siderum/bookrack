@@ -22,6 +22,9 @@ mod cli_driver;
 mod runner;
 
 pub use cli_driver::CliWizardDriver;
+/// Shared with `doctor` so the guard that refuses a bundle path and the
+/// warning about one already in use judge by the same predicate.
+pub(crate) use runner::enclosing_app_bundle;
 pub use runner::{Wizard, WizardOpts};
 
 /// The five wizard steps, in execution order. The runner never skips

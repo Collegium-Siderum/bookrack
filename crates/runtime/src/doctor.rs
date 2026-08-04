@@ -50,6 +50,7 @@ use serde::Serialize;
 
 use crate::backend_probe::{EmbedBackendState, check_embed_backend};
 use crate::mcp_endpoint::McpEndpointState;
+use crate::wizard::enclosing_app_bundle;
 
 /// One row of the health report.
 #[derive(Debug, Clone, serde::Deserialize, Serialize)]
@@ -554,7 +555,12 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
                 .and_then(library_identification_label)
                 .zip(cfg.library())
                 .map(|(label, name)| format!("identified as '{name}' by {label}"));
-            let status = data_root_status(source, cfg.shadowed_default(), identified.as_deref());
+            let status = data_root_status(
+                source,
+                cfg.shadowed_default(),
+                identified.as_deref(),
+                enclosing_app_bundle(cfg.data_dir()).as_deref(),
+            );
             rows.push(Row {
                 label: "data root".to_string(),
                 value,
@@ -589,25 +595,47 @@ fn push_data_root_row(rows: &mut Vec<Row>, selection: &LibrarySelection) -> Opti
     }
 }
 
+/// Judge the resolved data root. `bundle` is the macOS application
+/// bundle the root sits inside, if any; the wizard refuses such a path,
+/// so this is the only surface that reaches a root established before
+/// the guard existed. It leads the note when both warnings hold: a
+/// shadowed default serves the wrong library, a bundled root loses the
+/// library outright on the next upgrade.
 fn data_root_status(
     source: &str,
     shadowed: Option<&ShadowedDefault>,
     identified: Option<&str>,
+    bundle: Option<&Path>,
 ) -> Status {
     let suffix = identified
         .map(|note| format!("; {note}"))
         .unwrap_or_default();
-    match shadowed {
-        Some(shadowed) => Status::Warn {
-            note: format!(
-                "registry default '{}' ({}) is shadowed by {source}; unset it or \
-                 pass --library {} to serve the registered library{suffix}",
-                shadowed.name,
-                shadowed.data_dir.display(),
-                shadowed.name,
-            ),
+    let shadow_note = shadowed.map(|shadowed| {
+        format!(
+            "registry default '{}' ({}) is shadowed by {source}; unset it or \
+             pass --library {} to serve the registered library",
+            shadowed.name,
+            shadowed.data_dir.display(),
+            shadowed.name,
+        )
+    });
+    let bundle_note = bundle.map(|bundle| {
+        format!(
+            "the data root sits inside the application bundle {}; upgrading \
+             replaces the whole bundle, and every book, index, and log under \
+             it goes with it -- move the root outside the bundle and rerun \
+             `bookrack init`, or point --data-dir at a root outside it",
+            bundle.display(),
+        )
+    });
+    match (bundle_note, shadow_note) {
+        (Some(bundle), Some(shadow)) => Status::Warn {
+            note: format!("{bundle}; {shadow}{suffix}"),
         },
-        None => Status::Ok {
+        (Some(note), None) | (None, Some(note)) => Status::Warn {
+            note: format!("{note}{suffix}"),
+        },
+        (None, None) => Status::Ok {
             note: Some(format!("resolved via {source}{suffix}")),
         },
     }
@@ -3228,7 +3256,7 @@ mod tests {
 
     #[test]
     fn data_root_status_is_ok_when_nothing_is_shadowed() {
-        let status = data_root_status("--data-dir flag", None, None);
+        let status = data_root_status("--data-dir flag", None, None, None);
         match status {
             Status::Ok { note } => {
                 assert_eq!(note.as_deref(), Some("resolved via --data-dir flag"));
@@ -3243,6 +3271,7 @@ mod tests {
             "BOOKRACK_DATA_DIR env",
             None,
             Some("identified as 'hammer' by manifest uuid"),
+            None,
         );
         match status {
             Status::Ok { note } => {
@@ -3267,6 +3296,7 @@ mod tests {
             "BOOKRACK_DATA_DIR env",
             Some(&shadowed),
             Some("identified as 'hammer' by path"),
+            None,
         );
         match status {
             Status::Warn { note } => {
@@ -3281,6 +3311,55 @@ mod tests {
             }
             other => panic!("expected Warn, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn data_root_status_warns_when_the_root_is_inside_a_bundle() {
+        let bundle = std::path::PathBuf::from("/Applications/Bookrack.app");
+        let status = data_root_status("--data-dir flag", None, None, Some(&bundle));
+        let Status::Warn { note } = status else {
+            panic!("a root inside a bundle must warn");
+        };
+        assert!(
+            note.contains("/Applications/Bookrack.app"),
+            "missing the bundle: {note}"
+        );
+        assert!(
+            note.contains("bookrack init"),
+            "missing the way out: {note}"
+        );
+    }
+
+    /// The two warnings are independent, and the bundle one leads: a
+    /// shadowed default serves the wrong library, a bundled root loses
+    /// the library on the next upgrade.
+    #[test]
+    fn data_root_status_leads_with_the_bundle_when_both_warnings_hold() {
+        let shadowed = ShadowedDefault {
+            name: "eval-data".to_string(),
+            data_dir: std::path::PathBuf::from("/roots/eval-data"),
+        };
+        let bundle = std::path::PathBuf::from("/Applications/Bookrack.app");
+        let status = data_root_status(
+            "BOOKRACK_DATA_DIR env",
+            Some(&shadowed),
+            Some("identified as 'hammer' by path"),
+            Some(&bundle),
+        );
+        let Status::Warn { note } = status else {
+            panic!("expected Warn");
+        };
+        let bundle_at = note
+            .find("/Applications/Bookrack.app")
+            .expect("missing the bundle");
+        let shadow_at = note
+            .find("registry default 'eval-data'")
+            .expect("missing the shadow");
+        assert!(bundle_at < shadow_at, "bundle must lead: {note}");
+        assert!(
+            note.ends_with("identified as 'hammer' by path"),
+            "missing identification: {note}"
+        );
     }
 
     #[test]
@@ -3305,7 +3384,7 @@ mod tests {
             name: "eval-data".to_string(),
             data_dir: std::path::PathBuf::from("/roots/eval-data"),
         };
-        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed), None);
+        let status = data_root_status("BOOKRACK_DATA_DIR env", Some(&shadowed), None, None);
         match status {
             Status::Warn { note } => {
                 assert!(

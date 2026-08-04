@@ -406,6 +406,14 @@ release workflow extracts the matching section verbatim from this file.
   disappears on the next upgrade. The way out is a path outside the
   bundle.
 
+- **`doctor` warns when the data root already sits inside a bundle.**
+  The guard above speaks only while the wizard runs, and the roots at
+  risk were established before it existed. The `data root` row now
+  reports a `*.app` ancestor as a warning naming the bundle, and says
+  to move the root outside it. When the registry default is shadowed
+  as well, the bundle leads: serving the wrong library is recoverable,
+  losing it on the next upgrade is not.
+
 - **A paper's intake id may be written with its pipeline in front of
   it.** Every `bookrack papers` command that takes an intake id now
   takes `paper:101` as well as `101`; a `book:12` there names the other
