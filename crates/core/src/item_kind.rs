@@ -39,6 +39,11 @@ pub enum ItemKind {
 }
 
 impl ItemKind {
+    /// Every pipeline, in declaration order. Lets a caller walk the
+    /// vocabulary instead of transcribing it, so a new pipeline reaches
+    /// the walkers without a second edit.
+    pub const ALL: [ItemKind; 3] = [ItemKind::Book, ItemKind::Paper, ItemKind::Reference];
+
     /// The string the catalog writes into its `scope` column. Returned
     /// as `&'static str` so callers can bind it directly into prepared
     /// SQL parameters or pass it where a `&str` is expected.

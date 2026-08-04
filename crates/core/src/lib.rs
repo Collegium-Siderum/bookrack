@@ -20,6 +20,7 @@ mod partition;
 mod problem;
 pub mod queue;
 mod scope;
+mod typed_id;
 
 pub use bytes::bytes_human;
 pub use error_chain::error_chain;
@@ -29,3 +30,4 @@ pub use node_type::NodeType;
 pub use partition::{NODE_CAPACITY, NODE_PARTITION_FACTOR, NodeId, PartitionIdx};
 pub use problem::{Explain, Problem, ProblemData};
 pub use scope::{Scope, ScopeParseError};
+pub use typed_id::{TypedIdParseError, TypedItemId};
