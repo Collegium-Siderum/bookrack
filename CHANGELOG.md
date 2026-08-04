@@ -435,6 +435,14 @@ release workflow extracts the matching section verbatim from this file.
   re-asks: `--data-dir` and `--non-interactive` still decide once,
   because there is nobody there to ask.
 
+- **Double-clicking `Bookrack.app` leaves a usable window behind.** The
+  Terminal window it opens ran the daemon with `exec`, so the moment
+  the daemon stopped — including when it stopped by failing to start —
+  the window showed `[Process completed]` and accepted nothing further.
+  Whatever the daemon printed was still on screen but could not be
+  acted on. The window now drops to a shell, matching the Linux
+  `.desktop` entry.
+
 - **`doctor` warns when the data root already sits inside a bundle.**
   The guard above speaks only while the wizard runs, and the roots at
   risk were established before it existed. The `data root` row now
