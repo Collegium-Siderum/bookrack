@@ -32,7 +32,10 @@ use std::time::Duration;
 use bookrack_config::llama_server_pin::locate_llama_server;
 use bookrack_config::reranker_model_pin::locate_reranker_model;
 use bookrack_config::{Config, DEFAULT_RERANKER_CTX, RERANKER_SERVER_BATCH_SIZE, RerankerConfig};
-use bookrack_index_profile::RerankerKind;
+use bookrack_core::Problem;
+use bookrack_index_profile::{RerankerKind, RerankerSpec};
+
+use crate::backend_probe::PreflightRefusal;
 use bookrack_rerank::ServerHealth;
 use eyre::{Context, bail, eyre};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -299,8 +302,77 @@ const DEFAULT_TOP_K_IN: usize = 50;
 // setting: internal -- the other half of the same guard
 const DEFAULT_TOP_K_OUT: usize = 10;
 
-/// Bring up the reranker backend a library's effective profile
-/// demands, during daemon bring-up and before the daemon serves.
+/// Render a reranker section as the clause the refusal below reads it
+/// out with.
+fn render_reranker(spec: &RerankerSpec) -> String {
+    match spec.kind {
+        RerankerKind::None => "no reranker stage".to_string(),
+        RerankerKind::CrossEncoder => match spec.model.as_deref() {
+            Some(model) => format!("a cross-encoder stage on {model:?}"),
+            None => "a cross-encoder stage".to_string(),
+        },
+    }
+}
+
+/// The configuration bring-up serves the mounted set's reranker stage
+/// under, or the refusal naming the two libraries that disagree.
+///
+/// One supervised backend serves every mounted library, so agreement is
+/// a precondition rather than a preference. Taking the stage from the
+/// bring-up-selected library alone leaves a library that declares a
+/// cross-encoder served with no reranker at all, and nothing downstream
+/// re-reads that library's profile — the silent half of the promise
+/// [`bring_up_reranker`] documents.
+///
+/// The configuration handed back is the first agreeing mount's, not the
+/// primary's: once the set agrees every member resolves the same stage,
+/// and sourcing it from the set keeps the primary from being a special
+/// case here. `None` when no mount resolves a profile at all.
+///
+/// A library that references no profile counts as declaring no reranker
+/// — that is what it is served as — while a profile that fails to
+/// resolve is not this check's business: the step that owns resolution
+/// reports it with its own wording.
+pub fn agreed_reranker_config(
+    mounts: &[(String, Arc<Config>)],
+) -> Result<Option<&Config>, PreflightRefusal> {
+    let mut agreed: Option<(&str, RerankerSpec, &Config)> = None;
+    for (name, cfg) in mounts {
+        let spec = match crate::profile::effective_index_profile(cfg) {
+            Ok(Some(effective)) => effective.profile.reranker,
+            Ok(None) => RerankerSpec::default(),
+            Err(_) => continue,
+        };
+        match &agreed {
+            None => agreed = Some((name, spec, cfg)),
+            Some((first, first_spec, _)) if *first_spec != spec => {
+                return Err(PreflightRefusal {
+                    library: name.clone(),
+                    problem: Problem::new(
+                        "cannot serve libraries whose index profiles disagree on the reranker stage",
+                    )
+                    .detail(format!(
+                        "Library {first:?} resolves to {}; library {name:?} resolves to {}.",
+                        render_reranker(first_spec),
+                        render_reranker(&spec),
+                    ))
+                    .hint(
+                        "One reranker backend serves every mounted library, so the mounted set \
+                         has to agree on it. Point the libraries at the same index profile, or \
+                         serve them from separate daemons. Run `bookrack index-profile current` \
+                         against each library to see what it resolves to.",
+                    ),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(agreed.map(|(_, _, cfg)| cfg))
+}
+
+/// Bring up the reranker backend the mounted set's agreed profile
+/// section demands, during daemon bring-up and before the daemon
+/// serves.
 ///
 /// Dispatch on the deployment mode: no backend at all when the
 /// profile enables no reranker stage; a single hard `/health` probe
@@ -310,6 +382,10 @@ const DEFAULT_TOP_K_OUT: usize = 10;
 /// supervised llama-server is spawned and held to readiness. Either
 /// verified mode upholds the profile's promise at startup; every
 /// failure refuses bring-up with the repair spelled out.
+///
+/// The caller passes the configuration
+/// [`agreed_reranker_config`] hands back, so the stage serving every
+/// mounted library is one the whole set resolves to.
 pub async fn bring_up_reranker(
     cfg: &Config,
     runtime_dir: &Path,

@@ -482,9 +482,17 @@ impl DaemonRuntime {
         //     llama-server is spawned and held to readiness. Either
         //     way a profile that promises a reranker gets a verified
         //     backend or the daemon refuses to start.
+        //
+        //     The stage is taken from the mounted set, not from the
+        //     primary: one backend serves every mounted library, so a
+        //     set that disagrees on the section is refused here rather
+        //     than served under whichever library bring-up happened to
+        //     select.
+        let rerank_cfg =
+            crate::rerank_supervisor::agreed_reranker_config(&mounts)?.unwrap_or(cfg.as_ref());
         let events_for_rerank = event_stream.clone();
         let reranker = crate::rerank_supervisor::bring_up_reranker(
-            &cfg,
+            rerank_cfg,
             &runtime_dir,
             Some(Arc::new(move |state: &SupervisorState| {
                 if let Some(active) = rerank_degraded_transition(state) {

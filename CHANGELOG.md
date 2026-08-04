@@ -249,6 +249,22 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A library declaring a reranker was served without one.** One
+  supervised reranker backend serves every mounted library, and
+  bring-up asked the bring-up-selected library's index profile for it.
+  Under an eager multi-mount daemon, a library whose profile declared a
+  cross-encoder stage was therefore served with no reranker at all
+  whenever the selected library's profile declared none — silently, and
+  against the promise that a profile's reranker stage is either brought
+  up or the daemon refuses to start.
+
+  The stage now comes from the mounted set. A set whose profiles
+  disagree on it refuses bring-up, naming both libraries and what each
+  resolves to, and pointing at `bookrack index-profile current`. A
+  library that references no profile counts as declaring no reranker,
+  which is what it was already served as. Single-library daemons are
+  unaffected: a set of one agrees with itself.
+
 - **A wrong `HOME` made `bookrack diagnose` claim a coverage it did not
   have.** The scrubber takes its home-directory prefix from `HOME`
   first, and reported a gap only when no home could be found at all. A
