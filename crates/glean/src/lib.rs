@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use crate::audit::projection::csl_type_token;
 use bookrack_catalog::{
     ActorKind, Catalog, IntakeStatus, NewContributor, NewIntake, NewItemPipelineAudit,
     NewItemState, NewPublicationAttrs, NewReview, STATUS_PENDING,
@@ -1158,7 +1159,7 @@ pub(crate) fn write_biblio(
     attrs.issn = biblio.issn.clone();
     attrs.container_title = biblio.container_title.clone();
     attrs.abstract_text = biblio.abstract_text.clone();
-    attrs.csl_type = biblio.csl_type.map(|t| serde_csl_type(t).to_string());
+    attrs.csl_type = biblio.csl_type.map(|t| csl_type_token(t).to_string());
     attrs.source = Some("extracted".to_string());
     catalog.upsert_publication_attrs(&attrs)?;
     catalog.clear_extracted_contributors(intake_id, ItemKind::Paper)?;
@@ -1204,19 +1205,6 @@ fn role_str(role: ContributorRole) -> &'static str {
         ContributorRole::Editor => "editor",
         ContributorRole::Translator => "translator",
         ContributorRole::Other => "other",
-    }
-}
-
-/// Map a [`bookrack_extract::CslType`] to its CSL serde string.
-fn serde_csl_type(t: bookrack_extract::CslType) -> &'static str {
-    match t {
-        bookrack_extract::CslType::ArticleJournal => "article-journal",
-        bookrack_extract::CslType::PaperConference => "paper-conference",
-        bookrack_extract::CslType::Book => "book",
-        bookrack_extract::CslType::Chapter => "chapter",
-        bookrack_extract::CslType::Thesis => "thesis",
-        bookrack_extract::CslType::Report => "report",
-        bookrack_extract::CslType::Webpage => "webpage",
     }
 }
 
@@ -1413,7 +1401,7 @@ fn run_paper_audit_substep(
                 intake_id,
                 ItemKind::Paper.as_scope_str(),
                 profile,
-                biblio.csl_type.map(serde_csl_type),
+                report.csl_type.map(csl_type_token),
                 &audited_at,
                 &extractor_version,
                 pipeline_run_id,

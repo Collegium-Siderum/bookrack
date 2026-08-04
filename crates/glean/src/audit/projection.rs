@@ -21,9 +21,28 @@
 //!   blocking the audit row.
 
 use bookrack_catalog::{FLAG_COLUMNS, GRADE_COLUMNS, NewNodePaperAudit};
+use bookrack_extract::CslType;
 
 use super::profile::PaperAuditProfile;
 use super::report::{PaperFieldGrade, PaperFlag, PaperReport};
+
+/// Map a [`CslType`] to its CSL string, the form the `csl_type`
+/// column and `node_publication_attrs` both store.
+///
+/// It lives beside the projection because the row and the attrs write
+/// are its two callers, and a second spelling of this mapping is how
+/// the column and the matrix behind a verdict would drift apart.
+pub(crate) fn csl_type_token(t: CslType) -> &'static str {
+    match t {
+        CslType::ArticleJournal => "article-journal",
+        CslType::PaperConference => "paper-conference",
+        CslType::Book => "book",
+        CslType::Chapter => "chapter",
+        CslType::Thesis => "thesis",
+        CslType::Report => "report",
+        CslType::Webpage => "webpage",
+    }
+}
 
 /// Build one [`NewNodePaperAudit`] row from a [`PaperReport`].
 #[allow(clippy::too_many_arguments)]
@@ -119,6 +138,7 @@ mod tests {
             verdict: PaperVerdict::Clean,
             confidence: PaperConfidence::High,
             cross_field_flags: Vec::new(),
+            csl_type: Some(CslType::ArticleJournal),
         }
     }
 
@@ -326,6 +346,7 @@ mod tests {
             verdict: PaperVerdict::NeedsWork,
             confidence: PaperConfidence::Low,
             cross_field_flags: vec![PaperFlag::NoStableIdentifier],
+            csl_type: Some(CslType::ArticleJournal),
         };
         let row = row(&report);
         // Find the relevant column positions.
