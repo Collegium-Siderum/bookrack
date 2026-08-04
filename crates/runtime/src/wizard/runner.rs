@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use bookrack_catalog::Catalog;
 use bookrack_config::{
     Config, DEFAULT_OLLAMA_URL, EmbedConfig, LibraryEntryFields, LibraryKind, LibraryManifest,
-    MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, load_manifest, locate_pdfium,
-    new_manifest, pdfium_library_filename, portable_data_dir, registry_target_path,
+    MANIFEST_FILENAME, OLLAMA_URL_ENV, ROOT_CONFIG_NAME, default_data_root, load_manifest,
+    locate_pdfium, new_manifest, pdfium_library_filename, portable_data_dir, registry_target_path,
     render_root_config_toml, upsert_library_entry, write_manifest,
 };
 
@@ -69,6 +69,7 @@ impl Wizard {
     pub async fn run<D: WizardDriver>(driver: &D, opts: WizardOpts) -> Result<()> {
         let hint = DataRootHint {
             portable: portable_data_dir(),
+            default_root: default_data_root(),
             data_dir: opts.data_dir.clone(),
             non_interactive: opts.non_interactive,
             force: opts.force,

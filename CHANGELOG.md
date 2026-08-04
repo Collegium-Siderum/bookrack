@@ -406,6 +406,25 @@ release workflow extracts the matching section verbatim from this file.
   disappears on the next upgrade. The way out is a path outside the
   bundle.
 
+- **The wizard's first question has a default.** `bookrack init` asked
+  where the data root should go and, unless a portable `bookrack-data/`
+  directory happened to sit beside the binary, accepted nothing but a
+  typed path — an empty answer ended the run. A first run started by
+  double-clicking, which is the path the packaged builds invite, hit
+  that on the first prompt with no way past it.
+
+  The prompt now offers `<platform data directory>/bookrack/library`,
+  beside the daemon state and the managed PDFium copy, and Enter takes
+  it. A discovered portable layout still outranks the suggestion; a
+  typed path still wins over both; and the suggestion is a suggestion
+  only — nothing consults it outside the wizard, so declining it does
+  not hand it back later. Only a host whose platform data directory
+  cannot be located at all is left with a prompt that has no default.
+
+  `--non-interactive` is unchanged: `--data-dir` stays required there.
+  A scripted install that silently picks a data root is worse than one
+  that fails.
+
 - **`doctor` warns when the data root already sits inside a bundle.**
   The guard above speaks only while the wizard runs, and the roots at
   risk were established before it existed. The `data root` row now

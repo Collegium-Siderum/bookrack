@@ -3667,6 +3667,28 @@ fn portable_data_dir_from(exe_dir: Option<PathBuf>) -> Option<PathBuf> {
     candidate.is_dir().then_some(candidate)
 }
 
+/// Directory name the suggested data root carries under the platform
+/// data directory.
+pub const DEFAULT_LIBRARY_DIR: &str = "library";
+
+/// Data root to suggest when no portable layout exists: a `library`
+/// directory under the platform data directory, beside the daemon state
+/// and the managed PDFium copy.
+///
+/// This is a suggestion the wizard offers, not a resolution rung —
+/// [`Config::resolve`] never consults it, so an operator who declines
+/// the offer is not silently given it later. `None` when the platform
+/// data directory cannot be located.
+pub fn default_data_root() -> Option<PathBuf> {
+    default_data_root_from(dirs::data_dir())
+}
+
+/// Pure form of [`default_data_root`], factored out so the join shape
+/// can be tested without depending on the host's data directory.
+fn default_data_root_from(data_dir: Option<PathBuf>) -> Option<PathBuf> {
+    Some(data_dir?.join("bookrack").join(DEFAULT_LIBRARY_DIR))
+}
+
 /// Filename of the platform-default registry written by `bookrack init`.
 pub const DEFAULT_REGISTRY_NAME: &str = "registry.toml";
 
@@ -3745,7 +3767,13 @@ pub fn pdfium_library_filename() -> &'static str {
 /// pinned PDFium library; the last stop in the [`locate_pdfium`] search
 /// chain. `None` when the platform data directory cannot be located.
 pub fn pdfium_managed_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("bookrack").join("pdfium"))
+    pdfium_managed_dir_from(dirs::data_dir())
+}
+
+/// Pure form of [`pdfium_managed_dir`], factored out so the join shape
+/// can be tested without depending on the host's data directory.
+fn pdfium_managed_dir_from(data_dir: Option<PathBuf>) -> Option<PathBuf> {
+    data_dir.map(|d| d.join("bookrack").join("pdfium"))
 }
 
 /// Outcome of the PDFium library search.
@@ -5127,6 +5155,29 @@ mod tests {
     #[test]
     fn portable_data_dir_returns_none_when_exe_dir_is_unknown() {
         assert!(portable_data_dir_from(None).is_none());
+    }
+
+    /// The suggested root sits beside the daemon state and the managed
+    /// PDFium copy, so the three share one `bookrack` directory rather
+    /// than inventing a third convention.
+    #[test]
+    fn default_data_root_joins_the_platform_data_directory() {
+        let base = PathBuf::from("/opt/state");
+        assert_eq!(
+            default_data_root_from(Some(base.clone())),
+            Some(base.join("bookrack").join("library"))
+        );
+        assert_eq!(
+            default_data_root_from(Some(base.clone()))
+                .expect("some")
+                .parent(),
+            pdfium_managed_dir_from(Some(base)).expect("some").parent(),
+        );
+    }
+
+    #[test]
+    fn default_data_root_returns_none_without_a_platform_data_directory() {
+        assert!(default_data_root_from(None).is_none());
     }
 
     #[test]

@@ -45,7 +45,13 @@ pub enum WizardStep {
 /// before rendering its choice; the runner re-validates the returned
 /// path with the same predicate either way.
 pub struct DataRootHint {
+    /// An existing portable layout beside the running binary. A
+    /// discovery, so it outranks `default_root` as the offer.
     pub portable: Option<PathBuf>,
+    /// Where a root would go on this host if nobody says otherwise,
+    /// from `bookrack_config::default_data_root()`. A suggestion, not a
+    /// discovery: nothing exists there yet.
+    pub default_root: Option<PathBuf>,
     pub data_dir: Option<PathBuf>,
     pub non_interactive: bool,
     pub force: bool,
