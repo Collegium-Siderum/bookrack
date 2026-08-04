@@ -2,8 +2,8 @@
 
 //! Persistent ingest queue value types.
 //!
-//! The queue document is owned by `bookrack-cli`'s REPL worker and
-//! its readers — the file format, atomic write, walker, and worker
+//! The queue document is owned by the daemon runtime and its readers —
+//! the file format, version gate, atomic write, walker, and worker
 //! loop all live there. This module carries only the pure serde
 //! types that cross crate boundaries: the MCP `session.queue_status`
 //! tool reads the same `QueueState` snapshot the CLI mutates, and
