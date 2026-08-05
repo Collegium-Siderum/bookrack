@@ -77,7 +77,7 @@ async fn full_card(runtime_dir: Option<&Path>, lock_path: &Path, info: &LockInfo
     let library = helpers::dispatch(&client, "library.info", library_info_params(&status)).await?;
     let card = compose_card(lock_path, info, &version, &status, &library);
     let hint = card_hint(&card);
-    emit_card(&card, hint)
+    emit_card(&card, &hint)
 }
 
 /// Parameters for the card's `library.info` call: the library `status`
@@ -148,19 +148,62 @@ fn compose_card(
     if let Some(unreadable) = unreadable_stores(library) {
         card["library"]["unreadable"] = unreadable;
     }
+    // Same rule for the served set: a single-library daemon would get a
+    // list of one, which says nothing the rows above have not.
+    if let Some(served) = plural_served(status) {
+        if let Some(reached) = unnamed_calls_reach(&served, status) {
+            card["library"]["default_library"] = Value::String(reached);
+        }
+        card["library"]["served"] = served;
+    }
     card
+}
+
+/// The `served` set when this daemon holds more than one library, else
+/// `None`.
+fn plural_served(status: &Value) -> Option<Value> {
+    let served = status.get("served")?.as_array()?;
+    (served.len() > 1).then(|| Value::Array(served.clone()))
+}
+
+/// The library a call naming none would reach, when that is **not** the
+/// library this card is about; `None` when the two agree.
+///
+/// The card reports the primary. An unnamed call resolves to the
+/// registry default instead, so on a daemon started under a non-default
+/// library the operator is reading one library's card while their next
+/// unqualified write lands on another. That is worth a row of its own —
+/// the `default` mark inside `served` states the same fact, but only to
+/// a reader who already knows to look for the difference.
+fn unnamed_calls_reach(served: &Value, status: &Value) -> Option<String> {
+    let primary = status.get("library").and_then(Value::as_str);
+    let default = served
+        .as_array()?
+        .iter()
+        .find(|row| row["default"] == true)?["name"]
+        .as_str()?;
+    (Some(default) != primary).then(|| default.to_string())
 }
 
 /// The footer a full card ends on. A store that could not be read is
 /// the one finding the card states without explaining, so it sends the
 /// reader to the per-store schema check rather than to the environment
 /// sweep `doctor` performs.
-fn card_hint(card: &Value) -> &'static str {
-    if card["library"].get("unreadable").is_some() {
-        "a store could not be read -- run 'bookrack verify' for the per-store schema check"
-    } else {
-        "run 'bookrack doctor' for health checks"
+///
+/// `verify` takes a library selection, so the hint names the library
+/// the card is about: on a multi-library daemon the bare command would
+/// check the registry default, which is not the library whose store the
+/// card just reported as unreadable. `doctor` takes no selection, so
+/// that hint stays bare.
+fn card_hint(card: &Value) -> String {
+    if card["library"].get("unreadable").is_none() {
+        return "run 'bookrack doctor' for health checks".to_string();
     }
+    let verify = match card["library"]["name"].as_str() {
+        Some(name) => format!("bookrack --library {name} verify"),
+        None => "bookrack verify".to_string(),
+    };
+    format!("a store could not be read -- run '{verify}' for the per-store schema check")
 }
 
 /// Every store `library.info` reports a read failure for, keyed by the
@@ -252,10 +295,46 @@ fn emit_card(card: &Value, hint: &str) -> Result<()> {
         return Ok(());
     }
     let mut table = KvTable::new();
-    flatten_into_kv(&mut table, "", card);
+    flatten_into_kv(&mut table, "", &for_human(card));
     println!("{}", table.render());
     println!("hint: {hint}");
     Ok(())
+}
+
+/// The card with its served set turned into one row per library.
+///
+/// [`flatten_into_kv`] renders an array as a single line of compact
+/// JSON, which for this array is a screenful of quoted paths on one
+/// row. Keying each entry by its library name gives the table what it
+/// renders well — one `library.served.<name>` row each — while the
+/// `--json` twin keeps the array the `status` method reports.
+fn for_human(card: &Value) -> Value {
+    let Some(served) = card.pointer("/library/served").and_then(Value::as_array) else {
+        return card.clone();
+    };
+    let mut rows = serde_json::Map::new();
+    for row in served {
+        let Some(name) = row["name"].as_str() else {
+            continue;
+        };
+        let root = row["data_dir"].as_str().unwrap_or("(unknown root)");
+        let mut marks: Vec<&str> = Vec::new();
+        if row["default"] == true {
+            marks.push("default");
+        }
+        if row["primary"] == true {
+            marks.push("primary");
+        }
+        let rendered = if marks.is_empty() {
+            root.to_string()
+        } else {
+            format!("{root} ({})", marks.join(", "))
+        };
+        rows.insert(name.to_string(), Value::String(rendered));
+    }
+    let mut human = card.clone();
+    human["library"]["served"] = Value::Object(rows);
+    human
 }
 
 #[cfg(test)]
@@ -381,6 +460,117 @@ mod tests {
         assert_eq!(card["library"]["data_dir"], "/data/anon");
         assert!(card["daemon"]["control"].is_null());
         assert!(card["library"]["disk"].is_null());
+    }
+
+    /// A daemon serving one library gets no served list: it would
+    /// repeat the identity rows above it and say nothing more.
+    #[test]
+    fn a_single_library_daemon_gets_no_served_list() {
+        let status = json!({
+            "library": "main",
+            "data_dir": "/data/main",
+            "served": [
+                { "name": "main", "data_dir": "/data/main", "default": true, "primary": true },
+            ],
+        });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &status,
+            &json!({}),
+        );
+        assert!(card["library"].get("served").is_none(), "{card}");
+        assert!(card["library"].get("default_library").is_none(), "{card}");
+    }
+
+    /// More than one library: every one is listed, and the row saying
+    /// where an unnamed call lands appears only because the daemon came
+    /// up under a library that is not the default.
+    #[test]
+    fn a_multi_library_daemon_lists_them_and_names_where_unnamed_calls_land() {
+        let status = json!({
+            "library": "beta",
+            "data_dir": "/data/beta",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": false },
+                { "name": "beta", "data_dir": "/data/beta", "default": false, "primary": true },
+            ],
+        });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &status,
+            &json!({}),
+        );
+        let served = card["library"]["served"]
+            .as_array()
+            .unwrap_or_else(|| panic!("served list missing: {card}"));
+        assert_eq!(served.len(), 2, "{card}");
+        assert_eq!(
+            card["library"]["default_library"], "alpha",
+            "the card is about beta while an unnamed call reaches alpha: {card}",
+        );
+
+        // The human table gets one row per library, marked; the JSON
+        // twin above keeps the array.
+        let human = for_human(&card);
+        assert_eq!(
+            human["library"]["served"]["alpha"], "/data/alpha (default)",
+            "{human}",
+        );
+        assert_eq!(
+            human["library"]["served"]["beta"], "/data/beta (primary)",
+            "{human}",
+        );
+    }
+
+    /// Coming up under the default is the ordinary multi-library case:
+    /// the list is still there, the extra row is not.
+    #[test]
+    fn a_primary_that_is_the_default_needs_no_extra_row() {
+        let status = json!({
+            "library": "alpha",
+            "data_dir": "/data/alpha",
+            "served": [
+                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": true },
+                { "name": "beta", "data_dir": "/data/beta", "default": false, "primary": false },
+            ],
+        });
+        let card = compose_card(
+            Path::new("/run/bookrack.tty.lock"),
+            &lock_info(None),
+            &json!({ "version": "0.1.0" }),
+            &status,
+            &json!({}),
+        );
+        assert!(card["library"]["served"].is_array(), "{card}");
+        assert!(card["library"].get("default_library").is_none(), "{card}");
+        assert_eq!(
+            for_human(&card)["library"]["served"]["alpha"],
+            "/data/alpha (default, primary)",
+        );
+    }
+
+    /// The store-failure footer names the library the card is about:
+    /// `verify` is routed, so the bare command would check whichever
+    /// library the registry defaults to.
+    #[test]
+    fn the_verify_hint_names_the_library_whose_store_failed() {
+        let card = json!({
+            "library": { "name": "beta", "unreadable": { "catalog": "boom" } },
+        });
+        let hint = card_hint(&card);
+        assert!(hint.contains("--library beta verify"), "{hint}");
+
+        // A path-selected root has no name to pass, and such a daemon
+        // serves that root alone.
+        let anonymous = json!({
+            "library": { "name": Value::Null, "unreadable": { "catalog": "boom" } },
+        });
+        let hint = card_hint(&anonymous);
+        assert!(hint.contains("'bookrack verify'"), "{hint}");
     }
 
     /// The name travels under the key the handler declares, not under a

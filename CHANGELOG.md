@@ -474,6 +474,21 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack status` lists every library the daemon serves.** On a
+  daemon holding more than one library the card gains a `served` row
+  per library, each with its root and marked `default` (where a call
+  naming no library lands) or `primary` (the one the daemon came up
+  under). When those differ, one further row states which library an
+  unqualified command would reach — the card itself reports the
+  primary, so on such a daemon the operator is reading one library
+  while their next unqualified write goes to another. A single-library
+  daemon is unchanged: a list of one repeats the rows above it.
+
+  The footer shown when a store cannot be read now names the library
+  in the `verify` command it suggests. `verify` takes a library, and
+  the bare command checks the registry default, which is not
+  necessarily the library whose store the card just reported on.
+
 - **The session lock no longer records a library identity.** It
   carried `data_dir=` and `library_name=`, and with every registered
   library mounted, either one could only name a single mount. Their one
