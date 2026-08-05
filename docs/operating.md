@@ -209,20 +209,32 @@ daemon over RPC, so they name what is actually served, not what a lock
 file once recorded. `library.name` is empty when the served data root
 was selected directly by path — a normal state, not a fault.
 
+The short card answers one thing the full card has no use for: the
+`registry.default` row names the library a `bookrack run` here would
+serve. It reads `(none)` when no registry is set or none of its entries
+is the default, and `(unreadable: …)` when the registry file exists but
+could not be read — reported in the row rather than as a failure, since
+the card's own question was answered. `--json` carries the same three
+states as a name, `null`, and `{"error": "…"}`.
+
 The card distinguishes four verdicts:
 
 | Verdict | How it is decided | Output | Exit |
 | --- | --- | --- | --- |
 | running | session lock held, control plane answers within 2s | full card | 0 |
-| not running | no lock, or a leftover lock nobody holds | short card pointing at `bookrack run` | 0 |
-| stale | lock held, control plane silent for 2s | error naming the lock to remove | 3 |
+| not running | no lock, or a leftover lock nobody holds | short card pointing at `bookrack run`, with the library a restart would serve | 0 |
+| stale | lock held, control plane silent for 2s | error, with the steps to check the process before removing the lock | 3 |
 | unprobeable | lock held but records no control socket | short card with the recorded pid | 0 |
 
 "Not running" is an answer, not an error, so it exits 0; a daemon
 killed outright releases its flock and lands here, no cleanup needed.
 "Stale" means a process still holds the flock but its control plane
 has stopped answering — the same exit-3 contract as `bookrack run`
-against a stale lock. "Unprobeable" means the lock names no control
+against a stale lock. A suspended process looks exactly like this from
+outside, so the message walks the pid it recorded: check the process is
+there (`kill -0`), resume or end it if it is, and remove the lock only
+once it is gone. Deleting the lock under a live daemon leaves two
+processes believing they own the same session. "Unprobeable" means the lock names no control
 address (a daemon started without a control listener, or a hand-edited
 lock): the probe made no verdict that the daemon is dead, so status
 does not either — but note that under `--quiet`, where the exit code

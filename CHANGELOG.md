@@ -484,6 +484,27 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The short `bookrack status` card says which library a restart would
+  serve.** With no daemon running the card reported only that fact, and
+  the one thing an operator can act on there — which library `bookrack
+  run` would bring up — was not on it. A `registry.default` row now
+  answers it: a name, `(none)` when no registry is set or none of its
+  entries is the default, or `(unreadable: …)` when the registry file
+  cannot be read. That last state is reported in the row rather than as
+  a failed command, because the card's own question — is a daemon
+  running — was answered; `--json` carries the three states as a name,
+  `null`, and `{"error": "…"}`. A registry that could not be read had
+  no operator-facing surface at all before this.
+
+- **The stale-session-lock error checks for the process before telling
+  you to delete anything.** It read `Remove the lock file manually and
+  re-run bookrack: rm <path>`, and a suspended daemon — which holds its
+  lock and answers no probe — is indistinguishable from a dead one from
+  outside, so following that instruction stranded a live daemon's
+  session. The message now walks the recorded pid: `kill -0` to see
+  whether it exists, `kill -CONT` or `bookrack quit` if it does, and the
+  removal only once it is gone. Exit code 3 is unchanged.
+
 - **`bookrack status` lists every library the daemon serves.** On a
   daemon holding more than one library the card gains a `served` row
   per library, each with its root and marked `default` (where a call

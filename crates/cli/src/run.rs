@@ -174,6 +174,7 @@ async fn handle_lock_conflict(err: eyre::Report, lock_path: &Path, mode: LaunchM
         }
         (_, HealthProbe::Stale) => Err(BookrackCliError::StaleSessionLock {
             path: lock_path.to_path_buf(),
+            pid: info.pid,
         }
         .into()),
         (_, HealthProbe::Unprobeable) => Err(BookrackCliError::SessionLockUnreadable {

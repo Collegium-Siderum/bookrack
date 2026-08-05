@@ -41,11 +41,25 @@ pub enum BookrackCliError {
 
     /// `bookrack run` found a lock pointing at a daemon that did not
     /// answer the health probe within the grace window.
+    ///
+    /// A daemon that stopped answering has not necessarily stopped
+    /// existing: a suspended process holds its `flock` and answers
+    /// nothing, which is exactly what this state looks like. The remedy
+    /// therefore starts by asking whether the process is there, and
+    /// reaches removing the lock only after that has been answered —
+    /// deleting it under a live daemon leaves two processes believing
+    /// they own the same session. The recorded pid is what makes the
+    /// first step something the operator can run.
     #[error(
-        "bookrack session lock at {path} is stale (no live daemon answered within 2s).\nRemove the lock file manually and re-run bookrack: rm {path}",
+        "bookrack session lock at {path} is stale (no live daemon answered within 2s).\n\
+         The daemon recorded there may still exist; check before removing the lock:\n\
+         \x20 1. is it alive?      kill -0 {pid}\n\
+         \x20 2. if it is, it may be suspended: kill -CONT {pid} to resume it, \
+         or 'bookrack quit' / kill {pid} to end it\n\
+         \x20 3. only once it is gone:  rm {path}",
         path = .path.display()
     )]
-    StaleSessionLock { path: PathBuf },
+    StaleSessionLock { path: PathBuf, pid: u32 },
 
     /// `bookrack run` could not read or interpret the session lock
     /// file. Carries the formatted upstream error verbatim so the
@@ -363,12 +377,39 @@ pub fn classify_eyre(err: &eyre::Report) -> Option<CliReportCause<'_>> {
 mod tests {
     use super::*;
 
+    /// The stale-lock remedy asks whether the process exists before it
+    /// says to delete anything. A suspended daemon holds its `flock`
+    /// and answers no probe, which is indistinguishable from a dead one
+    /// from here — so a message whose first instruction is `rm` tells
+    /// the operator to strand a live daemon's session.
+    #[test]
+    fn the_stale_lock_remedy_checks_for_the_process_before_removing_the_lock() {
+        let rendered = BookrackCliError::StaleSessionLock {
+            path: PathBuf::from("/run/bookrack.tty.lock"),
+            pid: 4242,
+        }
+        .to_string();
+        let removal = rendered
+            .find("rm /run/bookrack.tty.lock")
+            .expect("the message still says how to remove the lock");
+        for probe in ["kill -0 4242", "kill -CONT 4242", "bookrack quit"] {
+            let at = rendered
+                .find(probe)
+                .unwrap_or_else(|| panic!("no `{probe}` step in: {rendered}"));
+            assert!(
+                at < removal,
+                "`{probe}` must come before the removal step: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn exit_codes_match_documented_values() {
         assert_eq!(BookrackCliError::DaemonNotRunning.exit_code(), 2);
         assert_eq!(
             BookrackCliError::StaleSessionLock {
-                path: PathBuf::from("/x")
+                path: PathBuf::from("/x"),
+                pid: 4242,
             }
             .exit_code(),
             3

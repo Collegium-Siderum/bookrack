@@ -61,7 +61,11 @@ pub async fn run(runtime_dir: Option<PathBuf>) -> Result<()> {
         return not_running_card(&lock_path);
     }
     match probe(&info, Duration::from_secs(2)).await {
-        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock { path: lock_path }.into()),
+        HealthProbe::Stale => Err(BookrackCliError::StaleSessionLock {
+            path: lock_path,
+            pid: info.pid,
+        }
+        .into()),
         HealthProbe::Unprobeable => unprobeable_card(&lock_path, &info),
         // A daemon that exits between the probe and the connect
         // surfaces as `DaemonNotRunning` (exit 2); no second short
@@ -248,14 +252,51 @@ fn worker_label(enabled: Option<&Value>) -> Value {
 
 /// Short card for "no daemon": no lock, or a leftover lock nobody
 /// holds. Exit 0 — the question was answered.
+///
+/// Carries one row the full card has no use for: which library a
+/// `bookrack run` here would serve. On the full card that library is
+/// already the subject of every row; here it is the only thing an
+/// operator can act on.
 fn not_running_card(lock_path: &Path) -> Result<()> {
     let card = json!({
         "daemon": {
             "running": false,
             "lock": lock_path.display().to_string(),
         },
+        "registry": {
+            "default": registry_default(bookrack_config::list_libraries()),
+        },
     });
     emit_card(&card, "start a daemon with 'bookrack run'")
+}
+
+/// The `registry.default` row's three states, from one registry read.
+///
+/// A registry that cannot be read is reported **in the row** rather
+/// than bubbled: this card's whole job is to answer "is a daemon
+/// running" for a machine that may not be configured at all, and
+/// failing the command over the follow-up question would take the
+/// answer away with it. The card still exits 0.
+///
+/// * a `default` entry — its name;
+/// * no registry, or a registry naming no default — `null`, rendered
+///   `(none)`. Both are "nobody has been chosen", and a card that
+///   distinguished them would be answering a question about files;
+/// * a registry that could not be read — `{"error": "<one line>"}`,
+///   rendered `(unreadable: …)`, so a machine-readable consumer can
+///   tell it from a name and from `null`.
+fn registry_default(
+    entries: Result<Option<Vec<bookrack_config::LibraryEntry>>, bookrack_config::ConfigError>,
+) -> Value {
+    match entries {
+        Ok(entries) => entries
+            .unwrap_or_default()
+            .into_iter()
+            .find(|e| e.is_default)
+            .map(|e| Value::String(e.name))
+            .unwrap_or(Value::Null),
+        Err(e) => json!({ "error": e.to_string() }),
+    }
 }
 
 /// Short card for a held lock that names no control socket: the
@@ -301,17 +342,41 @@ fn emit_card(card: &Value, hint: &str) -> Result<()> {
     Ok(())
 }
 
-/// The card with its served set turned into one row per library.
+/// The card rewritten where the table renders a value worse than a
+/// sentence does. Two places qualify.
 ///
-/// [`flatten_into_kv`] renders an array as a single line of compact
-/// JSON, which for this array is a screenful of quoted paths on one
-/// row. Keying each entry by its library name gives the table what it
-/// renders well — one `library.served.<name>` row each — while the
-/// `--json` twin keeps the array the `status` method reports.
+/// The served set: [`flatten_into_kv`] renders an array as a single
+/// line of compact JSON, which for this array is a screenful of quoted
+/// paths on one row. Keying each entry by its library name gives the
+/// table what it renders well — one `library.served.<name>` row each.
+///
+/// The registry row: `null` flattens to an empty cell and the
+/// unreadable state to a nested `registry.default.error` row, neither
+/// of which reads as the answer it is. Both become words.
+///
+/// The `--json` twin keeps the shapes the daemon and the registry
+/// reported, so no consumer has to parse these strings back.
 fn for_human(card: &Value) -> Value {
-    let Some(served) = card.pointer("/library/served").and_then(Value::as_array) else {
-        return card.clone();
-    };
+    let mut human = card.clone();
+    if let Some(served) = card.pointer("/library/served").and_then(Value::as_array) {
+        human["library"]["served"] = Value::Object(served_rows(served));
+    }
+    match card.pointer("/registry/default") {
+        Some(Value::Null) => {
+            human["registry"]["default"] = Value::String("(none)".to_string());
+        }
+        Some(Value::Object(state)) => {
+            if let Some(reason) = state.get("error").and_then(Value::as_str) {
+                human["registry"]["default"] = Value::String(format!("(unreadable: {reason})"));
+            }
+        }
+        _ => {}
+    }
+    human
+}
+
+/// One `<name> -> <root> (<marks>)` entry per served library.
+fn served_rows(served: &[Value]) -> serde_json::Map<String, Value> {
     let mut rows = serde_json::Map::new();
     for row in served {
         let Some(name) = row["name"].as_str() else {
@@ -332,9 +397,7 @@ fn for_human(card: &Value) -> Value {
         };
         rows.insert(name.to_string(), Value::String(rendered));
     }
-    let mut human = card.clone();
-    human["library"]["served"] = Value::Object(rows);
-    human
+    rows
 }
 
 #[cfg(test)]
@@ -460,6 +523,53 @@ mod tests {
         assert_eq!(card["library"]["data_dir"], "/data/anon");
         assert!(card["daemon"]["control"].is_null());
         assert!(card["library"]["disk"].is_null());
+    }
+
+    /// The three states of the short card's registry row, and how each
+    /// reads once the table has it. The unreadable one is the reason
+    /// this is a row rather than a bubbled error: the card's own
+    /// question — is a daemon running — was answered.
+    #[test]
+    fn the_registry_row_separates_a_name_from_nobody_from_unreadable() {
+        use bookrack_config::{ConfigError, LibraryEntry, LibraryKind};
+
+        let entry = |name: &str, is_default: bool| LibraryEntry {
+            name: name.to_string(),
+            data_dir: PathBuf::from(format!("/data/{name}")),
+            is_default,
+            kind: LibraryKind::Prod,
+            description: None,
+            index_profile: None,
+            created_at: None,
+            uuid: None,
+        };
+
+        assert_eq!(
+            registry_default(Ok(Some(vec![entry("alpha", false), entry("beta", true)]))),
+            "beta",
+        );
+
+        // No registry and a registry naming no default are the same
+        // answer: nobody has been chosen.
+        assert_eq!(registry_default(Ok(None)), Value::Null);
+        assert_eq!(
+            registry_default(Ok(Some(vec![entry("alpha", false)]))),
+            Value::Null
+        );
+
+        let unreadable = registry_default(Err(ConfigError::RegistryUnreadable {
+            path: PathBuf::from("/x/registry.toml"),
+            source: std::io::Error::other("unexpected character"),
+        }));
+        assert!(
+            unreadable["error"].as_str().is_some_and(|e| !e.is_empty()),
+            "the state is machine-distinguishable from a name and from null: {unreadable}",
+        );
+
+        let human = for_human(&json!({ "registry": { "default": Value::Null } }));
+        assert_eq!(human["registry"]["default"], "(none)");
+        let human = for_human(&json!({ "registry": { "default": { "error": "boom" } } }));
+        assert_eq!(human["registry"]["default"], "(unreadable: boom)");
     }
 
     /// A daemon serving one library gets no served list: it would
