@@ -10,6 +10,31 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`--library` now travels with the call.** The flag named a library
+  and then stopped at the CLI: every control-plane method that takes a
+  `library` parameter was reached without one, so the daemon resolved
+  the registry default and the flag survived only as an assertion that
+  the running daemon served the same library. It is now put on the
+  wire — under `library` for every routed method, and under `name` for
+  `library.info`, whose own parameter predates that spelling.
+
+  A method that reports on the daemon rather than on a library —
+  `status`, `doctor.gather`, `libraries list` — cannot honour a
+  selection, and naming one on such a command is now **refused** with
+  the reason and what to run instead, rather than silently answering a
+  question about a different library. Methods that describe the
+  process (`diagnose`, the queue verbs, `logs`) are unaffected: a
+  selection there is meaningless, not wrong.
+
+  A `library` the caller wrote out by hand always wins, so `bookrack
+  rpc call` stays an escape hatch.
+
+- **`daemon.methods` reports how each method takes a library.** Every
+  row gains `selection` (`routed` / `process` / `unrouted`) and
+  `library_key`, so `bookrack rpc list` — and any other client — reads
+  which methods act on one library, and under which parameter, off the
+  daemon instead of keeping a list of its own.
+
 - **Every paper curation edit now leaves an audit row.** `papers
   metadata set` / `clear` / `void` / `ack` / `approve` / `reject` /
   `reopen` / `contributor-add` / `contributor-remove` each append one

@@ -168,6 +168,8 @@ fn serialize_execute_outcome(o: &corpus::ExecuteRebuildOutcome) -> Value {
     v
 }
 
+routed_params!(CorpusRebuildParams);
+
 #[cfg(test)]
 mod tests {
     use super::*;

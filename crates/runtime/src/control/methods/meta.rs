@@ -24,6 +24,20 @@ pub struct MethodSignature {
     /// queue worker. Headless `bookrack-mcp` profiles without
     /// `--with-queue-worker` short-circuit these to `-32002 not_ready`.
     pub queue_bound: bool,
+    /// How an explicit library selection reaches the method:
+    /// `"routed"` — it takes one, under [`Self::library_key`];
+    /// `"process"` — it describes the process rather than a library,
+    /// so a selection is meaningless but harmless; `"unrouted"` — it
+    /// answers about the daemon or about every library at once, so a
+    /// selection naming one library cannot be honoured and a client
+    /// must refuse rather than drop it.
+    #[cfg_attr(test, ts(type = "string"))]
+    pub selection: &'static str,
+    /// The params key that names the library, for `selection ==
+    /// "routed"`. `"library"` everywhere but `library.info`, whose own
+    /// `name` parameter predates the shared spelling.
+    #[cfg_attr(test, ts(type = "string | null"))]
+    pub library_key: Option<&'static str>,
 }
 
 /// One row in the `daemon.mcp_tools` response. Populated at daemon

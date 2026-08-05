@@ -164,6 +164,15 @@ pub enum BookrackCliError {
         hint: String,
     },
 
+    /// The invocation names a library with `--library`, but the
+    /// command it names it on reports on the daemon itself — or on
+    /// every library at once — so the selection cannot be honoured.
+    /// Refusing is what keeps it from evaporating between the flag and
+    /// the wire. Operator input, not a bug: exit 2, and the reporter
+    /// draws the three parts.
+    #[error("{}", .problem.summary)]
+    LibraryNotRoutable { problem: Problem },
+
     /// The daemon refused to start: an external backend it needs is
     /// unusable, an endpoint it must serve on is taken, or its queue
     /// document was written by a newer version. Each is decided before
@@ -198,7 +207,7 @@ impl BookrackCliError {
             Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
-            Self::PreflightRefused { .. } => 2,
+            Self::LibraryNotRoutable { .. } | Self::PreflightRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -265,7 +274,9 @@ impl BookrackCliError {
             Self::RpcUserError { data, .. }
             | Self::RpcInternal { data, .. }
             | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
-            Self::PreflightRefused { problem } => return Some(problem.data.clone()),
+            Self::LibraryNotRoutable { problem } | Self::PreflightRefused { problem } => {
+                return Some(problem.data.clone());
+            }
             Self::RpcParamsInvalid { detail, .. } => {
                 return Some(ProblemData {
                     detail: Some(detail.clone()),

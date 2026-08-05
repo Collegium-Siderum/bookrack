@@ -340,8 +340,32 @@ the exit-code bucket does not distinguish the two.
   service that is not bookrack answers there, or when nothing answers
   at an address the daemon reports serving.
 - `daemon.methods` — the live method table: every name this daemon
-  dispatches, with its read/write class. Authoritative at runtime where
-  this document is authoritative at review time.
+  dispatches, with its read/write class, whether the queue worker
+  carries it, and how a library selection reaches it. Authoritative at
+  runtime where this document is authoritative at review time.
+
+  The selection field is one of three values, and `library_key` names
+  the parameter that carries it:
+
+  - `routed` — the method acts on one library, named by
+    `library_key`. That key is `library` for every method but
+    `library.info`, whose own `name` parameter predates the shared
+    spelling.
+  - `process` — the method reports on the process rather than on a
+    library: `daemon.*`, the queue verbs (whose job ids address one
+    daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`. A
+    selection is meaningless here, and clients pass it through
+    unchanged rather than treating meaningless as wrong.
+  - `unrouted` — the method answers about the daemon itself, or about
+    every library at once: `status`, `daemon.status`, `doctor.gather`,
+    `events.snapshot`, `library.list`, `library.set_default`. It has
+    no key to carry a selection, so a client holding an explicit one
+    must refuse the call rather than send it and let the selection
+    evaporate. The daemon cannot make that refusal for the client: a
+    key it never reads looks the same whether a flag put it there or
+    the caller typed it.
+
+  `library_key` is present exactly when the selection is `routed`.
 - `daemon.mcp_tools` — the MCP tool names the daemon's listener exposes.
 - `queue.list` — `{ schema_version, binary_schema_version, paused, jobs }`.
   `params.limit` optionally caps the jobs slice. `schema_version` is what

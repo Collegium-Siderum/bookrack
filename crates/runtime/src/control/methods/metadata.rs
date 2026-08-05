@@ -335,3 +335,16 @@ async fn run_metadata_action(
     })
     .await
 }
+
+routed_params!(
+    MetadataSetParams,
+    MetadataClearParams,
+    MetadataVoidParams,
+    MetadataReauditParams,
+    MetadataContributorAddParams,
+    MetadataContributorRemoveParams,
+    MetadataAckParams,
+    MetadataApproveParams,
+    MetadataRejectParams,
+    MetadataAdvanceParams,
+);

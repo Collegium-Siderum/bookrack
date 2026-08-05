@@ -986,6 +986,12 @@ async fn run() -> Result<()> {
         }
         bookrack_cli::render::init(RenderCtx::new(output, color));
     }
+    // The library this invocation names, installed once for the
+    // control-plane client to put on the wire. Only a name travels: a
+    // `--data-dir` or `BOOKRACK_DATA_DIR` selects a root by path, and
+    // a path is not something a daemon serving several libraries can
+    // be asked for.
+    bookrack_cli::library_param::init(cli.selection().library);
     let json_global = cli.json;
 
     // Refuse a daemon-routed command when the invoking shell's

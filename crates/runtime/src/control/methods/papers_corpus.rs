@@ -164,3 +164,5 @@ fn serialize_execute_outcome(o: &papers_corpus::ExecutePapersRebuildOutcome) -> 
     }
     v
 }
+
+routed_params!(PapersCorpusRebuildParams);

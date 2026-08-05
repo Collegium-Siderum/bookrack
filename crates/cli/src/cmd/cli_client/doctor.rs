@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bookrack_cli::library_param;
 use bookrack_config::LibrarySelection;
 use bookrack_control_client::ControlError;
 use eyre::Result;
@@ -108,8 +109,14 @@ pub async fn run(
     match bookrack_control_client::discover(runtime_dir.as_deref()) {
         Ok(socket) => match bookrack_control_client::connect(&socket).await {
             Ok(client) => {
+                // Not routed through `helpers::dispatch`: this call
+                // sits between two fallbacks that run without a
+                // daemon. It still passes the selection gate, which
+                // refuses a `--library` naming a library this report
+                // cannot be about.
+                let params = library_param::apply("doctor.gather", Value::Null)?;
                 let value = client
-                    .call_raw("doctor.gather", Value::Null)
+                    .call_raw("doctor.gather", params)
                     .await
                     .map_err(eyre::Report::from)?;
                 bookrack_runtime::doctor::render_value(&value, json)

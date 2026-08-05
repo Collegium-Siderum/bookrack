@@ -267,6 +267,19 @@ pub struct LibraryInfoParams {
     name: Option<String>,
 }
 
+/// `library.info` selects its library under `name` rather than the
+/// `library` every other routed method takes: this parameter predates
+/// the shared spelling and is part of a published surface. The key
+/// travels with the type so a client injecting a selection reads it
+/// off the registry instead of special-casing the method.
+impl super::RoutedParams for LibraryInfoParams {
+    const LIBRARY_KEY: &'static str = "name";
+
+    fn library(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let parsed: LibraryInfoParams = match params {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone()).map_err(|e| {

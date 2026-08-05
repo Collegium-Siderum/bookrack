@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use bookrack_cli::daemon_call::{DEFAULT_AWAIT_STALL_TIMEOUT, DEFAULT_CALL_TIMEOUT};
 use bookrack_cli::error::BookrackCliError;
+use bookrack_cli::library_param;
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
@@ -48,6 +49,7 @@ pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
 /// and the unit of work subcommands compose with `await_jobs` when
 /// they want to wait for queue completion.
 pub async fn dispatch(client: &ControlClient, method: &str, params: Value) -> Result<Value> {
+    let params = library_param::apply(method, params)?;
     client
         .call_raw(method, params)
         .await
@@ -83,6 +85,11 @@ pub async fn call_with_progress_value(
     method: &str,
     params: Value,
 ) -> Result<Value> {
+    // The second chokepoint: this one calls `call_raw` itself rather
+    // than going through `dispatch`, and every long-running write
+    // arrives here. Injecting in one place only would leave exactly
+    // the calls that act on a library without a library.
+    let params = library_param::apply(method, params)?;
     let mut events = client
         .subscribe()
         .await
@@ -566,7 +573,130 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bookrack_runtime::control::methods::REGISTRY;
     use serde_json::json;
+
+    /// Every method name this module tree sends must be one the
+    /// daemon answers.
+    ///
+    /// The two tables have different granularity — `rpc call` forwards
+    /// whatever the operator types, and a few call sites build their
+    /// method from a match — so the relation asserted is containment,
+    /// not equality. Reading the call sites out of the source is what
+    /// makes it a check on the surface rather than on a list somebody
+    /// remembered to update.
+    #[test]
+    fn every_method_name_the_client_sends_is_one_the_daemon_answers() {
+        let sent = method_literals_in_call_position();
+        assert!(
+            sent.len() >= 40,
+            "found only {} call sites; the scan stopped seeing them",
+            sent.len()
+        );
+        for (file, method) in &sent {
+            assert!(
+                REGISTRY.iter().any(|sig| sig.name == method),
+                "{file} sends `{method}`, which the daemon's method table does not carry"
+            );
+        }
+    }
+
+    /// The selection gate lives on the path to `call_raw`, so a call
+    /// site that reaches for `call_raw` on its own is a call that can
+    /// skip it.
+    ///
+    /// Two files legitimately do: `doctor` sits between two
+    /// no-daemon fallbacks and `quit` swallows the shutdown race.
+    /// Both pass the gate anyway, and this asserts that they do —
+    /// an exemption from the call shape is not an exemption from the
+    /// rules.
+    #[test]
+    fn call_raw_stays_behind_the_selection_gate() {
+        let mut offenders: Vec<String> = Vec::new();
+        for (name, source) in client_sources() {
+            if !source.contains("call_raw(") || name == "helpers.rs" {
+                continue;
+            }
+            if !matches!(name.as_str(), "doctor.rs" | "quit.rs") {
+                offenders.push(format!("{name} calls call_raw outside helpers"));
+                continue;
+            }
+            assert!(
+                source.contains("library_param::apply("),
+                "{name} calls call_raw without passing the selection gate"
+            );
+        }
+        assert!(offenders.is_empty(), "{}", offenders.join("; "));
+    }
+
+    /// `(file, method)` for every string literal sitting in the method
+    /// argument of a control-plane call. A site whose method comes
+    /// from a variable contributes nothing — the literal behind it, if
+    /// any, is out of reach from here.
+    fn method_literals_in_call_position() -> Vec<(String, String)> {
+        const CALLS: [&str; 5] = [
+            "dispatch(",
+            "call_and_print(",
+            "call_with_progress(",
+            "call_with_progress_value(",
+            "call_raw(",
+        ];
+        let mut found = Vec::new();
+        for (name, source) in client_sources() {
+            for call in CALLS {
+                let mut from = 0;
+                while let Some(at) = source[from..].find(call) {
+                    let start = from + at + call.len();
+                    from = start;
+                    let window = &source[start..source.len().min(start + 200)];
+                    let Some(open) = window.find('"') else {
+                        continue;
+                    };
+                    let Some(len) = window[open + 1..].find('"') else {
+                        continue;
+                    };
+                    let literal = &window[open + 1..open + 1 + len];
+                    if literal.contains('.')
+                        && literal
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_')
+                    {
+                        found.push((name.clone(), literal.to_string()));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// The source of every client module, read from the crate the test
+    /// is compiled in rather than from the current directory.
+    fn client_sources() -> Vec<(String, String)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/cli_client");
+        let mut sources = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read the client module directory") {
+            let path = entry.expect("read a client module").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("client module file name")
+                .to_string();
+            let source = std::fs::read_to_string(&path).expect("read a client module");
+            // Production call sites only: a test in one of these files
+            // may name a method no daemon answers precisely because it
+            // is testing what happens then.
+            let source = match source.find("\n#[cfg(test)]\nmod tests") {
+                Some(at) => source[..at].to_string(),
+                None => source,
+            };
+            sources.push((name, source));
+        }
+        assert!(!sources.is_empty(), "no client modules found at {dir:?}");
+        sources
+    }
 
     fn tick(job_id: &str, state: &str, pending: u64, running: u64) -> Event {
         Event {

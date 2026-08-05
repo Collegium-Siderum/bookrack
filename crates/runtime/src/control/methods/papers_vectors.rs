@@ -268,3 +268,10 @@ fn parse<T: serde::de::DeserializeOwned + Default>(
 fn deny_destructive(_prompt: &str) -> eyre::Result<bool> {
     Ok(false)
 }
+
+routed_params!(
+    PapersVectorsRebuildParams,
+    PapersVectorsReembedParams,
+    PapersVectorsResetParams,
+    PapersVectorsDropParams,
+);

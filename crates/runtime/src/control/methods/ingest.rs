@@ -192,3 +192,5 @@ pub async fn cancel(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "ok": true }))
 }
+
+routed_params!(IngestSubmitParams);

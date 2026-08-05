@@ -148,3 +148,5 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
     });
     Ok(json!({ "ok": true, "name": parsed.name }))
 }
+
+routed_params!(LibraryForkParams);

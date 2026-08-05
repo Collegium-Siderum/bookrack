@@ -11,6 +11,7 @@ pub mod daemon_call;
 pub mod distill_cmd;
 pub mod error;
 pub mod libraries_local;
+pub mod library_param;
 pub mod render;
 pub mod retrieval_cmd;
 pub mod runs_cmd;

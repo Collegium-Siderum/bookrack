@@ -64,3 +64,5 @@ pub async fn run(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
     })
     .await
 }
+
+routed_params!(PapersDryrunParams);

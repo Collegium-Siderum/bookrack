@@ -51,3 +51,5 @@ pub async fn reconcile(params: &Option<Value>, ctx: &MethodContext) -> Result<Va
     })
     .await
 }
+
+routed_params!(ReconcileParams);

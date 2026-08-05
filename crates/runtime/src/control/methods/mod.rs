@@ -37,6 +37,43 @@ use super::jsonrpc::{
 use super::plan_registry::PlanRegistry;
 use crate::cmd::input_error::CmdInputError;
 
+/// A params type that carries a library selection.
+///
+/// The implementation is what makes a `routed` row in [`methods!`]
+/// checkable: the row names the params type, the impl names the key
+/// and reads the field behind it, so a method filed as routed whose
+/// params have no such field fails to compile. Without it the axis
+/// would be a hand-kept assertion about code somewhere else, and the
+/// failure mode of a wrong row is silent — a selection the caller
+/// spelled out reaches a handler that never looks for it.
+pub trait RoutedParams {
+    /// The params key that names the library. `"library"` for every
+    /// method but `library.info`, whose own `name` parameter predates
+    /// the shared spelling.
+    const LIBRARY_KEY: &'static str;
+
+    /// The selection this call carries, `None` when the caller left
+    /// the key out and the registry's default applies.
+    fn library(&self) -> Option<&str>;
+}
+
+/// Implement [`RoutedParams`] for params types that spell the key
+/// `library`. Invoked in the module that owns the type, so the field
+/// need not be public.
+macro_rules! routed_params {
+    ($( $t:ty ),+ $(,)?) => {
+        $(
+            impl $crate::control::methods::RoutedParams for $t {
+                const LIBRARY_KEY: &'static str = "library";
+
+                fn library(&self) -> Option<&str> {
+                    self.library.as_deref()
+                }
+            }
+        )+
+    };
+}
+
 pub mod corpus;
 pub mod diagnose;
 pub mod dryrun;
@@ -149,9 +186,47 @@ pub enum DispatchOutcome {
     Shutdown(Value),
 }
 
+// Params types the table below names. Importing them keeps each row
+// on one line; the module each belongs to is the module that owns the
+// handler beside it.
+use corpus::CorpusRebuildParams;
+use dryrun::DryrunParams;
+use glean::GleanSubmitParams;
+use ingest::IngestSubmitParams;
+use intake::IntakeOcrParams;
+use libraries::LibraryForkParams;
+use metadata::{
+    MetadataAckParams, MetadataAdvanceParams, MetadataApproveParams, MetadataClearParams,
+    MetadataContributorAddParams, MetadataContributorRemoveParams, MetadataReauditParams,
+    MetadataRejectParams, MetadataSetParams, MetadataVoidParams,
+};
+use papers_corpus::PapersCorpusRebuildParams;
+use papers_dryrun::PapersDryrunParams;
+use papers_metadata::{
+    PapersContributorAddParams, PapersContributorRemoveParams, PapersJustifiedReviewParams,
+    PapersMetadataClearParams, PapersMetadataReauditParams, PapersMetadataSetParams,
+    PapersMetadataVoidParams, PapersReviewParams,
+};
+use papers_remove::PapersRemoveParams;
+use papers_stamps::ReconcileParams as PaperStampsReconcileParams;
+use papers_vectors::{
+    PapersVectorsDropParams, PapersVectorsRebuildParams, PapersVectorsReembedParams,
+    PapersVectorsResetParams,
+};
+use reads::LibraryInfoParams;
+use reads_library::{
+    BookIdParams, FindBooksParams, FindPapersParams, LibraryOnlyParams, ListMetadataParams,
+    PageParams, PaperAuditReadParams, ReadContextParams, ReadSpanParams, SearchInBookParams,
+    SearchInPaperParams, SearchParams, ShowTocParams,
+};
+use remove::RemoveParams;
+use stamps::ReconcileParams as BookStampsReconcileParams;
+use vectors::{VectorsDropParams, VectorsRebuildParams, VectorsReembedParams, VectorsResetParams};
+use verify::VerifyParams;
+
 /// Single source of truth for every control-plane method.
 ///
-/// Each row declares four facts about one method:
+/// Each row declares five facts about one method:
 ///
 /// 1. `kind` — `read`, `write`, or `stream`; reflected in
 ///    `daemon.methods` so clients can pick the right call surface.
@@ -163,19 +238,34 @@ pub enum DispatchOutcome {
 ///    `async` for `async fn(_, _) -> Result`, `sidebar` for methods
 ///    intercepted before `dispatch_normal` (the handler is left to a
 ///    hand-written arm in `dispatch`).
-/// 4. The method `name` and `=> handler` path (omitted for `sidebar`
+/// 4. `selection` — how an explicit library selection reaches the
+///    method:
+///    * `routed(<Params>)` — the method takes one, under the key the
+///      params type's [`RoutedParams`] impl declares. Naming the type
+///      is what makes the claim checkable rather than asserted.
+///    * `process` — the method describes the process, not a library:
+///      `daemon.*`, the queue verbs (whose job ids address one
+///      daemon-wide queue), `logs.tail`, `tray.focus`, `diagnose.run`.
+///      A selection is meaningless but harmless, so clients pass it
+///      through unchanged.
+///    * `unrouted` — the method answers about the daemon or about
+///      every library at once, so a selection naming one library
+///      cannot be honoured and must be refused rather than dropped.
+/// 5. The method `name` and `=> handler` path (omitted for `sidebar`
 ///    entries).
 ///
 /// The macro emits both the public `REGISTRY` const consumed by
 /// `daemon.methods` / `daemon.mcp_tools` and the `dispatch_normal`
 /// match table from this list, so the two tables cannot drift.
-/// `is_queue_bound_method` queries `REGISTRY` directly for the same
-/// reason. Sidebar rows still appear in `REGISTRY` but emit no arm in
+/// `is_queue_bound_method`, [`library_key_for`], and
+/// [`refuses_library`] query `REGISTRY` directly for the same reason.
+/// Sidebar rows still appear in `REGISTRY` but emit no arm in
 /// `dispatch_normal`; their wire behaviour is implemented in
 /// `dispatch` itself.
 macro_rules! methods {
     (
-        $( $kind:ident $queue:ident $shape:ident $name:literal $( => $handler:path )? ),* $(,)?
+        $( $kind:ident $queue:ident $shape:ident $selection:ident $( ( $params:path ) )?
+           $name:literal $( => $handler:path )? ),* $(,)?
     ) => {
         pub const REGISTRY: &[meta::MethodSignature] = &[
             $(
@@ -183,6 +273,8 @@ macro_rules! methods {
                     name: $name,
                     kind: methods!(@kind $kind),
                     queue_bound: methods!(@queue $queue),
+                    selection: methods!(@selection $selection),
+                    library_key: methods!(@key $selection $( ( $params ) )?),
                 },
             )*
         ];
@@ -206,6 +298,16 @@ macro_rules! methods {
     (@queue queue)    => { true };
     (@queue no_queue) => { false };
 
+    (@selection routed)   => { "routed" };
+    (@selection process)  => { "process" };
+    (@selection unrouted) => { "unrouted" };
+
+    (@key routed ( $params:path )) => {
+        Some(<$params as RoutedParams>::LIBRARY_KEY)
+    };
+    (@key process)  => { None };
+    (@key unrouted) => { None };
+
     (@stmt sync $name:literal => $handler:path; $m:expr, $p:expr, $c:expr) => {
         if $m == $name {
             return Some($handler($p, $c));
@@ -224,122 +326,164 @@ macro_rules! methods {
 
 methods! {
     // daemon
-    read   no_queue sync    "daemon.version"     => reads::daemon_version_rpc,
-    write  no_queue sidebar "daemon.shutdown",
-    read   no_queue sync    "status"             => reads::status_rpc,
-    read   no_queue sync    "daemon.status"      => reads::status_rpc,
-    read   no_queue async   "doctor.gather"      => reads::doctor_gather_rpc,
-    read   no_queue sync    "daemon.methods"     => meta::methods_rpc,
-    read   no_queue sync    "daemon.mcp_tools"   => meta::mcp_tools_rpc,
+    read  no_queue sync    process                    "daemon.version" => reads::daemon_version_rpc,
+    write no_queue sidebar process                    "daemon.shutdown",
+    read  no_queue sync    unrouted                   "status" => reads::status_rpc,
+    read  no_queue sync    unrouted                   "daemon.status" => reads::status_rpc,
+    read  no_queue async   unrouted                   "doctor.gather" => reads::doctor_gather_rpc,
+    read  no_queue sync    process                    "daemon.methods" => meta::methods_rpc,
+    read  no_queue sync    process                    "daemon.mcp_tools" => meta::mcp_tools_rpc,
 
     // queue
-    read   no_queue sync    "queue.list"         => reads::queue_list,
-    write  no_queue async   "queue.pause"        => queue_writes::pause,
-    write  no_queue async   "queue.resume"       => queue_writes::resume,
-    write  no_queue async   "queue.clear"        => queue_writes::clear,
+    read  no_queue sync    process                    "queue.list" => reads::queue_list,
+    write no_queue async   process                    "queue.pause" => queue_writes::pause,
+    write no_queue async   process                    "queue.resume" => queue_writes::resume,
+    write no_queue async   process                    "queue.clear" => queue_writes::clear,
 
     // library admin
-    read   no_queue sync    "library.list"          => reads::library_list_rpc,
-    read   no_queue async   "library.info"          => reads::library_info,
-    write  no_queue async   "library.fork"          => libraries::fork,
-    write  no_queue async   "library.set_default"   => libraries::set_default,
+    read  no_queue sync    unrouted                   "library.list" => reads::library_list_rpc,
+    read  no_queue async   routed(LibraryInfoParams)  "library.info" => reads::library_info,
+    write no_queue async   routed(LibraryForkParams)  "library.fork" => libraries::fork,
+    write no_queue async   unrouted
+        "library.set_default" => libraries::set_default,
 
     // library reads (sync, parametrised)
-    read   no_queue sync    "library.stats"                 => reads_library::stats,
-    read   no_queue sync    "library.list_books"            => reads_library::list_books,
-    read   no_queue sync    "library.list_ocr_pending"      => reads_library::list_ocr_pending,
-    read   no_queue sync    "library.find_books"            => reads_library::find_books,
-    read   no_queue sync    "library.show_book"             => reads_library::show_book,
-    read   no_queue sync    "library.show_toc"              => reads_library::show_toc,
-    read   no_queue sync    "library.read_context"          => reads_library::read_context,
-    read   no_queue sync    "library.read_span"             => reads_library::read_span,
-    read   no_queue sync    "library.show_metadata_audit"   => reads_library::show_metadata_audit,
-    read   no_queue sync    "library.show_metadata_report"  => reads_library::show_metadata_report,
-    read   no_queue sync    "library.list_metadata"         => reads_library::list_metadata,
-    read   no_queue sync    "library.list_pending_reviews"  => reads_library::list_pending_reviews,
-    read   no_queue sync    "library.show_audit_trail"      => reads_library::show_audit_trail,
-    read   no_queue sync    "library.show_pipeline_trail"   => reads_library::show_pipeline_trail,
-    read   no_queue sync    "library.list_papers"           => reads_library::list_papers,
-    read   no_queue sync    "library.find_papers"           => reads_library::find_papers,
-    read   no_queue sync    "library.show_paper"            => reads_library::show_paper,
-    read   no_queue sync    "library.show_paper_toc"        => reads_library::show_paper_toc,
-    read   no_queue sync    "library.show_paper_metadata_report"
-                                                    => reads_library::show_paper_metadata_report,
-    read   no_queue sync    "library.show_paper_audit_trail"
-                                                    => reads_library::show_paper_audit_trail,
-    read   no_queue sync    "library.list_paper_metadata"   => reads_library::list_paper_metadata,
-    read   no_queue sync    "library.list_paper_pending_reviews"
-                                                    => reads_library::list_paper_pending_reviews,
-    read   no_queue sync    "papers.export_csl"             => reads_library::papers_export_csl,
-    read   no_queue sync    "papers.fetch_source"           => reads_library::papers_fetch_source,
+    read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
+    read  no_queue sync    routed(PageParams)
+        "library.list_books" => reads_library::list_books,
+    read  no_queue sync    routed(PageParams)
+        "library.list_ocr_pending" => reads_library::list_ocr_pending,
+    read  no_queue sync    routed(FindBooksParams)
+        "library.find_books" => reads_library::find_books,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_book" => reads_library::show_book,
+    read  no_queue sync    routed(ShowTocParams)      "library.show_toc" => reads_library::show_toc,
+    read  no_queue sync    routed(ReadContextParams)
+        "library.read_context" => reads_library::read_context,
+    read  no_queue sync    routed(ReadSpanParams)
+        "library.read_span" => reads_library::read_span,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_metadata_audit" => reads_library::show_metadata_audit,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_metadata_report" => reads_library::show_metadata_report,
+    read  no_queue sync    routed(ListMetadataParams)
+        "library.list_metadata" => reads_library::list_metadata,
+    read  no_queue sync    routed(PageParams)
+        "library.list_pending_reviews" => reads_library::list_pending_reviews,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_audit_trail" => reads_library::show_audit_trail,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_pipeline_trail" => reads_library::show_pipeline_trail,
+    read  no_queue sync    routed(PageParams)
+        "library.list_papers" => reads_library::list_papers,
+    read  no_queue sync    routed(FindPapersParams)
+        "library.find_papers" => reads_library::find_papers,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_paper" => reads_library::show_paper,
+    read  no_queue sync    routed(ShowTocParams)
+        "library.show_paper_toc" => reads_library::show_paper_toc,
+    read  no_queue sync    routed(PaperAuditReadParams)
+        "library.show_paper_metadata_report" => reads_library::show_paper_metadata_report,
+    read  no_queue sync    routed(BookIdParams)
+        "library.show_paper_audit_trail" => reads_library::show_paper_audit_trail,
+    read  no_queue sync    routed(ListMetadataParams)
+        "library.list_paper_metadata" => reads_library::list_paper_metadata,
+    read  no_queue sync    routed(PageParams)
+        "library.list_paper_pending_reviews" => reads_library::list_paper_pending_reviews,
+    read  no_queue sync    routed(BookIdParams)
+        "papers.export_csl" => reads_library::papers_export_csl,
+    read  no_queue sync    routed(BookIdParams)
+        "papers.fetch_source" => reads_library::papers_fetch_source,
 
     // library reads (async)
-    read   no_queue async   "library.search"          => reads_library::search,
-    read   no_queue async   "library.search_in_book"  => reads_library::search_in_book,
-    read   no_queue async   "library.search_in_paper" => reads_library::search_in_paper,
-    read   no_queue async   "library.vectors_status"  => reads_library::vectors_status,
+    read  no_queue async   routed(SearchParams)       "library.search" => reads_library::search,
+    read  no_queue async   routed(SearchInBookParams)
+        "library.search_in_book" => reads_library::search_in_book,
+    read  no_queue async   routed(SearchInPaperParams)
+        "library.search_in_paper" => reads_library::search_in_paper,
+    read  no_queue async   routed(LibraryOnlyParams)
+        "library.vectors_status" => reads_library::vectors_status,
 
     // events
-    stream no_queue sidebar "events.subscribe",
-    read   no_queue sync    "events.snapshot"     => reads::events_snapshot,
+    stream no_queue sidebar process                    "events.subscribe",
+    read  no_queue sync    unrouted                   "events.snapshot" => reads::events_snapshot,
 
     // ingest / glean / intake
-    write  queue    async   "ingest.submit"       => ingest::submit,
-    write  queue    async   "ingest.cancel"       => ingest::cancel,
-    write  queue    async   "glean.submit"        => glean::submit,
-    write  queue    async   "intake.ocr"          => intake::submit,
+    write queue    async   routed(IngestSubmitParams) "ingest.submit" => ingest::submit,
+    write queue    async   process                    "ingest.cancel" => ingest::cancel,
+    write queue    async   routed(GleanSubmitParams)  "glean.submit" => glean::submit,
+    write queue    async   routed(IntakeOcrParams)    "intake.ocr" => intake::submit,
 
     // book metadata curation
-    write  no_queue async   "metadata.set"                => metadata::set,
-    write  no_queue async   "metadata.clear"              => metadata::clear,
-    write  no_queue async   "metadata.void"               => metadata::void,
-    write  no_queue async   "metadata.reaudit"            => metadata::reaudit,
-    write  no_queue async   "metadata.contributor_add"    => metadata::contributor_add,
-    write  no_queue async   "metadata.contributor_remove" => metadata::contributor_remove,
-    write  no_queue async   "metadata.ack"                => metadata::ack,
-    write  no_queue async   "metadata.approve"            => metadata::approve,
-    write  no_queue async   "metadata.reject"             => metadata::reject,
-    write  queue    async   "metadata.advance"            => metadata::advance,
+    write no_queue async   routed(MetadataSetParams)  "metadata.set" => metadata::set,
+    write no_queue async   routed(MetadataClearParams) "metadata.clear" => metadata::clear,
+    write no_queue async   routed(MetadataVoidParams) "metadata.void" => metadata::void,
+    write no_queue async   routed(MetadataReauditParams) "metadata.reaudit" => metadata::reaudit,
+    write no_queue async   routed(MetadataContributorAddParams)
+        "metadata.contributor_add" => metadata::contributor_add,
+    write no_queue async   routed(MetadataContributorRemoveParams)
+        "metadata.contributor_remove" => metadata::contributor_remove,
+    write no_queue async   routed(MetadataAckParams)  "metadata.ack" => metadata::ack,
+    write no_queue async   routed(MetadataApproveParams) "metadata.approve" => metadata::approve,
+    write no_queue async   routed(MetadataRejectParams) "metadata.reject" => metadata::reject,
+    write queue    async   routed(MetadataAdvanceParams) "metadata.advance" => metadata::advance,
 
     // book vectors / corpus / stamps
-    write  queue    async   "vectors.rebuild"     => vectors::rebuild,
-    write  queue    async   "vectors.reembed"     => vectors::reembed,
-    write  queue    async   "vectors.reset"       => vectors::reset,
-    write  queue    async   "vectors.drop"        => vectors::drop_index,
-    write  queue    async   "corpus.rebuild"      => corpus::rebuild,
-    write  queue    async   "stamps.reconcile"    => stamps::reconcile,
+    write queue    async   routed(VectorsRebuildParams) "vectors.rebuild" => vectors::rebuild,
+    write queue    async   routed(VectorsReembedParams) "vectors.reembed" => vectors::reembed,
+    write queue    async   routed(VectorsResetParams) "vectors.reset" => vectors::reset,
+    write queue    async   routed(VectorsDropParams)  "vectors.drop" => vectors::drop_index,
+    write queue    async   routed(CorpusRebuildParams) "corpus.rebuild" => corpus::rebuild,
+    write queue    async   routed(BookStampsReconcileParams)
+        "stamps.reconcile" => stamps::reconcile,
 
     // remove / dryrun (books)
-    write  queue    async   "remove"              => remove::run,
-    write  queue    async   "dryrun"              => dryrun::run,
+    write queue    async   routed(RemoveParams)       "remove" => remove::run,
+    write queue    async   routed(DryrunParams)       "dryrun" => dryrun::run,
 
     // paper maintenance triplet
-    write  queue    async   "papers.remove"             => papers_remove::run,
-    write  queue    async   "papers.corpus_rebuild"     => papers_corpus::rebuild,
-    write  queue    async   "papers.vectors_rebuild"    => papers_vectors::rebuild,
-    write  queue    async   "papers.vectors_reembed"    => papers_vectors::reembed,
-    write  queue    async   "papers.vectors_reset"      => papers_vectors::reset,
-    write  queue    async   "papers.vectors_drop"       => papers_vectors::drop_index,
-    write  queue    async   "papers.stamps_reconcile"   => papers_stamps::reconcile,
-    write  queue    async   "papers.dryrun"             => papers_dryrun::run,
+    write queue    async   routed(PapersRemoveParams) "papers.remove" => papers_remove::run,
+    write queue    async   routed(PapersCorpusRebuildParams)
+        "papers.corpus_rebuild" => papers_corpus::rebuild,
+    write queue    async   routed(PapersVectorsRebuildParams)
+        "papers.vectors_rebuild" => papers_vectors::rebuild,
+    write queue    async   routed(PapersVectorsReembedParams)
+        "papers.vectors_reembed" => papers_vectors::reembed,
+    write queue    async   routed(PapersVectorsResetParams)
+        "papers.vectors_reset" => papers_vectors::reset,
+    write queue    async   routed(PapersVectorsDropParams)
+        "papers.vectors_drop" => papers_vectors::drop_index,
+    write queue    async   routed(PaperStampsReconcileParams)
+        "papers.stamps_reconcile" => papers_stamps::reconcile,
+    write queue    async   routed(PapersDryrunParams) "papers.dryrun" => papers_dryrun::run,
 
     // paper metadata curation
-    write  no_queue async   "papers.metadata.reaudit"            => papers_metadata::reaudit,
-    write  no_queue async   "papers.metadata.set"                => papers_metadata::set,
-    write  no_queue async   "papers.metadata.clear"              => papers_metadata::clear,
-    write  no_queue async   "papers.metadata.void"               => papers_metadata::void,
-    write  no_queue async   "papers.metadata.ack"                => papers_metadata::ack,
-    write  no_queue async   "papers.metadata.approve"            => papers_metadata::approve,
-    write  no_queue async   "papers.metadata.reject"             => papers_metadata::reject,
-    write  no_queue async   "papers.metadata.reopen"             => papers_metadata::reopen,
-    write  no_queue async   "papers.metadata.contributor_add"    => papers_metadata::contributor_add,
-    write  no_queue async   "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
+    write no_queue async   routed(PapersMetadataReauditParams)
+        "papers.metadata.reaudit" => papers_metadata::reaudit,
+    write no_queue async   routed(PapersMetadataSetParams)
+        "papers.metadata.set" => papers_metadata::set,
+    write no_queue async   routed(PapersMetadataClearParams)
+        "papers.metadata.clear" => papers_metadata::clear,
+    write no_queue async   routed(PapersMetadataVoidParams)
+        "papers.metadata.void" => papers_metadata::void,
+    write no_queue async   routed(PapersJustifiedReviewParams)
+        "papers.metadata.ack" => papers_metadata::ack,
+    write no_queue async   routed(PapersReviewParams)
+        "papers.metadata.approve" => papers_metadata::approve,
+    write no_queue async   routed(PapersJustifiedReviewParams)
+        "papers.metadata.reject" => papers_metadata::reject,
+    write no_queue async   routed(PapersReviewParams)
+        "papers.metadata.reopen" => papers_metadata::reopen,
+    write no_queue async   routed(PapersContributorAddParams)
+        "papers.metadata.contributor_add" => papers_metadata::contributor_add,
+    write no_queue async   routed(PapersContributorRemoveParams)
+        "papers.metadata.contributor_remove" => papers_metadata::contributor_remove,
 
     // verify / diagnose / tray / logs
-    read   no_queue async   "verify.run"     => verify::run_rpc,
-    read   no_queue async   "diagnose.run"   => diagnose::run,
-    write  no_queue sync    "tray.focus"     => tray::focus_rpc,
-    read   no_queue sync    "logs.tail"      => logs::tail,
+    read  no_queue async   routed(VerifyParams)       "verify.run" => verify::run_rpc,
+    read  no_queue async   process                    "diagnose.run" => diagnose::run,
+    write no_queue sync    process                    "tray.focus" => tray::focus_rpc,
+    read  no_queue sync    process                    "logs.tail" => logs::tail,
 }
 
 /// Method router. Method names are matched verbatim against the table
@@ -416,6 +560,35 @@ fn is_queue_bound_method(method: &str) -> bool {
     REGISTRY
         .iter()
         .any(|sig| sig.name == method && sig.queue_bound)
+}
+
+/// The params key under which `method` takes a library selection, or
+/// `None` when it takes none.
+///
+/// The client side of the control plane injects the operator's
+/// selection by this key rather than by a table of its own: the fact
+/// belongs to the handler that reads it, and a second copy is a second
+/// thing to keep true. An unknown method answers `None` — `rpc call`
+/// forwards any name the caller types, and inventing a parameter for a
+/// method this build does not have would put words in the caller's
+/// mouth.
+pub fn library_key_for(method: &str) -> Option<&'static str> {
+    REGISTRY
+        .iter()
+        .find(|sig| sig.name == method)
+        .and_then(|sig| sig.library_key)
+}
+
+/// Whether `method` cannot honour a library selection at all, so a
+/// client holding an explicit one must refuse the call rather than
+/// send it and let the selection evaporate.
+///
+/// False for a method this build does not know, for the same reason
+/// [`library_key_for`] answers `None`.
+pub fn refuses_library(method: &str) -> bool {
+    REGISTRY
+        .iter()
+        .any(|sig| sig.name == method && sig.selection == "unrouted")
 }
 
 /// RAII bundle owning the write mutex guard and the broadcast handle

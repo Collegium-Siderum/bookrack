@@ -122,3 +122,5 @@ pub async fn submit(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
     ctx.event_stream.publish(Event::QueueTick(tick));
     Ok(json!({ "job_id": id }))
 }
+
+routed_params!(IntakeOcrParams);

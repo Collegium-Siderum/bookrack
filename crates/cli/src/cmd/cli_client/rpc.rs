@@ -86,7 +86,16 @@ async fn list(runtime_dir: Option<&Path>) -> Result<()> {
         for row in rows {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("?");
             let kind = row.get("kind").and_then(Value::as_str).unwrap_or("?");
-            println!("  {kind:<6}  {name}");
+            // The parameter a library selection travels in, for the
+            // methods that act on one. Blank for the rest: an empty
+            // column reads as "takes none", where a placeholder would
+            // read as a value.
+            let library = row
+                .get("library_key")
+                .and_then(Value::as_str)
+                .map(|key| format!("  [{key}]"))
+                .unwrap_or_default();
+            println!("  {kind:<6}  {name}{library}");
         }
     }
     println!();

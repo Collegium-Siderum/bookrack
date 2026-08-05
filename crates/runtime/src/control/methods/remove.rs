@@ -171,3 +171,5 @@ fn serialize_counts(c: &bookrack_catalog::ItemRemovalCounts) -> Value {
         "toc_edits": c.toc_edits,
     })
 }
+
+routed_params!(RemoveParams);

@@ -760,6 +760,22 @@ pub async fn vectors_status(
     to_value(&status)
 }
 
+routed_params!(
+    LibraryOnlyParams,
+    BookIdParams,
+    ShowTocParams,
+    PageParams,
+    ListMetadataParams,
+    FindBooksParams,
+    FindPapersParams,
+    SearchParams,
+    SearchInBookParams,
+    SearchInPaperParams,
+    ReadContextParams,
+    ReadSpanParams,
+    PaperAuditReadParams,
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

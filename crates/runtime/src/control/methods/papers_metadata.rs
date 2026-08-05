@@ -476,3 +476,14 @@ pub async fn contributor_remove(
     )
     .await
 }
+
+routed_params!(
+    PapersMetadataReauditParams,
+    PapersMetadataSetParams,
+    PapersMetadataClearParams,
+    PapersMetadataVoidParams,
+    PapersReviewParams,
+    PapersJustifiedReviewParams,
+    PapersContributorAddParams,
+    PapersContributorRemoveParams,
+);

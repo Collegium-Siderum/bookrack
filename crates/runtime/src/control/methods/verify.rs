@@ -65,6 +65,8 @@ pub async fn run_rpc(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
     run(parsed.library.as_deref(), ctx).await
 }
 
+routed_params!(VerifyParams);
+
 #[cfg(test)]
 mod tests {
     use super::*;
