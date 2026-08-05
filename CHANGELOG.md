@@ -10,6 +10,28 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **Every paper curation edit now leaves an audit row.** `papers
+  metadata set` / `clear` / `void` / `ack` / `approve` / `reject` /
+  `reopen` / `contributor-add` / `contributor-remove` each append one
+  `metadata_audit` row to the paper catalog, carrying who made the
+  edit, the field, the value it replaced, and the reason when one was
+  given. Until now the paper side wrote the change and nothing else,
+  so a corrected title left no record that anyone had corrected it,
+  and the two questions the book side has always answered — who
+  edited this, and what did it say before — had no answer on a paper.
+
+  The edit is attributed to the surface that made it, so an agent
+  editing over MCP and a curator editing at the CLI are told apart in
+  the trail rather than both recorded as `human`. Each call is also
+  logged in `mcp_tool_calls` under its method name, the way paper
+  reads already were.
+
+- **The paper curation verbs take `--reason`.** All nine accept one and
+  record it on the audit row. `ack` and `reject` require it, matching
+  the book side: they are the two verbs that overrule a judgement, and
+  a trail that says a flagged record was waved through without saying
+  why is worth little.
+
 - **Both registries can be filtered by language.** `find_books` and
   `find_papers` take a `language` list and match a row whose reported
   language is any one of the values named — the ordinary question in a
@@ -389,6 +411,25 @@ release workflow extracts the matching section verbatim from this file.
   leftmost-match rule unchanged.
 
 ### Changed
+
+- **`papers metadata contributor-remove` names the paper the row
+  belongs to.** The command took the contributor row's surrogate id
+  alone, and that id addresses a row anywhere in the catalog: any id
+  removed any row, including one attributed to a different paper. It
+  now takes the paper as its positional argument and the row as
+  `--contributor-id`, and a pair that does not match is refused.
+  Migration: `papers metadata contributor-remove 7` becomes `papers
+  metadata contributor-remove <paper> --contributor-id 7`.
+
+- **The paper review verbs take `--reason` in place of `--notes`, and
+  no longer take a reviewer.** `--notes` wrote its text into
+  `node_reviews.notes` — the column holding the report the ingest
+  audit produced — so explaining an approval destroyed the only copy
+  of what the pipeline had judged. The curator's words now go on the
+  audit row and the report stays put. `reviewer` is gone with it: the
+  edit is attributed to the surface that called, which the caller
+  cannot claim to be something else. Passing either name to a
+  `papers.metadata.*` method is now refused rather than ignored.
 
 - **The wizard refuses a data root inside a macOS application bundle.**
   On macOS the binary ships inside `Bookrack.app`, so the directory

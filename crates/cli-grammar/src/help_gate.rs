@@ -93,7 +93,16 @@ pub const PARSE_EXEMPT: &[&str] = &[];
 /// title or contributor name is exactly what must not enter through
 /// one; the local secret-scanning denylist does not run in CI, so this
 /// table is the only constraint on them that CI can see.
-pub const EXAMPLE_QUOTED_VALUES: &[&str] = &["Doe, Jane", "Sample Title"];
+///
+/// Curation reasons are here for the same reason bibliographic values
+/// are: an example that shows why a record was refused is a sentence
+/// about a real book unless it comes from a fixed set.
+pub const EXAMPLE_QUOTED_VALUES: &[&str] = &[
+    "Doe, Jane",
+    "Sample Title",
+    "venue lists no DOI",
+    "wrong source file",
+];
 
 /// Which tree the walk was handed.
 #[derive(Clone, Copy, Debug)]

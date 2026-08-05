@@ -91,6 +91,7 @@ fn outcome_json(outcome: &bookrack_ops::dto::writes::WriteOutcome) -> Value {
 // ─── reaudit ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersMetadataReauditParams {
     intake_id: i64,
     /// Optional paper-side audit profile name. Absent means the
@@ -147,10 +148,13 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 // ─── set / clear / void ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersMetadataSetParams {
     intake_id: i64,
     field: String,
     value: String,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     confirmed: bool,
     #[serde(default)]
@@ -169,7 +173,7 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
                 intake_id: parsed.intake_id,
                 field: parsed.field,
                 value: parsed.value,
-                reason: None,
+                reason: parsed.reason,
                 confirmed: parsed.confirmed,
             },
         )?;
@@ -184,9 +188,12 @@ pub async fn set(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, R
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersMetadataClearParams {
     intake_id: i64,
     field: String,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     library: Option<String>,
 }
@@ -205,7 +212,7 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
                 PaperClearMetadataFieldRequest {
                     intake_id: parsed.intake_id,
                     field: parsed.field,
-                    reason: None,
+                    reason: parsed.reason,
                 },
             )?;
             let mut body = outcome_json(&outcome);
@@ -219,9 +226,12 @@ pub async fn clear(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersMetadataVoidParams {
     intake_id: i64,
     field: String,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     library: Option<String>,
 }
@@ -240,7 +250,7 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
                 PaperVoidMetadataFieldRequest {
                     intake_id: parsed.intake_id,
                     field: parsed.field,
-                    reason: None,
+                    reason: parsed.reason,
                 },
             )?;
             let mut body = outcome_json(&outcome);
@@ -255,11 +265,43 @@ pub async fn void(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
 
 // ─── ack / approve / reject / reopen ─────────────────────────────────
 
+/// A review verb that may be left unexplained: `approve` records
+/// agreement with what the pipeline already judged, `reopen` undoes an
+/// earlier call.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersReviewParams {
     intake_id: i64,
     #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
     library: Option<String>,
+}
+
+/// A review verb that must be justified: `ack` waves a flagged record
+/// through and `reject` takes one out of circulation, so the trail is
+/// worth little without the words that go with it.
+///
+/// The requirement is a separate struct rather than a check in the
+/// body, so a missing reason is refused where every other malformed
+/// request is — at parse time, before the write path is entered.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PapersJustifiedReviewParams {
+    intake_id: i64,
+    reason: String,
+    #[serde(default)]
+    library: Option<String>,
+}
+
+impl From<PapersJustifiedReviewParams> for PapersReviewParams {
+    fn from(p: PapersJustifiedReviewParams) -> PapersReviewParams {
+        PapersReviewParams {
+            intake_id: p.intake_id,
+            reason: Some(p.reason),
+            library: p.library,
+        }
+    }
 }
 
 /// One review verb: which op runs, and the status string the response
@@ -282,6 +324,7 @@ async fn write_review_status(
             ops,
             PaperReviewRequest {
                 intake_id: parsed.intake_id,
+                reason: parsed.reason,
             },
         )?;
         let mut body = outcome_json(&outcome);
@@ -295,7 +338,7 @@ async fn write_review_status(
 pub async fn ack(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     write_review_status(
         ctx,
-        parse(params, "papers.metadata.ack")?,
+        parse::<PapersJustifiedReviewParams>(params, "papers.metadata.ack")?.into(),
         "papers.metadata.ack",
         bookrack_catalog::STATUS_ACKNOWLEDGED,
         ops_papers::acknowledge_paper_metadata_gap,
@@ -317,7 +360,7 @@ pub async fn approve(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
 pub async fn reject(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     write_review_status(
         ctx,
-        parse(params, "papers.metadata.reject")?,
+        parse::<PapersJustifiedReviewParams>(params, "papers.metadata.reject")?.into(),
         "papers.metadata.reject",
         bookrack_catalog::STATUS_REJECTED,
         ops_papers::reject_paper_metadata,
@@ -342,6 +385,7 @@ pub async fn reopen(params: &Option<Value>, ctx: &MethodContext) -> Result<Value
 // ─── contributor_add / contributor_remove ───────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersContributorAddParams {
     intake_id: i64,
     role: String,
@@ -352,6 +396,8 @@ pub struct PapersContributorAddParams {
     given: Option<String>,
     #[serde(default)]
     orcid: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     library: Option<String>,
 }
@@ -378,7 +424,7 @@ pub async fn contributor_add(
                     family: parsed.family,
                     given: parsed.given,
                     orcid: parsed.orcid,
-                    reason: None,
+                    reason: parsed.reason,
                 },
             )?;
             let mut body = outcome_json(&outcome.write);
@@ -393,9 +439,12 @@ pub async fn contributor_add(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PapersContributorRemoveParams {
     intake_id: i64,
     contributor_id: i64,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default)]
     library: Option<String>,
 }
@@ -417,7 +466,7 @@ pub async fn contributor_remove(
                 PaperContributorRemoveRequest {
                     intake_id: parsed.intake_id,
                     contributor_id: parsed.contributor_id,
-                    reason: None,
+                    reason: parsed.reason,
                 },
             )?;
             let mut body = outcome_json(&outcome);

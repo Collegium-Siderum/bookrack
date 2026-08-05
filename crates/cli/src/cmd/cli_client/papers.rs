@@ -92,14 +92,18 @@ async fn metadata(
             intake_id,
             field,
             value,
+            reason,
             confirmed,
         } => {
-            let params = json!({
+            let mut params = json!({
                 "intake_id": intake_id,
                 "field": field,
                 "value": value,
                 "confirmed": confirmed,
             });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.set", params).await?;
             emit_metadata_outcome(
@@ -108,8 +112,15 @@ async fn metadata(
             );
             Ok(())
         }
-        PapersMetadataAction::Clear { intake_id, field } => {
-            let params = json!({ "intake_id": intake_id, "field": field });
+        PapersMetadataAction::Clear {
+            intake_id,
+            field,
+            reason,
+        } => {
+            let mut params = json!({ "intake_id": intake_id, "field": field });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.clear", params).await?;
             let removed = response
@@ -124,49 +135,56 @@ async fn metadata(
             emit_metadata_outcome(&response, sentence);
             Ok(())
         }
-        PapersMetadataAction::Void { intake_id, field } => {
-            let params = json!({ "intake_id": intake_id, "field": field });
+        PapersMetadataAction::Void {
+            intake_id,
+            field,
+            reason,
+        } => {
+            let mut params = json!({ "intake_id": intake_id, "field": field });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response =
                 helpers::call_with_progress_value(client, "papers.metadata.void", params).await?;
             emit_metadata_outcome(&response, format!("Voided {field} on paper {intake_id}."));
             Ok(())
         }
-        PapersMetadataAction::Ack { intake_id, notes } => {
+        PapersMetadataAction::Ack { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.ack",
                 intake_id,
-                notes,
+                Some(reason),
                 "acknowledged",
             )
             .await
         }
-        PapersMetadataAction::Approve { intake_id, notes } => {
+        PapersMetadataAction::Approve { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.approve",
                 intake_id,
-                notes,
+                reason,
                 "approved",
             )
             .await
         }
-        PapersMetadataAction::Reject { intake_id, notes } => {
+        PapersMetadataAction::Reject { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.reject",
                 intake_id,
-                notes,
+                Some(reason),
                 "rejected",
             )
             .await
         }
-        PapersMetadataAction::Reopen { intake_id, notes } => {
+        PapersMetadataAction::Reopen { intake_id, reason } => {
             review_status_call(
                 client,
                 "papers.metadata.reopen",
                 intake_id,
-                notes,
+                reason,
                 "pending",
             )
             .await
@@ -178,6 +196,7 @@ async fn metadata(
             family,
             given,
             orcid,
+            reason,
         } => {
             let mut params = json!({
                 "intake_id": intake_id,
@@ -193,6 +212,9 @@ async fn metadata(
             if let Some(orcid) = orcid {
                 params["orcid"] = Value::String(orcid);
             }
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_add",
@@ -207,8 +229,18 @@ async fn metadata(
             emit_metadata_outcome(&response, sentence);
             Ok(())
         }
-        PapersMetadataAction::ContributorRemove { contributor_id } => {
-            let params = json!({ "contributor_id": contributor_id });
+        PapersMetadataAction::ContributorRemove {
+            intake_id,
+            contributor_id,
+            reason,
+        } => {
+            let mut params = json!({
+                "intake_id": intake_id,
+                "contributor_id": contributor_id,
+            });
+            if let Some(reason) = reason {
+                params["reason"] = Value::String(reason);
+            }
             let response = helpers::call_with_progress_value(
                 client,
                 "papers.metadata.contributor_remove",
@@ -234,12 +266,12 @@ async fn review_status_call(
     client: std::sync::Arc<bookrack_control_client::ControlClient>,
     method: &str,
     intake_id: i64,
-    notes: Option<String>,
+    reason: Option<String>,
     pretty_status: &str,
 ) -> Result<()> {
     let mut params = json!({ "intake_id": intake_id });
-    if let Some(notes) = notes {
-        params["notes"] = Value::String(notes);
+    if let Some(reason) = reason {
+        params["reason"] = Value::String(reason);
     }
     let response = helpers::call_with_progress_value(client, method, params).await?;
     emit_metadata_outcome(

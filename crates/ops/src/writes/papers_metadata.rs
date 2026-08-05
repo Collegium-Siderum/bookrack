@@ -366,7 +366,10 @@ pub fn acknowledge_paper_metadata_gap<E: Embedder>(
     ops: &Ops<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
-    let args = serde_json::json!({ "intake_id": req.intake_id });
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
     record_call_sync!(ops, "papers.metadata.ack", args, {
         let catalog = open_paper_catalog(ops)?;
         write_review_status_inner(
@@ -376,7 +379,7 @@ pub fn acknowledge_paper_metadata_gap<E: Embedder>(
             req.intake_id,
             STATUS_ACKNOWLEDGED,
             "acknowledge_gate",
-            None,
+            req.reason,
         )
     })
 }
@@ -387,7 +390,10 @@ pub fn approve_paper_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
-    let args = serde_json::json!({ "intake_id": req.intake_id });
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
     record_call_sync!(ops, "papers.metadata.approve", args, {
         let catalog = open_paper_catalog(ops)?;
         write_review_status_inner(
@@ -397,7 +403,7 @@ pub fn approve_paper_metadata<E: Embedder>(
             req.intake_id,
             STATUS_APPROVED,
             "approve",
-            None,
+            req.reason,
         )
     })
 }
@@ -408,7 +414,10 @@ pub fn reject_paper_metadata<E: Embedder>(
     ops: &Ops<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
-    let args = serde_json::json!({ "intake_id": req.intake_id });
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
     record_call_sync!(ops, "papers.metadata.reject", args, {
         let catalog = open_paper_catalog(ops)?;
         write_review_status_inner(
@@ -418,7 +427,7 @@ pub fn reject_paper_metadata<E: Embedder>(
             req.intake_id,
             STATUS_REJECTED,
             "reject",
-            None,
+            req.reason,
         )
     })
 }
@@ -429,7 +438,10 @@ pub fn reopen_paper_review<E: Embedder>(
     ops: &Ops<E>,
     req: PaperReviewRequest,
 ) -> Result<WriteOutcome> {
-    let args = serde_json::json!({ "intake_id": req.intake_id });
+    let args = serde_json::json!({
+        "intake_id": req.intake_id,
+        "reason": req.reason,
+    });
     record_call_sync!(ops, "papers.metadata.reopen", args, {
         let catalog = open_paper_catalog(ops)?;
         write_review_status_inner(
@@ -439,7 +451,7 @@ pub fn reopen_paper_review<E: Embedder>(
             req.intake_id,
             STATUS_PENDING,
             "reopen",
-            None,
+            req.reason,
         )
     })
 }

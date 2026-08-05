@@ -516,30 +516,35 @@ the exit-code bucket does not distinguish the two.
   refused with `-32602`. The paper side keeps its own built-in set:
   it holds the same three names as the book side today, but the two
   are checked separately and are free to diverge.
-- `papers.metadata.set` — `{ intake_id, field, value, confirmed?,
-  library? }`. Writes an override on one paper field. `field` must
+- `papers.metadata.set` — `{ intake_id, field, value, reason?,
+  confirmed?, library? }`. Writes an override on one paper field. `field` must
   belong to the editable set
   (`title`, `subtitle`, `publisher`, `year`, `language`, `series`,
   `doi`, `arxiv_id`, `issn`, `container_title`, `abstract_text`,
   `csl_type`). `confirmed` marks the override as having been checked
   against the source.
-- `papers.metadata.clear` — `{ intake_id, field, library? }`.
+- `papers.metadata.clear` — `{ intake_id, field, reason?, library? }`.
   Removes the override row on one field, reverting to the extracted
   value. Returns `{ removed: bool }`.
-- `papers.metadata.void` — `{ intake_id, field, library? }`.
+- `papers.metadata.void` — `{ intake_id, field, reason?, library? }`.
   Writes a value-less override row so the field reads as
   deliberately empty rather than extracted.
 - `papers.metadata.ack` / `.approve` / `.reject` / `.reopen` —
-  `{ intake_id, library? }`. Move the review row through the four
-  states; the row is attributed to the surface that called, the way
-  every other curation write is. `reopen` returns the row to
-  `pending` after an approve / reject. The report JSON glean wrote
-  into the review row's notes is left alone.
+  `{ intake_id, reason, library? }` for `ack` and `reject`,
+  `{ intake_id, reason?, library? }` for `approve` and `reopen`. Move
+  the review row through the four states; the row is attributed to the
+  surface that called, the way every other curation write is.
+  `reopen` returns the row to `pending` after an approve / reject.
+  `reason` lands on the audit row and nowhere else: the report JSON
+  glean wrote into the review row's notes is left alone. The two
+  verbs that demand one are the two that overrule a judgement — a
+  missing `reason` on either is refused with `-32602` at parse time,
+  matching the book side.
 - `papers.metadata.contributor_add` — `{ intake_id, role, name,
-  family?, given?, orcid?, library? }`. Appends a curator-authored
-  contributor row after every extracted one.
+  family?, given?, orcid?, reason?, library? }`. Appends a
+  curator-authored contributor row after every extracted one.
 - `papers.metadata.contributor_remove` — `{ intake_id,
-  contributor_id, library? }`. Removes a contributor row by id from
+  contributor_id, reason?, library? }`. Removes a contributor row by id from
   the named paper; returns `{ removed: bool }`. The row must belong to
   that paper — the surrogate id alone addresses a row anywhere in the
   catalog, so a mismatched pair is refused with `-32602` rather than
@@ -552,6 +557,12 @@ the exit-code bucket does not distinguish the two.
   tables carry no foreign key onto `intakes`, so rows written against
   a phantom id before the check existed are still present, and
   `papers.remove` does not cascade them away.
+
+  Every `papers.metadata.*` method rejects a parameter it does not
+  know with `-32602`, so a name that has been retired or mistyped is
+  answered rather than dropped on the way to a success envelope. Each
+  one also appends a `metadata_audit` row carrying the actor, the
+  field, the value it replaced, and the `reason` when one was given.
 
   Every `papers.metadata.*` method runs through the same write path as
   its book-side peer: the daemon's write mutex serializes it against a

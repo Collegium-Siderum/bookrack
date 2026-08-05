@@ -239,6 +239,12 @@ pub struct PaperContributorRemoveRequest {
 pub struct PaperReviewRequest {
     /// Catalog intake id of the paper.
     pub intake_id: i64,
+    /// Why the transition was made; recorded on the audit row, never
+    /// on the review row — `node_reviews.notes` carries the ingest
+    /// audit's report. Which verbs demand one is decided by the
+    /// surface that parses the request.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// What a write op records about the change it just made.

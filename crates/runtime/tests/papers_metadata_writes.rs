@@ -118,20 +118,25 @@ async fn paper_metadata_writes_refuse_an_intake_the_catalog_does_not_hold() -> R
 
         // 3. The four review verbs share one write path; each is
         //    dispatched separately, so each is asserted separately.
-        for (id, method) in [
-            (4, "papers.metadata.ack"),
-            (5, "papers.metadata.approve"),
-            (6, "papers.metadata.reject"),
-            (7, "papers.metadata.reopen"),
+        // `ack` and `reject` demand a reason, so each verb is called
+        // in the shape its parameters accept: a call refused for a
+        // missing reason would never reach the intake check this test
+        // is about.
+        for (id, method, params) in [
+            (
+                4,
+                "papers.metadata.ack",
+                json!({"intake_id": PHANTOM, "reason": "acknowledged"}),
+            ),
+            (5, "papers.metadata.approve", json!({"intake_id": PHANTOM})),
+            (
+                6,
+                "papers.metadata.reject",
+                json!({"intake_id": PHANTOM, "reason": "rejected"}),
+            ),
+            (7, "papers.metadata.reopen", json!({"intake_id": PHANTOM})),
         ] {
-            let resp = call(
-                &mut reader,
-                &mut w,
-                id,
-                method,
-                json!({"intake_id": PHANTOM}),
-            )
-            .await?;
+            let resp = call(&mut reader, &mut w, id, method, params).await?;
             assert_unknown_intake(&resp, method);
         }
 
@@ -836,5 +841,199 @@ async fn a_paper_curation_write_is_logged_as_a_tool_call() -> Result<()> {
         "a paper curation write must be logged like every other op"
     );
     assert_eq!(calls[0].status, "ok");
+    Ok(())
+}
+
+/// A review verb leaves the ingest audit's report JSON in the review
+/// row alone: the curator's words belong on the audit row, and the
+/// report is the only copy of what the pipeline judged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_review_verb_does_not_overwrite_the_ingest_report() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let seeded_notes = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("open paper catalog: {e}"))?
+        .review(intake_id, ItemKind::Paper)?
+        .and_then(|r| r.notes)
+        .ok_or_else(|| eyre!("the fixture must seed a report into the review row"))?;
+    assert!(
+        seeded_notes.contains("fields"),
+        "the seeded notes must be the report JSON: {seeded_notes}"
+    );
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.approve",
+            json!({"intake_id": intake_id, "reason": "checked against the published version"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "approve must succeed: {resp}");
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    let review = catalog
+        .review(intake_id, ItemKind::Paper)?
+        .ok_or_else(|| eyre!("the review row must survive"))?;
+    assert_eq!(review.status, "approved");
+    assert_eq!(
+        review.notes.as_deref(),
+        Some(seeded_notes.as_str()),
+        "the report JSON must survive a review verb"
+    );
+
+    // The words the curator supplied are on the audit row instead.
+    let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
+    let rows = catalog.metadata_audit_for_node(node_id)?;
+    assert_eq!(rows.len(), 1, "approve must append one audit row");
+    assert_eq!(
+        rows[0].reason.as_deref(),
+        Some("checked against the published version")
+    );
+    Ok(())
+}
+
+/// The reason matrix the book side already enforces: `ack` and
+/// `reject` must be justified, `approve` and `reopen` need not be.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ack_and_reject_require_a_reason_while_approve_and_reopen_do_not() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        for (id, method) in [(1, "papers.metadata.ack"), (2, "papers.metadata.reject")] {
+            let resp = call(
+                &mut reader,
+                &mut w,
+                id,
+                method,
+                json!({"intake_id": intake_id}),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(-32602),
+                "{method} without a reason must be refused: {resp}"
+            );
+        }
+        for (id, method) in [
+            (3, "papers.metadata.approve"),
+            (4, "papers.metadata.reopen"),
+        ] {
+            let resp = call(
+                &mut reader,
+                &mut w,
+                id,
+                method,
+                json!({"intake_id": intake_id}),
+            )
+            .await?;
+            assert!(
+                resp["error"].is_null(),
+                "{method} without a reason must succeed: {resp}"
+            );
+        }
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+    Ok(())
+}
+
+/// A retired parameter is refused rather than silently dropped.
+///
+/// `serde` ignores unknown keys by default, so without
+/// `deny_unknown_fields` a caller still passing `reviewer` or `notes`
+/// is answered with a success envelope for a call that did something
+/// else — the hardest failure shape for an operator to self-diagnose.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_paper_curation_parameter_is_refused() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        for (id, params) in [
+            (1, json!({"intake_id": intake_id, "reviewer": "someone"})),
+            (2, json!({"intake_id": intake_id, "notes": "free text"})),
+        ] {
+            let resp = call(
+                &mut reader,
+                &mut w,
+                id,
+                "papers.metadata.approve",
+                params.clone(),
+            )
+            .await?;
+            assert_eq!(
+                resp["error"]["code"].as_i64(),
+                Some(-32602),
+                "a retired parameter must be refused, not ignored: {params} -> {resp}"
+            );
+        }
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
     Ok(())
 }

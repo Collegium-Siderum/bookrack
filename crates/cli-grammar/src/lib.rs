@@ -927,6 +927,10 @@ pub enum PapersMetadataAction {
         /// The new value.
         #[arg(long)]
         value: String,
+        /// Optional note on why this value is correct, recorded on the
+        /// audit row.
+        #[arg(long)]
+        reason: Option<String>,
         /// Mark the override as confirmed against the source.
         #[arg(long)]
         confirmed: bool,
@@ -944,6 +948,10 @@ pub enum PapersMetadataAction {
         /// The field whose override is removed.
         #[arg(long)]
         field: String,
+        /// Optional note on why the override is removed, recorded on
+        /// the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Set an override that deliberately voids one field's value.
     #[command(after_long_help = crate::examples![
@@ -957,20 +965,24 @@ pub enum PapersMetadataAction {
         /// The field whose extracted value is suppressed.
         #[arg(long)]
         field: String,
+        /// Optional note on why the extracted value is wrong, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Acknowledge a flagged paper without changing its metadata —
     /// move the review row to `acknowledged`.
     #[command(after_long_help = crate::examples![
-        "papers metadata ack 101",
-        "papers metadata ack 101 --library demo",
+        "papers metadata ack 101 --reason \"venue lists no DOI\"",
+        "papers metadata ack 101 --reason \"venue lists no DOI\" --library demo",
     ])]
     Ack {
         /// Intake id of the paper.
         #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
-        /// Optional note for the audit trail.
+        /// Why the gap was accepted.
         #[arg(long)]
-        notes: Option<String>,
+        reason: String,
     },
     /// Approve a paper's metadata as correct.
     #[command(after_long_help = crate::examples![
@@ -983,20 +995,20 @@ pub enum PapersMetadataAction {
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
-        notes: Option<String>,
+        reason: Option<String>,
     },
     /// Reject a paper's metadata as wrong.
     #[command(after_long_help = crate::examples![
-        "papers metadata reject 101",
-        "papers metadata reject 101 --library demo",
+        "papers metadata reject 101 --reason \"wrong source file\"",
+        "papers metadata reject 101 --reason \"wrong source file\" --library demo",
     ])]
     Reject {
         /// Intake id of the paper.
         #[arg(value_parser = paper_intake_id)]
         intake_id: i64,
-        /// Optional note for the audit trail.
+        /// Why the paper was rejected.
         #[arg(long)]
-        notes: Option<String>,
+        reason: String,
     },
     /// Move a previously approved / rejected paper back to
     /// `pending`.
@@ -1010,7 +1022,7 @@ pub enum PapersMetadataAction {
         intake_id: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
-        notes: Option<String>,
+        reason: Option<String>,
     },
     /// Add a contributor row to a paper.
     #[command(after_long_help = crate::examples![
@@ -1037,16 +1049,28 @@ pub enum PapersMetadataAction {
         /// The contributor's ORCID identifier, when known.
         #[arg(long)]
         orcid: Option<String>,
+        /// Optional note on why this attribution is correct, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Remove a contributor row by id.
     #[command(after_long_help = crate::examples![
-        "papers metadata contributor-remove 7",
-        "papers metadata contributor-remove 7 --library demo",
+        "papers metadata contributor-remove 101 --contributor-id 7",
+        "papers metadata contributor-remove 101 --contributor-id 7 --library demo",
     ])]
     ContributorRemove {
+        /// Intake id of the paper the row belongs to.
+        #[arg(value_parser = paper_intake_id)]
+        intake_id: i64,
         /// Surrogate id of the contributor row to remove (listed by
         /// `papers show`).
+        #[arg(long)]
         contributor_id: i64,
+        /// Optional note on why the attribution is removed, recorded
+        /// on the audit row.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -1579,13 +1603,17 @@ mod tests {
         ),
         (&["metadata", "clear"], &["--field", "title"]),
         (&["metadata", "void"], &["--field", "publisher"]),
-        (&["metadata", "ack"], &[]),
+        (&["metadata", "ack"], &["--reason", "venue lists no DOI"]),
         (&["metadata", "approve"], &[]),
-        (&["metadata", "reject"], &[]),
+        (&["metadata", "reject"], &["--reason", "wrong source file"]),
         (&["metadata", "reopen"], &[]),
         (
             &["metadata", "contributor-add"],
             &["--role", "author", "--name", "Doe, Jane"],
+        ),
+        (
+            &["metadata", "contributor-remove"],
+            &["--contributor-id", "7"],
         ),
     ];
 
