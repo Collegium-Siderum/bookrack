@@ -835,6 +835,26 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A dry run no longer deletes the other pipeline's reports.** Both
+  `bookrack dryrun` and `bookrack papers dryrun` write their artifacts
+  under `<data_root>/dryruns/` and prune the directory to the newest
+  five afterwards. The paper side matched its own `dryrun-paper-`
+  names, but the book side matched the bare `dryrun-` prefix the two
+  share, so its sweep counted and deleted both.
+
+  The damage ran in both directions and was silent either way. A book
+  dry run finishing beside five paper reports was pruned the moment it
+  was written — the path the command had just printed no longer
+  existed, because a book name leads with a digit and a paper name
+  with `p`, putting every book artifact at the front of the deletion
+  order. A book dry run in a directory holding only paper reports
+  deleted three of them while keeping nothing of its own. Both
+  retention settings reported by `bookrack config fixed` were
+  unreachable in the process: `dryrun.reports_kept` was effectively
+  five minus the number of paper reports present, which could be zero.
+
+  Each side now sweeps only what it wrote.
+
 - **`bookrack status` counts the library it names.** The card is built
   from two calls: one reports the library the daemon came up under, the
   other projects the counts. The second went out without naming a

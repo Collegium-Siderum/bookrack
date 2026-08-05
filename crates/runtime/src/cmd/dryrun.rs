@@ -378,9 +378,19 @@ fn input_hash(path: &Path) -> String {
     digest[..8].to_string()
 }
 
-/// Keep the [`DRYRUN_KEEP`] newest `dryrun-*.jsonl` files (plus their
+/// Names a book-side artifact. The paper side writes into the same
+/// directory and its names extend this one's prefix with `paper-`, so
+/// that extension is excluded here: each side's sweep sees only what
+/// it wrote, and neither counts nor deletes the other's runs.
+fn is_book_artifact(name: &str) -> bool {
+    name.starts_with("dryrun-") && !name.starts_with("dryrun-paper-") && name.ends_with(".jsonl")
+}
+
+/// Keep the [`DRYRUN_KEEP`] newest book-side artifacts (plus their
 /// summary sidecars); delete the rest. Filenames lead with a sortable
-/// timestamp, so lexical order is chronological.
+/// timestamp, so lexical order is chronological. Membership is
+/// [`is_book_artifact`], not the bare `dryrun-` prefix — the shared
+/// directory holds the paper side's runs too.
 fn prune_old_dryruns(dir: &Path) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
     let mut jsonls: Vec<PathBuf> = entries
@@ -388,7 +398,7 @@ fn prune_old_dryruns(dir: &Path) -> Result<()> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("dryrun-") && n.ends_with(".jsonl"))
+                .is_some_and(is_book_artifact)
         })
         .collect();
     jsonls.sort();
@@ -453,6 +463,86 @@ mod tests {
             sidecar_summary_path(p),
             PathBuf::from("/tmp/dryrun-2026-06-02-deadbeef.summary.json")
         );
+    }
+
+    /// Lays a full keep window of paper-side artifacts beside three
+    /// book-side ones. Both sides write into the same directory, and
+    /// `dryrun-` leads a timestamp on the book side but `paper-` on the
+    /// paper side — a digit sorts before a letter, so every book-side
+    /// name sorts ahead of every paper-side one and an unfiltered
+    /// prune evicts exactly the artifacts it was meant to keep.
+    #[test]
+    fn book_pruning_does_not_count_paper_artifacts() {
+        let dir = tempdir().expect("tempdir");
+        for i in 0..DRYRUN_KEEP {
+            let jsonl = dir.path().join(format!(
+                "dryrun-paper-2026-06-02T00-00-{i:02}Z-abcdef01.jsonl"
+            ));
+            fs::write(&jsonl, b"{}\n").expect("write paper jsonl");
+            fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write paper summary");
+        }
+        let books: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let jsonl = dir
+                    .path()
+                    .join(format!("dryrun-2026-06-03T00-00-{i:02}Z-abcdef01.jsonl"));
+                fs::write(&jsonl, b"{}\n").expect("write book jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write book summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_dryruns(dir.path()).expect("prune");
+
+        for book in &books {
+            assert!(
+                book.exists(),
+                "book dry-run {} was pruned; surviving artifacts: {:?}",
+                book.display(),
+                surviving_names(dir.path())
+            );
+        }
+    }
+
+    /// The other half of the same filter: a directory holding nothing
+    /// but paper-side artifacts gives a book-side prune nothing of its
+    /// own to age out, so it must delete nothing at all.
+    #[test]
+    fn book_pruning_never_deletes_a_paper_artifact() {
+        let dir = tempdir().expect("tempdir");
+        let papers: Vec<PathBuf> = (0..(DRYRUN_KEEP + 3))
+            .map(|i| {
+                let jsonl = dir.path().join(format!(
+                    "dryrun-paper-2026-06-02T00-00-{i:02}Z-abcdef01.jsonl"
+                ));
+                fs::write(&jsonl, b"{}\n").expect("write paper jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write paper summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_dryruns(dir.path()).expect("prune");
+
+        for paper in &papers {
+            assert!(
+                paper.exists(),
+                "paper dry-run {} was pruned by the book-side sweep; \
+                 surviving artifacts: {:?}",
+                paper.display(),
+                surviving_names(dir.path())
+            );
+        }
+    }
+
+    fn surviving_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jsonl"))
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

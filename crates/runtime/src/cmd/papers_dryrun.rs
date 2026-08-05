@@ -315,6 +315,11 @@ fn input_hash(path: &Path) -> String {
     hex
 }
 
+/// Keep the [`PAPERS_DRYRUN_KEEP`] newest paper-side artifacts (plus
+/// their summary sidecars); delete the rest. The `dryrun-paper-`
+/// prefix is what confines the sweep to this side — the directory is
+/// shared with [`crate::cmd::dryrun`], whose own names lead with
+/// `dryrun-` and a timestamp.
 fn prune_old_papers_dryruns(dir: &Path) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
     let mut jsonls: Vec<PathBuf> = entries
@@ -356,6 +361,35 @@ mod tests {
             .into_iter()
             .map(|run| run.command)
             .collect()
+    }
+
+    /// The counterpart of the book side's own pair: a sweep here must
+    /// leave the book side's artifacts alone however many of them the
+    /// shared directory holds. Widening the prefix to the bare
+    /// `dryrun-` the two sides have in common is what this rules out.
+    #[test]
+    fn paper_pruning_never_touches_a_book_artifact() {
+        let (tmp, _cfg) = temp_cfg();
+        let books: Vec<PathBuf> = (0..(PAPERS_DRYRUN_KEEP + 3))
+            .map(|i| {
+                let jsonl = tmp
+                    .path()
+                    .join(format!("dryrun-2026-06-03T00-00-{i:02}Z-abcdef01.jsonl"));
+                fs::write(&jsonl, b"{}\n").expect("write book jsonl");
+                fs::write(sidecar_summary_path(&jsonl), b"{}").expect("write book summary");
+                jsonl
+            })
+            .collect();
+
+        prune_old_papers_dryruns(tmp.path()).expect("prune");
+
+        for book in &books {
+            assert!(
+                book.exists(),
+                "book dry-run {} was pruned by the paper-side sweep",
+                book.display(),
+            );
+        }
     }
 
     /// The run row belongs to the catalog that holds the paper-side
