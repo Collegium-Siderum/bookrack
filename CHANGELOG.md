@@ -29,6 +29,16 @@ release workflow extracts the matching section verbatim from this file.
   A `library` the caller wrote out by hand always wins, so `bookrack
   rpc call` stays an escape hatch.
 
+- **`bookrack libraries list` marks which libraries the daemon
+  serves.** The listing reads the registry file, so it shows every
+  registered library whether or not a daemon is running — and gave no
+  way to tell those two sets apart. A `served` column now marks the
+  entries a running daemon holds; the sets differ whenever the daemon
+  came up on a root the registry does not name, because such a daemon
+  serves that root alone. With no daemon answering, the column is
+  absent rather than a column of noes: nobody was asked, which is a
+  different answer from nobody serving them.
+
 - **`daemon.status` reports every library the daemon serves.** A new
   `served` array carries one row per mounted library — `name`,
   `data_dir`, `default`, `primary` — so a client can see the whole

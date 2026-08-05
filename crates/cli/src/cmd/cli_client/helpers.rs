@@ -47,6 +47,53 @@ pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
     Ok(client)
 }
 
+/// How long to wait for a daemon to answer a best-effort question
+/// nobody asked for. Matches the health-probe window `bookrack status`
+/// uses, so "is a daemon there" is decided on the same budget wherever
+/// it is asked.
+// setting: internal -- the wait on a question the operator did not ask;
+// exceeding it drops one annotation column, so there is nothing to tune
+const SERVED_PROBE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Names of the libraries a running daemon serves, or `None` when no
+/// daemon answered.
+///
+/// Deliberately below both gates the ordinary call path goes through:
+///
+/// * **no selection settling** — the answer is the whole served set, on
+///   which the operator's selection has no bearing. Going through
+///   [`connect`] would send a path-shaped selection to the daemon for
+///   translation, so a command that only wanted to annotate a listing
+///   could fail on a selection it never used;
+/// * **no selection injection** — `library.list` takes none, and this
+///   call is the command's own rather than the operator's.
+///
+/// Every failure collapses to `None`: no daemon, an unreachable socket,
+/// a daemon that does not answer inside [`SERVED_PROBE_WINDOW`], or a
+/// reply in an unexpected shape. A caller therefore cannot tell an
+/// unserved library from an unanswered question, and must render
+/// neither as the other.
+pub async fn served_library_names(runtime_dir: Option<&Path>) -> Option<Vec<String>> {
+    let socket = bookrack_control_client::discover(runtime_dir).ok()?;
+    let names = tokio::time::timeout(SERVED_PROBE_WINDOW, async move {
+        let client =
+            bookrack_control_client::connect_with_default_timeout(&socket, SERVED_PROBE_WINDOW)
+                .await
+                .ok()?;
+        let value = client.call_raw("library.list", Value::Null).await.ok()?;
+        Some(
+            value
+                .as_array()?
+                .iter()
+                .filter_map(|row| row["name"].as_str().map(String::from))
+                .collect::<Vec<String>>(),
+        )
+    })
+    .await
+    .ok()??;
+    Some(names)
+}
+
 /// Decide, once a connection exists, which library name this
 /// invocation puts on its calls.
 ///

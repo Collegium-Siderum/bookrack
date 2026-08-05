@@ -22,6 +22,16 @@ registry does not know is served alone, as before. Mounting and
 unmounting libraries at runtime is not available yet — change the
 registry, then restart the daemon.
 
+`bookrack libraries list` reads the registry file, so it works with no
+daemon and always shows every registered library. When a daemon does
+answer, a `served` column marks the ones it holds — the two differ
+whenever the daemon came up on a root the registry does not name, since
+such a daemon serves that root alone. With no daemon the column is
+absent rather than empty: nobody was asked, which is not the same
+answer as nobody serving them. `bookrack status` reports the same set
+from the other side, with each library's root and which one an
+unqualified command reaches.
+
 It takes the session lock plus one data-root lock per mounted library
 for its lifetime, and they answer different questions. The session lock
 under the runtime directory admits one daemon per runtime directory,

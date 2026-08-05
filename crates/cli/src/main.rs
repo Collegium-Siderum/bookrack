@@ -1157,7 +1157,10 @@ async fn run() -> Result<()> {
             match action {
                 // `list` renders the on-disk registry directly, so it
                 // works with no daemon and shows every registered
-                // library, not just the one a daemon has warm.
+                // library, not just the ones a daemon has warm. Which
+                // of them a daemon does hold is a separate question,
+                // asked here and answered best-effort: no daemon means
+                // no column, not a column of noes.
                 LibrariesAction::List { json } => {
                     if bookrack_cli::render::ctx().is_quiet() {
                         // Quiet suppresses the listing but still reads
@@ -1166,7 +1169,8 @@ async fn run() -> Result<()> {
                         bookrack_config::list_libraries()?;
                         Ok(())
                     } else {
-                        bookrack_runtime::cmd::libraries::list(json)
+                        let served = cmd::cli_client::helpers::served_library_names(None).await;
+                        bookrack_runtime::cmd::libraries::list(json, served.as_deref())
                     }
                 }
                 LibrariesAction::Default { name } => {

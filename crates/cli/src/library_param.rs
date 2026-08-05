@@ -121,8 +121,8 @@ fn not_routable(name: &str, method: &str) -> Problem {
              or drop the flag to report on the daemon."
         }
         "library.list" => {
-            "`bookrack libraries list` reports every library the daemon serves; \
-             drop the flag."
+            "`bookrack libraries list` reports every registered library and marks \
+             the ones the daemon serves; drop the flag."
         }
         "doctor.gather" => {
             "Stop the daemon and re-run `bookrack doctor` to diagnose another \

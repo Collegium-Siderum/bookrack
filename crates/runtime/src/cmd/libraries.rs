@@ -19,12 +19,16 @@ use eyre::{Context, ContextCompat, Result, bail};
 use crate::cmd::input_error::CmdInputError;
 use crate::render;
 
-pub fn list(json: bool) -> Result<()> {
+/// Render the registry. `served` names the libraries a running daemon
+/// holds, or `None` when the caller could not ask or was not answered —
+/// the registry read itself never needs a daemon, so the listing is the
+/// same either way apart from that one column.
+pub fn list(json: bool, served: Option<&[String]>) -> Result<()> {
     let entries = bookrack_config::list_libraries().context("list libraries")?;
     if json {
-        render::libraries_list_json(entries.as_deref());
+        render::libraries_list_json(entries.as_deref(), served);
     } else {
-        render::libraries_list(entries.as_deref());
+        render::libraries_list(entries.as_deref(), served);
     }
     Ok(())
 }
