@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pre-flight check that refuses a daemon-routed command when the
-//! CLI's explicit library selection disagrees with the library a
-//! running daemon is serving.
+//! CLI's explicit library selection names a data root the running
+//! daemon is not serving.
 //!
-//! The control-plane architecture is "one daemon owns one library":
-//! once a daemon is up, every CLI command that routes through it
-//! (`verify`, `rpc`, `library.*` reads, ingest, ...) acts on the
-//! daemon's library, not on whatever `--data-dir` / `--library` /
-//! `BOOKRACK_DATA_DIR` the per-invocation environment expresses. The
-//! pre-flight makes that takeover non-silent: it compares the
-//! invoking shell's intent against the session lock's recorded
-//! `data_dir` / `library_name`, and bails with a typed
-//! [`BookrackCliError::LibraryMismatch`] when they differ so the
-//! caller never has the daemon quietly acting on the "wrong" library
-//! behind a flag that looks like it switched.
+//! **Transitional, and half the size it was.** A selection given by
+//! name now travels with the call: the client puts it in the
+//! `library` parameter and the daemon resolves it against the
+//! registry, so a name is routed rather than asserted and every
+//! mounted library is reachable. What has no home yet is a selection
+//! given as a *path* — `--data-dir` or `BOOKRACK_DATA_DIR` — because
+//! a path is not a registry name and cannot be sent. Until path
+//! sugaring resolves one into the other, this check is what keeps a
+//! path selection from evaporating: it compares the invoking shell's
+//! intent against the session lock's recorded `data_dir` and bails
+//! with a typed [`BookrackCliError::LibraryMismatch`] when they
+//! differ, so the caller never has the daemon quietly acting on a
+//! root behind a flag that looks like it switched. The path arm and
+//! the lock line it reads retire together, in the commit that makes
+//! paths routable.
 //!
 //! The check is silent in every "cannot reliably compare" case:
 //!   * no explicit selection was given (env / flag both unset)
@@ -23,10 +27,9 @@
 //!     content is a dead session's leftover (liveness lives in the
 //!     flock, never in the file, which is deliberately not deleted
 //!     on shutdown), so there is no running daemon to disagree with
-//!   * the lock predates the identity fields and carries neither
-//!     `data_dir=` nor `library_name=`
-//!   * the side of the comparison the intent expresses (path vs name)
-//!     is the side the lock lacks
+//!   * the lock predates the identity fields and carries no
+//!     `data_dir=`
+//!   * the selection is a name, which is routed rather than compared
 //!
 //! Which commands the check applies to is
 //! [`crate::selection_routing::resolves_root_locally`] — the locally
@@ -47,10 +50,11 @@ use bookrack_cli::error::BookrackCliError;
 use bookrack_config::{DATA_DIR_ENV, LibrarySelection};
 use bookrack_session::{LockInfo, lock_is_held, peek_lock, resolve_runtime_dir, tty_lock_name};
 
-/// Compare the CLI's explicit selection against the running session
-/// (if any) and return [`BookrackCliError::LibraryMismatch`] when
-/// they disagree. See the module-level doc for the silent-fallthrough
-/// cases.
+/// Compare the CLI's explicit *path* selection against the running
+/// session (if any) and return [`BookrackCliError::LibraryMismatch`]
+/// when they disagree. A selection given by name is not compared here
+/// at all — it is routed. See the module-level doc for the
+/// silent-fallthrough cases.
 pub fn enforce_selection_mismatch(selection: &LibrarySelection) -> Result<(), BookrackCliError> {
     let env = std::env::var(DATA_DIR_ENV).ok();
     let Some(intent) = resolve_intent(selection, env.as_deref()) else {
@@ -68,29 +72,29 @@ pub fn enforce_selection_mismatch(selection: &LibrarySelection) -> Result<(), Bo
     })
 }
 
-/// The library the invoking shell appears to be asking for, distilled
-/// from `--data-dir`, `--library`, and `BOOKRACK_DATA_DIR` in the
+/// The data root the invoking shell appears to be asking for,
+/// distilled from `--data-dir` and `BOOKRACK_DATA_DIR` in the
 /// precedence the config crate documents.
+///
+/// `--library` is absent by design: a name is routed to the daemon,
+/// which resolves it against the registry and answers `-32010` for a
+/// name it does not hold. Comparing it here as well would refuse a
+/// library the daemon is serving.
 #[derive(Debug, PartialEq, Eq)]
-enum Intent {
-    /// A path, from `--data-dir` or `BOOKRACK_DATA_DIR`. Compared
-    /// against the lock's `data_dir=` after best-effort
-    /// canonicalisation on both sides.
-    Path(PathBuf),
-    /// A registry name, from `--library`. Compared against the
-    /// lock's `library_name=` byte-for-byte.
-    Name(String),
-}
+struct Intent(PathBuf);
 
 fn resolve_intent(selection: &LibrarySelection, env_data_dir: Option<&str>) -> Option<Intent> {
     if let Some(p) = &selection.data_dir {
-        return Some(Intent::Path(p.clone()));
+        return Some(Intent(p.clone()));
     }
-    if let Some(n) = &selection.library {
-        return Some(Intent::Name(n.clone()));
+    // `--library` outranks the environment variable in the config
+    // crate's precedence, so a named selection means the environment
+    // has already lost and there is nothing left to compare.
+    if selection.library.is_some() {
+        return None;
     }
     if let Some(p) = env_data_dir.filter(|s| !s.is_empty()) {
-        return Some(Intent::Path(PathBuf::from(p)));
+        return Some(Intent(PathBuf::from(p)));
     }
     None
 }
@@ -124,15 +128,9 @@ fn read_lock_info() -> Option<LockInfo> {
 }
 
 fn is_mismatch(intent: &Intent, lock: &LockInfo) -> bool {
-    match intent {
-        Intent::Path(want) => match lock.data_dir.as_deref() {
-            Some(have) => !same_path(want, have),
-            None => false,
-        },
-        Intent::Name(want) => match lock.library_name.as_deref() {
-            Some(have) => want != have,
-            None => false,
-        },
+    match lock.data_dir.as_deref() {
+        Some(have) => !same_path(&intent.0, have),
+        None => false,
     }
 }
 
@@ -147,10 +145,7 @@ fn same_path(want: &Path, have: &Path) -> bool {
 }
 
 fn render_intent(intent: &Intent) -> String {
-    match intent {
-        Intent::Path(p) => p.display().to_string(),
-        Intent::Name(n) => format!("library {n}"),
-    }
+    intent.0.display().to_string()
 }
 
 fn render_lock_target(lock: &LockInfo) -> String {
@@ -173,24 +168,27 @@ mod tests {
             library: None,
         };
         let intent = resolve_intent(&selection, Some("/env")).unwrap();
-        assert_eq!(intent, Intent::Path(PathBuf::from("/flag")));
+        assert_eq!(intent, Intent(PathBuf::from("/flag")));
     }
 
+    /// A named selection outranks the environment variable, and a name
+    /// is routed rather than compared — so the check has nothing to
+    /// say about this invocation, including nothing about the `/env`
+    /// root the flag displaced.
     #[test]
-    fn intent_prefers_library_flag_over_env() {
+    fn a_named_selection_leaves_nothing_to_compare() {
         let selection = LibrarySelection {
             data_dir: None,
             library: Some("named".into()),
         };
-        let intent = resolve_intent(&selection, Some("/env")).unwrap();
-        assert_eq!(intent, Intent::Name("named".into()));
+        assert!(resolve_intent(&selection, Some("/env")).is_none());
     }
 
     #[test]
     fn intent_falls_through_to_env_when_no_flags() {
         let selection = LibrarySelection::default();
         let intent = resolve_intent(&selection, Some("/env")).unwrap();
-        assert_eq!(intent, Intent::Path(PathBuf::from("/env")));
+        assert_eq!(intent, Intent(PathBuf::from("/env")));
     }
 
     #[test]
@@ -214,7 +212,7 @@ mod tests {
             data_dir: Some(PathBuf::from("/served")),
             library_name: None,
         };
-        assert!(is_mismatch(&Intent::Path(PathBuf::from("/asked")), &lock));
+        assert!(is_mismatch(&Intent(PathBuf::from("/asked")), &lock));
     }
 
     #[test]
@@ -226,7 +224,7 @@ mod tests {
             data_dir: Some(PathBuf::from("/same")),
             library_name: None,
         };
-        assert!(!is_mismatch(&Intent::Path(PathBuf::from("/same")), &lock));
+        assert!(!is_mismatch(&Intent(PathBuf::from("/same")), &lock));
     }
 
     #[test]
@@ -238,43 +236,34 @@ mod tests {
             data_dir: None,
             library_name: None,
         };
-        assert!(!is_mismatch(&Intent::Path(PathBuf::from("/asked")), &lock));
+        assert!(!is_mismatch(&Intent(PathBuf::from("/asked")), &lock));
     }
 
+    /// The lock still records a `library_name=`, and this check no
+    /// longer reads it: a name is routed. Pinning the silence is what
+    /// keeps the two identity lines from being re-coupled by accident
+    /// — a comparison reinstated here would refuse a library the
+    /// daemon is serving, which is the failure this arm was removed to
+    /// end.
     #[test]
-    fn mismatch_when_library_names_differ() {
-        let lock = LockInfo {
-            pid: 1,
-            mcp: "disabled".into(),
-            control_sock: None,
+    fn a_lock_serving_another_library_does_not_refuse_a_named_selection() {
+        let selection = LibrarySelection {
             data_dir: None,
-            library_name: Some("served".into()),
+            library: Some("asked".into()),
         };
-        assert!(is_mismatch(&Intent::Name("asked".into()), &lock));
-    }
+        assert!(resolve_intent(&selection, None).is_none());
 
-    #[test]
-    fn no_mismatch_when_library_names_match() {
-        let lock = LockInfo {
-            pid: 1,
-            mcp: "disabled".into(),
-            control_sock: None,
-            data_dir: None,
-            library_name: Some("same".into()),
-        };
-        assert!(!is_mismatch(&Intent::Name("same".into()), &lock));
-    }
-
-    #[test]
-    fn silent_when_lock_has_no_library_name_and_intent_is_a_name() {
         let lock = LockInfo {
             pid: 1,
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: Some(PathBuf::from("/served")),
-            library_name: None,
+            library_name: Some("served".into()),
         };
-        assert!(!is_mismatch(&Intent::Name("asked".into()), &lock));
+        // The env root still is compared, and still refuses: dropping
+        // the name arm must not drop the path arm with it.
+        let by_env = resolve_intent(&LibrarySelection::default(), Some("/asked")).unwrap();
+        assert!(is_mismatch(&by_env, &lock));
     }
 
     #[test]

@@ -222,11 +222,14 @@ output, where an unreachable control plane surfaces as
 `daemon.control: null`.
 
 Other exits follow the standard buckets in
-[control-plane.md](control-plane.md): 2 when an explicit `--library` /
-`--data-dir` disagrees with what the running daemon serves (the
-preflight names both sides), or when the daemon exits in the race
-between the probe and the connect; RPC failures map to 1 / 2 / 4 as
-everywhere else.
+[control-plane.md](control-plane.md): 2 when an explicit `--data-dir`
+names a root the running daemon does not serve (the preflight names
+both sides), when `--library` names a library the registry does not
+hold, or when the daemon exits in the race between the probe and the
+connect; RPC failures map to 1 / 2 / 4 as everywhere else. A
+`--library` naming a registered library is routed to the daemon, which
+serves every registered library, so it no longer disagrees with
+anything.
 
 `--json` prints the same card as one JSON object
 (`{ "daemon": …, "library": …, "queue": … }`); the short cards are

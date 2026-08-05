@@ -5,7 +5,13 @@
 //! process holds the flock. A dead session's leftover content must
 //! fall through to the ordinary daemon-not-running path instead of
 //! refusing the command, while a held lock still refuses a routed
-//! command whose explicit selection names a different library.
+//! command whose explicit selection names a different data root.
+//!
+//! **The check compares paths only.** A selection given by name is
+//! routed to the daemon, which resolves it against the registry, so a
+//! held lock naming another library no longer refuses it — one case
+//! below pins that, because it is the behaviour the rest of this file
+//! could quietly undo.
 //!
 //! Every case runs against a registry that names both `asked` and
 //! `served`, so the selection the tests pass is one the resolver can
@@ -43,8 +49,24 @@ fn run_command(sandbox: &Sandbox, args: &[&str]) -> Output {
         .expect("spawn bookrack")
 }
 
+/// The same invocation, selecting the `asked` root by path. This is the
+/// axis the check still compares: a path is not a registry name and
+/// cannot be sent to the daemon, so the lock is the only thing that can
+/// tell the caller their selection will not be honoured.
+fn run_command_by_path(sandbox: &Sandbox, args: &[&str]) -> Output {
+    let asked = sandbox.data_root("asked");
+    let mut full = vec!["--data-dir".to_string(), asked.display().to_string()];
+    full.extend(args.iter().map(|a| (*a).to_string()));
+    bookrack_cmd!(sandbox)
+        .without_data_dir()
+        .build()
+        .args(&full)
+        .output()
+        .expect("spawn bookrack")
+}
+
 fn run_routed_command(sandbox: &Sandbox) -> Output {
-    run_command(sandbox, &["diagnose"])
+    run_command_by_path(sandbox, &["diagnose"])
 }
 
 /// Take the flock on the lock file, seed it with `library_name=served`
@@ -112,7 +134,7 @@ fn leftover_lock_content_without_a_holder_does_not_refuse() {
 }
 
 #[test]
-fn held_lock_still_refuses_a_differently_named_selection() {
+fn held_lock_still_refuses_a_differently_rooted_selection() {
     let sandbox = world();
     let holder = hold_mismatched_lock(&sandbox);
 
@@ -120,17 +142,49 @@ fn held_lock_still_refuses_a_differently_named_selection() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(
-        stderr.contains("refusing to act on library asked"),
+        stderr.contains("refusing to act on"),
         "expected the mismatch refusal: {stderr}"
+    );
+    assert!(
+        stderr.contains(&sandbox.data_root("asked").display().to_string()),
+        "the refusal must name the root that was asked for: {stderr}"
     );
     assert!(stderr.contains("library served"), "stderr: {stderr}");
     drop(holder);
 }
 
+/// The other half of the same lock: a selection given by *name* is a
+/// routing decision the daemon makes, so the lock has no standing to
+/// refuse it. A daemon mounts every registered library, and the one
+/// name the lock records is only the library it came up under.
+///
+/// Nothing is listening on the socket the lock points at, so the
+/// invocation ends at the ordinary not-running path. That is the
+/// assertion: the run must get far enough to try, where before it was
+/// turned back at the flag.
+#[test]
+fn held_lock_no_longer_refuses_a_named_selection() {
+    let sandbox = world();
+    let holder = hold_mismatched_lock(&sandbox);
+
+    let out = run_command(&sandbox, &["diagnose"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_the_selection_resolved(&stderr);
+    assert!(
+        !stderr.contains("refusing to act"),
+        "a named selection is routed, not compared against the lock: {stderr}"
+    );
+    assert!(
+        stderr.contains("daemon not running"),
+        "the run must reach the daemon it names: {stderr}"
+    );
+    drop(holder);
+}
+
 /// `doctor` is not on the exemption list: with a daemon holding the
-/// lock on a differently named library, the pre-flight must refuse
+/// lock on a differently rooted library, the pre-flight must refuse
 /// before `doctor` self-resolves, or it would silently report on the
-/// served library instead of the one the selection named.
+/// served library instead of the root the selection named.
 ///
 /// The unlocked run comes first and establishes what the refusal has
 /// to beat: `--library asked` resolves and `doctor` reports on that
@@ -141,7 +195,7 @@ fn held_lock_still_refuses_a_differently_named_selection() {
 fn held_lock_refuses_doctor_because_it_is_not_exempt() {
     let sandbox = world();
 
-    let unlocked = run_command(&sandbox, &["doctor"]);
+    let unlocked = run_command_by_path(&sandbox, &["doctor"]);
     let unlocked_stderr = String::from_utf8_lossy(&unlocked.stderr);
     assert_the_selection_resolved(&unlocked_stderr);
     assert!(
@@ -155,11 +209,11 @@ fn held_lock_refuses_doctor_because_it_is_not_exempt() {
     );
 
     let holder = hold_mismatched_lock(&sandbox);
-    let out = run_command(&sandbox, &["doctor"]);
+    let out = run_command_by_path(&sandbox, &["doctor"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
     assert!(
-        stderr.contains("refusing to act on library asked"),
+        stderr.contains("refusing to act on"),
         "doctor must hit the mismatch refusal: {stderr}"
     );
     assert!(

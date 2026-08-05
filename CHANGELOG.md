@@ -746,6 +746,25 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`--library` reaches every library the daemon serves.** A daemon
+  mounts all registered libraries, but the flag was compared against
+  the single name the session lock records — the library the daemon
+  came up under — and any other one was refused with exit 2 before the
+  command ran. With more than one library mounted, that made the whole
+  multi-library surface unreachable from the CLI: the only way in was
+  `bookrack rpc call` with no selection at all.
+
+  The selection is now routed rather than asserted, so `bookrack
+  --library beta <command>` acts on `beta` while the daemon serves
+  `alpha` alongside it. A name the registry does not hold is still
+  refused, now by the daemon and as caller input (`-32010`, exit 2),
+  and `index-profile apply` names the library its plan was computed
+  for rather than inheriting whichever one the invocation selected.
+
+  A selection given as a path — `--data-dir` or `BOOKRACK_DATA_DIR` —
+  is not a registry name and cannot be sent, so it is still compared
+  against the running daemon and still refuses on a disagreement.
+
 - **A read that names a library the registry does not hold now reports
   `-32010 invalid library`, the same code a write reports.**
   `docs/control-plane.md` states that code as a property of the
