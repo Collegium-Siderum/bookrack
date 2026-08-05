@@ -145,6 +145,7 @@ mod tests {
     fn user_input_error_message_is_unchanged_by_flattening() {
         let e = OpsError::UnknownMetadataField {
             field: "no_such_field".into(),
+            editable: vec![String::from("title"), String::from("year")],
         };
         let expected = e.to_string(); // error-boundary-check: allow
         let data = ops_error_to_edit_error(e);

@@ -76,15 +76,21 @@ pub enum OpsError {
     },
 
     /// The named field is not a curator-editable bibliographic
-    /// attribute. The message carries the full editable set so the
-    /// caller can self-correct without a second lookup.
+    /// attribute of the addressed pipeline. The message carries that
+    /// pipeline's editable set so the caller can self-correct without
+    /// a second lookup — the book and paper sides accept different
+    /// sets, and naming the wrong one points at a field the write
+    /// would refuse.
     #[error(
         "unknown metadata field {field:?}; editable fields are: {}",
-        bookrack_catalog::EDITABLE_FIELDS.join(", ")
+        editable.join(", ")
     )]
     UnknownMetadataField {
         /// The field name the caller asked to edit.
         field: String,
+        /// The fields the addressed pipeline accepts, in the order the
+        /// surface advertises them.
+        editable: Vec<String>,
     },
 
     /// The named contribution role is not in the closed role set. The

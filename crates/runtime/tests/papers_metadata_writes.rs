@@ -562,3 +562,279 @@ async fn a_paper_metadata_write_announces_the_library_it_changed() -> Result<()>
     );
     Ok(())
 }
+
+/// Every paper curation write appends one `metadata_audit` row, and the
+/// row says what changed.
+///
+/// The paper side wrote the override and nothing else, so a curator
+/// could rewrite a title and leave no record that anyone had. The
+/// column assertions are what make this more than a row count: an
+/// audit row that names the wrong table or drops the new value is a
+/// trail nothing can be reconstructed from.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_curation_write_records_an_audit_row() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.set",
+            json!({"intake_id": intake_id, "field": "title", "value": "A Curated Title"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the set must succeed: {resp}");
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
+    let rows = catalog.metadata_audit_for_node(node_id)?;
+    assert_eq!(
+        rows.len(),
+        1,
+        "one paper curation write must leave exactly one audit row"
+    );
+    let row = &rows[0];
+    assert_eq!(row.table_name, "node_publication_attrs");
+    assert_eq!(row.action, "update");
+    assert_eq!(row.field.as_deref(), Some("title"));
+    assert_eq!(row.new_value.as_deref(), Some("A Curated Title"));
+    assert_eq!(
+        row.old_value.as_deref(),
+        Some("Synthetic Findings in Test Spaces"),
+        "the row must carry the value the edit replaced"
+    );
+    Ok(())
+}
+
+/// A second edit of the same field records the value the first one
+/// left, so the trail reconstructs the sequence rather than only its
+/// end state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_edit_records_the_value_the_first_one_left() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        for (id, value) in [(1, "First Correction"), (2, "Second Correction")] {
+            let resp = call(
+                &mut reader,
+                &mut w,
+                id,
+                "papers.metadata.set",
+                json!({"intake_id": intake_id, "field": "title", "value": value}),
+            )
+            .await?;
+            assert!(resp["error"].is_null(), "set {value} must succeed: {resp}");
+        }
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
+    let rows = catalog.metadata_audit_for_node(node_id)?;
+    assert_eq!(rows.len(), 2, "two edits must leave two audit rows");
+    assert_eq!(
+        rows[1].old_value.as_deref(),
+        Some("First Correction"),
+        "the second row must carry what the first edit left"
+    );
+    assert_eq!(rows[1].new_value.as_deref(), Some("Second Correction"));
+    Ok(())
+}
+
+/// `contributor_remove` refuses a contributor row that belongs to
+/// another paper, and leaves it in place.
+///
+/// The method addressed the row by its surrogate id alone, so any id
+/// deleted any row — including one on a paper the caller never named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contributor_remove_refuses_a_row_on_another_paper() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let papers_catalog = data_root.path().join("papers_catalog.db");
+
+    // Two papers, so "belongs to the named paper" has something to
+    // fail against.
+    let (paper_a, paper_b) = {
+        let mut catalog =
+            Catalog::open(&papers_catalog).map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+        let mut register = |sha: &str| -> Result<i64> {
+            Ok(catalog
+                .register_intake(
+                    ItemKind::Paper,
+                    &bookrack_catalog::NewIntake::new(sha).format("pdf"),
+                )
+                .map_err(|e| eyre!("seed intake: {e}"))?
+                .into_intake()
+                .intake_id)
+        };
+        (register("sha-owner")?, register("sha-bystander")?)
+    };
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.contributor_add",
+            json!({"intake_id": paper_a, "role": "author", "name": "Alex Sample"}),
+        )
+        .await?;
+        assert!(
+            resp["error"].is_null(),
+            "contributor_add must succeed: {resp}"
+        );
+        let contributor_id = resp["result"]["contributor_id"]
+            .as_i64()
+            .ok_or_else(|| eyre!("contributor_add must report the new row's id: {resp}"))?;
+
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "papers.metadata.contributor_remove",
+            json!({"intake_id": paper_b, "contributor_id": contributor_id}),
+        )
+        .await?;
+        assert_eq!(
+            resp["error"]["code"].as_i64(),
+            Some(-32602),
+            "removing another paper's contributor must be refused as caller input: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&papers_catalog).map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    assert_eq!(
+        catalog
+            .contributors_for_address(paper_a, ItemKind::Paper)?
+            .len(),
+        1,
+        "a refused removal must leave the row it named in place"
+    );
+    Ok(())
+}
+
+/// A paper curation write is logged in `mcp_tool_calls` under the
+/// control-plane method name, the way every paper *read* already is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_curation_write_is_logged_as_a_tool_call() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+    // The tool-call log lives in the book-side catalog for every op,
+    // paper reads included, and the recorder skips a data root that
+    // holds no catalog at all. A library with both pipelines is what
+    // this assertion is about, so the fixture materializes it.
+    Catalog::open(&data_root.path().join("catalog.db"))
+        .map_err(|e| eyre!("seed book catalog: {e}"))?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.set",
+            json!({"intake_id": intake_id, "field": "title", "value": "Logged"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the set must succeed: {resp}");
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&data_root.path().join("catalog.db"))
+        .map_err(|e| eyre!("reopen catalog: {e}"))?;
+    let calls = catalog.tool_calls_for_tool("papers.metadata.set")?;
+    assert_eq!(
+        calls.len(),
+        1,
+        "a paper curation write must be logged like every other op"
+    );
+    assert_eq!(calls[0].status, "ok");
+    Ok(())
+}

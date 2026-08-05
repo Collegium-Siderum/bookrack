@@ -12,6 +12,7 @@
 //! differs between them.
 
 pub mod metadata;
+pub mod papers_metadata;
 
 use bookrack_catalog::{Catalog, NewMetadataAudit, NewReview};
 use bookrack_core::{ItemKind, PartitionIdx};

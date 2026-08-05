@@ -411,6 +411,7 @@ fn require_editable(field: &str) -> Result<()> {
     if !EDITABLE_FIELDS.contains(&field) {
         return Err(OpsError::UnknownMetadataField {
             field: field.to_string(),
+            editable: EDITABLE_FIELDS.iter().map(|f| f.to_string()).collect(),
         });
     }
     Ok(())

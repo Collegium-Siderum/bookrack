@@ -313,6 +313,7 @@ mod tests {
     fn ops_unknown_field_is_invalid_params() {
         let err: Report = OpsError::UnknownMetadataField {
             field: "no_such_field".into(),
+            editable: vec![String::from("title")],
         }
         .into();
         let rpc = write_err("metadata.set", err);

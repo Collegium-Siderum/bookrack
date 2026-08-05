@@ -530,15 +530,20 @@ the exit-code bucket does not distinguish the two.
   Writes a value-less override row so the field reads as
   deliberately empty rather than extracted.
 - `papers.metadata.ack` / `.approve` / `.reject` / `.reopen` —
-  `{ intake_id, reviewer?, notes?, library? }`. Move the review
-  row through the four states; `reviewer` defaults to `human`.
-  `reopen` returns the row to `pending` after an approve / reject.
+  `{ intake_id, library? }`. Move the review row through the four
+  states; the row is attributed to the surface that called, the way
+  every other curation write is. `reopen` returns the row to
+  `pending` after an approve / reject. The report JSON glean wrote
+  into the review row's notes is left alone.
 - `papers.metadata.contributor_add` — `{ intake_id, role, name,
   family?, given?, orcid?, library? }`. Appends a curator-authored
   contributor row after every extracted one.
-- `papers.metadata.contributor_remove` — `{ contributor_id,
-  library? }`. Removes a contributor row by id; returns
-  `{ removed: bool }`.
+- `papers.metadata.contributor_remove` — `{ intake_id,
+  contributor_id, library? }`. Removes a contributor row by id from
+  the named paper; returns `{ removed: bool }`. The row must belong to
+  that paper — the surrogate id alone addresses a row anywhere in the
+  catalog, so a mismatched pair is refused with `-32602` rather than
+  deleting a bystander's attribution.
 
   Every `papers.metadata.*` method above that takes an `intake_id`
   checks that it names a real paper intake before writing, and answers
@@ -546,9 +551,7 @@ the exit-code bucket does not distinguish the two.
   bounds new rows only: the paper override, review, and contributor
   tables carry no foreign key onto `intakes`, so rows written against
   a phantom id before the check existed are still present, and
-  `papers.remove` does not cascade them away. `contributor_remove` is
-  the one method with nothing to check — it carries no `intake_id`, so
-  it still reports `{ removed: false }` for a row it cannot find.
+  `papers.remove` does not cascade them away.
 
   Every `papers.metadata.*` method runs through the same write path as
   its book-side peer: the daemon's write mutex serializes it against a

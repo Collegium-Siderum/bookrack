@@ -142,6 +142,105 @@ pub struct RejectMetadataRequest {
     pub reason: String,
 }
 
+/// Request body for
+/// [`crate::writes::papers_metadata::set_paper_metadata_field`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperSetMetadataFieldRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+    /// The field to set; must be one of
+    /// [`crate::writes::papers_metadata::PAPER_EDITABLE_FIELDS`].
+    pub field: String,
+    /// The new value.
+    pub value: String,
+    /// Why this value is correct; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// True when the curator has checked the value against the source
+    /// itself. Recorded on the override row; the audit grades a
+    /// confirmed override strong unless a validation check fails.
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// Request body for
+/// [`crate::writes::papers_metadata::clear_paper_metadata_field`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperClearMetadataFieldRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+    /// The field whose override should be removed.
+    pub field: String,
+    /// Why the override is being removed; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for
+/// [`crate::writes::papers_metadata::void_paper_metadata_field`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperVoidMetadataFieldRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+    /// The field whose extracted value should be suppressed.
+    pub field: String,
+    /// Why the extracted value is wrong; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for
+/// [`crate::writes::papers_metadata::add_paper_contributor`].
+///
+/// Carries the structured name parts and the ORCID a citation needs,
+/// and no nationality: that one is a book-side enrichment field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperContributorAddRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+    /// Contribution role; must be one of
+    /// [`bookrack_catalog::CONTRIBUTOR_ROLES`].
+    pub role: String,
+    /// The contributor's name as it should be displayed.
+    pub name: String,
+    /// Family name, when the parts are known separately.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Given name, when the parts are known separately.
+    #[serde(default)]
+    pub given: Option<String>,
+    /// The contributor's ORCID, when known.
+    #[serde(default)]
+    pub orcid: Option<String>,
+    /// Why this attribution is correct; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for
+/// [`crate::writes::papers_metadata::remove_paper_contributor`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperContributorRemoveRequest {
+    /// Catalog intake id of the paper the row belongs to. The
+    /// surrogate id alone addresses a row anywhere in the catalog, so
+    /// this is what makes the request checkable.
+    pub intake_id: i64,
+    /// Surrogate id of the contributor row, as listed by `show_paper`.
+    pub contributor_id: i64,
+    /// Why the attribution is being removed; recorded on the audit row.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Request body for the four paper review-status transitions
+/// (`ack` / `approve` / `reject` / `reopen`), which differ only in the
+/// status and audit action their op supplies.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperReviewRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+}
+
 /// What a write op records about the change it just made.
 ///
 /// Every write op returns one of these so the caller can render or log

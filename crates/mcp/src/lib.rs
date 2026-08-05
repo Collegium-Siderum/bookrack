@@ -2527,6 +2527,7 @@ mod tests {
         for err in [
             OpsError::UnknownMetadataField {
                 field: "bogus".to_string(),
+                editable: vec!["title".to_string()],
             },
             OpsError::UnknownContributorRole {
                 role: "bogus".to_string(),

@@ -898,7 +898,7 @@ fn set_rejects_a_field_name_outside_the_editable_set() {
         .expect_err("unknown field must be rejected");
         assert!(matches!(
             &err,
-            bookrack_ops::OpsError::UnknownMetadataField { field: f } if f == field
+            bookrack_ops::OpsError::UnknownMetadataField { field: f, .. } if f == field
         ));
         assert!(
             err.to_string().contains("title"),
