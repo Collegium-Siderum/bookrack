@@ -28,8 +28,8 @@ use crate::OpsError;
 use crate::Result;
 use crate::dto::writes::{
     AddContributorOutcome, PaperClearMetadataFieldRequest, PaperContributorAddRequest,
-    PaperContributorRemoveRequest, PaperReviewRequest, PaperSetMetadataFieldRequest,
-    PaperVoidMetadataFieldRequest, WriteOutcome,
+    PaperContributorRemoveRequest, PaperReauditRequest, PaperReviewRequest,
+    PaperSetMetadataFieldRequest, PaperVoidMetadataFieldRequest, ReauditOutcome, WriteOutcome,
 };
 use crate::recorder::record_call_sync;
 use crate::writes::{build_audit, require_intake, write_outcome, write_review_status_inner};
@@ -357,6 +357,46 @@ pub fn remove_paper_contributor<E: Embedder>(
         let audit_id = catalog.record_metadata_audit(&audit)?;
 
         Ok(write_outcome(ops, audit_id, removed))
+    })
+}
+
+/// Re-run the metadata plausibility audit for one paper from its
+/// cached extraction envelope, refreshing the stored audit projection
+/// so it reflects the current effective metadata (overrides
+/// included). The review status is untouched: the audit is machine
+/// plausibility, review is human (or LLM) confirmation.
+///
+/// No `metadata_audit` row is written. That table records curation
+/// edits, and the review queue and the audit trail both read it on
+/// that understanding; a recomputation is not an edit.
+pub fn reaudit_paper_metadata<E: Embedder>(
+    ops: &Ops<E>,
+    req: PaperReauditRequest,
+    audit_data: &bookrack_glean::audit::PaperAuditData,
+    audit_profile: &bookrack_glean::audit::PaperAuditProfile,
+) -> Result<ReauditOutcome> {
+    let args = serde_json::json!({ "intake_id": req.intake_id });
+    record_call_sync!(ops, "papers.metadata.reaudit", args, {
+        let catalog = open_paper_catalog(ops)?;
+        let outcome = bookrack_glean::reaudit::reaudit_paper(
+            &catalog,
+            req.intake_id,
+            audit_profile,
+            audit_data,
+        )
+        .map_err(|e| match e {
+            bookrack_glean::GleanError::UnknownIntake(intake_id) => {
+                OpsError::IntakeNotFound { intake_id }
+            }
+            other => OpsError::Other(eyre::Report::new(other)),
+        })?;
+        Ok(ReauditOutcome {
+            intake_id: outcome.intake_id,
+            previous_verdict: outcome.previous_verdict,
+            previous_confidence: outcome.previous_confidence,
+            verdict: outcome.verdict,
+            confidence: outcome.confidence,
+        })
     })
 }
 

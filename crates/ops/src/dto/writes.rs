@@ -232,6 +232,14 @@ pub struct PaperContributorRemoveRequest {
     pub reason: Option<String>,
 }
 
+/// Request body for
+/// [`crate::writes::papers_metadata::reaudit_paper_metadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperReauditRequest {
+    /// Catalog intake id of the paper.
+    pub intake_id: i64,
+}
+
 /// Request body for the four paper review-status transitions
 /// (`ack` / `approve` / `reject` / `reopen`), which differ only in the
 /// status and audit action their op supplies.

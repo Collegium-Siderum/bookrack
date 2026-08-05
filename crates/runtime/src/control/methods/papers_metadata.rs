@@ -133,7 +133,7 @@ pub async fn reaudit(params: &Option<Value>, ctx: &MethodContext) -> Result<Valu
         let outcome = handle
             .reaudit_paper(intake_id, &profile, &data)
             .await
-            .map_err(|e| write_err("papers.metadata.reaudit", e))?;
+            .map_err(|e| write_err("papers.metadata.reaudit", e.into()))?;
         Ok(json!({
             "intake_id": outcome.intake_id,
             "verdict": outcome.verdict,

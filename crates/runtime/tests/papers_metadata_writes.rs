@@ -1037,3 +1037,77 @@ async fn a_retired_paper_curation_parameter_is_refused() -> Result<()> {
     join_with_deadline(runtime, repl_handle, driver).await?;
     Ok(())
 }
+
+/// A paper re-audit is logged in `mcp_tool_calls` under its method
+/// name, the way the other nine curation actions are.
+///
+/// It was the one action that never reached the ops layer, so the
+/// call log had a hole exactly where the most expensive paper-side
+/// write is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paper_reaudit_is_logged_as_a_tool_call() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+    // The tool-call log lives in the book-side catalog, and the
+    // recorder skips a data root that holds no catalog at all.
+    Catalog::open(&data_root.path().join("catalog.db"))
+        .map_err(|e| eyre!("seed book catalog: {e}"))?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.reaudit",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the re-audit must succeed: {resp}");
+        assert!(
+            resp["result"]["verdict"].is_string(),
+            "the re-audit must still report its verdict: {resp}"
+        );
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+
+    let catalog = Catalog::open(&data_root.path().join("catalog.db"))
+        .map_err(|e| eyre!("reopen catalog: {e}"))?;
+    let calls = catalog.tool_calls_for_tool("papers.metadata.reaudit")?;
+    assert_eq!(
+        calls.len(),
+        1,
+        "a re-audit must be logged like every other op"
+    );
+    assert_eq!(calls[0].status, "ok");
+
+    // A re-audit is a recomputation, not a curator edit, so it leaves
+    // no `metadata_audit` row — the same split the book side keeps.
+    let papers = Catalog::open(&data_root.path().join("papers_catalog.db"))
+        .map_err(|e| eyre!("reopen paper catalog: {e}"))?;
+    let node_id = bookrack_core::PartitionIdx::new(intake_id).root().get();
+    assert!(
+        papers.metadata_audit_for_node(node_id)?.is_empty(),
+        "a re-audit must not be recorded as a curation edit"
+    );
+    Ok(())
+}

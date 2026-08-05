@@ -30,6 +30,7 @@ use eyre::WrapErr;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::Ops;
+use crate::OpsError;
 
 /// Why a registry operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -411,21 +412,24 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     /// cached extraction envelope and write only the `confidence` /
     /// `audit_verdict` rollup. Returns the new and previous verdict /
     /// confidence pair.
+    ///
+    /// The audit itself is
+    /// [`crate::writes::papers_metadata::reaudit_paper_metadata`];
+    /// what this wrapper adds is the glean lock, which serializes the
+    /// re-audit against an ingest writing the same catalog.
     pub async fn reaudit_paper(
         &self,
         intake_id: i64,
         profile: &bookrack_glean::audit::PaperAuditProfile,
         data: &bookrack_glean::audit::PaperAuditData,
-    ) -> eyre::Result<bookrack_glean::reaudit::ReauditOutcome> {
-        let catalog_db = self
-            .ops
-            .papers_catalog_db()
-            .ok_or_else(|| eyre::eyre!("library handle has no papers backend"))?;
+    ) -> std::result::Result<crate::dto::writes::ReauditOutcome, OpsError> {
         let _guard = self.glean_lock.lock().await;
-        let catalog = Catalog::open_with_backup(catalog_db, self.ops.backup_dir())
-            .context("open papers catalog for reaudit")?;
-        bookrack_glean::reaudit::reaudit_paper(&catalog, intake_id, profile, data)
-            .map_err(|e| eyre::Report::from(e).wrap_err("registry-mediated paper reaudit"))
+        crate::writes::papers_metadata::reaudit_paper_metadata(
+            &self.ops,
+            crate::dto::writes::PaperReauditRequest { intake_id },
+            data,
+            profile,
+        )
     }
 }
 
