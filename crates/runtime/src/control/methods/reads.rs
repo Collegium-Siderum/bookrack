@@ -119,12 +119,14 @@ pub fn status(ctx: &MethodContext) -> Value {
         // clients that would enqueue work (e.g. `index-profile apply`)
         // check this up front instead of failing on their first call.
         "queue_worker_enabled": ctx.queue_worker_enabled,
-        // Identity of the served library. `library` is the registry
-        // name and `null` when the data root was selected directly by
-        // path — a normal state, matching the lock file's omitted
-        // `library_name=` line, not the fabricated fallback in
-        // `ctx.library_name`. Single-library snapshot fields: a daemon
-        // serves exactly one library today.
+        // Identity of the primary (bring-up-selected) library.
+        // `library` is its registry name and `null` when the data root
+        // was selected directly by path — a normal state, matching the
+        // lock file's omitted `library_name=` line, not the fabricated
+        // fallback in `ctx.library_name`. Both fields are a
+        // single-library snapshot of the primary: an eager daemon
+        // serves every registered library, and `library.list` reports
+        // that set.
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
     })
