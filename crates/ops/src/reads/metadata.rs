@@ -2,6 +2,8 @@
 
 //! Read ops over the metadata audit trail and the review queue.
 
+use std::path::Path;
+
 use bookrack_catalog::{Catalog, IntakeFilter, STATUS_ACKNOWLEDGED, STATUS_PENDING};
 use bookrack_core::{ItemKind, PartitionIdx};
 use bookrack_corpus::Corpus;
@@ -145,7 +147,13 @@ pub fn list_metadata<E: Embedder>(
                 review_status_in: review_status_in.as_slice(),
                 ..IntakeFilter::default()
             };
-            list_metadata_inner(ops, catalog_filter, limit, offset)
+            list_metadata_inner(
+                ops.catalog_db(),
+                ItemKind::Book,
+                catalog_filter,
+                limit,
+                offset,
+            )
         }
     )
 }
@@ -171,27 +179,33 @@ pub fn list_pending_reviews<E: Embedder>(
                 review_status_in: NEEDS_REVIEW_STATUS,
                 ..IntakeFilter::default()
             };
-            list_metadata_inner(ops, filter, limit, offset)
+            list_metadata_inner(ops.catalog_db(), ItemKind::Book, filter, limit, offset)
         }
     )
 }
 
-/// Shared body of the two paginated metadata listings. Pulled out so
-/// the public entry points stay thin and the filter shape is the only
-/// thing that differs between them.
-fn list_metadata_inner<E: Embedder>(
-    ops: &Ops<E>,
+/// Shared body of the paginated metadata listings, over whichever
+/// catalog and item kind the caller names. Pulled out so the public
+/// entry points stay thin and the filter shape and the pipeline are
+/// the only things that differ between them.
+///
+/// The row shape carries nothing pipeline-specific, so one body serves
+/// both sides; what a caller must get right is pairing the catalog
+/// with the kind stored in it.
+pub(crate) fn list_metadata_inner(
+    catalog_db: &Path,
+    kind: ItemKind,
     filter: IntakeFilter<'_>,
     limit: u32,
     offset: u32,
 ) -> Result<MetadataListPage> {
     let (effective_limit, _) = clamp_limit(limit);
-    let catalog = Catalog::open_read_only(ops.catalog_db())?;
+    let catalog = Catalog::open_read_only(catalog_db)?;
     let (intakes, total) = catalog.find_intakes_page(&filter, effective_limit, offset)?;
     let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();
-    let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
-    let attrs = catalog.publication_attrs_for_intakes(&intake_ids, ItemKind::Book)?;
-    let reviews = catalog.reviews_for_addresses(&intake_ids, ItemKind::Book)?;
+    let effective = catalog.effective_publication_attrs_for_intakes(&intake_ids, kind)?;
+    let attrs = catalog.publication_attrs_for_intakes(&intake_ids, kind)?;
+    let reviews = catalog.reviews_for_addresses(&intake_ids, kind)?;
     let rows: Vec<MetadataListRow> = intakes
         .iter()
         .map(|intake| {
@@ -234,14 +248,25 @@ pub fn show_audit_trail<E: Embedder>(ops: &Ops<E>, intake_id: i64) -> Result<Vec
         ops,
         "library.show_audit_trail",
         serde_json::json!({ "intake_id": intake_id }),
-        {
-            let catalog = Catalog::open_read_only(ops.catalog_db())?;
-            let node_id = PartitionIdx::new(intake_id).root().get();
-            let rows = catalog.metadata_audit_for_node(node_id)?;
-            if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
-                return Err(OpsError::IntakeNotFound { intake_id });
-            }
-            Ok(rows.into_iter().map(AuditTrailEntry::from_row).collect())
-        }
+        { show_audit_trail_inner(ops.catalog_db(), intake_id) }
     )
+}
+
+/// Shared body of the audit-trail read, over whichever catalog the
+/// caller names.
+///
+/// `metadata_audit` has no scope column — each pipeline's rows live in
+/// its own catalog — so the catalog path is the whole of what differs
+/// between the two sides.
+pub(crate) fn show_audit_trail_inner(
+    catalog_db: &Path,
+    intake_id: i64,
+) -> Result<Vec<AuditTrailEntry>> {
+    let catalog = Catalog::open_read_only(catalog_db)?;
+    let node_id = PartitionIdx::new(intake_id).root().get();
+    let rows = catalog.metadata_audit_for_node(node_id)?;
+    if rows.is_empty() && catalog.intake_by_id(intake_id)?.is_none() {
+        return Err(OpsError::IntakeNotFound { intake_id });
+    }
+    Ok(rows.into_iter().map(AuditTrailEntry::from_row).collect())
 }
