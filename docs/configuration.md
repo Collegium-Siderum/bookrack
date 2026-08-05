@@ -44,6 +44,32 @@ absent. A selection that does need the registry (`--library`, or
 falling through to a `default`) still fails, and it fails naming the
 registry rather than reporting that no library is configured.
 
+## Selecting a library on a running daemon
+
+The order above chooses a data root for a command that resolves one
+itself. A command that routes through a running daemon does not: the
+daemon already serves its libraries, and what travels with the call is
+a library *name*.
+
+- `--library <name>` travels as itself. A daemon mounts every
+  registered library, so any of them is reachable; a name the registry
+  does not hold is refused by the daemon as caller input.
+- `--data-dir <path>` and `BOOKRACK_DATA_DIR` name a place on disk,
+  which is not a name a daemon can be asked for, so the registry
+  translates: the entry whose manifest identity matches the root wins,
+  then the entry whose path matches.
+- A root **no entry claims** has no name to send. The daemon is asked
+  whether that is the root it serves; if it is, the call goes out
+  unnamed and lands there. If the daemon serves something else, the
+  command is refused and names both roots.
+- A root whose manifest identity belongs to an entry pointing
+  **somewhere else** is refused without asking any daemon: two
+  directories claim one library, and acting on either answers for the
+  other.
+
+An unreadable registry therefore does veto a routed command that
+selected by path, where it does not veto the same path on a local one.
+
 ## The library registry
 
 The registry maps short names to data roots and records the machine's

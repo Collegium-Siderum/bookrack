@@ -122,12 +122,13 @@ pub fn status(ctx: &MethodContext) -> Value {
         "queue_worker_enabled": ctx.queue_worker_enabled,
         // Identity of the primary (bring-up-selected) library.
         // `library` is its registry name and `null` when the data root
-        // was selected directly by path — a normal state, matching the
-        // lock file's omitted `library_name=` line, not the fabricated
-        // fallback in `ctx.library_name`. Both fields are a
+        // was selected directly by path — a normal state, not the
+        // fabricated fallback in `ctx.library_name`. Both fields are a
         // single-library snapshot of the primary: an eager daemon
         // serves every registered library, and `library.list` reports
-        // that set.
+        // that set. `data_dir` is also what a client with a path-shaped
+        // selection compares against when no registry entry claims that
+        // root.
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
     })

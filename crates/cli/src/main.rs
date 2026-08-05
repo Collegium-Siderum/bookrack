@@ -58,12 +58,13 @@ struct Cli {
     /// Select the library at this data root, overriding the
     /// environment.
     ///
-    /// On local commands (`run`, `init`, `doctor`, `audit-profile`,
-    /// `index-profile`, `distill`, `runs`) this switches the data root
-    /// for the invocation. On commands that route through a running
-    /// daemon, the daemon must already be serving this root; a mismatch
-    /// aborts the command without acting. Mutually exclusive with
-    /// `--library`.
+    /// On local commands (`run`, `init`, `audit-profile`,
+    /// `index-profile`, `distill`, `runs`, `retrieval`) this switches
+    /// the data root for the invocation. On commands that route
+    /// through a running daemon, the registry names the library that
+    /// owns this root and the call goes there; a root no entry claims
+    /// is refused unless the daemon is the one serving it. Mutually
+    /// exclusive with `--library`.
     #[arg(
         long,
         global = true,
@@ -74,9 +75,10 @@ struct Cli {
     /// Select the named library from the registry.
     ///
     /// The registry is the BOOKRACK_REGISTRY file when set, else the
-    /// platform-default registry. Behaves like `--data-dir`: a switch on
-    /// local commands, an assertion against the running daemon on routed
-    /// commands. Mutually exclusive with `--data-dir`.
+    /// platform-default registry. A switch on local commands; on
+    /// commands that route through a running daemon the name travels
+    /// with the call, so any library the daemon serves is reachable.
+    /// Mutually exclusive with `--data-dir`.
     #[arg(long, global = true, help_heading = "Common Options")]
     library: Option<String>,
     /// Select an audit profile by name: the built-ins are `default`,
@@ -1067,6 +1069,14 @@ async fn run() -> Result<()> {
         // instead of an opaque "no library configured" bail -- the
         // platform launchers count on `bookrack run` to be a
         // self-contained first-run flow.
+        //
+        // The probe **discards its result**: the daemon resolves again
+        // once it owns the lock, and that one is the configuration it
+        // serves. Only the failure is read here, and only to decide
+        // whether to offer the wizard. Handing this result down instead
+        // would move the resolve ahead of the lock it is supposed to
+        // follow, and would put a `Config` in the runtime's options for
+        // no behaviour that differs.
         if let Err(err) = Config::resolve(&selection) {
             match err {
                 ConfigError::MissingDataDir | ConfigError::DataDirNotFound(_) => {

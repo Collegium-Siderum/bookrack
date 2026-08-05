@@ -338,6 +338,13 @@ impl DaemonRuntime {
         }
 
         // 4. Config::resolve + obs init
+        //
+        // The authoritative resolve, and the only one whose result is
+        // used. `bookrack run` probes the same call before taking the
+        // lock, to offer the wizard on an unconfigured install, and
+        // throws that result away; resolution happens here, after the
+        // lock, so the configuration the daemon serves is the one that
+        // was in place when it took ownership.
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
