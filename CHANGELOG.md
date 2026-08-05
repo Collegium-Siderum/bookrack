@@ -29,6 +29,15 @@ release workflow extracts the matching section verbatim from this file.
   A `library` the caller wrote out by hand always wins, so `bookrack
   rpc call` stays an escape hatch.
 
+- **`daemon.status` reports every library the daemon serves.** A new
+  `served` array carries one row per mounted library — `name`,
+  `data_dir`, `default`, `primary` — so a client can see the whole
+  served set, which library an unnamed call resolves to, and which one
+  the daemon came up under. Those last two are separate bits: a daemon
+  started under a library that is not the registry's default carries
+  them on different rows. The existing `library` and `data_dir` fields
+  keep their meaning, the primary's identity.
+
 - **`daemon.methods` reports how each method takes a library.** Every
   row gains `selection` (`routed` / `process` / `unrouted`) and
   `library_key`, so `bookrack rpc list` — and any other client — reads

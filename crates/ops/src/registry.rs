@@ -16,7 +16,7 @@
 //! [`get`]: LibraryRegistry::get
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use bookrack_catalog::{Catalog, RunHandle, RunLock};
@@ -433,13 +433,16 @@ impl<E: Embedder + Send + Sync + 'static> LibraryHandle<E> {
     }
 }
 
-/// One row of [`LibraryRegistry::list`] — the registered name and the
-/// vector dimension the library's store was opened at (when search is
-/// available on the handle).
+/// One row of [`LibraryRegistry::list`] — the registered name, the root
+/// the library was opened at, and the vector dimension its store was
+/// opened at (when search is available on the handle).
 #[derive(Debug, Clone)]
 pub struct LibrarySummary {
     /// The library's registered short name.
     pub name: String,
+    /// The data root this library's handle is open on, taken from the
+    /// handle's own configuration rather than re-resolved.
+    pub data_dir: PathBuf,
     /// The embedder dimension the vector store was opened at; `None`
     /// for catalog-only handles.
     pub dimension: Option<usize>,
@@ -570,6 +573,7 @@ impl<E: Embedder> LibraryRegistry<E> {
             .values()
             .map(|h| LibrarySummary {
                 name: h.name().to_string(),
+                data_dir: h.cfg().data_dir().to_path_buf(),
                 dimension: h.ops().dimension(),
                 is_default: h.name() == default,
             })

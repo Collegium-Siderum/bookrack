@@ -123,15 +123,48 @@ pub fn status(ctx: &MethodContext) -> Value {
         // Identity of the primary (bring-up-selected) library.
         // `library` is its registry name and `null` when the data root
         // was selected directly by path — a normal state, not the
-        // fabricated fallback in `ctx.library_name`. Both fields are a
-        // single-library snapshot of the primary: an eager daemon
-        // serves every registered library, and `library.list` reports
-        // that set. `data_dir` is also what a client with a path-shaped
-        // selection compares against when no registry entry claims that
-        // root.
+        // fabricated fallback in `ctx.library_name`. Both fields stay a
+        // single-library snapshot of the primary; the set this daemon
+        // serves is `served` below. `data_dir` is also what a client
+        // with a path-shaped selection compares against when no
+        // registry entry claims that root.
         "library": ctx.info_context.library_name,
         "data_dir": ctx.info_context.data_dir,
+        "served": served_libraries(ctx),
     })
+}
+
+/// Every library this daemon has mounted, one row each, sorted by name;
+/// `null` when the registry could not be read.
+///
+/// `default` marks the library an unnamed call resolves to, `primary`
+/// the one the daemon came up under. They are two bits rather than one
+/// because they are two facts: a daemon started under a library that is
+/// not the registry's default carries them on different rows, and a
+/// client that folded them together could not answer which library an
+/// unnamed call reaches. `data_dir` is each library's own root, so a
+/// registry pointing two names at one root is visible as such.
+fn served_libraries(ctx: &MethodContext) -> Value {
+    // A poisoned default-pointer lock is the only way this read fails.
+    // The rest of the card is still worth printing, and `null` says the
+    // set could not be read rather than implying an empty one.
+    let Ok(summaries) = ctx.registry.list() else {
+        return Value::Null;
+    };
+    let primary = ctx.info_context.library_name.as_deref();
+    let rows: Vec<Value> = summaries
+        .into_iter()
+        .map(|s| {
+            let is_primary = Some(s.name.as_str()) == primary;
+            json!({
+                "name": s.name,
+                "data_dir": s.data_dir.display().to_string(),
+                "default": s.is_default,
+                "primary": is_primary,
+            })
+        })
+        .collect();
+    Value::Array(rows)
 }
 
 pub async fn doctor_gather(ctx: &MethodContext) -> Value {

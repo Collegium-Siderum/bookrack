@@ -320,8 +320,8 @@ the exit-code bucket does not distinguish the two.
 - `daemon.shutdown` — fires the shared shutdown broadcast; the
   response is `null` and is written before the listener stops.
 - `daemon.status` — `{ state, queue_pending, queue_running,
-  queue_worker_enabled, library, data_dir }`. The canonical name;
-  `status` is a compatibility alias answered by the same handler.
+  queue_worker_enabled, library, data_dir, served }`. The canonical
+  name; `status` is a compatibility alias answered by the same handler.
   `state` is one of
   `idle`, `writing`, `working`, `degraded`, `stopping`; see the
   `daemon.state` event for the semantics of each value.
@@ -329,10 +329,20 @@ the exit-code bucket does not distinguish the two.
   a queue worker. `library` is the registry name of the primary
   (bring-up-selected) library, `null` when the data root was selected
   directly by path; `data_dir` is that library's root. Both identity
-  fields are a single-library snapshot of the primary — an eager
-  daemon serves every registered library (see `library.list` for the
-  full set) — and will become plural with the multi-library status
-  surface.
+  fields are a single-library snapshot of the primary and stay that
+  way; `data_dir` is also what a client holding a path-shaped
+  selection compares against when no registry entry claims that root.
+
+  `served` is the plural face: one row per mounted library, sorted by
+  name, each `{ name, data_dir, default, primary }`. `default` marks
+  the library a call that names none resolves to, `primary` the one
+  the daemon came up under. They are separate bits because they are
+  separate facts — a daemon started under a library that is not the
+  registry's default carries them on different rows — and a client
+  answering "which library does an unnamed call reach" must read
+  `default`, not `primary`. `served` is `null` when the registry could
+  not be read; that is not the same as an empty set, which cannot
+  occur (a daemon serves at least the library it came up under).
 - `doctor.gather` — JSON serialisation of the same report the
   `bookrack doctor` subcommand prints. Gathered inside the daemon, so
   the `MCP endpoint` row probes the address this session bound and not

@@ -137,6 +137,88 @@ async fn status_identity_reports_the_primary_not_the_registry_default() -> Resul
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// `daemon.status` reports the whole served set, and marks the default
+/// and the primary separately.
+///
+/// The fixture comes up under `beta` while the registry's default is
+/// `alpha`, so the two marks land on different rows — a bring-up under
+/// the default would satisfy a handler that reported one bit twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_reports_every_served_library_marking_default_and_primary() -> Result<()> {
+    world();
+    let runtime_root = tempfile::tempdir()?;
+
+    let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+
+    let runtime = DaemonRuntime::start(opts).await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"daemon.status"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let served = resp["result"]["served"]
+            .as_array()
+            .ok_or_else(|| eyre!("status carries no served set: {resp}"))?;
+        let names: Vec<&str> = served.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            ["alpha", "beta"],
+            "every mounted library is reported, sorted by name: {resp}"
+        );
+
+        let defaults: Vec<&str> = served
+            .iter()
+            .filter(|e| e["default"] == true)
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert_eq!(
+            defaults,
+            ["alpha"],
+            "exactly the registry default carries `default`: {resp}"
+        );
+        let primaries: Vec<&str> = served
+            .iter()
+            .filter(|e| e["primary"] == true)
+            .filter_map(|e| e["name"].as_str())
+            .collect();
+        assert_eq!(
+            primaries,
+            ["beta"],
+            "exactly the bring-up selection carries `primary`: {resp}"
+        );
+
+        // Each row's root is its own, so a client can tell which library
+        // an unnamed call would reach without asking a second method.
+        for row in served {
+            let name = row["name"].as_str().unwrap_or_default();
+            let root = row["data_dir"]
+                .as_str()
+                .ok_or_else(|| eyre!("served row carries no data_dir: {resp}"))?;
+            assert!(
+                root.ends_with(&format!("{name}-root")),
+                "row for {name} reports another library's root: {resp}"
+            );
+        }
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 /// Both served roots hold the daemon's root lock while it runs — the
 /// eager-mount counterpart of the single-library lock test in
 /// `daemon_lifecycle.rs`.
