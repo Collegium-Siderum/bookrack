@@ -31,8 +31,10 @@ use super::report::{PaperFieldGrade, PaperFlag, PaperReport};
 ///
 /// It lives beside the projection because the row and the attrs write
 /// are its two callers, and a second spelling of this mapping is how
-/// the column and the matrix behind a verdict would drift apart.
-pub(crate) fn csl_type_token(t: CslType) -> &'static str {
+/// the column and the matrix behind a verdict would drift apart. A
+/// read surface rendering the same value goes through here for the
+/// same reason.
+pub fn csl_type_token(t: CslType) -> &'static str {
     match t {
         CslType::ArticleJournal => "article-journal",
         CslType::PaperConference => "paper-conference",

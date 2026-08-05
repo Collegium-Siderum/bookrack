@@ -263,6 +263,10 @@ methods! {
     read   no_queue sync    "library.find_papers"           => reads_library::find_papers,
     read   no_queue sync    "library.show_paper"            => reads_library::show_paper,
     read   no_queue sync    "library.show_paper_toc"        => reads_library::show_paper_toc,
+    read   no_queue sync    "library.show_paper_metadata_report"
+                                                    => reads_library::show_paper_metadata_report,
+    read   no_queue sync    "library.show_paper_audit_trail"
+                                                    => reads_library::show_paper_audit_trail,
     read   no_queue sync    "papers.export_csl"             => reads_library::papers_export_csl,
     read   no_queue sync    "papers.fetch_source"           => reads_library::papers_fetch_source,
 

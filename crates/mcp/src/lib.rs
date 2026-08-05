@@ -1414,6 +1414,65 @@ impl BookrackServer {
         }
     }
 
+    /// Recompute and return the full per-field metadata audit report
+    /// for one paper.
+    #[tool(
+        name = "library.show_paper_metadata_report",
+        description = "Recompute the metadata plausibility audit for one paper from \
+                       its cached extraction and return the full per-field report: \
+                       origin (extracted / override / override_confirmed / voided), \
+                       grade, flags, and hint per field, plus the cross-field flags \
+                       and the CSL type the required-field matrix was selected by. \
+                       Each response also carries the judgement stored on the paper's \
+                       audit row; the two disagreeing means the paper was edited after \
+                       that judgement was made, and papers.metadata.reaudit is the \
+                       write path that brings the row back in line. Runs the default \
+                       audit profile; nothing is written back. Returns null when no \
+                       such paper is registered."
+    )]
+    async fn library_show_paper_metadata_report(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let audit_data = bookrack_ops::PaperAuditData::default_data();
+        let audit_profile = bookrack_ops::PaperAuditProfile::default_profile();
+        match reads::papers_metadata::show_paper_metadata_report(
+            handle.ops(),
+            args.intake_id,
+            &audit_data,
+            &audit_profile,
+        ) {
+            Ok(report) => respond_with(&Some(report)),
+            Err(OpsError::IntakeNotFound { .. }) => respond_with::<
+                Option<bookrack_ops::dto::metadata_report::PaperMetadataAuditReport>,
+            >(&None),
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
+    /// Return the metadata-edit audit trail for one paper.
+    #[tool(
+        name = "library.show_paper_audit_trail",
+        description = "Return the metadata-edit audit trail for one paper, oldest \
+                       first: who changed which field, what it said before, and why. \
+                       Returns null when no such paper is registered and no edits \
+                       were ever recorded against the id."
+    )]
+    async fn library_show_paper_audit_trail(
+        &self,
+        Parameters(args): Parameters<BookIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        match reads::papers_metadata::show_paper_audit_trail(handle.ops(), args.intake_id) {
+            Ok(trail) => respond_with(&Some(trail)),
+            Err(OpsError::IntakeNotFound { .. }) => {
+                respond_with::<Option<Vec<bookrack_ops::dto::audit::AuditTrailEntry>>>(&None)
+            }
+            Err(e) => Err(ops_error_to_internal(e)),
+        }
+    }
+
     /// Return the book-level pipeline audit trail for one book.
     #[tool(
         name = "library.show_pipeline_trail",

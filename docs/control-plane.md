@@ -686,6 +686,23 @@ carry is reported as `-32602 invalid params`, not `-32010`.
 - `library.show_paper` / `library.show_paper_toc` — per-paper
   bibliographic record and paginated section outline; `null` when the
   intake id is unknown.
+- `library.show_paper_metadata_report` — the paper plausibility audit
+  recomputed from the cached extraction against the current effective
+  metadata: per-field origin, grade, flags and hint, the cross-field
+  flags, and the CSL type the required-field matrix was selected by.
+  Each response also carries the judgement stored on the paper's audit
+  row (`stored_verdict`, `stored_confidence`, `stored_audited_at`,
+  `stored_profile_name`). The two disagreeing means the paper has been
+  edited since that judgement was made; `papers.metadata.reaudit` is
+  the write path that brings the row back in line. Takes an optional
+  `audit_profile`, resolved the same way `papers.metadata.reaudit`
+  resolves it — the overlay under the target library's data root,
+  with a name outside the paper built-in set refused as `-32602`. So a
+  report and the re-audit it recommends are judged under one set of
+  rules. Nothing is written back.
+- `library.show_paper_audit_trail` — per-paper metadata-edit audit
+  trail, peer of `library.show_audit_trail`. The two catalogs number
+  independently, so each verb answers only for its own side.
 - `papers.export_csl` / `papers.fetch_source` — a paper's metadata as a
   CSL-JSON item, and a reference to its archived source PDF bytes.
   These two are `papers.*`-namespaced but read-class and take no write
@@ -740,6 +757,14 @@ that launched the daemon. The metadata write tools all require a
 `reason`, which lands on the audit row.
 
 Two properties the tool set deliberately does *not* have:
+
+The read set includes `library.show_paper_metadata_report` and
+`library.show_paper_audit_trail`, the paper peers of
+`library.show_metadata_report` and `library.show_audit_trail`. Both run
+the built-in default audit profile rather than the overlay-resolved
+one, matching the book-side tool; the control-plane method resolves the
+overlay, so the two surfaces can grade the same paper differently and
+the tool description says which one it ran.
 
 - **The read tools are not side-effect free.** The four search tools
   append a `retrieval_calls` row (and its hits) per call, so a

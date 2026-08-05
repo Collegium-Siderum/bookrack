@@ -1111,3 +1111,226 @@ async fn a_paper_reaudit_is_logged_as_a_tool_call() -> Result<()> {
     );
     Ok(())
 }
+
+/// The recomputed report follows an override while the stored
+/// judgement stays where the last re-audit left it.
+///
+/// Both halves are asserted from one response: a read that recomputed
+/// but reported the stored rollup, or one that echoed the stored row
+/// as if it were fresh, would each satisfy only one of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_paper_report_recomputes_while_the_stored_judgement_stays_put() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+
+        let before = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.show_paper_metadata_report",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        let before = &before["result"];
+        assert!(
+            !before.is_null(),
+            "the seeded paper must have a report: {before}"
+        );
+        let title_origin = |r: &Value| -> String {
+            r["fields"]
+                .as_array()
+                .expect("fields array")
+                .iter()
+                .find(|f| f["field"] == "title")
+                .expect("a title row")["origin"]
+                .as_str()
+                .expect("origin string")
+                .to_string()
+        };
+        assert_eq!(title_origin(before), "extracted");
+        let stored_before = before["stored_verdict"].clone();
+        assert!(
+            stored_before.is_string(),
+            "the fixture must have a stored judgement to compare against: {before}"
+        );
+
+        // Void the DOI: `article-journal` requires it, so the
+        // recomputation must move off `clean` while the stored row,
+        // which nothing re-audited, must not.
+        let resp = call(
+            &mut reader,
+            &mut w,
+            2,
+            "papers.metadata.void",
+            json!({"intake_id": intake_id, "field": "doi"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the void must succeed: {resp}");
+        let resp = call(
+            &mut reader,
+            &mut w,
+            3,
+            "papers.metadata.set",
+            json!({"intake_id": intake_id, "field": "title", "value": "A Curated Title"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the set must succeed: {resp}");
+
+        let after = call(
+            &mut reader,
+            &mut w,
+            4,
+            "library.show_paper_metadata_report",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        let after = &after["result"];
+        assert_eq!(
+            title_origin(after),
+            "override",
+            "the recomputation must read the effective layer: {after}"
+        );
+        assert_eq!(
+            after["stored_verdict"], stored_before,
+            "nothing re-audited, so the stored judgement must not move: {after}"
+        );
+        assert_ne!(
+            after["verdict"], after["stored_verdict"],
+            "the edit must show up as a divergence between the two: {after}"
+        );
+
+        // A re-audit is what closes the gap.
+        let resp = call(
+            &mut reader,
+            &mut w,
+            5,
+            "papers.metadata.reaudit",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the re-audit must succeed: {resp}");
+        let settled = call(
+            &mut reader,
+            &mut w,
+            6,
+            "library.show_paper_metadata_report",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        let settled = &settled["result"];
+        assert_eq!(
+            settled["verdict"], settled["stored_verdict"],
+            "after a re-audit the two must agree: {settled}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+    Ok(())
+}
+
+/// The paper audit trail reports the rows the curation writes left,
+/// attributed to the surface that made them.
+///
+/// This is what welds the read to the write: if the write side stopped
+/// recording, this read would have nothing to return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_paper_audit_trail_reports_what_the_curation_writes_recorded() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let intake_id = seed_audited_paper(data_root.path())?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let resp = call(
+            &mut reader,
+            &mut w,
+            1,
+            "papers.metadata.set",
+            json!({
+                "intake_id": intake_id,
+                "field": "title",
+                "value": "A Curated Title",
+                "reason": "checked against the published version",
+            }),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "the set must succeed: {resp}");
+
+        let trail = call(
+            &mut reader,
+            &mut w,
+            2,
+            "library.show_paper_audit_trail",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        let rows = trail["result"]
+            .as_array()
+            .ok_or_else(|| eyre!("the trail must be an array: {trail}"))?;
+        assert_eq!(rows.len(), 1, "one edit, one row: {trail}");
+        assert_eq!(rows[0]["field"], "title");
+        assert_eq!(rows[0]["new_value"], "A Curated Title");
+        assert_eq!(rows[0]["old_value"], "Synthetic Findings in Test Spaces");
+        assert_eq!(rows[0]["reason"], "checked against the published version");
+        assert_eq!(rows[0]["actor_kind"], "human");
+
+        // The book-side trail must not answer for a paper id: the two
+        // catalogs number independently, and one answering for the
+        // other is how a curator reads the wrong history.
+        let book_trail = call(
+            &mut reader,
+            &mut w,
+            3,
+            "library.show_audit_trail",
+            json!({"intake_id": intake_id}),
+        )
+        .await?;
+        assert!(
+            book_trail["result"].is_null(),
+            "the book trail must not report a paper's edits: {book_trail}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+    Ok(())
+}

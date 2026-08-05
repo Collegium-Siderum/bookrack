@@ -456,6 +456,63 @@ pub fn show_metadata_report(
     }
 }
 
+/// Addressing parameters for a paper read that runs the audit: the
+/// paper, and optionally the profile to judge it under.
+#[derive(Debug, Deserialize)]
+pub struct PaperAuditReadParams {
+    pub intake_id: i64,
+    /// Optional paper-side audit profile name. Absent means the
+    /// overlay-resolved default; a name outside the paper built-in set
+    /// is refused as invalid params.
+    #[serde(default)]
+    pub audit_profile: Option<String>,
+    #[serde(default)]
+    pub library: Option<String>,
+}
+
+pub fn show_paper_metadata_report(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: PaperAuditReadParams = parse(params, "library.show_paper_metadata_report")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    crate::audit_helpers::require_known_profile(
+        p.audit_profile.as_deref(),
+        bookrack_glean::audit::profile::ALL_BUILT_IN_NAMES,
+    )
+    .map_err(super::input_err)?;
+    // The overlay lives under the target library's data root, so the
+    // report is judged under the same rules `papers.metadata.reaudit`
+    // would write with — a read that graded differently from the write
+    // it recommends would be worse than no read.
+    let audit_profile =
+        crate::audit_helpers::load_paper_audit_profile(handle.cfg(), p.audit_profile.as_deref());
+    let audit_data = crate::audit_helpers::load_paper_audit_data(handle.cfg());
+    match reads::papers_metadata::show_paper_metadata_report(
+        handle.ops(),
+        p.intake_id,
+        &audit_data,
+        &audit_profile,
+    ) {
+        Ok(report) => to_value(&Some(report)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
+pub fn show_paper_audit_trail(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: BookIdParams = parse(params, "library.show_paper_audit_trail")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    match reads::papers_metadata::show_paper_audit_trail(handle.ops(), p.intake_id) {
+        Ok(entries) => to_value(&Some(entries)),
+        Err(OpsError::IntakeNotFound { .. }) => Ok(Value::Null),
+        Err(e) => Err(ops_internal(e)),
+    }
+}
+
 pub fn list_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: ListMetadataParams = parse(params, "library.list_metadata")?;
     let handle = resolve(ctx, p.library.as_deref())?;

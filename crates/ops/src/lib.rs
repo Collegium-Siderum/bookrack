@@ -36,6 +36,7 @@ use bookrack_embed::Embedder;
 use bookrack_query::{Library, QueryError};
 use bookrack_rerank::RerankClient;
 
+pub use bookrack_glean::audit::{PaperAuditData, PaperAuditProfile};
 pub use bookrack_ingest::{AuditData, AuditProfile};
 pub use bookrack_query::{Citation, SearchOptions};
 pub use dto::audit::Caller;

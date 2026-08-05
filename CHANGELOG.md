@@ -26,6 +26,26 @@ release workflow extracts the matching section verbatim from this file.
   logged in `mcp_tool_calls` under its method name, the way paper
   reads already were.
 
+- **The paper metadata audit is readable per field.**
+  `library.show_paper_metadata_report` recomputes the plausibility
+  audit from a paper's cached extraction against its current effective
+  metadata and returns the whole judgement: per-field origin, grade,
+  flags and hint, the cross-field flags, and the CSL type the
+  required-field matrix was chosen by. The book side has had this read
+  since the audit existed; on the paper side the only way to see why a
+  record was graded `needs_work` was to run a re-audit and watch the
+  two-scalar rollup move.
+
+  Each response also carries the judgement stored on the paper's audit
+  row. The two disagreeing is the answer to a question nothing could
+  answer before — whether the paper has been edited since it was last
+  judged — and `papers metadata reaudit` is what closes the gap.
+
+- **The paper metadata-edit trail is readable.**
+  `library.show_paper_audit_trail` returns a paper's edit history
+  oldest first, the peer of `library.show_audit_trail`. Both reads are
+  also MCP tools.
+
 - **The paper curation verbs take `--reason`.** All nine accept one and
   record it on the audit row. `ack` and `reject` require it, matching
   the book side: they are the two verbs that overrule a judgement, and
