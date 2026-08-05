@@ -1334,3 +1334,223 @@ async fn the_paper_audit_trail_reports_what_the_curation_writes_recorded() -> Re
     join_with_deadline(runtime, repl_handle, driver).await?;
     Ok(())
 }
+
+/// Register one paper carrying an audit grade and a review status, so
+/// a listing has something to include and something to leave out.
+fn seed_graded_paper(
+    data_root: &std::path::Path,
+    sha: &str,
+    title: &str,
+    confidence: &str,
+    status: &str,
+) -> Result<i64> {
+    use bookrack_catalog::{NewIntake, NewPublicationAttrs, NewReview};
+
+    let mut catalog = Catalog::open(&data_root.join("papers_catalog.db"))
+        .map_err(|e| eyre!("open paper catalog to seed: {e}"))?;
+    let intake_id = catalog
+        .register_intake(ItemKind::Paper, &NewIntake::new(sha).format("pdf"))
+        .map_err(|e| eyre!("seed intake: {e}"))?
+        .into_intake()
+        .intake_id;
+    let mut attrs = NewPublicationAttrs::new(intake_id, ItemKind::Paper);
+    attrs.title = Some(title.to_string());
+    attrs.confidence = Some(confidence.to_string());
+    attrs.audit_verdict = Some(if confidence == "high" {
+        "clean".to_string()
+    } else {
+        "needs_work".to_string()
+    });
+    catalog
+        .upsert_publication_attrs(&attrs)
+        .map_err(|e| eyre!("seed attrs: {e}"))?;
+    catalog
+        .upsert_review(&NewReview::new(
+            intake_id,
+            ItemKind::Paper,
+            "pipeline",
+            status,
+        ))
+        .map_err(|e| eyre!("seed review: {e}"))?;
+    Ok(intake_id)
+}
+
+/// The paper review queue holds the papers that need review and only
+/// those, and a curator's decision takes one off it.
+///
+/// Three papers are seeded, one per review state the preset spans plus
+/// one it must exclude: a fixture missing `acknowledged` passes
+/// against a preset that only looks for `pending`, and a fixture with
+/// one row passes whether or not the predicate was ever bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_paper_review_queue_holds_what_needs_review_and_empties_on_a_decision() -> Result<()> {
+    process_env(ProcessEnv::daemon());
+    let data_root = tempfile::tempdir()?;
+    let runtime_root = tempfile::tempdir()?;
+    let flagged = seed_graded_paper(
+        data_root.path(),
+        "sha-flagged",
+        "A Flagged Paper",
+        "low",
+        "pending",
+    )?;
+    let acknowledged = seed_graded_paper(
+        data_root.path(),
+        "sha-acknowledged",
+        "An Acknowledged Paper",
+        "medium",
+        "acknowledged",
+    )?;
+    let settled = seed_graded_paper(
+        data_root.path(),
+        "sha-settled",
+        "A Settled Paper",
+        "high",
+        "approved",
+    )?;
+
+    let runtime = bookrack_runtime::DaemonRuntime::start(build_opts(
+        data_root.path().into(),
+        runtime_root.path().into(),
+        true,
+    ))
+    .await?;
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let rows = |resp: &Value| -> Vec<Value> {
+            resp["result"]["rows"]
+                .as_array()
+                .expect("rows array")
+                .clone()
+        };
+        let ids = |resp: &Value| -> Vec<i64> {
+            let mut v: Vec<i64> = rows(resp)
+                .iter()
+                .map(|r| r["intake_id"].as_i64().expect("intake_id"))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+
+        let all = call(
+            &mut reader,
+            &mut w,
+            1,
+            "library.list_paper_metadata",
+            json!({}),
+        )
+        .await?;
+        assert_eq!(
+            ids(&all),
+            vec![flagged, acknowledged, settled],
+            "the unfiltered listing must hold every paper: {all}"
+        );
+        // Each row's projection has to come off the paper scope. With
+        // no predicate to bind, the id list alone is the same whichever
+        // scope the query joined on, so the row content is what says
+        // which one it read.
+        let flagged_row = rows(&all)
+            .into_iter()
+            .find(|r| r["intake_id"].as_i64() == Some(flagged))
+            .ok_or_else(|| eyre!("the flagged paper must be listed: {all}"))?;
+        assert_eq!(flagged_row["title"], "A Flagged Paper", "{flagged_row}");
+        assert_eq!(flagged_row["confidence"], "low", "{flagged_row}");
+        assert_eq!(flagged_row["review_status"], "pending", "{flagged_row}");
+
+        let queue = call(
+            &mut reader,
+            &mut w,
+            2,
+            "library.list_paper_pending_reviews",
+            json!({}),
+        )
+        .await?;
+        assert_eq!(
+            ids(&queue),
+            vec![flagged, acknowledged],
+            "the queue spans both unfinished review states and excludes the settled one: {queue}"
+        );
+
+        // Deciding takes it off the queue — the loop the paper side
+        // never closed.
+        let resp = call(
+            &mut reader,
+            &mut w,
+            3,
+            "papers.metadata.approve",
+            json!({"intake_id": flagged, "reason": "checked against the venue"}),
+        )
+        .await?;
+        assert!(resp["error"].is_null(), "approve must succeed: {resp}");
+
+        let queue = call(
+            &mut reader,
+            &mut w,
+            4,
+            "library.list_paper_pending_reviews",
+            json!({}),
+        )
+        .await?;
+        assert_eq!(
+            ids(&queue),
+            vec![acknowledged],
+            "an approved paper must leave the queue and the others must stay: {queue}"
+        );
+        let all = call(
+            &mut reader,
+            &mut w,
+            5,
+            "library.list_paper_metadata",
+            json!({}),
+        )
+        .await?;
+        assert_eq!(
+            ids(&all).len(),
+            3,
+            "leaving the queue is not leaving the registry: {all}"
+        );
+
+        // Paging reports the whole result set, not the page.
+        let page = call(
+            &mut reader,
+            &mut w,
+            6,
+            "library.list_paper_metadata",
+            json!({"limit": 1}),
+        )
+        .await?;
+        assert_eq!(ids(&page).len(), 1, "limit must bound the page: {page}");
+        assert_eq!(page["result"]["total"].as_u64(), Some(3), "{page}");
+        assert_eq!(page["result"]["truncated"].as_bool(), Some(true), "{page}");
+
+        // The filtered listing is the one with a predicate to bind, so
+        // it is the one that fails outright on the wrong scope.
+        let filtered = call(
+            &mut reader,
+            &mut w,
+            7,
+            "library.list_paper_metadata",
+            json!({"title_substring": "Flagged"}),
+        )
+        .await?;
+        assert_eq!(
+            ids(&filtered),
+            vec![flagged],
+            "the title filter must read the paper scope: {filtered}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+
+    join_with_deadline(runtime, repl_handle, driver).await?;
+    Ok(())
+}

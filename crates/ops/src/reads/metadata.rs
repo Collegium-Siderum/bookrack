@@ -103,12 +103,24 @@ pub fn show_metadata_report<E: Embedder>(
     )
 }
 
-/// The confidence grades a book on the review queue carries.
+/// The confidence grades an item on the review queue carries.
 const NEEDS_REVIEW_CONFIDENCE: &[&str] = &["low", "medium"];
 
-/// The review states a book on the review queue carries. A book never
-/// reviewed counts as `pending`.
+/// The review states an item on the review queue carries. An item
+/// never reviewed counts as `pending`.
 const NEEDS_REVIEW_STATUS: &[&str] = &[STATUS_PENDING, STATUS_ACKNOWLEDGED];
+
+/// The filter behind the review-queue preset, shared by both
+/// pipelines: the confidence and review vocabularies are one set, so a
+/// second threshold on the paper side would be a second answer to the
+/// same question.
+pub(crate) fn needs_review_filter() -> IntakeFilter<'static> {
+    IntakeFilter {
+        confidence_in: NEEDS_REVIEW_CONFIDENCE,
+        review_status_in: NEEDS_REVIEW_STATUS,
+        ..IntakeFilter::default()
+    }
+}
 
 /// List registered books with their current confidence and review
 /// status, narrowed by `filter`. Paginated.
@@ -174,12 +186,13 @@ pub fn list_pending_reviews<E: Embedder>(
         "library.list_pending_reviews",
         serde_json::json!({ "limit": limit, "offset": offset }),
         {
-            let filter = IntakeFilter {
-                confidence_in: NEEDS_REVIEW_CONFIDENCE,
-                review_status_in: NEEDS_REVIEW_STATUS,
-                ..IntakeFilter::default()
-            };
-            list_metadata_inner(ops.catalog_db(), ItemKind::Book, filter, limit, offset)
+            list_metadata_inner(
+                ops.catalog_db(),
+                ItemKind::Book,
+                needs_review_filter(),
+                limit,
+                offset,
+            )
         }
     )
 }
@@ -200,6 +213,14 @@ pub(crate) fn list_metadata_inner(
     offset: u32,
 ) -> Result<MetadataListPage> {
     let (effective_limit, _) = clamp_limit(limit);
+    // The kind reaches the query twice: `IntakeFilter::kind` decides
+    // which scope every `node_*` JOIN picks up, and the projection
+    // reads below take it directly. Setting it here rather than
+    // trusting the caller's filter keeps those two from disagreeing —
+    // a filter left on the default scope returns the other pipeline's
+    // rows against this pipeline's catalog, which is an empty page
+    // rather than an error.
+    let filter = IntakeFilter { kind, ..filter };
     let catalog = Catalog::open_read_only(catalog_db)?;
     let (intakes, total) = catalog.find_intakes_page(&filter, effective_limit, offset)?;
     let intake_ids: Vec<i64> = intakes.iter().map(|i| i.intake_id).collect();

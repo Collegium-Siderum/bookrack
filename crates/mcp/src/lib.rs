@@ -1451,6 +1451,53 @@ impl BookrackServer {
         }
     }
 
+    /// Return registered papers with their confidence and review
+    /// status.
+    #[tool(
+        name = "library.list_paper_metadata",
+        description = "List registered papers with their current confidence and \
+                       review status, regardless of audit verdict. Filters match \
+                       the metadata as extracted, before curation, so this is the \
+                       tool for finding records that need fixing; \
+                       `library.find_papers` searches the corrected values. \
+                       Paginated."
+    )]
+    async fn library_list_paper_metadata(
+        &self,
+        Parameters(args): Parameters<MetadataPageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let filter = MetadataFilter::checked(
+            args.title_substring,
+            args.confidence_in.unwrap_or_default(),
+            args.review_status_in.unwrap_or_default(),
+        )
+        .map_err(|unknown| unknown_filter_value_to_mcp(&unknown))?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers_metadata::list_paper_metadata(handle.ops(), filter, limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
+    /// Return papers still on the metadata review queue.
+    #[tool(
+        name = "library.list_paper_pending_reviews",
+        description = "List papers whose metadata audit confidence is low or medium \
+                       and whose review is still pending or acknowledged. Paginated."
+    )]
+    async fn library_list_paper_pending_reviews(
+        &self,
+        Parameters(args): Parameters<MetadataPageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let handle = self.resolve_handle(args.library.as_deref())?;
+        let limit = args.limit.unwrap_or(0);
+        let offset = args.offset.unwrap_or(0);
+        let page = reads::papers_metadata::list_paper_pending_reviews(handle.ops(), limit, offset)
+            .map_err(ops_error_to_internal)?;
+        respond_with(&page)
+    }
+
     /// Return the metadata-edit audit trail for one paper.
     #[tool(
         name = "library.show_paper_audit_trail",

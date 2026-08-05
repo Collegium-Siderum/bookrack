@@ -40,6 +40,8 @@ const READ_TOOLS: &[&str] = &[
     "library.show_book",
     "library.show_metadata_audit",
     "library.show_metadata_report",
+    "library.list_paper_metadata",
+    "library.list_paper_pending_reviews",
     "library.show_paper",
     "library.show_paper_audit_trail",
     "library.show_paper_metadata_report",

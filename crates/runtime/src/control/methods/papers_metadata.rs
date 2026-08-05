@@ -29,8 +29,6 @@ use crate::audit_helpers::{
 use crate::control::error_map::{registry_err, write_err};
 use crate::control::jsonrpc::{INVALID_PARAMS, RpcError};
 
-const PAPER_SCOPE: &str = "paper";
-
 fn parse<T: for<'de> Deserialize<'de>>(
     params: &Option<Value>,
     method: &str,
@@ -478,8 +476,3 @@ pub async fn contributor_remove(
     )
     .await
 }
-
-/// Marker so the unused-`PAPER_SCOPE` constant can be removed in a
-/// follow-up that introduces a scope-aware metadata listing. Kept as
-/// a public-facing label that downstream renderers can call out.
-pub const SCOPE: &str = PAPER_SCOPE;

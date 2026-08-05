@@ -547,6 +547,40 @@ pub fn list_pending_reviews(
     to_value(&page)
 }
 
+pub fn list_paper_metadata(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let p: ListMetadataParams = parse(params, "library.list_paper_metadata")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let filter = MetadataFilter::checked(
+        p.title_substring,
+        p.confidence_in.unwrap_or_default(),
+        p.review_status_in.unwrap_or_default(),
+    )
+    .map_err(|unknown| unknown_filter_value(&unknown))?;
+    let page = reads::papers_metadata::list_paper_metadata(
+        handle.ops(),
+        filter,
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
+    to_value(&page)
+}
+
+pub fn list_paper_pending_reviews(
+    params: &Option<Value>,
+    ctx: &MethodContext,
+) -> Result<Value, RpcError> {
+    let p: PageParams = parse(params, "library.list_paper_pending_reviews")?;
+    let handle = resolve(ctx, p.library.as_deref())?;
+    let page = reads::papers_metadata::list_paper_pending_reviews(
+        handle.ops(),
+        p.limit.unwrap_or(0),
+        p.offset.unwrap_or(0),
+    )
+    .map_err(ops_internal)?;
+    to_value(&page)
+}
+
 pub fn show_audit_trail(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
     let p: BookIdParams = parse(params, "library.show_audit_trail")?;
     let handle = resolve(ctx, p.library.as_deref())?;

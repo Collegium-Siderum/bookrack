@@ -41,6 +41,14 @@ release workflow extracts the matching section verbatim from this file.
   answer before — whether the paper has been edited since it was last
   judged — and `papers metadata reaudit` is what closes the gap.
 
+- **The paper review queue is browsable.**
+  `library.list_paper_metadata` lists papers with their confidence and
+  review status, and `library.list_paper_pending_reviews` is the preset
+  for the ones still needing a decision. The paper side had the four
+  review verbs but no way to ask which papers they applied to, so a
+  record entering the queue at ingest had no route out that did not
+  start with reading every row.
+
 - **The paper metadata-edit trail is readable.**
   `library.show_paper_audit_trail` returns a paper's edit history
   oldest first, the peer of `library.show_audit_trail`. Both reads are

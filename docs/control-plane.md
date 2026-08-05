@@ -703,6 +703,13 @@ carry is reported as `-32602 invalid params`, not `-32010`.
 - `library.show_paper_audit_trail` — per-paper metadata-edit audit
   trail, peer of `library.show_audit_trail`. The two catalogs number
   independently, so each verb answers only for its own side.
+- `library.list_paper_metadata` / `library.list_paper_pending_reviews`
+  — paginated paper review-queue browse, peers of the `*_metadata`
+  pair. Same filters, same refusal on an unrecognised confidence or
+  review state, and the same base-layer title predicate. The preset is
+  the book side's — low or medium confidence, still pending or
+  acknowledged — because the confidence and review vocabularies are one
+  set across both pipelines.
 - `papers.export_csl` / `papers.fetch_source` — a paper's metadata as a
   CSL-JSON item, and a reference to its archived source PDF bytes.
   These two are `papers.*`-namespaced but read-class and take no write
@@ -758,9 +765,11 @@ that launched the daemon. The metadata write tools all require a
 
 Two properties the tool set deliberately does *not* have:
 
-The read set includes `library.show_paper_metadata_report` and
-`library.show_paper_audit_trail`, the paper peers of
-`library.show_metadata_report` and `library.show_audit_trail`. Both run
+The read set includes `library.show_paper_metadata_report`,
+`library.show_paper_audit_trail`, `library.list_paper_metadata` and
+`library.list_paper_pending_reviews` — the paper peers of
+`library.show_metadata_report`, `library.show_audit_trail`,
+`library.list_metadata` and `library.list_pending_reviews`. Both run
 the built-in default audit profile rather than the overlay-resolved
 one, matching the book-side tool; the control-plane method resolves the
 overlay, so the two surfaces can grade the same paper differently and

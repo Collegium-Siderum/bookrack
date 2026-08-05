@@ -267,6 +267,9 @@ methods! {
                                                     => reads_library::show_paper_metadata_report,
     read   no_queue sync    "library.show_paper_audit_trail"
                                                     => reads_library::show_paper_audit_trail,
+    read   no_queue sync    "library.list_paper_metadata"   => reads_library::list_paper_metadata,
+    read   no_queue sync    "library.list_paper_pending_reviews"
+                                                    => reads_library::list_paper_pending_reviews,
     read   no_queue sync    "papers.export_csl"             => reads_library::papers_export_csl,
     read   no_queue sync    "papers.fetch_source"           => reads_library::papers_fetch_source,
 
