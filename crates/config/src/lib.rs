@@ -2754,6 +2754,76 @@ fn identify_library(
     }
 }
 
+/// What a data root turns out to be, once matched against the library
+/// registry.
+///
+/// A path is not something a daemon serving several libraries can be
+/// asked for, so a client holding one has to turn it into a registry
+/// name before it can route. This is that translation, and its three
+/// outcomes are the three things the caller has to say differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootIdentity {
+    /// The root is a registered library's, matched by manifest uuid or
+    /// by path, and the entry points at this same place.
+    Named {
+        name: String,
+        by: LibraryIdentification,
+    },
+    /// The root's manifest carries the uuid of a registered library
+    /// whose entry points somewhere else. Reported rather than
+    /// followed: the two are the same library by identity and
+    /// different places on disk, and acting on the registered one
+    /// would silently redirect a caller who named a path.
+    UuidElsewhere { name: String, entry_root: PathBuf },
+    /// No entry in any registry matches this root.
+    Unregistered,
+}
+
+/// Match `root` against the library registry the environment names.
+///
+/// Reads [`REGISTRY_ENV`] and the platform-default registry in the same
+/// precedence [`Config::resolve`] uses, so a caller translating a path
+/// selection reaches the same entries the resolver would. An
+/// unreadable registry answers [`RootIdentity::Unregistered`]: the
+/// question here is which entry claims this root, and no readable
+/// entries means none does.
+pub fn identify_root(root: &Path) -> RootIdentity {
+    let registries = load_registries(std::env::var(REGISTRY_ENV).ok(), load_default_registry);
+    let loaded: Vec<&Registry> = [
+        registries.env.as_ref(),
+        registries.platform_default.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    identify_root_in(&loaded, root)
+}
+
+/// [`identify_root`] against registries already in hand. Pure.
+fn identify_root_in(registries: &[&Registry], root: &Path) -> RootIdentity {
+    if let Ok(Some(manifest)) = load_manifest(root) {
+        for reg in registries {
+            if let Some(entry) = find_library_by_uuid(reg, &manifest.uuid) {
+                return if same_root(&entry.data_dir, root) {
+                    RootIdentity::Named {
+                        name: entry.name,
+                        by: LibraryIdentification::ManifestUuid,
+                    }
+                } else {
+                    RootIdentity::UuidElsewhere {
+                        name: entry.name,
+                        entry_root: entry.data_dir,
+                    }
+                };
+            }
+        }
+    }
+    match claim_root_by_path(registries, root) {
+        (Some(name), Some(by)) => RootIdentity::Named { name, by },
+        _ => RootIdentity::Unregistered,
+    }
+}
+
 /// Claim a registry name for `resolved_dir` by matching an entry's data
 /// root to it, registry before platform-default registry. Both sides are
 /// canonicalized best-effort before comparison — a failure to
@@ -4349,6 +4419,79 @@ mod tests {
         );
         assert_eq!(name.as_deref(), Some("primary"));
         assert_eq!(id, Some(LibraryIdentification::ManifestUuid));
+    }
+
+    /// A root whose manifest uuid names a registered library that
+    /// lives somewhere else is reported, not followed. Following it
+    /// would answer for a different directory than the one the caller
+    /// typed — the same library by identity, another place on disk.
+    #[test]
+    fn a_uuid_registered_at_another_root_is_reported_rather_than_followed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("moved");
+        std::fs::create_dir_all(&root).expect("create the moved root");
+        std::fs::write(
+            root.join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\nformat_version = 1\nuuid = \"uuid-a\"\nname = \"a\"\n",
+        )
+        .expect("write a manifest");
+        let registry =
+            parse_registry("[libraries.a]\ndata_dir = \"/roots/a\"\nuuid = \"uuid-a\"\n")
+                .expect("parse the registry");
+
+        let identity = identify_root_in(&[&registry], &root);
+        assert_eq!(
+            identity,
+            RootIdentity::UuidElsewhere {
+                name: "a".to_string(),
+                entry_root: PathBuf::from("/roots/a"),
+            }
+        );
+    }
+
+    /// The same uuid at the root the registry records is an ordinary
+    /// match. Without this the case above would pass for a matcher
+    /// that reported every uuid hit as a mismatch.
+    #[test]
+    fn a_uuid_at_its_registered_root_is_a_plain_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("home");
+        std::fs::create_dir_all(&root).expect("create the root");
+        std::fs::write(
+            root.join(MANIFEST_FILENAME),
+            "format = \"bookrack-library\"\nformat_version = 1\nuuid = \"uuid-a\"\nname = \"a\"\n",
+        )
+        .expect("write a manifest");
+        let registry = parse_registry(&format!(
+            "[libraries.a]\ndata_dir = \"{}\"\nuuid = \"uuid-a\"\n",
+            root.display()
+        ))
+        .expect("parse the registry");
+
+        assert_eq!(
+            identify_root_in(&[&registry], &root),
+            RootIdentity::Named {
+                name: "a".to_string(),
+                by: LibraryIdentification::ManifestUuid,
+            }
+        );
+    }
+
+    /// A root no entry claims stays unregistered — the caller has to
+    /// hear that rather than be handed a neighbour's name.
+    #[test]
+    fn a_root_no_entry_claims_is_unregistered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("stranger");
+        std::fs::create_dir_all(&root).expect("create the root");
+        let registry =
+            parse_registry("[libraries.a]\ndata_dir = \"/roots/a\"\nuuid = \"uuid-a\"\n")
+                .expect("parse the registry");
+
+        assert_eq!(
+            identify_root_in(&[&registry], &root),
+            RootIdentity::Unregistered
+        );
     }
 
     #[test]

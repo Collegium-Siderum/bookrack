@@ -234,7 +234,6 @@ mod tests {
             pid: 4242,
             mcp: "127.0.0.1:8391".to_string(),
             control_sock: control.map(PathBuf::from),
-            data_dir: None,
         }
     }
 

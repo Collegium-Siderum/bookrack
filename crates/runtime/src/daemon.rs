@@ -339,13 +339,6 @@ impl DaemonRuntime {
 
         // 4. Config::resolve + obs init
         let cfg = Arc::new(Config::resolve(&opts.selection).context("resolve configuration")?);
-        // Now that the data root and (optional) registry name are
-        // known, append them to the session lock so other tools can
-        // identify which library this session serves without paying
-        // for an RPC. Mirrors the `record_control_sock` append above.
-        tty_lock
-            .record_library_root(cfg.data_dir())
-            .context("record library root in session lock")?;
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root
         //     fails with no reranker spawned and no half-open handles.

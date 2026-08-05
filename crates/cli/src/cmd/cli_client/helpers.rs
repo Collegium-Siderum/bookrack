@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use bookrack_cli::daemon_call::{DEFAULT_AWAIT_STALL_TIMEOUT, DEFAULT_CALL_TIMEOUT};
 use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
+use bookrack_cli::path_sugar::{self, Routing};
 use bookrack_cli::render::confirm::{ConfirmMode, Confirmation};
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::job_report::{JobOutcomeRecord, JobOutcomeReport, JobOutcomeState};
@@ -34,11 +35,72 @@ pub async fn connect(runtime_dir: Option<&Path>) -> Result<Arc<ControlClient>> {
         Err(ControlError::NotRunning) => return Err(BookrackCliError::DaemonNotRunning.into()),
         Err(source) => return Err(BookrackCliError::DaemonUnreachable { source }.into()),
     };
-    match bookrack_control_client::connect_with_default_timeout(&socket, DEFAULT_CALL_TIMEOUT).await
-    {
-        Ok(client) => Ok(Arc::new(client)),
-        Err(ControlError::NotRunning) => Err(BookrackCliError::DaemonNotRunning.into()),
-        Err(source) => Err(BookrackCliError::DaemonUnreachable { source }.into()),
+    let client =
+        match bookrack_control_client::connect_with_default_timeout(&socket, DEFAULT_CALL_TIMEOUT)
+            .await
+        {
+            Ok(client) => Arc::new(client),
+            Err(ControlError::NotRunning) => return Err(BookrackCliError::DaemonNotRunning.into()),
+            Err(source) => return Err(BookrackCliError::DaemonUnreachable { source }.into()),
+        };
+    settle_library_selection(&client).await?;
+    Ok(client)
+}
+
+/// Decide, once a connection exists, which library name this
+/// invocation puts on its calls.
+///
+/// A name needs no deciding. A path does: the registry translates it
+/// into the name of the library that claims that root, and a root no
+/// entry claims has no name to send — which is ordinary, and means the
+/// daemon serving it was started on that same path. Whether *this*
+/// daemon is that one is the only thing left to ask, and only the
+/// daemon can answer it, so the question is asked here rather than at
+/// startup: a command that never connects never needed it, and one
+/// that finds no daemon has a better thing to report.
+///
+/// The probe calls `status` directly rather than through [`dispatch`]:
+/// the selection it exists to settle is not settled yet, and `status`
+/// is one of the methods that refuses a selection.
+async fn settle_library_selection(client: &ControlClient) -> Result<()> {
+    let Some(selection) = library_param::pending() else {
+        return Ok(());
+    };
+    let name = match path_sugar::routing_for(selection)? {
+        Routing::Unselected => None,
+        Routing::Named(name) => Some(name),
+        Routing::UnclaimedRoot(asked) => {
+            let status = client
+                .call_raw("status", Value::Null)
+                .await
+                .context("status rpc")?;
+            let served = status.get("data_dir").and_then(Value::as_str);
+            match served {
+                Some(served) if same_root(Path::new(served), &asked) => None,
+                Some(served) => {
+                    return Err(BookrackCliError::RootNotRoutable {
+                        problem: path_sugar::serves_another_root(&asked, Path::new(served)),
+                    }
+                    .into());
+                }
+                // A daemon that does not say which root it serves
+                // cannot be shown to be serving another one. Refusing
+                // on that would turn a missing field into an accusation.
+                None => None,
+            }
+        }
+    };
+    library_param::init(name);
+    Ok(())
+}
+
+/// Whether two paths name the same root, comparing canonicalized forms
+/// and falling back to a raw comparison when canonicalization fails —
+/// the same rule the config crate matches registry entries by.
+fn same_root(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

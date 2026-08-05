@@ -59,16 +59,6 @@ pub enum BookrackCliError {
     #[error("doctor: at least one check failed; see the table above")]
     DoctorUnhealthy,
 
-    /// The invoking shell's explicit library selection
-    /// (`--data-dir` / `--library` / `BOOKRACK_DATA_DIR`) disagrees
-    /// with the library a running daemon is serving, and the
-    /// requested subcommand routes through that daemon. Bail
-    /// instead of silently acting on the daemon's library.
-    #[error(
-        "running daemon serves {running}; refusing to act on {intent}.\nRun `bookrack quit` and start a new session with the desired --library/--data-dir to switch."
-    )]
-    LibraryMismatch { intent: String, running: String },
-
     /// Daemon rejected the call as a user-input failure: bad params,
     /// unknown library, unknown job/plan id, missing confirmation
     /// token, or an unknown RPC method (typo or unsupported by this
@@ -164,6 +154,16 @@ pub enum BookrackCliError {
         hint: String,
     },
 
+    /// The invocation selects a data root by path — `--data-dir` or
+    /// `BOOKRACK_DATA_DIR` — on a command that routes through the
+    /// daemon, and the root cannot be turned into a name the daemon can
+    /// be asked for: no registry entry claims it, or its manifest
+    /// identity belongs to an entry pointing somewhere else. Operator
+    /// input, not a bug: exit 2, and the reporter draws the three
+    /// parts.
+    #[error("{}", .problem.summary)]
+    RootNotRoutable { problem: Problem },
+
     /// The invocation names a library with `--library`, but the
     /// command it names it on reports on the daemon itself — or on
     /// every library at once — so the selection cannot be honoured.
@@ -199,7 +199,6 @@ impl BookrackCliError {
             Self::StaleSessionLock { .. } => 3,
             Self::SessionLockUnreadable { .. } => 1,
             Self::DoctorUnhealthy => 1,
-            Self::LibraryMismatch { .. } => 2,
             Self::RpcUserError { .. } => 2,
             Self::RpcBusy { .. } | Self::RpcBackendUnavailable { .. } => 4,
             Self::RpcInternal { .. } => 1,
@@ -207,7 +206,9 @@ impl BookrackCliError {
             Self::RpcParamsInvalid { .. } | Self::RpcMethodNotNamespaced { .. } => 2,
             Self::LocalUserError { .. } => 2,
             Self::ConfirmationUnanswerable { .. } => 2,
-            Self::LibraryNotRoutable { .. } | Self::PreflightRefused { .. } => 2,
+            Self::LibraryNotRoutable { .. }
+            | Self::RootNotRoutable { .. }
+            | Self::PreflightRefused { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -274,7 +275,9 @@ impl BookrackCliError {
             Self::RpcUserError { data, .. }
             | Self::RpcInternal { data, .. }
             | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
-            Self::LibraryNotRoutable { problem } | Self::PreflightRefused { problem } => {
+            Self::LibraryNotRoutable { problem }
+            | Self::RootNotRoutable { problem }
+            | Self::PreflightRefused { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
@@ -372,9 +375,15 @@ mod tests {
         );
         assert_eq!(BookrackCliError::DoctorUnhealthy.exit_code(), 1);
         assert_eq!(
-            BookrackCliError::LibraryMismatch {
-                intent: "library x".into(),
-                running: "library y".into(),
+            BookrackCliError::RootNotRoutable {
+                problem: bookrack_core::Problem {
+                    summary: "no registered library at \"/x\"".into(),
+                    data: ProblemData {
+                        detail: None,
+                        hint: None,
+                        retryable: false,
+                    },
+                },
             }
             .exit_code(),
             2
@@ -419,16 +428,33 @@ mod tests {
         );
     }
 
+    /// A three-part refusal renders its summary alone on the one-line
+    /// surface; the detail and hint are the reporter's to draw. A
+    /// `Display` that reached into `data` would print the same
+    /// sentence twice.
     #[test]
-    fn library_mismatch_message_points_at_quit_and_names_both_sides() {
-        let s = BookrackCliError::LibraryMismatch {
-            intent: "/asked".into(),
-            running: "/served (library a)".into(),
-        }
-        .to_string();
-        assert!(s.contains("/asked"));
-        assert!(s.contains("/served (library a)"));
-        assert!(s.contains("bookrack quit"));
+    fn a_root_refusal_renders_its_summary_and_carries_the_rest() {
+        let err = BookrackCliError::RootNotRoutable {
+            problem: bookrack_core::Problem {
+                summary: "no registered library at \"/asked\"".into(),
+                data: ProblemData {
+                    detail: Some("A running daemon serves libraries by name.".into()),
+                    hint: Some("Register it with `bookrack libraries register`.".into()),
+                    retryable: false,
+                },
+            },
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("/asked"), "{rendered}");
+        assert!(
+            !rendered.contains("libraries register"),
+            "the hint belongs to the reporter, not to the one-line form: {rendered}"
+        );
+        let data = err.problem_data().expect("the three parts survive");
+        assert_eq!(
+            data.hint.as_deref(),
+            Some("Register it with `bookrack libraries register`.")
+        );
     }
 
     #[test]

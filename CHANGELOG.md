@@ -465,15 +465,38 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
-- **The session lock no longer names a library.** It recorded
-  `library_name=` alongside `data_dir=`, and with every registered
-  library mounted that name could only ever be the primary — the one
-  the daemon came up under. Its only reader compared a caller's
-  `--library` against it and refused every other mounted library, which
-  is the refusal removed above. The `data_dir=` line stays: a selection
-  given as a path has nothing else to be checked against. Which
-  libraries a daemon serves is answered by `library.list`, and a lock
-  written by an older daemon still parses — the extra line is ignored.
+- **The session lock no longer records a library identity.** It
+  carried `data_dir=` and `library_name=`, and with every registered
+  library mounted, either one could only name a single mount. Their one
+  reader compared a caller's selection against them and refused
+  everything else the daemon was serving. Which libraries a daemon
+  serves is answered by `library.list`; a lock written by an older
+  daemon still parses, with both lines ignored.
+
+- **A data root selected by path is resolved to the library that owns
+  it.** `--data-dir` and `BOOKRACK_DATA_DIR` name a place on disk,
+  which a daemon serving several libraries cannot be asked for. On a
+  daemon-routed command the registry now translates that root into the
+  library that claims it — by the root's manifest identity first, then
+  by the path — and the command routes there.
+
+  A root no registry entry claims keeps working: it has no name to
+  send, so the running daemon is asked whether that is the root it
+  serves, and the single-library setup answers yes and proceeds
+  exactly as before. A daemon serving something else refuses (exit 2)
+  and names both roots, which is what the retired pre-flight did from
+  the session lock — the question is now put to the daemon rather than
+  to a file it wrote.
+
+  One case is refused before any daemon is consulted: a root whose
+  manifest carries the identity of a registered library that the
+  registry places somewhere else. Following either one would answer for
+  a directory the caller did not name, so both paths go in the message
+  and nothing runs.
+
+  On locally resolving commands (`run`, `init`, `runs`, `retrieval`,
+  `distill`, offline `doctor`, `index-profile` reads) a path is
+  unchanged: it switches the root, and the registry has no say.
 
 
 - **`papers metadata contributor-remove` names the paper the row

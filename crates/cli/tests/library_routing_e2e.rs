@@ -15,6 +15,14 @@
 //! refused as caller input rather than quietly answered by the
 //! default.
 //!
+//! A selection given as a path is sugared into the registry name that
+//! claims that root, so `--data-dir` and `BOOKRACK_DATA_DIR` reach the
+//! same library `--library` does. A root no entry claims has no name to
+//! send, so the daemon is asked whether it is the root it serves: the
+//! ordinary single-library setup answers yes and proceeds unnamed —
+//! `rpc_e2e` runs on exactly that shape — and a daemon serving
+//! something else refuses rather than acting on its own default.
+//!
 //! The embedder probe on the daemon's startup path is answered by
 //! [`EmbedStub`], so no Ollama daemon is required.
 
@@ -107,4 +115,132 @@ async fn a_library_the_daemon_serves_answers_for_itself() {
             .await;
     }
     let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+}
+
+/// Both path channels reach the library that owns the root, and a root
+/// this daemon does not serve is refused instead of being answered by
+/// its default.
+///
+/// The three cases share one daemon and differ only in how the caller
+/// names the library, which is what makes them comparable: `--data-dir`
+/// and the environment variable must land where `--library beta` lands,
+/// and a stranger root must land nowhere.
+#[tokio::test]
+async fn a_path_selection_reaches_the_library_that_owns_the_root() {
+    let sandbox = two_library_world();
+    let lock_path = sandbox.tty_lock_path();
+    let beta_root = sandbox.data_root("beta-root");
+
+    let mut daemon_cmd = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .ollama_url(EmbedStub::url())
+            .build(),
+    );
+    daemon_cmd.args(["--library", "alpha", "run"]);
+    let daemon = DaemonProcess::spawn(daemon_cmd).expect("spawn bookrack run");
+    assert!(
+        wait_for_lock(&lock_path, Duration::from_secs(20)).await,
+        "session lock did not appear; bookrack run may have failed to start",
+    );
+
+    let by_flag = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["--data-dir", &beta_root.display().to_string()])
+        .args(["rpc", "call", "library.info", "{}"])
+        .output()
+        .await
+        .expect("run bookrack rpc call");
+    let stdout = String::from_utf8_lossy(&by_flag.stdout).into_owned();
+    assert!(
+        by_flag.status.success(),
+        "a registered root must route: stderr={}",
+        String::from_utf8_lossy(&by_flag.stderr),
+    );
+    assert!(
+        stdout.contains("\"library_name\": \"beta\""),
+        "--data-dir must reach the library that owns the root: {stdout}",
+    );
+
+    let by_env = Command::from(
+        bookrack_cmd!(&sandbox)
+            .without_data_dir()
+            .data_dir(beta_root.as_path())
+            .build(),
+    )
+    .args(["rpc", "call", "library.info", "{}"])
+    .output()
+    .await
+    .expect("run bookrack rpc call");
+    let stdout = String::from_utf8_lossy(&by_env.stdout).into_owned();
+    assert!(
+        by_env.status.success(),
+        "the environment variable is the same selection: stderr={}",
+        String::from_utf8_lossy(&by_env.stderr),
+    );
+    assert!(
+        stdout.contains("\"library_name\": \"beta\""),
+        "BOOKRACK_DATA_DIR must reach the same library the flag does: {stdout}",
+    );
+
+    let stranger = sandbox.data_root("stranger-root");
+    let unclaimed = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["--data-dir", &stranger.display().to_string()])
+        .args(["rpc", "call", "library.info", "{}"])
+        .output()
+        .await
+        .expect("run bookrack rpc call");
+    let stderr = String::from_utf8_lossy(&unclaimed.stderr).into_owned();
+    assert_eq!(
+        unclaimed.status.code(),
+        Some(2),
+        "a root this daemon does not serve is caller input: stderr={stderr}",
+    );
+    assert!(
+        stderr.contains(&stranger.display().to_string()),
+        "the refusal must name the root that was asked for: {stderr}",
+    );
+    assert!(
+        stderr.contains(&sandbox.data_root("alpha-root").display().to_string()),
+        "and the one the daemon serves, so both sides are on screen: {stderr}",
+    );
+
+    if let Some(id) = daemon.id() {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(id.to_string())
+            .status()
+            .await;
+    }
+    let _ = daemon.wait_with_output(Duration::from_secs(5)).await;
+}
+
+/// A locally resolving command keeps a path selection as what it is
+/// there: a switch into that root. Nothing about routing reaches it,
+/// and an unregistered root is none of the registry's business.
+///
+/// This case comes from the pre-flight suite, which retired with the
+/// check it tested. What it pins is the other side of the split that
+/// outlived it.
+#[tokio::test]
+async fn a_local_command_still_switches_roots_by_path() {
+    let sandbox = two_library_world();
+    let stranger = sandbox.data_root("stranger-root");
+
+    let out = Command::from(bookrack_cmd!(&sandbox).without_data_dir().build())
+        .args(["--data-dir", &stranger.display().to_string()])
+        .args(["retrieval", "list"])
+        .output()
+        .await
+        .expect("run bookrack retrieval list");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a local command must reach its own resolution: stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("No retrieval calls."),
+        "it must report the empty root it was pointed at: stdout={stdout} stderr={stderr}",
+    );
 }

@@ -27,24 +27,47 @@
 
 use std::sync::OnceLock;
 
+use bookrack_config::LibrarySelection;
 use bookrack_core::{Problem, ProblemData};
 use bookrack_runtime::control::methods::{library_key_for, refuses_library};
 use serde_json::Value;
 
 use crate::error::BookrackCliError;
 
+static PENDING: OnceLock<LibrarySelection> = OnceLock::new();
 static SELECTED: OnceLock<Option<String>> = OnceLock::new();
 
-/// Install the invocation's `--library`, once, before any subcommand
-/// runs. A second call is ignored, mirroring [`crate::render::init`]:
+/// Record what a daemon-routed invocation selected, before anything is
+/// known about which library that is. Installed at startup; read once a
+/// connection exists, by the client code that settles it into a name.
+///
+/// A locally resolving command installs nothing: its selection never
+/// travels.
+pub fn init_pending(selection: LibrarySelection) {
+    let _ = PENDING.set(selection);
+}
+
+/// The selection waiting to be settled, or `None` when this invocation
+/// installed none.
+pub fn pending() -> Option<&'static LibrarySelection> {
+    PENDING.get()
+}
+
+/// Install the library this invocation names, once, before any call
+/// goes out. A second call is ignored, mirroring [`crate::render::init`]:
 /// the selection is a property of the process, not of a call site.
+///
+/// A selection expressed as a path arrives here already translated, or
+/// as `None` when the root it names belongs to no registry entry and
+/// the daemon serving it needs no name to find it. The translation is
+/// [`crate::path_sugar`]; it happens once a connection exists, because
+/// its last question — is this the root you serve? — is the daemon's to
+/// answer.
 pub fn init(selected: Option<String>) {
     let _ = SELECTED.set(selected);
 }
 
-/// The library this invocation selected by name, or `None` when it
-/// selected none — or selected one by path, which is not a name and
-/// cannot be routed.
+/// The library this invocation acts on, or `None` when it names none.
 pub fn selected() -> Option<&'static str> {
     SELECTED.get().and_then(|s| s.as_deref())
 }

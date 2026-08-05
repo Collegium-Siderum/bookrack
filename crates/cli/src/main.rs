@@ -13,7 +13,6 @@
 
 mod cmd;
 mod init;
-mod preflight;
 mod run;
 mod selection_routing;
 mod util;
@@ -986,24 +985,17 @@ async fn run() -> Result<()> {
         }
         bookrack_cli::render::init(RenderCtx::new(output, color));
     }
-    // The library this invocation names, installed once for the
-    // control-plane client to put on the wire. Only a name travels: a
-    // `--data-dir` or `BOOKRACK_DATA_DIR` selects a root by path, and
-    // a path is not something a daemon serving several libraries can
-    // be asked for.
-    bookrack_cli::library_param::init(cli.selection().library);
-    let json_global = cli.json;
-
-    // Refuse a daemon-routed command when the invoking shell's
-    // explicit library selection (`--data-dir` / `--library` /
-    // `BOOKRACK_DATA_DIR`) disagrees with the library a running
-    // daemon is serving. Which commands are daemon-routed is
-    // [`selection_routing::resolves_root_locally`]. Silent when no
-    // daemon is running, when no selection was given, or when the lock
-    // predates the identity fields that make the comparison possible.
+    // A locally resolving command keeps its selection to itself: a path
+    // is a switch into that root, a name is resolved through the
+    // config crate, and nothing goes on a wire. A daemon-routed one
+    // hands its selection to the control-plane client, which puts it
+    // on every call — translating a path into a registry name once it
+    // has a connection, since the last question that translation asks
+    // is the daemon's to answer.
     if !selection_routing::resolves_root_locally(&cli.command) {
-        preflight::enforce_selection_mismatch(&cli.selection())?;
+        bookrack_cli::library_param::init_pending(cli.selection());
     }
+    let json_global = cli.json;
 
     // `doctor` resolves on its own — it has a daemon-running path
     // (control plane) and a daemon-not-running fallback that probes

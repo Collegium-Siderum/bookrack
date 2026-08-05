@@ -76,19 +76,15 @@ pub async fn run(
         return Ok(());
     }
 
-    // Executing routes through the daemon that owns the library. The
-    // plan's own target is what every action names, so a plan derived
-    // from a registry default the daemon does not share no longer has
-    // to be refused — it is delivered. What has no delivery yet is a
-    // target with no registry entry: a path cannot be sent, so the
-    // running daemon is still asked whether it serves that root, and
-    // the command refuses rather than resetting the wrong store.
-    if plan.target.entry.is_none() {
-        crate::preflight::enforce_selection_mismatch(&LibrarySelection {
-            data_dir: Some(plan.target.data_dir().to_path_buf()),
-            library: None,
-        })?;
-    }
+    // Executing routes through the daemon that owns the library, and
+    // every action names the plan's own target. A target with no
+    // registry entry has no name to deliver: the selection that
+    // produced it was refused before the plan was built, so the only
+    // way here is a root the registry claims.
+    debug_assert!(
+        plan.target.entry.is_some(),
+        "an apply reached execution with an unnamed target"
+    );
 
     let client = helpers::connect(runtime_dir).await?;
     let status = helpers::dispatch(&client, "status", Value::Null).await?;
