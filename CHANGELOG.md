@@ -465,6 +465,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **The session lock no longer names a library.** It recorded
+  `library_name=` alongside `data_dir=`, and with every registered
+  library mounted that name could only ever be the primary — the one
+  the daemon came up under. Its only reader compared a caller's
+  `--library` against it and refused every other mounted library, which
+  is the refusal removed above. The `data_dir=` line stays: a selection
+  given as a path has nothing else to be checked against. Which
+  libraries a daemon serves is answered by `library.list`, and a lock
+  written by an older daemon still parses — the extra line is ignored.
+
+
 - **`papers metadata contributor-remove` names the paper the row
   belongs to.** The command took the contributor row's surrogate id
   alone, and that id addresses a row anywhere in the catalog: any id

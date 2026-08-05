@@ -15,11 +15,12 @@ not read-only: see *MCP tool surface* below.
 - Windows: named pipe bound at `\\.\pipe\bookrack-control`.
 - Discovery: clients read `<runtime_dir>/bookrack.tty.lock` and pick
   up the `control_sock=<path>` line. The lock file's `pid=` and
-  `mcp=` lines are unchanged. The daemon appends `data_dir=` and,
-  for a registry-selected root, `library_name=` once its
-  configuration resolves; served-library identity is nevertheless
-  answered over RPC (`status`, `library.info`), not from these
-  display-only lines.
+  `mcp=` lines are unchanged. The daemon appends `data_dir=` once its
+  configuration resolves, naming the root it came up under. It does
+  not name a library: a daemon mounts every registered library, so one
+  name could only be the primary. Served-library identity is answered
+  over RPC (`status`, `library.list`, `library.info`), not from this
+  display-only line.
 
 ## Locks
 
@@ -29,7 +30,7 @@ registry, held only for a write.
 
 | Lock | File | Guarantee | Held for |
 | --- | --- | --- | --- |
-| Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above and the `data_dir=` / `library_name=` identity lines | the daemon's lifetime |
+| Session | `<runtime_dir>/bookrack.tty.lock` | one daemon per runtime directory, plus the `pid=` / `mcp=` / `control_sock=` discovery lines above and the `data_dir=` identity line | the daemon's lifetime |
 | Data root | `<data_root>/.bookrack.lock` | one writer per data root, whether a daemon or an offline destructive command | the daemon's lifetime; briefly for an offline writer |
 | Registry | `<registry>.lock` | one writer at a time through a registry file's read-modify-write window | a single write; milliseconds |
 

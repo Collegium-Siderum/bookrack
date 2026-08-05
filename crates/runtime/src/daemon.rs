@@ -344,7 +344,7 @@ impl DaemonRuntime {
         // identify which library this session serves without paying
         // for an RPC. Mirrors the `record_control_sock` append above.
         tty_lock
-            .record_library_root(cfg.data_dir(), cfg.library())
+            .record_library_root(cfg.data_dir())
             .context("record library root in session lock")?;
         // 4b. Decide the mount set and take every served root's lock
         //     before anything expensive comes up, so a contended root

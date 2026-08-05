@@ -305,25 +305,20 @@ impl TtyLock {
             .context("record the bound MCP address in the session lock")
     }
 
-    /// Append `data_dir=` and optionally `library_name=` lines to the
-    /// lock file. Called after the daemon resolves its configuration
-    /// so other tools can identify which library this session serves
-    /// without paying for an RPC.
+    /// Append the `data_dir=` line to the lock file. Called after the
+    /// daemon resolves its configuration so a client can tell which
+    /// root this session serves without paying for an RPC.
     ///
-    /// `library_name` is `None` when the data root was selected
-    /// directly (`--data-dir` / `BOOKRACK_DATA_DIR`) and so has no
-    /// registry handle.
-    pub fn record_library_root(
-        &mut self,
-        data_dir: &Path,
-        library_name: Option<&str>,
-    ) -> Result<()> {
+    /// The name of the served library is deliberately not recorded.
+    /// A daemon mounts every registered library, so one name could
+    /// only ever be the library it came up under — and the one client
+    /// that read it compared a caller's `--library` against it and
+    /// refused every other mounted library. What the root is still
+    /// good for is the comparison a path-shaped selection needs, which
+    /// has no other answer until such a selection can be routed.
+    pub fn record_library_root(&mut self, data_dir: &Path) -> Result<()> {
         writeln!(self.file, "data_dir={}", data_dir.display())
             .context("append session lock data_dir line")?;
-        if let Some(name) = library_name {
-            writeln!(self.file, "library_name={name}")
-                .context("append session lock library_name line")?;
-        }
         Ok(())
     }
 }
@@ -461,10 +456,6 @@ pub struct LockInfo {
     /// written by daemons that crashed before that step or by an
     /// older daemon that predates the identity fields.
     pub data_dir: Option<PathBuf>,
-    /// Registry name of the served library, when one was selected by
-    /// name. `None` when the data root was selected directly (no
-    /// registry handle) or when the lock predates the identity fields.
-    pub library_name: Option<String>,
 }
 
 /// Read the session lock at `path` without acquiring it.
@@ -472,11 +463,12 @@ pub struct LockInfo {
 /// Returns `Ok(None)` when the file does not exist. Returns `Err`
 /// when the file cannot be read, or when its contents are missing
 /// the required `pid=` / `mcp=` lines or carry a `pid` value that
-/// is not a `u32`. The `control_sock=`, `data_dir=`, and
-/// `library_name=` lines are all optional: a lock file written by a
-/// daemon that crashed mid-startup, or one written by a binary that
-/// predates these fields, parses cleanly with the corresponding
-/// `Option` left at `None`.
+/// is not a `u32`. The `control_sock=` and `data_dir=` lines are both
+/// optional: a lock file written by a daemon that crashed
+/// mid-startup, or one written by a binary that predates these
+/// fields, parses cleanly with the corresponding `Option` left at
+/// `None`. A `library_name=` line written by an older daemon is
+/// ignored — the identity it names is one mount among several.
 pub fn peek_lock(path: &Path) -> Result<Option<LockInfo>> {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -495,7 +487,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
     let mut mcp: Option<String> = None;
     let mut control_sock: Option<PathBuf> = None;
     let mut data_dir: Option<PathBuf> = None;
-    let mut library_name: Option<String> = None;
     for line in raw.lines() {
         if let Some(value) = line.strip_prefix("pid=") {
             pid = Some(value.parse::<u32>().with_context(|| {
@@ -510,8 +501,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
             control_sock = Some(PathBuf::from(value));
         } else if let Some(value) = line.strip_prefix("data_dir=") {
             data_dir = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("library_name=") {
-            library_name = Some(value.to_string());
         }
     }
     let pid = pid.ok_or_else(|| {
@@ -531,7 +520,6 @@ fn parse_lock(raw: &str, source: &Path) -> Result<LockInfo> {
         mcp,
         control_sock,
         data_dir,
-        library_name,
     })
 }
 
@@ -799,7 +787,6 @@ mod tests {
         assert_eq!(info.mcp, "127.0.0.1:8765");
         assert_eq!(info.control_sock.as_deref(), Some(Path::new("/tmp/x.sock")));
         assert!(info.data_dir.is_none());
-        assert!(info.library_name.is_none());
     }
 
     #[test]
@@ -812,11 +799,13 @@ mod tests {
         assert_eq!(info.mcp, "disabled");
         assert!(info.control_sock.is_none());
         assert!(info.data_dir.is_none());
-        assert!(info.library_name.is_none());
     }
 
+    /// A lock written by an older daemon still carries the line that
+    /// named its library. Reading it as an unknown key rather than
+    /// failing is what lets a new binary examine an old session.
     #[test]
-    fn peek_lock_parses_library_root_fields() {
+    fn peek_lock_parses_the_root_and_ignores_a_legacy_library_name() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bookrack.tty.lock");
         std::fs::write(
@@ -826,37 +815,28 @@ mod tests {
         .unwrap();
         let info = peek_lock(&path).unwrap().unwrap();
         assert_eq!(info.data_dir.as_deref(), Some(Path::new("/data/main")));
-        assert_eq!(info.library_name.as_deref(), Some("main"));
     }
 
+    /// The root is recorded and the library name is not. One name
+    /// cannot describe a daemon that mounts several libraries, and the
+    /// client that read it turned that single name into a refusal of
+    /// every other one.
     #[test]
-    fn record_library_root_appends_data_dir_only_when_unnamed() {
+    fn record_library_root_writes_the_root_and_no_library_name() {
         let dir = tempdir().unwrap();
         let path = dir.path().join(tty_lock_name());
         let mut lock = TtyLock::acquire(&path, 9, "disabled", None).unwrap();
-        let data_dir = PathBuf::from("/data/unnamed");
-        lock.record_library_root(&data_dir, None).unwrap();
+        let data_dir = PathBuf::from("/data/main");
+        lock.record_library_root(&data_dir).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(
-            content.contains("data_dir=/data/unnamed"),
+            content.contains("data_dir=/data/main"),
             "data_dir line missing: {content:?}"
         );
         assert!(
             !content.contains("library_name="),
-            "unexpected library_name line: {content:?}"
+            "the lock must not name one of the libraries the daemon serves: {content:?}"
         );
-    }
-
-    #[test]
-    fn record_library_root_appends_both_lines_when_named() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join(tty_lock_name());
-        let mut lock = TtyLock::acquire(&path, 10, "disabled", None).unwrap();
-        let data_dir = PathBuf::from("/data/main");
-        lock.record_library_root(&data_dir, Some("main")).unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("data_dir=/data/main"));
-        assert!(content.contains("library_name=main"));
     }
 
     #[test]

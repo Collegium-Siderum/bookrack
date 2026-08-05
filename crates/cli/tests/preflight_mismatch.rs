@@ -149,7 +149,10 @@ fn held_lock_still_refuses_a_differently_rooted_selection() {
         stderr.contains(&sandbox.data_root("asked").display().to_string()),
         "the refusal must name the root that was asked for: {stderr}"
     );
-    assert!(stderr.contains("library served"), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&sandbox.data_root("served").display().to_string()),
+        "and the root the daemon serves, so both sides of the disagreement are on          screen: {stderr}"
+    );
     drop(holder);
 }
 

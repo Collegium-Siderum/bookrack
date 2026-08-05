@@ -149,11 +149,9 @@ fn render_intent(intent: &Intent) -> String {
 }
 
 fn render_lock_target(lock: &LockInfo) -> String {
-    match (&lock.data_dir, &lock.library_name) {
-        (Some(p), Some(n)) => format!("{} (library {n})", p.display()),
-        (Some(p), None) => p.display().to_string(),
-        (None, Some(n)) => format!("library {n}"),
-        (None, None) => "<unknown library>".to_string(),
+    match &lock.data_dir {
+        Some(p) => p.display().to_string(),
+        None => "<unknown data root>".to_string(),
     }
 }
 
@@ -210,7 +208,6 @@ mod tests {
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: Some(PathBuf::from("/served")),
-            library_name: None,
         };
         assert!(is_mismatch(&Intent(PathBuf::from("/asked")), &lock));
     }
@@ -222,7 +219,6 @@ mod tests {
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: Some(PathBuf::from("/same")),
-            library_name: None,
         };
         assert!(!is_mismatch(&Intent(PathBuf::from("/same")), &lock));
     }
@@ -234,7 +230,6 @@ mod tests {
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: None,
-            library_name: None,
         };
         assert!(!is_mismatch(&Intent(PathBuf::from("/asked")), &lock));
     }
@@ -258,7 +253,6 @@ mod tests {
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: Some(PathBuf::from("/served")),
-            library_name: Some("served".into()),
         };
         // The env root still is compared, and still refuses: dropping
         // the name arm must not drop the path arm with it.
@@ -266,36 +260,23 @@ mod tests {
         assert!(is_mismatch(&by_env, &lock));
     }
 
+    /// The lock either records the root it serves or it does not, and
+    /// the refusal has to read on both. A daemon that crashed before
+    /// its configuration resolved leaves the second shape behind.
     #[test]
-    fn render_lock_target_handles_every_field_combo() {
-        let with_both = LockInfo {
+    fn render_lock_target_reads_with_and_without_a_root() {
+        let with_root = LockInfo {
             pid: 1,
             mcp: "disabled".into(),
             control_sock: None,
             data_dir: Some(PathBuf::from("/p")),
-            library_name: Some("n".into()),
         };
-        assert_eq!(render_lock_target(&with_both), "/p (library n)");
+        assert_eq!(render_lock_target(&with_root), "/p");
 
-        let path_only = LockInfo {
-            data_dir: Some(PathBuf::from("/p")),
-            library_name: None,
-            ..with_both.clone()
-        };
-        assert_eq!(render_lock_target(&path_only), "/p");
-
-        let name_only = LockInfo {
+        let without_root = LockInfo {
             data_dir: None,
-            library_name: Some("n".into()),
-            ..with_both.clone()
+            ..with_root
         };
-        assert_eq!(render_lock_target(&name_only), "library n");
-
-        let empty = LockInfo {
-            data_dir: None,
-            library_name: None,
-            ..with_both
-        };
-        assert_eq!(render_lock_target(&empty), "<unknown library>");
+        assert_eq!(render_lock_target(&without_root), "<unknown data root>");
     }
 }
