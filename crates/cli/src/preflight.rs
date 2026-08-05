@@ -28,14 +28,11 @@
 //!   * the side of the comparison the intent expresses (path vs name)
 //!     is the side the lock lacks
 //!
-//! Local-resolves commands (`run`, `init`, `audit-profile`, the
-//! `index-profile` verbs other than an executing `apply` (its
-//! `--dry-run` form stays offline and keeps the exemption), `distill`,
-//! `runs`, `retrieval`, and the offline `libraries` verbs —
-//! `default`/`detect`/`scan`/`add`/`register`/`remove`/`config`) bypass
-//! this check entirely — for them the flag is a real switch into a
-//! different data root, or an offline registry read/write, not an
-//! assertion about the running daemon.
+//! Which commands the check applies to is
+//! [`crate::selection_routing::resolves_root_locally`] — the locally
+//! resolving ones bypass it entirely, because for them the flag is a
+//! real switch into a different data root, or an offline registry
+//! read/write, not an assertion about the running daemon.
 //!
 //! `doctor` is deliberately *not* exempt. When a daemon is running it
 //! routes through the control plane and reports on the daemon's

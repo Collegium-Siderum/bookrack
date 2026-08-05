@@ -15,6 +15,7 @@ mod cmd;
 mod init;
 mod preflight;
 mod run;
+mod selection_routing;
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -990,45 +991,11 @@ async fn run() -> Result<()> {
     // Refuse a daemon-routed command when the invoking shell's
     // explicit library selection (`--data-dir` / `--library` /
     // `BOOKRACK_DATA_DIR`) disagrees with the library a running
-    // daemon is serving. Skipped for commands that resolve a data
-    // root locally through `Config::resolve` (`run`, `init`,
-    // `audit-profile`, the `index-profile` verbs other than an executing
-    // `apply`, `distill`, `runs`, `retrieval`, and the offline
-    // `libraries` verbs): the flag is a real switch there, not an
-    // assertion. `doctor` is not exempt — it
-    // resolves on its own below, but only after this check keeps a
-    // running daemon from being diagnosed under the wrong library.
-    // Silent when no daemon is running, when no
-    // selection was given, or when the lock predates the identity
-    // fields that make the comparison possible.
-    let index_profile_is_local = match &cli.command {
-        // `apply` executes through the daemon, so only its offline
-        // `--dry-run` form keeps the local-resolve exemption.
-        Command::IndexProfile { action } => {
-            !matches!(action, IndexProfileAction::Apply { dry_run: false, .. })
-        }
-        _ => false,
-    };
-    if !(index_profile_is_local
-        || matches!(
-            cli.command,
-            Command::Init { .. }
-                | Command::Run { .. }
-                | Command::AuditProfile { .. }
-                | Command::Distill { .. }
-                | Command::Runs { .. }
-                | Command::Retrieval { .. }
-                | Command::Libraries {
-                    action: LibrariesAction::Default { .. }
-                        | LibrariesAction::Detect { .. }
-                        | LibrariesAction::Scan { .. }
-                        | LibrariesAction::Add { .. }
-                        | LibrariesAction::Register { .. }
-                        | LibrariesAction::Remove { .. }
-                        | LibrariesAction::Config { .. }
-                }
-        ))
-    {
+    // daemon is serving. Which commands are daemon-routed is
+    // [`selection_routing::resolves_root_locally`]. Silent when no
+    // daemon is running, when no selection was given, or when the lock
+    // predates the identity fields that make the comparison possible.
+    if !selection_routing::resolves_root_locally(&cli.command) {
         preflight::enforce_selection_mismatch(&cli.selection())?;
     }
 
@@ -2387,6 +2354,111 @@ mod tests {
              into TOP_LEVEL_BY_ACCRETION when it does not, and record the change \
              in CHANGELOG.md. Added: {added:?}; no longer present: {removed:?}"
         );
+    }
+
+    /// How an explicit library selection reaches a command: as a switch
+    /// into a data root the command resolves itself, or as an assertion
+    /// about the library a running daemon serves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Reach {
+        Local,
+        Routed,
+    }
+
+    /// One representative invocation per side of
+    /// [`selection_routing::resolves_root_locally`], keyed by the argv a
+    /// caller would type. Namespaces that span both sides carry a row
+    /// each: `libraries` splits by verb, `index-profile apply` by
+    /// `--dry-run`.
+    ///
+    /// The table mirrors the classification rather than deriving from
+    /// it, which is what lets the two be compared; the comparison runs
+    /// each row through the real parser and the real classifier.
+    const ROUTING_CASES: &[(&[&str], Reach)] = &[
+        (&["audit-profile", "list"], Reach::Local),
+        (&["config", "effective"], Reach::Routed),
+        (&["corpus", "rebuild"], Reach::Routed),
+        (&["diagnose"], Reach::Routed),
+        (&["distill", "list"], Reach::Local),
+        (&["doctor"], Reach::Routed),
+        (&["dryrun", "/tmp/book.epub"], Reach::Routed),
+        (&["glean", "/tmp/paper.pdf"], Reach::Routed),
+        (&["index-profile", "list"], Reach::Local),
+        (
+            &["index-profile", "apply", "demo", "--dry-run"],
+            Reach::Local,
+        ),
+        (&["index-profile", "apply", "demo"], Reach::Routed),
+        (&["ingest", "/tmp/book.epub"], Reach::Routed),
+        (&["init"], Reach::Local),
+        (&["intake", "list-ocr-pending"], Reach::Routed),
+        (&["libraries", "detect", "/tmp/library"], Reach::Local),
+        (&["libraries", "list"], Reach::Routed),
+        (&["logs"], Reach::Routed),
+        (&["metadata", "reaudit", "1"], Reach::Routed),
+        (&["papers", "list"], Reach::Routed),
+        (&["queue", "list"], Reach::Routed),
+        (&["quit"], Reach::Routed),
+        (&["remove", "1"], Reach::Routed),
+        (&["retrieval", "list"], Reach::Local),
+        (&["rpc", "list"], Reach::Routed),
+        (&["run"], Reach::Local),
+        (&["runs", "list"], Reach::Local),
+        (&["stamps", "reconcile"], Reach::Routed),
+        (&["status"], Reach::Routed),
+        (&["vectors", "reset"], Reach::Routed),
+        (&["verify"], Reach::Routed),
+    ];
+
+    /// The routing classification and the top-level whitelist are two
+    /// tables at two granularities — the whitelist names commands, the
+    /// classification splits some of them by verb — so neither can be
+    /// generated from the other. What has to hold is that they cover the
+    /// same set of commands: a name the classification never mentions is
+    /// a command whose selection semantics nobody decided, and a name
+    /// only the classification knows is a stale row.
+    #[test]
+    fn the_routing_table_and_the_top_level_whitelist_name_the_same_commands() {
+        let routed: BTreeSet<&str> = ROUTING_CASES.iter().map(|(argv, _)| argv[0]).collect();
+        let whitelisted: BTreeSet<&str> = TOP_LEVEL_BY_DESIGN
+            .iter()
+            .chain(TOP_LEVEL_BY_ACCRETION)
+            .copied()
+            .collect();
+
+        let unclassified: Vec<&&str> = whitelisted.difference(&routed).collect();
+        let stale: Vec<&&str> = routed.difference(&whitelisted).collect();
+        assert!(
+            unclassified.is_empty() && stale.is_empty(),
+            "the routing classification and the top-level command surface \
+             disagree. Every top-level command has to be filed on one side \
+             of `selection_routing::resolves_root_locally` and carry a row \
+             here. Not classified: {unclassified:?}; classified but no \
+             longer a command: {stale:?}"
+        );
+    }
+
+    /// The table above is only worth having if it is checked against the
+    /// classifier it mirrors, through the parser an operator's argv goes
+    /// through.
+    #[test]
+    fn every_recorded_invocation_reaches_the_side_the_table_records() {
+        for (argv, expected) in ROUTING_CASES {
+            let full: Vec<&str> = std::iter::once("bookrack")
+                .chain(argv.iter().copied())
+                .collect();
+            let cli = Cli::try_parse_from(&full)
+                .unwrap_or_else(|err| panic!("{argv:?} does not parse: {err}"));
+            let reach = if selection_routing::resolves_root_locally(&cli.command) {
+                Reach::Local
+            } else {
+                Reach::Routed
+            };
+            assert_eq!(
+                reach, *expected,
+                "{argv:?} is classified {reach:?} but the table records {expected:?}"
+            );
+        }
     }
 
     /// A new subcommand is a new help page, and every help page carries the
