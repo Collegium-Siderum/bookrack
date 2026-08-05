@@ -780,6 +780,16 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`bookrack status` counts the library it names.** The card is built
+  from two calls: one reports the library the daemon came up under, the
+  other projects the counts. The second went out without naming a
+  library, so it answered for the registry's default — a different
+  library whenever the daemon was started under something else. The
+  card then showed one library's name and root above another's chunk
+  count, ready-book count, disk usage, and unreadable-store reasons,
+  with no way to tell from the card that it had done so. It now asks
+  about the library it names.
+
 - **`--library` reaches every library the daemon serves.** A daemon
   mounts all registered libraries, but the flag was compared against
   the single name the session lock records — the library the daemon
