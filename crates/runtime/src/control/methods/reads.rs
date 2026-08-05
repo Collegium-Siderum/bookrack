@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use ts_rs::TS;
 
 use super::MethodContext;
+use crate::control::error_map::registry_err;
 use crate::control::events::{Event, JobOutcomeSummary, QueueTick};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 use crate::doctor;
@@ -276,7 +277,7 @@ pub async fn library_info(params: &Option<Value>, ctx: &MethodContext) -> Result
     let handle = ctx
         .registry
         .get(parsed.name.as_deref())
-        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("registry: {e}")))?;
+        .map_err(registry_err)?;
     // The card's identity is built from the library the handle names,
     // not from the bring-up snapshot in `ctx`: the counts below already
     // come from this handle, and a card pairing one library's counts

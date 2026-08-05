@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::MethodContext;
-use crate::control::error_map::{rpc_from_problem, unknown_filter_value};
+use crate::control::error_map::{registry_err, rpc_from_problem, unknown_filter_value};
 use crate::control::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
 
 #[derive(Debug, Deserialize, Default)]
@@ -301,12 +301,7 @@ fn resolve(
     ctx: &MethodContext,
     library: Option<&str>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, RpcError> {
-    ctx.registry.get(library).map_err(|e| {
-        RpcError::new(
-            INVALID_PARAMS,
-            format!("registry: {}", bookrack_core::error_chain(&e)),
-        )
-    })
+    ctx.registry.get(library).map_err(registry_err)
 }
 
 fn ops_internal(e: OpsError) -> RpcError {

@@ -721,6 +721,28 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **A read that names a library the registry does not hold now reports
+  `-32010 invalid library`, the same code a write reports.**
+  `docs/control-plane.md` states that code as a property of the
+  `library` parameter — raised by any handler that resolves it — but
+  only the write-class handlers did. The `library.*` read proxies and
+  `library.info` each carried their own mapping that collapsed every
+  registry failure to `-32602 invalid params`, so a client branching on
+  `-32010` had to treat `-32602` as the same condition on a read, and
+  could not tell an unknown library from a malformed request.
+
+  Both now go through the shared mapping. Two consequences beyond the
+  code: the message no longer opens with the `registry:` wrapper noun
+  that named the layer instead of stating the failure, and a poisoned
+  internal lock — a bug, not caller input — reports `-32603` rather
+  than inviting the caller to fix their request. The available-name
+  list the error carries is unchanged, so a refusal still says which
+  names would have resolved.
+
+  `bookrack libraries info --name <unknown>` is the reachable case at
+  the CLI; the exit code is unchanged, both codes having always shared
+  one bucket.
+
 - **A queue document from a newer version is refused instead of being
   quietly truncated.** `docs/UPGRADE.md` promised that the queue
   schema's bump is one-way — that an older binary will not read a

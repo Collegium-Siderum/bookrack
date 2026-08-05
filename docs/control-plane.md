@@ -100,11 +100,11 @@ systems. bookrack is a local-first system and does not probe for it.
 - `-32002` not ready (bookrack-specific; the runtime has not finished
   initialising the resource the method needs)
 - `-32010` invalid library (bookrack-specific; a `library` param does
-  not exist in the registry). Raised by the write-class handlers and by
-  `library.set_default`. The `library.*` read proxies resolve their
-  `library` param one layer earlier and report an unknown name as
-  `-32602` instead, so a client that branches on `-32010` alone must
-  treat `-32602` as the same condition on a read.
+  not exist in the registry). Raised by every handler that resolves
+  that parameter — the write class, the `library.*` read proxies, and
+  `library.info` against its own `name` key — so a client branches on
+  the code alone, without knowing which class it called. The message
+  names the library it could not resolve and the names it could.
 - `-32011` job not found (bookrack-specific; `ingest.cancel` named a
   job id no longer in the queue document)
 - `-32012` confirmation required (bookrack-specific; a destructive
@@ -632,8 +632,9 @@ of these methods take the write mutex; they read straight from the
 catalog and corpus handles the daemon already holds.
 
 All of them accept an optional `library` param naming a mounted
-library. Unlike the write-class handlers, a name the registry does not
-carry is reported as `-32602 invalid params`, not `-32010`.
+library. A name the registry does not carry is reported as
+`-32010 invalid library`, the same code the write-class handlers raise
+for the same parameter.
 
 - `library.stats` — aggregate counts over the library.
 - `library.list_books` / `library.find_books` — paginated registry
