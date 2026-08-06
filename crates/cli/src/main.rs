@@ -372,6 +372,20 @@ enum Command {
         #[command(subcommand)]
         action: PapersAction,
     },
+    /// Show one item by its typed id.
+    ///
+    /// The id names its own pipeline (`book:12`, `paper:101`), so the
+    /// verb needs no namespace to fix which catalog is read. The
+    /// namespaced forms — `bookrack papers show 101` — stay, and mean
+    /// the same thing.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "show book:12",
+        "show paper:101",
+    ])]
+    Show {
+        /// Item to show, as `<kind>:<id>`.
+        id: String,
+    },
     /// Simulate an ingest without writing the live stores.
     #[command(after_long_help = bookrack_cli_grammar::examples![
         "dryrun /path/to/book.epub",
@@ -1304,6 +1318,7 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
+        Command::Show { id } => cmd::cli_client::show::run(id, None).await,
         Command::Glean(args) => {
             cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
         }
@@ -1363,6 +1378,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. }
         | Command::Logs(_)
+        | Command::Show { .. }
         | Command::Status
         | Command::Quit
         | Command::Doctor { .. }
@@ -2264,6 +2280,7 @@ mod tests {
         "rpc",
         "run",
         "runs",
+        "show",
         "stamps",
         "status",
         "vectors",
@@ -2281,7 +2298,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 27),
+        ("bookrack", 28),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
@@ -2416,6 +2433,7 @@ mod tests {
         (&["rpc", "list"], Reach::Routed),
         (&["run"], Reach::Local),
         (&["runs", "list"], Reach::Local),
+        (&["show", "book:12"], Reach::Routed),
         (&["stamps", "reconcile"], Reach::Routed),
         (&["status"], Reach::Routed),
         (&["vectors", "reset"], Reach::Routed),

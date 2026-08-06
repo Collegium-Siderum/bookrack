@@ -672,7 +672,7 @@ const BIBLIO_KEYS_ROWED_SEPARATELY: [&str; 2] = ["abstract_text", "title"];
 /// the hash, the intake timestamp, the page count and the byte size —
 /// stays in the `--json` payload: the card names the file, it does not
 /// reproduce the intake row.
-fn format_paper_detail(response: &Value) -> String {
+pub(super) fn format_paper_detail(response: &Value) -> String {
     let mut t = KvTable::new();
     if let Some(id) = response.get("intake_id").and_then(Value::as_i64) {
         t.push("intake_id", id.to_string());

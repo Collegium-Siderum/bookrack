@@ -88,6 +88,7 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
         | Command::Stamps { .. }
         | Command::Remove(_)
         | Command::Papers { .. }
+        | Command::Show { .. }
         | Command::Dryrun(_)
         | Command::Quit
         | Command::Logs(_)

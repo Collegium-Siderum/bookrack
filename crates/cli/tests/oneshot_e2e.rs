@@ -774,6 +774,112 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
     Ok(())
 }
 
+/// The top-level `show` reads its id in the verb body rather than in
+/// the grammar, so a malformed id earns the three-part report instead
+/// of clap's one-line `invalid value`.
+///
+/// The exit code cannot tell the two apart — both are 2 — so what
+/// discriminates is the wording, and the summary alone does not
+/// discriminate either: an implementation that dropped the hint would
+/// still print a summary. The hint is the part that tells an operator
+/// holding a bare number what to type next.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_id_at_the_top_level_is_refused_with_a_hint() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["show", "12"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot resolve a bare id at the top level"),
+        "the summary should name what failed: {stderr}",
+    );
+    assert!(
+        stderr.contains("hint:") && stderr.contains("book:12"),
+        "the hint should show the prefixed form to type instead: {stderr}",
+    );
+    assert!(
+        !stderr.contains("invalid value"),
+        "the id is read in the verb body, not by the grammar: {stderr}",
+    );
+    Ok(())
+}
+
+/// A `reference:` id parses and is refused at the verb, before any
+/// connection is opened: the kind is one the syntax accepts and the
+/// command line has no read path for.
+///
+/// The negative assertion carries the discrimination. An
+/// implementation that dispatched the id like any other would fail
+/// too — with "daemon not running", which says nothing about the
+/// capability being absent and would send the operator off to start a
+/// daemon that could not answer either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reference_id_is_refused_before_a_daemon_is_looked_for() -> Result<()> {
+    let sandbox = Sandbox::new();
+    let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+        .args(["show", "reference:name_alpha/smith"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr={stderr}");
+    assert!(
+        stderr.contains("reference ids are not readable from the command line yet"),
+        "the summary should state the capability boundary: {stderr}",
+    );
+    assert!(
+        stderr.contains("control plane") && stderr.contains("hint:"),
+        "the refusal should carry its detail and hint: {stderr}",
+    );
+    assert!(
+        !stderr.contains("bookrack daemon not running"),
+        "the refusal should not depend on a daemon: {stderr}",
+    );
+    Ok(())
+}
+
+/// Both readable kinds get past the grammar and into the
+/// control-plane client, which is as far as anything gets without a
+/// daemon.
+///
+/// The negative assertion is what would catch a `value_parser` hung
+/// on the top-level argument: clap would refuse `book:12` with
+/// `invalid value` and exit 2 as well, and the `Explain`
+/// implementation written for this surface would never have a
+/// consumer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn both_readable_kinds_reach_the_control_plane_client() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for id in ["book:12", "paper:101"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["show", id])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{id:?} stderr={stderr}");
+        assert!(
+            stderr.contains("bookrack daemon not running"),
+            "{id:?} should have reached the daemon client: {stderr}",
+        );
+        assert!(
+            !stderr.contains("invalid value") && !stderr.contains("item kind"),
+            "{id:?} should not have been refused while reading the id: {stderr}",
+        );
+    }
+    Ok(())
+}
+
 /// Write a minimal valid v1 identity manifest into `dir`.
 fn write_manifest(dir: &std::path::Path, name: &str) {
     std::fs::write(

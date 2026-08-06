@@ -196,6 +196,14 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     PreflightRefused { problem: Problem },
 
+    /// A top-level verb was handed an item id it cannot act on: the
+    /// string does not parse as `<kind>:<id>`, or it parses into a
+    /// pipeline the verb has no read path for. Both are the operator's
+    /// input rather than a bug: exit 2, and the reporter draws the
+    /// three parts.
+    #[error("{}", .problem.summary)]
+    ItemIdUnusable { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -222,7 +230,8 @@ impl BookrackCliError {
             Self::ConfirmationUnanswerable { .. } => 2,
             Self::LibraryNotRoutable { .. }
             | Self::RootNotRoutable { .. }
-            | Self::PreflightRefused { .. } => 2,
+            | Self::PreflightRefused { .. }
+            | Self::ItemIdUnusable { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -291,7 +300,8 @@ impl BookrackCliError {
             | Self::RpcBackendUnavailable { data, .. } => data.as_ref()?,
             Self::LibraryNotRoutable { problem }
             | Self::RootNotRoutable { problem }
-            | Self::PreflightRefused { problem } => {
+            | Self::PreflightRefused { problem }
+            | Self::ItemIdUnusable { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {
