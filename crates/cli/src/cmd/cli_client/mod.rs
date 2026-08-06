@@ -23,6 +23,7 @@ pub mod index_profile;
 pub mod ingest;
 pub mod intake;
 pub mod libraries;
+pub mod listing;
 pub mod logs;
 pub mod metadata;
 pub mod papers;

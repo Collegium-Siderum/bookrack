@@ -16,11 +16,13 @@ use bookrack_cli_grammar::{
     PapersAction, PapersCorpusAction, PapersDryrunArgs, PapersFindArgs, PapersIngestArgs,
     PapersListArgs, PapersRemoveArgs, PapersStampsAction, PapersVectorsAction,
 };
+use bookrack_core::ItemKind;
 use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
 use super::helpers::DestructivePrompt;
+use super::listing::row_id;
 
 pub async fn run(
     action: PapersAction,
@@ -575,18 +577,25 @@ async fn show(intake_id: i64, runtime_dir: Option<PathBuf>) -> Result<()> {
 }
 
 fn emit_paper_list(response: &Value) {
-    if ctx().is_json() {
-        helpers::print_value(response);
-        return;
+    if let Some(text) = paper_list_output(ctx().output(), response) {
+        println!("{text}");
     }
-    if ctx().is_quiet() {
-        return;
-    }
-    render_paper_list(response);
 }
 
-fn render_paper_list(response: &Value) {
-    println!("{}", format_paper_list(response));
+/// What one listing page prints, by output mode.
+///
+/// `--json` forwards the control-plane response verbatim. The typed id
+/// a row prints is composed by the human renderer alone, so a script
+/// reading the payload still sees the wire shape the method documents:
+/// an `intake_id` beside a `kind`.
+pub(super) fn paper_list_output(mode: OutputMode, response: &Value) -> Option<String> {
+    match mode {
+        OutputMode::Quiet => None,
+        OutputMode::Json => {
+            Some(serde_json::to_string_pretty(response).unwrap_or_else(|_| response.to_string()))
+        }
+        OutputMode::Human => Some(format_paper_list(response)),
+    }
 }
 
 /// Renders one `library.list_papers` / `library.find_papers` page as
@@ -597,7 +606,7 @@ fn render_paper_list(response: &Value) {
 /// cell reads `-` only when neither is recorded. A page that covers
 /// less than the whole result set carries a trailing count line; an
 /// empty page is one sentence and no table.
-fn format_paper_list(response: &Value) -> String {
+pub(super) fn format_paper_list(response: &Value) -> String {
     let papers = response.get("papers").and_then(Value::as_array);
     let rows = match papers {
         Some(arr) if !arr.is_empty() => arr,
@@ -608,7 +617,8 @@ fn format_paper_list(response: &Value) -> String {
         let id = row
             .get("intake_id")
             .and_then(Value::as_i64)
-            .map(|i| i.to_string())
+            .and_then(|i| row_id(ItemKind::Paper, i))
+            .map(|id| id.to_string())
             .unwrap_or_else(|| "-".to_string());
         let title = row
             .get("title")

@@ -92,7 +92,7 @@ impl FromStr for TypedItemId {
             });
         };
 
-        let kind = parse_kind(prefix).ok_or_else(|| unknown_kind(prefix, payload))?;
+        let kind = ItemKind::from_scope_str(prefix).ok_or_else(|| unknown_kind(prefix, payload))?;
         if payload.is_empty() {
             return Err(TypedIdParseError::EmptyPayload {
                 kind,
@@ -123,21 +123,12 @@ impl FromStr for TypedItemId {
     }
 }
 
-/// Map a kind prefix onto its pipeline. Private: the one caller is the
-/// parser below, and a public `FromStr for ItemKind` would be a surface
-/// designed for a single use.
-fn parse_kind(prefix: &str) -> Option<ItemKind> {
-    ItemKind::ALL
-        .into_iter()
-        .find(|kind| kind.as_scope_str() == prefix)
-}
-
 /// Classify a prefix that named no pipeline. A plural is a near miss
 /// worth its own wording: the command namespaces are plural
 /// (`bookrack papers export-csl`) and the id kinds are singular, so
 /// `papers:101` is the mistake an operator actually makes.
 fn unknown_kind(prefix: &str, payload: &str) -> TypedIdParseError {
-    match prefix.strip_suffix('s').and_then(parse_kind) {
+    match prefix.strip_suffix('s').and_then(ItemKind::from_scope_str) {
         Some(singular) => TypedIdParseError::PluralKind {
             prefix: prefix.to_string(),
             singular,
@@ -473,19 +464,29 @@ mod tests {
         assert!(hint.contains("`paper:101`"), "{hint}");
     }
 
-    /// The accepted prefixes are `ItemKind`'s own scope strings. The
-    /// `match` is exhaustive on purpose: adding a pipeline breaks the
-    /// build here rather than silently leaving its ids unaddressable.
+    /// Every kind's own scope string is a prefix the parser knows, and
+    /// the hint that lists the accepted prefixes is rendered from the
+    /// same vocabulary.
+    ///
+    /// Asserted through `FromStr` rather than through the lookup it
+    /// calls — that one is pinned where it lives, and what this module
+    /// promises is that an id written with a kind's scope string
+    /// reaches that kind. An empty payload is the probe because it
+    /// carries the kind the prefix resolved to without also fixing the
+    /// shape the payload has to take.
     #[test]
     fn the_kind_vocabulary_is_the_item_kind_vocabulary() {
         for kind in ItemKind::ALL {
-            let prefix = match kind {
-                ItemKind::Book => "book",
-                ItemKind::Paper => "paper",
-                ItemKind::Reference => "reference",
-            };
-            assert_eq!(prefix, kind.as_scope_str());
-            assert_eq!(parse_kind(prefix), Some(kind));
+            let prefix = kind.as_scope_str();
+            let input = format!("{prefix}:");
+            assert_eq!(
+                input.parse::<TypedItemId>(),
+                Err(TypedIdParseError::EmptyPayload {
+                    kind,
+                    input: input.clone(),
+                }),
+                "the parser does not read {prefix:?} as {kind:?}"
+            );
             assert!(
                 accepted_kinds().contains(prefix),
                 "the hint lists {prefix:?}"
