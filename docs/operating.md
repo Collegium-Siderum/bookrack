@@ -191,6 +191,29 @@ or read the item you named with `bookrack show book:12`.
 Refusing it is the point: the number is a valid paper id too, so
 accepting it would act on a paper the operator never named.
 
+### Reading one item by its id
+
+A typed id needs no namespace to resolve it, so there is a verb that
+takes one directly:
+
+```
+bookrack show book:12
+bookrack show paper:101
+```
+
+`bookrack show paper:101` and `bookrack papers show 101` are the same
+read; both stay. Under the card is the library the record came from —
+the one `--library` named, or the one an unnamed call resolves to. If
+no daemon can be asked, the line is absent rather than guessed.
+
+`--json` prints the response as it came off the control plane, and
+`--quiet` prints nothing; both skip the card and its library line.
+
+`reference:` ids parse but have no read path on the command line yet:
+the reference tools are published to MCP clients, and the control plane
+carries no matching method. The refusal says so and names the surface
+that does have it.
+
 ## The status card
 
 ```

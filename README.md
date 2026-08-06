@@ -11,10 +11,11 @@ clients like Claude Code can search the library as a tool.
 
 Pre-release. The end-to-end pipeline — extract, ingest, embed, and
 cited search — runs through the `bookrack run` daemon, driven by
-one-shot subcommands, `bookrack rpc` for ad-hoc control-plane RPCs,
-and MCP. Books and academic papers live in two parallel stores under
-one data root and share the same MCP surface. Schema migrations and
-metadata workflows are still being hardened for production use.
+one-shot subcommands, `bookrack show <kind>:<id>` for a single item,
+`bookrack rpc` for ad-hoc control-plane RPCs, and MCP. Books and
+academic papers live in two parallel stores under one data root and
+share the same MCP surface. Schema migrations and metadata workflows
+are still being hardened for production use.
 
 ## Install
 

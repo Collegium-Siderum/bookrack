@@ -10,6 +10,28 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **`bookrack show <kind>:<id>` reads one item, whichever pipeline it
+  belongs to.** Books and papers are two catalogs numbering their
+  intakes independently, so `101` names one of each and a bare number
+  cannot address either without a namespace to fix it. An item id now
+  carries its own kind — `book:12`, `paper:101`,
+  `reference:name_alpha/smith` — and the top-level `show` reads
+  whichever the id names. It is the first read verb on the book side of
+  the external command line; `bookrack papers show` stays, and means
+  the same thing.
+
+  A card names the library the record came from, so an item read on a
+  multi-library daemon is not left ambiguous. An id whose kind has no
+  read path yet says so and points at the surface that does carry it,
+  rather than at a command that would fail.
+
+  The same `<kind>:<id>` form is accepted everywhere a `bookrack
+  papers` command takes an intake id — `paper:101` as well as `101` —
+  and a `book:12` there names the other catalog and is refused while
+  arguments are read. It is also what listings print, so an id copied
+  out of one command can be pasted into the next. See [Naming an
+  item](docs/operating.md#naming-an-item).
+
 - **`--library` now travels with the call.** The flag named a library
   and then stopped at the CLI: every control-plane method that takes a
   `library` parameter was reached without one, so the daemon resolved
@@ -633,12 +655,6 @@ release workflow extracts the matching section verbatim from this file.
   to move the root outside it. When the registry default is shadowed
   as well, the bundle leads: serving the wrong library is recoverable,
   losing it on the next upgrade is not.
-
-- **A paper's intake id may be written with its pipeline in front of
-  it.** Every `bookrack papers` command that takes an intake id now
-  takes `paper:101` as well as `101`; a `book:12` there names the other
-  catalog, whose ids number independently, and is refused while
-  arguments are read. See [Naming an item](docs/operating.md#naming-an-item).
 
 - **A book or paper answers the title it is shown under.** The registry
   filters compared against the values extraction wrote, while every row
