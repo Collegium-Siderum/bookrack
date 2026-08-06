@@ -181,12 +181,23 @@ fn plural_served(status: &Value) -> Option<Value> {
 /// a reader who already knows to look for the difference.
 fn unnamed_calls_reach(served: &Value, status: &Value) -> Option<String> {
     let primary = status.get("library").and_then(Value::as_str);
-    let default = served
+    let default = default_served(served)?;
+    (Some(default) != primary).then(|| default.to_string())
+}
+
+/// The name of the served row the registry marks default — the library
+/// a call naming none resolves to.
+///
+/// Read off the daemon's own served set rather than inferred from
+/// anything the client knows: `status` reports the primary, which is a
+/// different library whenever the daemon came up under one that is not
+/// the registry default.
+pub(super) fn default_served(served: &Value) -> Option<&str> {
+    served
         .as_array()?
         .iter()
         .find(|row| row["default"] == true)?["name"]
-        .as_str()?;
-    (Some(default) != primary).then(|| default.to_string())
+        .as_str()
 }
 
 /// The footer a full card ends on. A store that could not be read is
