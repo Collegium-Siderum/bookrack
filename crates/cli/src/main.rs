@@ -31,8 +31,13 @@ use eyre::{Context, Result};
 
 /// Trailing block shown by `bookrack --help`. Names the environment
 /// variables that select the library and the embed backend, points at
-/// the session as the way to reach library reads, and hands the
-/// runtime prerequisite check to `doctor` rather than restating it.
+/// the session as the way to reach library reads, names the one read
+/// that has a verb of its own, and hands the runtime prerequisite check
+/// to `doctor` rather than restating it.
+///
+/// The read verbs are not enumerated here: `natural_name_hint` already
+/// holds that table, and a second copy is one that goes stale on its
+/// own schedule.
 const TOP_AFTER_HELP: &str = "\
 Environment:
   BOOKRACK_DATA_DIR     library data root (overridden by --data-dir)
@@ -42,7 +47,8 @@ Environment:
 
 Library reads (search, browse, metadata, status) are served by a running
 session: start one with `bookrack run`, then list the live control-plane
-surface with `bookrack rpc list`.
+surface with `bookrack rpc list`. One of them has a verb of its own:
+`bookrack show <kind>:<id>` reads a single item.
 
 Prerequisites:
   Run `bookrack doctor` to check Ollama and the embed model.";
@@ -828,14 +834,15 @@ fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
 /// (multiple options joined with ` or `), or `None` for tokens not in
 /// the table — those fall through to clap's own similarity tip.
 ///
-/// Library reads moved off the external CLI surface: the hints below
-/// point at the `bookrack rpc call library.<tool>` proxy that talks to
-/// the running daemon session.
+/// A read with a top-level verb of its own is pointed at that verb.
+/// The rest point at the `bookrack rpc call library.<tool>` proxy that
+/// talks to the running daemon session, which is the whole surface
+/// those reads have.
 fn natural_name_hint(typed: &str) -> Option<String> {
     let suggestions: &[&str] = match typed {
         "list" | "ls" => &["`bookrack rpc call library.list_books`"],
         "find" => &["`bookrack rpc call library.find_books`"],
-        "show" => &["`bookrack rpc call library.show_book`"],
+        "show" => &["`bookrack show book:<id>`"],
         "stats" => &["`bookrack rpc call library.stats`"],
         "search" => &["`bookrack rpc call library.search`"],
         _ => return None,
@@ -1997,7 +2004,7 @@ mod tests {
             ("list", "`bookrack rpc call library.list_books`"),
             ("ls", "`bookrack rpc call library.list_books`"),
             ("find", "`bookrack rpc call library.find_books`"),
-            ("show", "`bookrack rpc call library.show_book`"),
+            ("show", "`bookrack show book:<id>`"),
             ("stats", "`bookrack rpc call library.stats`"),
             ("search", "`bookrack rpc call library.search`"),
         ] {

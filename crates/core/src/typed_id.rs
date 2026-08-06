@@ -327,7 +327,8 @@ impl Explain for TypedIdParseError {
                     "{written:?} does not apply to the {namespace} namespace"
                 ))
                 .hint(format!(
-                    "Pass it as `{}:{payload}`, or drop the prefix.",
+                    "Pass it as `{}:{payload}`, drop the prefix, or read the item you \
+                     named with `bookrack show {written}`.",
                     expected.as_scope_str()
                 ))
             }
@@ -588,9 +589,14 @@ mod tests {
             problem.summary,
             "\"book:12\" does not apply to the papers namespace"
         );
+        let hint = problem.data.hint.expect("hint");
         assert!(
-            problem.data.hint.expect("hint").contains("`paper:12`"),
-            "the hint rewrites the id for the namespace it was typed under"
+            hint.contains("`paper:12`"),
+            "the hint rewrites the id for the namespace it was typed under: {hint}"
+        );
+        assert!(
+            hint.contains("bookrack show book:12"),
+            "the hint offers the verb that reads the item as typed: {hint}"
         );
     }
 }
