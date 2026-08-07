@@ -55,15 +55,35 @@ pub enum RegistryError {
     #[error("the library registry is empty")]
     Empty,
 
+    /// A mount was attempted under a name the registry already carries.
+    #[error("a library named {name:?} is already mounted")]
+    AlreadyMounted {
+        /// The name the caller asked to mount.
+        name: String,
+    },
+
     /// The internal `RwLock` guarding the default-library name was
     /// poisoned. Indicates a bug — a panic while a writer held the lock
     /// — rather than a misuse path the caller can recover from.
     #[error("internal: default-library lock poisoned")]
     DefaultLockPoisoned,
+
+    /// The internal `RwLock` guarding the mounted-library map was
+    /// poisoned. Indicates a bug — a panic while a writer held the lock
+    /// — rather than a misuse path the caller can recover from.
+    #[error("internal: mounted-library lock poisoned")]
+    LibsLockPoisoned,
 }
 
 /// A fallible registry operation.
 pub type Result<T> = std::result::Result<T, RegistryError>;
+
+/// An opaque token whose drop marks a mounted library as no longer
+/// held. The registry never inspects it; a host that guards a data root
+/// while it serves the library puts that guard here, so releasing it is
+/// tied to the lifetime of the handle rather than to the moment the
+/// name leaves the map.
+pub type MountGuard = Arc<dyn Send + Sync>;
 
 /// One named library bound to the scheduler — its short name and the
 /// warm [`Ops`] that drives its catalog, corpus, and vector store.
@@ -77,6 +97,11 @@ pub type Result<T> = std::result::Result<T, RegistryError>;
 /// without contention; only [`LibraryHandle::ingest_book`] takes the
 /// lock, so two queue workers — current and hypothetical — never run
 /// the catalog/corpus write path in parallel against the same library.
+///
+/// The handle also carries an opaque [`MountGuard`]. The runtime puts
+/// the data root's exclusive lock there, so the lock outlives every
+/// in-flight caller: a handle resolved before an unmount keeps the root
+/// locked until the last clone of that handle is dropped.
 pub struct LibraryHandle<E: Embedder> {
     name: String,
     cfg: Arc<Config>,
@@ -84,6 +109,7 @@ pub struct LibraryHandle<E: Embedder> {
     ops: Arc<Ops<E>>,
     ingest_lock: AsyncMutex<()>,
     glean_lock: AsyncMutex<()>,
+    _mount_guard: Option<MountGuard>,
 }
 
 /// The pipeline parameters a queue job for this library starts from.
@@ -119,12 +145,14 @@ impl<E: Embedder> LibraryHandle<E> {
     }
 
     /// [`LibraryHandle::new`] with the pipeline parameters queue jobs
-    /// for this library start from.
+    /// for this library start from, and the opaque token that marks
+    /// this library as held for as long as the handle lives.
     pub fn with_templates(
         name: impl Into<String>,
         cfg: Arc<Config>,
         ops: Ops<E>,
         templates: JobTemplates,
+        guard: Option<MountGuard>,
     ) -> Arc<LibraryHandle<E>> {
         let handle = LibraryHandle::from_arc(name, cfg, Arc::new(ops));
         // `from_arc` owns the construction guard; rebuilding the value
@@ -137,6 +165,7 @@ impl<E: Embedder> LibraryHandle<E> {
             ops: Arc::clone(&handle.ops),
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
+            _mount_guard: guard,
         })
     }
 
@@ -168,6 +197,7 @@ impl<E: Embedder> LibraryHandle<E> {
             ops,
             ingest_lock: AsyncMutex::new(()),
             glean_lock: AsyncMutex::new(()),
+            _mount_guard: None,
         })
     }
 
@@ -465,8 +495,17 @@ pub struct LibrarySummary {
 /// server, and the queue worker. Routing in this phase is "look up
 /// handle, hand it back"; future scheduling logic — priority,
 /// throttling, preemption — lands here without touching callers.
+///
+/// The mounted set is itself mutable: [`mount`] and [`unmount`] add and
+/// remove libraries while the host runs. Every read hands back a cloned
+/// `Arc`, so a caller that resolved a handle keeps serving from it —
+/// and keeps that handle's [`MountGuard`] alive — after the name has
+/// left the map.
+///
+/// [`mount`]: LibraryRegistry::mount
+/// [`unmount`]: LibraryRegistry::unmount
 pub struct LibraryRegistry<E: Embedder> {
-    libs: HashMap<String, Arc<LibraryHandle<E>>>,
+    libs: RwLock<HashMap<String, Arc<LibraryHandle<E>>>>,
     default: RwLock<String>,
 }
 
@@ -494,7 +533,7 @@ impl<E: Embedder> LibraryRegistry<E> {
             });
         }
         Ok(Arc::new(LibraryRegistry {
-            libs,
+            libs: RwLock::new(libs),
             default: RwLock::new(default),
         }))
     }
@@ -510,7 +549,7 @@ impl<E: Embedder> LibraryRegistry<E> {
         let mut libs: HashMap<String, Arc<LibraryHandle<E>>> = HashMap::new();
         libs.insert(name.clone(), handle);
         Arc::new(LibraryRegistry {
-            libs,
+            libs: RwLock::new(libs),
             default: RwLock::new(name),
         })
     }
@@ -525,24 +564,33 @@ impl<E: Embedder> LibraryRegistry<E> {
                 .map_err(|_| RegistryError::DefaultLockPoisoned)?
                 .clone(),
         };
-        self.libs
-            .get(&key)
+        let libs = self
+            .libs
+            .read()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        libs.get(&key)
             .cloned()
             .ok_or_else(|| RegistryError::LibraryUnknown {
                 name: key,
-                available: sorted_names(&self.libs),
+                available: sorted_names(&libs),
             })
     }
 
     /// Move the default-library pointer to `name`. Returns
-    /// [`RegistryError::LibraryUnknown`] if the name is not registered;
+    /// [`RegistryError::LibraryUnknown`] if the name is not mounted;
     /// no state is changed in that case.
     pub fn set_default(&self, name: &str) -> Result<()> {
-        if !self.libs.contains_key(name) {
-            return Err(RegistryError::LibraryUnknown {
-                name: name.to_string(),
-                available: sorted_names(&self.libs),
-            });
+        {
+            let libs = self
+                .libs
+                .read()
+                .map_err(|_| RegistryError::LibsLockPoisoned)?;
+            if !libs.contains_key(name) {
+                return Err(RegistryError::LibraryUnknown {
+                    name: name.to_string(),
+                    available: sorted_names(&libs),
+                });
+            }
         }
         let mut guard = self
             .default
@@ -550,6 +598,46 @@ impl<E: Embedder> LibraryRegistry<E> {
             .map_err(|_| RegistryError::DefaultLockPoisoned)?;
         *guard = name.to_string();
         Ok(())
+    }
+
+    /// Add a library to the mounted set. Returns
+    /// [`RegistryError::AlreadyMounted`] when the name is already
+    /// served; the caller's handle is dropped in that case and nothing
+    /// changes.
+    pub fn mount(&self, handle: Arc<LibraryHandle<E>>) -> Result<()> {
+        let mut libs = self
+            .libs
+            .write()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        if libs.contains_key(handle.name()) {
+            return Err(RegistryError::AlreadyMounted {
+                name: handle.name().to_string(),
+            });
+        }
+        libs.insert(handle.name().to_string(), handle);
+        Ok(())
+    }
+
+    /// Remove a library from the mounted set and hand its handle back.
+    /// Returns [`RegistryError::LibraryUnknown`] when the name is not
+    /// mounted.
+    ///
+    /// Removal takes the name out of routing immediately, but the
+    /// library's [`MountGuard`] is released only when the last clone of
+    /// the returned handle is dropped — including clones a caller
+    /// resolved before this call. Dropping the return value is
+    /// therefore a request to release, not a guarantee that the release
+    /// has happened.
+    pub fn unmount(&self, name: &str) -> Result<Arc<LibraryHandle<E>>> {
+        let mut libs = self
+            .libs
+            .write()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        libs.remove(name)
+            .ok_or_else(|| RegistryError::LibraryUnknown {
+                name: name.to_string(),
+                available: sorted_names(&libs),
+            })
     }
 
     /// Read the current default-library name.
@@ -568,8 +656,11 @@ impl<E: Embedder> LibraryRegistry<E> {
             .read()
             .map_err(|_| RegistryError::DefaultLockPoisoned)?
             .clone();
-        let mut out: Vec<LibrarySummary> = self
+        let libs = self
             .libs
+            .read()
+            .map_err(|_| RegistryError::LibsLockPoisoned)?;
+        let mut out: Vec<LibrarySummary> = libs
             .values()
             .map(|h| LibrarySummary {
                 name: h.name().to_string(),
@@ -582,20 +673,20 @@ impl<E: Embedder> LibraryRegistry<E> {
         Ok(out)
     }
 
-    /// Number of registered libraries.
+    /// Number of mounted libraries. A poisoned map reads as zero, the
+    /// same shape a caller already handles for an empty registry.
     pub fn len(&self) -> usize {
-        self.libs.len()
+        self.libs.read().map(|libs| libs.len()).unwrap_or(0)
     }
 
-    /// Whether the registry holds no libraries. Always `false` for
-    /// registries built through [`from_handles`] or [`single`], which
-    /// reject empty inputs; kept for completeness so `clippy` does not
-    /// flag a bare `len`.
+    /// Whether the registry holds no libraries. `false` for registries
+    /// built through [`from_handles`] or [`single`], which reject empty
+    /// inputs, until every library is unmounted.
     ///
     /// [`from_handles`]: LibraryRegistry::from_handles
     /// [`single`]: LibraryRegistry::single
     pub fn is_empty(&self) -> bool {
-        self.libs.is_empty()
+        self.len() == 0
     }
 }
 
@@ -871,6 +962,125 @@ mod tests {
             msg.contains("no papers backend"),
             "expected the no-papers-backend guard message, got: {msg}",
         );
+    }
+
+    /// A mount guard that records its own release, so a test can tell
+    /// "the name left the map" apart from "the token was dropped".
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A guarded handle plus the flag its guard sets when released.
+    fn guarded_handle(
+        name: &str,
+    ) -> (
+        std::sync::Arc<LibraryHandle<FakeEmbedder>>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let cfg = fake_cfg(&format!("/dev/null/{name}"));
+        let ops = fake_ops(&cfg);
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard: super::MountGuard = std::sync::Arc::new(DropFlag(std::sync::Arc::clone(&flag)));
+        let handle = LibraryHandle::with_templates(
+            name,
+            cfg,
+            ops,
+            super::JobTemplates::default(),
+            Some(guard),
+        );
+        (handle, flag)
+    }
+
+    fn released(flag: &std::sync::atomic::AtomicBool) -> bool {
+        flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn mount_adds_a_name_to_the_listing() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(handle("b")).unwrap();
+        let names: Vec<String> = reg.list().unwrap().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(reg.get(Some("b")).unwrap().name(), "b");
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn unmount_removes_it_and_drops_the_guard() {
+        let (b, flag) = guarded_handle("b");
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(b).unwrap();
+        assert!(
+            !released(&flag),
+            "the guard is held while the library is mounted"
+        );
+
+        let removed = reg.unmount("b").unwrap();
+        assert_eq!(removed.name(), "b");
+        assert!(
+            !released(&flag),
+            "the caller still holds the returned handle, so the guard is still held",
+        );
+        drop(removed);
+        assert!(
+            released(&flag),
+            "dropping the last handle releases the mount guard",
+        );
+        assert!(matches!(
+            reg.get(Some("b")),
+            Err(RegistryError::LibraryUnknown { .. })
+        ));
+    }
+
+    /// The whole point of hanging the guard on the handle rather than on
+    /// the map entry: a caller that resolved a handle before the unmount
+    /// keeps the library held until it is done with it.
+    #[test]
+    fn unmount_keeps_the_guard_alive_while_a_handle_clone_lives() {
+        let (b, flag) = guarded_handle("b");
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        reg.mount(b).unwrap();
+
+        let in_flight = reg.get(Some("b")).unwrap();
+        let removed = reg.unmount("b").unwrap();
+        drop(removed);
+        assert!(
+            !released(&flag),
+            "an in-flight caller's clone must keep the guard alive past the unmount",
+        );
+        drop(in_flight);
+        assert!(
+            released(&flag),
+            "the guard is released when the last clone goes away",
+        );
+    }
+
+    #[test]
+    fn mount_refuses_a_name_already_mounted() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        match reg.mount(handle("a")) {
+            Err(RegistryError::AlreadyMounted { name }) => assert_eq!(name, "a"),
+            Err(other) => panic!("expected AlreadyMounted, got {other:?}"),
+            Ok(()) => panic!("expected error, got Ok"),
+        }
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn unmount_refuses_a_name_that_is_not_mounted() {
+        let reg = LibraryRegistry::from_handles([handle("a")], "a").unwrap();
+        match reg.unmount("ghost") {
+            Err(RegistryError::LibraryUnknown { name, available }) => {
+                assert_eq!(name, "ghost");
+                assert_eq!(available, vec!["a".to_string()]);
+            }
+            Err(other) => panic!("expected LibraryUnknown, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 
     #[test]

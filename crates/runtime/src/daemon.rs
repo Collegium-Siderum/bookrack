@@ -1065,6 +1065,7 @@ async fn build_library_handle(
         Arc::clone(&cfg_arc),
         ops,
         templates,
+        None,
     ))
 }
 
