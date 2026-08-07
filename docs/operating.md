@@ -214,6 +214,56 @@ the reference tools are published to MCP clients, and the control plane
 carries no matching method. The refusal says so and names the surface
 that does have it.
 
+
+### Browsing and searching both catalogs
+
+Three verbs read across the pipelines rather than within one:
+
+```
+bookrack list
+bookrack find --title "Sample Title"
+bookrack search "a sample phrase"
+```
+
+Each takes `--scope`, one of `book`, `paper`, or `all`; `all` is the
+default, because reading across the pipelines is what these verbs are
+for. The per-pipeline namespaces stay: `bookrack papers list` is
+`bookrack list --scope paper`.
+
+`list` and `find` page each side separately, so `--limit` and
+`--offset` apply per side and `--scope all` can return up to twice the
+limit. Each side reports its own total. `search` has no paging: one
+method ranks both corpora against the same query and `--top-k` is the
+whole result set.
+
+Filters on `find` divide in two. The shared ones — `--title`,
+`--contributor`, `--contributor-role`, `--language`, `--status` — name
+a column both catalogs carry. The side-specific ones name a column only
+one has: `--format` on the book side, `--year` / `--venue` / `--doi` on
+the paper side. Each of those requires `--scope`, and a scope that
+reaches the other side is refused before anything is sent:
+
+```
+$ bookrack find --year 2020 --scope all
+bookrack: --year filters the paper side only
+```
+
+`--status` is shared but its vocabulary is not: each catalog enforces
+its own, so a status only one side knows is refused by that side.
+
+Under the rows is the library they came from, on the same rule the
+single-item card follows. `--json` carries it too, but the payload is
+assembled by the command rather than forwarded: `items` holds the rows
+of every side that was read, each naming its own `kind` and carrying
+the id that addresses it, and `list` / `find` add a `pages` block with
+each side's own total. It is not the response of any one control-plane
+method — read [control-plane.md](control-plane.md) for those.
+
+One consequence worth knowing: a `--scope all` search is not recorded
+in the retrieval sidecar, so it does not appear in `bookrack retrieval
+list`. Its results span two corpora and no single corpus fingerprint
+describes them. A single-sided search is recorded as usual.
+
 ## The status card
 
 ```

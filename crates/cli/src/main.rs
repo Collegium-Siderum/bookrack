@@ -48,8 +48,9 @@ Environment:
 
 Library reads (search, browse, metadata, status) are served by a running
 session: start one with `bookrack run`, then list the live control-plane
-surface with `bookrack rpc list`. One of them has a verb of its own:
-`bookrack show <kind>:<id>` reads a single item.
+surface with `bookrack rpc list`. The reads used most have verbs of their
+own; a name this binary does not carry is answered with the verb that
+does the same thing.
 
 Prerequisites:
   Run `bookrack doctor` to check Ollama and the embed model.";
@@ -837,8 +838,8 @@ impl From<KindArg> for bookrack_config::LibraryKind {
 }
 
 /// clap's default "did you mean" tip only sees top-level subcommand
-/// names, so a user typing `bookrack list` lands on a suggestion of
-/// `bookrack ingest`. This wrapper parses normally, then on a
+/// names, so a user typing `bookrack ls` lands on a suggestion of
+/// `bookrack logs`. This wrapper parses normally, then on a
 /// `InvalidSubcommand` error checks the offending token against a
 /// hand-maintained map of natural-name aliases and prints a friendlier
 /// tip before exiting through clap's own renderer.
@@ -882,11 +883,11 @@ fn invalid_subcommand_token(err: &clap::Error) -> Option<String> {
 /// those reads have.
 fn natural_name_hint(typed: &str) -> Option<String> {
     let suggestions: &[&str] = match typed {
-        "list" | "ls" => &["`bookrack rpc call library.list_books`"],
-        "find" => &["`bookrack rpc call library.find_books`"],
+        "list" | "ls" => &["`bookrack list`"],
+        "find" => &["`bookrack find`"],
         "show" => &["`bookrack show book:<id>`"],
         "stats" => &["`bookrack rpc call library.stats`"],
-        "search" => &["`bookrack rpc call library.search`"],
+        "search" => &["`bookrack search`"],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -2049,12 +2050,14 @@ mod tests {
     #[test]
     fn natural_name_hints_cover_the_common_typos_from_the_test_report() {
         for (typed, expected) in [
-            ("list", "`bookrack rpc call library.list_books`"),
-            ("ls", "`bookrack rpc call library.list_books`"),
-            ("find", "`bookrack rpc call library.find_books`"),
+            ("list", "`bookrack list`"),
+            ("ls", "`bookrack list`"),
+            ("find", "`bookrack find`"),
             ("show", "`bookrack show book:<id>`"),
+            // The one read with no verb of its own, so the one line
+            // that still points at the proxy.
             ("stats", "`bookrack rpc call library.stats`"),
-            ("search", "`bookrack rpc call library.search`"),
+            ("search", "`bookrack search`"),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }

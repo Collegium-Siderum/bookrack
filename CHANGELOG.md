@@ -10,6 +10,34 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **Three verbs read across both pipelines.** `bookrack list`,
+  `bookrack find`, and `bookrack search` read the book catalog and the
+  paper catalog together, so a page covers the library rather than one
+  pipeline. `--scope` narrows any of them to `book` or `paper`, and
+  defaults to both; the per-pipeline namespaces stay and mean the same
+  thing.
+
+  `list` and `find` page each side separately — `--limit` and
+  `--offset` apply per side, and each side reports its own total.
+  `find` takes the filters both catalogs share, plus the ones only one
+  of them has: `--format` on the book side, `--year` / `--venue` /
+  `--doi` on the paper side, each requiring a `--scope` that names its
+  own side. A scope reaching the other side is refused before anything
+  is sent, naming the catalog that carries the column. `search` ranks
+  both corpora against one query and has no paging; a merged search is
+  not recorded in the retrieval sidecar, since its results span two
+  corpora that no single fingerprint describes.
+
+  Under the rows is the library they came from. `--json` is assembled
+  by the command rather than forwarded: `items` carries the rows of
+  every side that was read, each naming its own kind and the id that
+  addresses it. See [Browsing and searching both
+  catalogs](docs/operating.md#browsing-and-searching-both-catalogs).
+
+  `bookrack papers find` gains the three shared filters it was missing
+  (`--contributor-role`, `--language`, `--status`), so it and `--scope
+  paper` are the same query.
+
 - **`bookrack show <kind>:<id>` reads one item, whichever pipeline it
   belongs to.** Books and papers are two catalogs numbering their
   intakes independently, so `101` names one of each and a bare number

@@ -685,7 +685,10 @@ for the same parameter.
   `library.list_metadata`. A `language` list matches the reported
   language, hitting on any one of the values named; the tag is
   compared as text and is not normalised, so match what the row
-  reports.
+  reports. The CLI's `bookrack list` and `bookrack find` reach these
+  and their paper-side peers, but their `--json` is a shape the CLI
+  assembles from one or both sides — it is not this method's response
+  verbatim.
 - `library.show_book` / `library.show_toc` — per-book bibliographic
   record and paginated TOC; `null` when the intake id is unknown.
 - `library.read_context` / `library.read_span` — passage windows by
@@ -764,7 +767,11 @@ for the same parameter.
   take **no** exclusion fields, since recall there is already confined
   to one item; and `reference.lookup`'s `exclude_books` (a list of book
   slugs, not intake ids) applies only with `book="*"`, the scope that
-  spans more than one reference book.
+  spans more than one reference book. `kind` defaults to `"book"` when
+  the field is absent; the CLI's `bookrack search` therefore always
+  sends it, because that verb defaults to `"all"`. Its `--json` wraps
+  the hits this method returns as a bare array, so that payload is not
+  this method's response verbatim either.
 - `library.vectors_status` — vector-store snapshot for the library.
 - `library.list_ocr_pending` — scan sources still awaiting OCR: every
   `needs_ocr` intake anchor with no successfully-processed OCR product
