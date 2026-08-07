@@ -761,7 +761,8 @@ async fn a_typed_paper_id_reaches_the_control_plane_client() -> Result<()> {
                     "{id:?} should have been refused by the grammar: {stderr}",
                 );
                 assert!(
-                    stderr.contains("papers namespace"),
+                    stderr.contains("names the book catalog")
+                        && stderr.contains("reads the paper catalog"),
                     "{id:?} should be refused for naming another catalog: {stderr}",
                 );
                 assert!(

@@ -217,18 +217,20 @@ pub enum TypedIdParseError {
         input: String,
     },
 
-    /// A well-formed id whose kind is not the one the command namespace
-    /// addresses. Raised where a namespace already fixes the kind, not
-    /// by [`FromStr`], which has no namespace to compare against.
-    NamespaceMismatch {
+    /// A well-formed id whose kind is not the catalog the command
+    /// reads. Raised where the command already fixes the catalog, not
+    /// by [`FromStr`], which has nothing to compare against.
+    ///
+    /// The wording names catalogs rather than command namespaces
+    /// because only one side has a namespace: a book is the unprefixed
+    /// subject, so a book-side command has no plural name to report.
+    CatalogMismatch {
         /// The pipeline the id names.
         kind: ItemKind,
         /// The payload it carried.
         payload: String,
-        /// The pipeline the namespace addresses.
+        /// The pipeline the command reads.
         expected: ItemKind,
-        /// The namespace as the operator types it, in the plural.
-        namespace: &'static str,
     },
 }
 
@@ -307,15 +309,16 @@ impl Explain for TypedIdParseError {
                 ))
             }
 
-            TypedIdParseError::NamespaceMismatch {
+            TypedIdParseError::CatalogMismatch {
                 kind,
                 payload,
                 expected,
-                namespace,
             } => {
                 let written = format!("{}:{payload}", kind.as_scope_str());
                 Problem::new(format!(
-                    "{written:?} does not apply to the {namespace} namespace"
+                    "{written:?} names the {} catalog, and this command reads the {} catalog",
+                    kind.as_scope_str(),
+                    expected.as_scope_str()
                 ))
                 .hint(format!(
                     "Pass it as `{}:{payload}`, drop the prefix, or read the item you \
@@ -355,7 +358,7 @@ mod tests {
             | TypedIdParseError::NonNumericId { .. }
             | TypedIdParseError::BadBookSlug { .. }
             | TypedIdParseError::EmptyPayload { .. }
-            | TypedIdParseError::NamespaceMismatch { .. } => {}
+            | TypedIdParseError::CatalogMismatch { .. } => {}
         }
         vec![
             TypedIdParseError::BareId("12".into()),
@@ -376,11 +379,10 @@ mod tests {
                 kind: ItemKind::Book,
                 input: "book:".into(),
             },
-            TypedIdParseError::NamespaceMismatch {
+            TypedIdParseError::CatalogMismatch {
                 kind: ItemKind::Book,
                 payload: "12".into(),
                 expected: ItemKind::Paper,
-                namespace: "papers",
             },
         ]
     }
@@ -575,25 +577,26 @@ mod tests {
         }
     }
 
-    /// The mismatch a command namespace raises names both sides and
-    /// rewrites the id into the namespace it was typed under.
+    /// The mismatch a command raises names both catalogs and rewrites
+    /// the id for the one being read. It says "catalog" rather than
+    /// naming a command namespace, because the book side has none: a
+    /// book is the unprefixed subject and only `papers` is a namespace.
     #[test]
-    fn a_namespace_mismatch_names_both_kinds() {
-        let problem = TypedIdParseError::NamespaceMismatch {
+    fn a_catalog_mismatch_names_both_kinds() {
+        let problem = TypedIdParseError::CatalogMismatch {
             kind: ItemKind::Book,
             payload: "12".into(),
             expected: ItemKind::Paper,
-            namespace: "papers",
         }
         .explain();
         assert_eq!(
             problem.summary,
-            "\"book:12\" does not apply to the papers namespace"
+            "\"book:12\" names the book catalog, and this command reads the paper catalog"
         );
         let hint = problem.data.hint.expect("hint");
         assert!(
             hint.contains("`paper:12`"),
-            "the hint rewrites the id for the namespace it was typed under: {hint}"
+            "the hint rewrites the id for the catalog being read: {hint}"
         );
         assert!(
             hint.contains("bookrack show book:12"),

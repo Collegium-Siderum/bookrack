@@ -183,9 +183,10 @@ being read — before anything is looked up or written — and exits `2`:
 
 ```
 $ bookrack papers show book:12
-error: invalid value 'book:12' for '<INTAKE_ID>': "book:12" does not
-apply to the papers namespace. Pass it as `paper:12`, drop the prefix,
-or read the item you named with `bookrack show book:12`.
+error: invalid value 'book:12' for '<INTAKE_ID>': "book:12" names the
+book catalog, and this command reads the paper catalog. Pass it as
+`paper:12`, drop the prefix, or read the item you named with `bookrack
+show book:12`.
 ```
 
 Refusing it is the point: the number is a valid paper id too, so

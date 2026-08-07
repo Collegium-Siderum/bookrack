@@ -534,6 +534,15 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **A typed id that names the wrong catalog says so in terms of
+  catalogs, not command namespaces.** `bookrack papers show book:12`
+  reported that the id `does not apply to the papers namespace`, which
+  is only sayable on the side that has a namespace: a book is the
+  unprefixed subject and `bookrack books` does not exist. The refusal
+  now reads `"book:12" names the book catalog, and this command reads
+  the paper catalog`, followed by the same next steps as before. One
+  wording covers both sides.
+
 - **`bookrack books …` is answered with the verbs that cover the book
   side.** There is no `books` namespace: a book is the unprefixed
   subject, and `papers` is the namespace because it is the second

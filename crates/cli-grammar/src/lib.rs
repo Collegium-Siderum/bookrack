@@ -771,14 +771,13 @@ fn paper_intake_id(raw: &str) -> Result<i64, String> {
         // Well formed, wrong catalog. The payload is read back off the
         // input so the message can offer it under this namespace's own
         // kind.
-        Ok(other) => Err(TypedIdParseError::NamespaceMismatch {
+        Ok(other) => Err(TypedIdParseError::CatalogMismatch {
             kind: other.kind(),
             payload: raw
                 .split_once(':')
                 .map_or(raw, |(_, rest)| rest)
                 .to_string(),
             expected: ItemKind::Paper,
-            namespace: "papers",
         }
         .to_string()),
         Err(err) => Err(err.to_string()),
@@ -1927,15 +1926,16 @@ mod tests {
         }
     }
 
-    /// The refusal names the namespace it was typed under and rewrites
-    /// the id for it, rather than reporting only that a value was bad.
+    /// The refusal names both catalogs and rewrites the id for the one
+    /// being read, rather than reporting only that a value was bad.
     #[test]
     fn a_book_id_in_the_papers_namespace_names_both_kinds() {
         let Err(err) = TestCli::try_parse_from(["papers", "show", "book:12"]) else {
             panic!("a book id must not resolve in the papers namespace");
         };
         let rendered = err.to_string();
-        assert!(rendered.contains("papers namespace"), "{rendered}");
+        assert!(rendered.contains("names the book catalog"), "{rendered}");
+        assert!(rendered.contains("reads the paper catalog"), "{rendered}");
         assert!(rendered.contains("`paper:12`"), "{rendered}");
     }
 
