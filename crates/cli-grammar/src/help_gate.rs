@@ -53,26 +53,13 @@ pub const GLOBAL_ARG_IDS: &[&str] = &[
 /// is not on it must carry at least `MIN_EXAMPLES`, and a leaf that is
 /// on it must still carry none — filling one in without striking its
 /// line out fails the gate just as loudly as leaving it empty.
-pub const EXAMPLES_OWED: &[&str] = &[];
-
-/// Leaves whose examples are deliberately deferred behind a rename
-/// that is already decided: the four book-side write namespaces move
-/// under a `books` namespace. Writing examples against a form that is
-/// on its way out buys nothing. Same discipline as `EXAMPLES_OWED`:
-/// the list only shrinks, and the rename that empties it strikes out
-/// its own lines.
-pub const EXAMPLES_DEFERRED: &[&str] = &[
+pub const EXAMPLES_OWED: &[&str] = &[
     "corpus rebuild",
     "metadata ack",
     "metadata advance",
     "metadata approve",
-    "metadata clear",
-    "metadata contributor-add",
-    "metadata contributor-remove",
     "metadata reaudit",
     "metadata reject",
-    "metadata set",
-    "metadata void",
     "stamps reconcile",
     "vectors drop",
     "vectors rebuild",
@@ -200,8 +187,7 @@ impl fmt::Display for Violation {
             ViolationKind::ExamplesAlreadyWritten => write!(
                 f,
                 "is filed as owing examples but carries them. Strike its line \
-                 out of EXAMPLES_OWED / EXAMPLES_DEFERRED — those lists only \
-                 shrink."
+                 out of EXAMPLES_OWED — that list only shrinks."
             ),
             ViolationKind::ExampleLineTooLong { line, len } => write!(
                 f,
@@ -530,9 +516,9 @@ pub fn split_example(invocation: &str) -> Result<Vec<String>, UnbalancedQuote> {
 #[derive(Debug)]
 pub struct UnbalancedQuote;
 
-/// Whether the leaf is on either debt list.
+/// Whether the leaf is on the debt list.
 pub fn owes_examples(path: &str) -> bool {
-    EXAMPLES_OWED.contains(&path) || EXAMPLES_DEFERRED.contains(&path)
+    EXAMPLES_OWED.contains(&path)
 }
 
 /// Whether the command's grammar makes a parse check vacuous.
@@ -541,25 +527,18 @@ pub fn is_parse_exempt(path: &str) -> bool {
 }
 
 /// Defects in the constants themselves: an unsorted or duplicated list
-/// reads as complete when it is not, and a path on both debt lists
-/// makes "deferred" and "in reach" the same state. Every entry point
-/// calls this, so a bad edit fails on whichever crate was touched.
+/// reads as complete when it is not. Every entry point calls this, so a
+/// bad edit fails on whichever crate was touched.
 pub fn policy_defects() -> Vec<String> {
     let mut out = Vec::new();
     for (name, list) in [
         ("EXAMPLES_OWED", EXAMPLES_OWED),
-        ("EXAMPLES_DEFERRED", EXAMPLES_DEFERRED),
         ("PARSE_EXEMPT", PARSE_EXEMPT),
         ("EXAMPLE_QUOTED_VALUES", EXAMPLE_QUOTED_VALUES),
         ("GLOBAL_ARG_IDS", GLOBAL_ARG_IDS),
     ] {
         if is_unsorted_or_duplicated(list) {
             out.push(format!("{name} is not sorted, or holds a duplicate"));
-        }
-    }
-    for path in EXAMPLES_DEFERRED {
-        if EXAMPLES_OWED.contains(path) {
-            out.push(format!("`{path}` is filed on both debt lists"));
         }
     }
     out
@@ -594,7 +573,6 @@ pub fn unclaimed_debt(root: &clap::Command) -> Vec<&'static str> {
     collect_leaves(root, "", &mut live);
     EXAMPLES_OWED
         .iter()
-        .chain(EXAMPLES_DEFERRED.iter())
         .copied()
         .filter(|path| !live.contains(*path))
         .collect()
@@ -737,13 +715,13 @@ mod tests {
     #[test]
     fn a_debt_listed_leaf_that_carries_examples_is_reported() {
         let block =
-            format!("Examples:\n{EXAMPLE_PREFIX}metadata set\n{EXAMPLE_PREFIX}metadata set");
+            format!("Examples:\n{EXAMPLE_PREFIX}metadata ack\n{EXAMPLE_PREFIX}metadata ack");
         let cmd = clap::Command::new("probe").subcommand(
             clap::Command::new("metadata")
                 .about("Namespace.")
                 .subcommand(
-                    clap::Command::new("set")
-                        .about("Set.")
+                    clap::Command::new("ack")
+                        .about("Ack.")
                         .after_long_help(block),
                 ),
         );
@@ -752,7 +730,7 @@ mod tests {
             violations
                 .iter()
                 .any(|v| matches!(v.kind, ViolationKind::ExamplesAlreadyWritten)
-                    && v.path == "metadata set"),
+                    && v.path == "metadata ack"),
             "expected the walk to report the un-struck debt line, got: {}",
             report(&violations)
         );
@@ -943,11 +921,11 @@ mod tests {
         let cmd = clap::Command::new("probe").subcommand(
             clap::Command::new("metadata")
                 .about("Namespace.")
-                .subcommand(clap::Command::new("set").about("Set.")),
+                .subcommand(clap::Command::new("ack").about("Ack.")),
         );
         let unclaimed = unclaimed_debt(&cmd);
         assert!(
-            !unclaimed.contains(&"metadata set"),
+            !unclaimed.contains(&"metadata ack"),
             "the mounted path must read as claimed"
         );
         assert!(

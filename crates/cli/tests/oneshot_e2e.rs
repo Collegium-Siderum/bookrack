@@ -32,7 +32,7 @@ async fn oneshot_subcommands_consistent_no_daemon() -> Result<()> {
             CaseExpect::NotRunning,
         ),
         (
-            &["metadata", "set", "1", "title", "x"],
+            &["metadata", "set", "1", "--field", "title", "--value", "x"],
             CaseExpect::NotRunning,
         ),
         (&["vectors", "drop"], CaseExpect::NotRunning),

@@ -423,13 +423,19 @@ pub enum RetrievalAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum WriteMetadataAction {
     /// Set (or change) one metadata field's value.
+    #[command(after_long_help = crate::examples![
+        "metadata set 12 --field title --value \"Sample Title\"",
+        "metadata set 12 --field title --value \"Sample Title\" --confirmed",
+    ])]
     Set {
         /// The intake id of the book.
         book: i64,
         /// The field column on `node_publication_attrs` to write
         /// (e.g. `title`, `publisher`, `year`, `language`).
+        #[arg(long)]
         field: String,
         /// The new value.
+        #[arg(long)]
         value: String,
         /// Optional note on why this value is correct, recorded on the
         /// audit row.
@@ -443,10 +449,15 @@ pub enum WriteMetadataAction {
         confirmed: bool,
     },
     /// Clear an override, falling back to the extracted base value.
+    #[command(after_long_help = crate::examples![
+        "metadata clear 12 --field title",
+        "metadata clear 12 --field publisher --library demo",
+    ])]
     Clear {
         /// The intake id of the book.
         book: i64,
         /// The field whose override is removed.
+        #[arg(long)]
         field: String,
         /// Optional note on why the override is removed, recorded on
         /// the audit row.
@@ -457,10 +468,15 @@ pub enum WriteMetadataAction {
     ///
     /// The field reads as absent until a correct value is set. `clear`
     /// removes the suppression.
+    #[command(after_long_help = crate::examples![
+        "metadata void 12 --field publisher",
+        "metadata void 12 --field publisher --json",
+    ])]
     Void {
         /// The intake id of the book.
         book: i64,
         /// The field whose extracted value is suppressed.
+        #[arg(long)]
         field: String,
         /// Optional note on why the extracted value is wrong, recorded
         /// on the audit row.
@@ -479,12 +495,18 @@ pub enum WriteMetadataAction {
     ///
     /// Adds a row with origin `user`, appended after the role's existing
     /// contributors. User rows survive a re-ingest.
+    #[command(after_long_help = crate::examples![
+        "metadata contributor-add 12 --role author --name \"Doe, Jane\"",
+        "metadata contributor-add 12 --role author --name \"Doe, Jane\" --json",
+    ])]
     ContributorAdd {
         /// The intake id of the book.
         book: i64,
         /// Contribution role: author / translator / editor / other.
+        #[arg(long)]
         role: String,
         /// The contributor's name.
+        #[arg(long)]
         name: String,
         /// The contributor's nationality, when known.
         #[arg(long)]
@@ -499,10 +521,15 @@ pub enum WriteMetadataAction {
     /// The id is the one listed by `show_book`. The row is removed
     /// whatever its origin — this is the path for stripping a wrong
     /// extracted attribution.
+    #[command(after_long_help = crate::examples![
+        "metadata contributor-remove 12 --contributor-id 7",
+        "metadata contributor-remove 12 --contributor-id 7 --library demo",
+    ])]
     ContributorRemove {
         /// The intake id of the book.
         book: i64,
         /// The contributor row's surrogate id.
+        #[arg(long)]
         contributor_id: i64,
         /// Optional note on why the attribution is removed, recorded
         /// on the audit row.
@@ -1585,6 +1612,104 @@ mod tests {
         match TestCli::try_parse_from(tokens).expect("parse").command {
             TestCommand::Intake { action } => action,
             other => panic!("expected intake, got {other:?}"),
+        }
+    }
+
+    fn parse_metadata(tokens: &[&str]) -> WriteMetadataAction {
+        match TestCli::try_parse_from(tokens).expect("parse").command {
+            TestCommand::Metadata { action } => action,
+            other => panic!("expected metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn book_side_metadata_names_every_operand_the_way_the_paper_side_does() {
+        match parse_metadata(&[
+            "metadata",
+            "set",
+            "12",
+            "--field",
+            "title",
+            "--value",
+            "Sample Title",
+        ]) {
+            WriteMetadataAction::Set {
+                book, field, value, ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "title");
+                assert_eq!(value, "Sample Title");
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+
+        match parse_metadata(&["metadata", "clear", "12", "--field", "publisher"]) {
+            WriteMetadataAction::Clear { book, field, .. } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "publisher");
+            }
+            other => panic!("expected clear, got {other:?}"),
+        }
+
+        match parse_metadata(&["metadata", "void", "12", "--field", "publisher"]) {
+            WriteMetadataAction::Void { book, field, .. } => {
+                assert_eq!(book, 12);
+                assert_eq!(field, "publisher");
+            }
+            other => panic!("expected void, got {other:?}"),
+        }
+
+        match parse_metadata(&[
+            "metadata",
+            "contributor-add",
+            "12",
+            "--role",
+            "author",
+            "--name",
+            "Doe, Jane",
+        ]) {
+            WriteMetadataAction::ContributorAdd {
+                book, role, name, ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(role, "author");
+                assert_eq!(name, "Doe, Jane");
+            }
+            other => panic!("expected contributor-add, got {other:?}"),
+        }
+
+        match parse_metadata(&[
+            "metadata",
+            "contributor-remove",
+            "12",
+            "--contributor-id",
+            "7",
+        ]) {
+            WriteMetadataAction::ContributorRemove {
+                book,
+                contributor_id,
+                ..
+            } => {
+                assert_eq!(book, 12);
+                assert_eq!(contributor_id, 7);
+            }
+            other => panic!("expected contributor-remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_positional_operand_grammar_no_longer_parses_on_the_book_side() {
+        for tokens in [
+            vec!["metadata", "set", "12", "title", "Sample Title"],
+            vec!["metadata", "clear", "12", "publisher"],
+            vec!["metadata", "void", "12", "publisher"],
+            vec!["metadata", "contributor-add", "12", "author", "Doe, Jane"],
+            vec!["metadata", "contributor-remove", "12", "7"],
+        ] {
+            assert!(
+                TestCli::try_parse_from(&tokens).is_err(),
+                "the positional form {tokens:?} must be refused, not silently accepted"
+            );
         }
     }
 

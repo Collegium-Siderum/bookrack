@@ -534,6 +534,31 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Book-side metadata commands name their operands, the way the paper
+  side already did.** `bookrack metadata set 12 title "…"` took its
+  field and value as bare positions while `bookrack papers metadata set
+  101 --field title --value "…"` named them, so the same edit was
+  written two ways depending on which pipeline held the item. The book
+  side now takes `--field` / `--value` on `set`, `--field` on `clear`
+  and `void`, `--role` / `--name` on `contributor-add`, and
+  `--contributor-id` on `contributor-remove`. The intake id stays
+  positional on both sides.
+
+  **Breaking, with no deprecation period**: the positional forms are
+  refused, by the argument parser, before anything is looked up or
+  written. Migration is mechanical —
+  `metadata set 12 title "…"` becomes
+  `metadata set 12 --field title --value "…"`;
+  `metadata clear 12 publisher` becomes
+  `metadata clear 12 --field publisher`;
+  `metadata contributor-add 12 author "…"` becomes
+  `metadata contributor-add 12 --role author --name "…"`;
+  `metadata contributor-remove 12 7` becomes
+  `metadata contributor-remove 12 --contributor-id 7`. The REPL parses
+  the same grammar and changes with it. Control-plane params and MCP
+  tool schemas are untouched: this is the command line's spelling, not
+  the wire's.
+
 - **The short `bookrack status` card says which library a restart would
   serve.** With no daemon running the card reported only that fact, and
   the one thing an operator can act on there — which library `bookrack

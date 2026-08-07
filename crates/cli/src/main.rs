@@ -1957,7 +1957,9 @@ mod tests {
         // global flag is set, so the value cannot silently drop.
         let outsiders = [
             vec!["bookrack", "verify"],
-            vec!["bookrack", "metadata", "set", "1", "title", "x"],
+            vec![
+                "bookrack", "metadata", "set", "1", "--field", "title", "--value", "x",
+            ],
             vec!["bookrack", "metadata", "approve", "1"],
             vec!["bookrack", "queue", "list"],
             vec!["bookrack", "vectors", "rebuild"],
@@ -1976,10 +1978,37 @@ mod tests {
     #[test]
     fn metadata_write_subcommands_parse_through_cli() {
         for argv in [
-            vec!["bookrack", "metadata", "set", "1", "title", "A New Title"],
-            vec!["bookrack", "metadata", "set", "1", "pub_place", "New York"],
-            vec!["bookrack", "metadata", "set", "1", "original_year", "1949"],
-            vec!["bookrack", "metadata", "clear", "1", "title"],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "title",
+                "--value",
+                "A New Title",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "pub_place",
+                "--value",
+                "New York",
+            ],
+            vec![
+                "bookrack",
+                "metadata",
+                "set",
+                "1",
+                "--field",
+                "original_year",
+                "--value",
+                "1949",
+            ],
+            vec!["bookrack", "metadata", "clear", "1", "--field", "title"],
             vec!["bookrack", "metadata", "ack", "1", "--reason", "test"],
             vec!["bookrack", "metadata", "approve", "1"],
             vec![
