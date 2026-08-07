@@ -534,6 +534,14 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **`bookrack books …` is answered with the verbs that cover the book
+  side.** There is no `books` namespace: a book is the unprefixed
+  subject, and `papers` is the namespace because it is the second
+  pipeline. Typing one now gets `tip: did you mean `bookrack list
+  --scope book` or `bookrack search --scope book`?` beside the parser's
+  own error, the same way the read verbs already answer `list`, `find`,
+  `show`, and `search`.
+
 - **Book-side metadata commands name their operands, the way the paper
   side already did.** `bookrack metadata set 12 title "…"` took its
   field and value as bare positions while `bookrack papers metadata set

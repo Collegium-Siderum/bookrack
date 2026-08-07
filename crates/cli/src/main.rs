@@ -888,6 +888,13 @@ fn natural_name_hint(typed: &str) -> Option<String> {
         "show" => &["`bookrack show book:<id>`"],
         "stats" => &["`bookrack rpc call library.stats`"],
         "search" => &["`bookrack search`"],
+        // The paper side has a namespace, the book side does not: a
+        // book is the unprefixed subject, and the verbs that narrow to
+        // it take `--scope book`.
+        "books" => &[
+            "`bookrack list --scope book`",
+            "`bookrack search --scope book`",
+        ],
         _ => return None,
     };
     Some(suggestions.join(" or "))
@@ -2087,6 +2094,11 @@ mod tests {
             // that still points at the proxy.
             ("stats", "`bookrack rpc call library.stats`"),
             ("search", "`bookrack search`"),
+            // The namespace the book side deliberately does not have.
+            (
+                "books",
+                "`bookrack list --scope book` or `bookrack search --scope book`",
+            ),
         ] {
             assert_eq!(natural_name_hint(typed).as_deref(), Some(expected));
         }
