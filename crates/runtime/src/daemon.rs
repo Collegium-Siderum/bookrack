@@ -39,7 +39,7 @@ use bookrack_ingest::IngestParams;
 use bookrack_obs::WorkerGuard;
 use bookrack_obs::stream::LogStreamHandle;
 use bookrack_ops::reads::info::LibraryInfoContext;
-use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry};
+use bookrack_ops::registry::{JobTemplates, LibraryHandle, LibraryRegistry, MountGuard};
 use bookrack_ops::{Caller, Ops, PapersPaths};
 use bookrack_query::Library;
 use bookrack_session::{
@@ -209,12 +209,13 @@ pub struct DaemonRuntime {
     /// underscore prefix marks it as "kept alive for its destructor";
     /// no caller reads it.
     pub _tty_lock: TtyLock,
-    /// Drop-only field: holds the exclusive flock on every served
-    /// data root for the daemon's whole life, so no second daemon and
-    /// no offline destructive command touches a served root behind
-    /// its back. A root that cannot host a lock file (read-only
-    /// volume) is served without an entry here.
-    pub _root_locks: Vec<RootLock>,
+    /// Drop-only field: takes every library out of the registry, which
+    /// releases each served root's lock as soon as the last caller
+    /// still using that library is done. Each lock lives on its
+    /// library's handle, so this is the one owner whose drop stands for
+    /// "this daemon is done serving" — a spawned task holding a
+    /// `MethodContext` clone keeps the registry alive on its own.
+    _mounted_set: crate::mount::MountedSet,
     /// Drop-only field: holds the tracing non-blocking writer's
     /// background-thread guard. Dropping flushes buffered log lines
     /// and joins the writer thread, so this lives until the runtime
@@ -383,7 +384,10 @@ impl DaemonRuntime {
         // volume, which `libraries add` already supports — is served
         // unlocked: read-only media have no writers to exclude.
         let mut roots_seen: HashMap<PathBuf, String> = HashMap::new();
-        let mut root_locks: Vec<RootLock> = Vec::with_capacity(mounts.len());
+        // Each lock is keyed by the library it guards, so step 6 can
+        // hand it to that library's handle: from there on the lock is
+        // released when the handle is, not when this scope ends.
+        let mut root_locks: HashMap<String, MountGuard> = HashMap::new();
         for (name, lib_cfg) in &mounts {
             claim_unique_root(&mut roots_seen, lib_cfg.data_dir(), name)?;
             match RootLock::acquire(lib_cfg.data_dir(), std::process::id(), "daemon") {
@@ -393,7 +397,7 @@ impl DaemonRuntime {
                         path = %root_lock_path(lib_cfg.data_dir()).display(),
                         "bookrack data root lock acquired",
                     );
-                    root_locks.push(lock);
+                    root_locks.insert(name.clone(), Arc::new(lock) as MountGuard);
                 }
                 Err(err) if is_root_lock_conflict(&err) => {
                     return Err(err.wrap_err(format!("lock the data root of library '{name}'")));
@@ -514,6 +518,7 @@ impl DaemonRuntime {
                 name,
                 reranker.as_ref().map(|r| &r.stage),
                 opts.caller.clone(),
+                root_locks.remove(name),
             )
             .await
             .with_context(|| format!("bring up library '{name}'"))?;
@@ -747,6 +752,11 @@ impl DaemonRuntime {
             queue_paused: Arc::clone(&queue_paused),
             log_stream: log_stream.clone(),
             plan_registry,
+            mounter: Some(Arc::new(crate::mount::Mounter::new(
+                Arc::clone(&registry),
+                reranker.as_ref().map(|r| r.stage.clone()),
+                opts.caller.clone(),
+            ))),
         };
 
         // Bridge the obs log stream into the control-plane event
@@ -776,6 +786,8 @@ impl DaemonRuntime {
         // belongs to `run_until_shutdown`.
         let control_sock = control_sock_guard.disarm();
 
+        let mounted_set = crate::mount::MountedSet::new(Arc::clone(&registry));
+
         Ok(Self {
             cfg,
             registry,
@@ -799,7 +811,7 @@ impl DaemonRuntime {
             method_context: method_ctx,
             rerank_supervisor,
             _tty_lock: tty_lock,
-            _root_locks: root_locks,
+            _mounted_set: mounted_set,
             _obs_guard: obs_guard,
             shutdown_rx,
             queue_worker,
@@ -832,7 +844,7 @@ impl DaemonRuntime {
             // Bound (not folded into `..`) so the flocks live across
             // the drain timeouts below; `..` would drop them here.
             _tty_lock,
-            _root_locks,
+            _mounted_set,
             ..
         } = self;
 
@@ -957,11 +969,12 @@ fn claim_unique_root(seen: &mut HashMap<PathBuf, String>, root: &Path, name: &st
 /// (`Ops::with_library`) — read, ingest, and glean paths all work,
 /// unlike an `Ops::catalog_only` handle, whose pipeline entry points
 /// report an error.
-async fn build_library_handle(
+pub(crate) async fn build_library_handle(
     cfg_arc: Arc<Config>,
     name: &str,
     reranker_stage: Option<&bookrack_ops::RerankStage>,
     caller: Caller,
+    mount_guard: Option<MountGuard>,
 ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>> {
     let cfg = cfg_arc.as_ref();
     // The embed model resolves per library by the full chain
@@ -1065,7 +1078,7 @@ async fn build_library_handle(
         Arc::clone(&cfg_arc),
         ops,
         templates,
-        None,
+        mount_guard,
     ))
 }
 

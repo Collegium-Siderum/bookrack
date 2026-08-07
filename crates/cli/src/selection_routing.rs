@@ -70,7 +70,8 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
             | LibrariesAction::Config { .. } => true,
             LibrariesAction::List { .. }
             | LibrariesAction::Info { .. }
-            | LibrariesAction::Fork { .. } => false,
+            | LibrariesAction::Fork { .. }
+            | LibrariesAction::Mount { .. } => false,
         },
 
         Command::Config { .. }

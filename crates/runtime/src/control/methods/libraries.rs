@@ -18,9 +18,9 @@ use serde_json::{Value, json};
 #[cfg(test)]
 use ts_rs::TS;
 
-use super::super::error_map::{config_err, registry_err, write_err};
+use super::super::error_map::{config_err, mount_err, registry_err, write_err};
 use super::super::events::Event;
-use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, RpcError};
+use super::super::jsonrpc::{INTERNAL_ERROR, INVALID_PARAMS, NOT_READY, RpcError};
 use super::MethodContext;
 use super::run_write;
 use crate::cmd::libraries::CopyMode;
@@ -147,6 +147,60 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
         library: parsed.name.clone(),
     });
     Ok(json!({ "ok": true, "name": parsed.name }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LibraryMountParams {
+    pub name: String,
+}
+
+/// Open a registered library and add it to the set this daemon serves.
+///
+/// The name is a registry name, never a path: the daemon resolves it
+/// through the registry, so what it mounts is what the registry
+/// declares, and registering a new root stays a separate act with its
+/// own failure modes.
+///
+/// Runs through [`run_write`] like every other change to what the
+/// daemon serves: the write mutex keeps a mount from racing another
+/// write, MCP is paused for its duration, and the `library.changed`
+/// event a subscriber needs to refresh its view of the library set is
+/// published on success by the wrapper itself.
+pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let name = mount_target("library.mount", params)?;
+    let mounter = require_mounter("library.mount", ctx)?;
+    let target = name.clone();
+    run_write(ctx, &name, move || async move {
+        mounter.mount(&target).await.map_err(mount_err)?;
+        tracing::info!(library = %target, "library mounted at runtime");
+        Ok(json!({ "ok": true, "name": target }))
+    })
+    .await
+}
+
+fn mount_target(method: &str, params: &Option<Value>) -> Result<String, RpcError> {
+    let raw = params
+        .clone()
+        .ok_or_else(|| RpcError::new(INVALID_PARAMS, format!("{method}: missing params")))?;
+    let parsed: LibraryMountParams = serde_json::from_value(raw)
+        .map_err(|e| RpcError::new(INVALID_PARAMS, format!("{method} params: {e}")))?;
+    Ok(parsed.name)
+}
+
+/// The mount capability, or the refusal an entry point without one
+/// owes its caller. Same shape as a queue-bound method reaching a
+/// daemon that spawned no worker: the method exists, this process
+/// cannot serve it.
+fn require_mounter(
+    method: &str,
+    ctx: &MethodContext,
+) -> Result<std::sync::Arc<crate::mount::Mounter>, RpcError> {
+    ctx.mounter.clone().ok_or_else(|| {
+        RpcError::new(
+            NOT_READY,
+            format!("{method} is not available in this entry point: it dispatches without a daemon bring-up, so it holds no library mounts"),
+        )
+    })
 }
 
 routed_params!(LibraryForkParams);

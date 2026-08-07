@@ -176,6 +176,14 @@ pub struct MethodContext {
     /// RPCs. Constructed once at daemon bring-up; see
     /// [`super::plan_registry`] for the semantics.
     pub plan_registry: Arc<PlanRegistry>,
+    /// The capability to change the mounted set, carrying what a mount
+    /// needs and this context does not: the reranker stage a new handle
+    /// clones, the caller attribution its writes take, and the ability
+    /// to lock a data root. `None` in an entry point that dispatches
+    /// without a daemon bring-up behind it, where `library.mount` and
+    /// `library.unmount` answer [`NOT_READY`] — the same shape a
+    /// queue-bound method takes when no worker was spawned.
+    pub mounter: Option<Arc<crate::mount::Mounter>>,
 }
 
 /// One of two terminal outcomes a method handler can produce: an
@@ -346,6 +354,7 @@ methods! {
     write no_queue async   routed(LibraryForkParams)  "library.fork" => libraries::fork,
     write no_queue async   unrouted
         "library.set_default" => libraries::set_default,
+    write no_queue async   unrouted                   "library.mount" => libraries::mount,
 
     // library reads (sync, parametrised)
     read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,
@@ -763,6 +772,7 @@ pub(crate) fn test_method_context(
         queue_paused: Arc::new(AtomicBool::new(false)),
         log_stream: LogStreamHandle::new(8, 8),
         plan_registry: Arc::new(PlanRegistry::new()),
+        mounter: None,
     }
 }
 

@@ -116,9 +116,12 @@ async fn set_default_flips_the_registry_and_the_in_memory_pointer() -> Result<()
     join_with_deadline(runtime, repl_handle, driver).await?;
 
     // Memory follows disk: the daemon's in-memory pointer — a cache of
-    // the on-disk value — was refreshed by the handler.
+    // the on-disk value — was refreshed by the handler. Read as the
+    // pointer rather than through a handle lookup, because a daemon
+    // that has shut down has given its libraries back and holds no
+    // handles to resolve.
     assert_eq!(
-        registry_handle.get(None)?.name(),
+        registry_handle.default_name()?,
         "beta",
         "the in-memory default pointer must follow the persisted flip"
     );

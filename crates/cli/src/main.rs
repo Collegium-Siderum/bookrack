@@ -622,6 +622,20 @@ pub(crate) enum LibrariesAction {
         /// Library short name to record as the registry default.
         name: String,
     },
+    /// Mount a registered library into the running daemon.
+    ///
+    /// The daemon opens the library's stores, takes its data root's
+    /// lock, and serves it from then on — no restart. The name has to
+    /// be in the registry already; register a new root with
+    /// `libraries add` first.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries mount demo",
+        "libraries mount demo --json",
+    ])]
+    Mount {
+        /// Registry name of the library to start serving.
+        name: String,
+    },
     /// Clone the current library into a sibling at a new data root.
     ///
     /// Shares `books/` (the envelope store) via hardlinks by default,
@@ -2413,7 +2427,7 @@ mod tests {
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
         ("bookrack intake", 2),
-        ("bookrack libraries", 10),
+        ("bookrack libraries", 11),
         ("bookrack metadata", 10),
         ("bookrack papers", 13),
         ("bookrack papers corpus", 1),
@@ -2532,6 +2546,7 @@ mod tests {
         (&["intake", "list-ocr-pending"], Reach::Routed),
         (&["libraries", "detect", "/tmp/library"], Reach::Local),
         (&["libraries", "list"], Reach::Routed),
+        (&["libraries", "mount", "demo"], Reach::Routed),
         (&["list"], Reach::Routed),
         (&["logs"], Reach::Routed),
         (&["metadata", "reaudit", "1"], Reach::Routed),

@@ -56,6 +56,7 @@ use super::jsonrpc::{
 };
 use super::plan_registry::PlanLookupError;
 use crate::cmd::input_error::CmdInputError;
+use crate::mount::MountRefusal;
 
 /// Map a write-handler error onto a JSON-RPC error envelope.
 ///
@@ -111,6 +112,26 @@ pub(crate) fn registry_err(e: RegistryError) -> RpcError {
 /// registry fault is a server-side [`INTERNAL_ERROR`].
 pub(crate) fn config_err(e: ConfigError) -> RpcError {
     from_config(&e)
+}
+
+/// Map a change to the mounted set onto the corresponding wire code.
+///
+/// The `match` is exhaustive: each variant already knows whether it is
+/// caller input, a refusal the caller can repair, or a fault, so the
+/// only decision a new one carries is which code it takes — and that
+/// decision should not have a silent default. The refusals carry their
+/// own three-part [`Problem`], so nothing is worded here.
+pub(crate) fn mount_err(e: MountRefusal) -> RpcError {
+    match e {
+        MountRefusal::Unresolvable(e) => from_config(&e),
+        MountRefusal::Registry(e) => from_registry(&e),
+        MountRefusal::Refused { problem, .. } => rpc_from_problem(INVALID_PARAMS, problem),
+        MountRefusal::RootLocked { problem, .. } => rpc_from_problem(BACKEND_UNAVAILABLE, problem),
+        MountRefusal::BringUp(err) => rpc_from_problem(
+            INTERNAL_ERROR,
+            Problem::from_error_chain(err.as_ref() as &dyn std::error::Error),
+        ),
+    }
 }
 
 /// Map a [`PlanLookupError`] onto the corresponding wire code.

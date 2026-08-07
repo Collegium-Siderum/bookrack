@@ -1,4 +1,4 @@
-//! `bookrack libraries {info,fork}` — control-plane wrapper.
+//! `bookrack libraries {info,mount,fork}` — control-plane wrapper.
 
 use std::path::{Path, PathBuf};
 
@@ -78,6 +78,19 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
             // or a root's `config.toml` offline; `main` dispatches them
             // before reaching this daemon path.
             unreachable!("libraries add/register/remove/config are handled offline in main")
+        }
+        LibrariesAction::Mount { name } => {
+            let response =
+                helpers::dispatch(&client, "library.mount", json!({ "name": name })).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            println!("Mounted library '{name}'; the daemon serves it from now on.");
+            Ok(())
         }
         LibrariesAction::Fork {
             new_name,

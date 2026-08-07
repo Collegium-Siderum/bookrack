@@ -368,7 +368,8 @@ the exit-code bucket does not distinguish the two.
     unchanged rather than treating meaningless as wrong.
   - `unrouted` — the method answers about the daemon itself, or about
     every library at once: `status`, `daemon.status`, `doctor.gather`,
-    `events.snapshot`, `library.list`, `library.set_default`. It has
+    `events.snapshot`, `library.list`, `library.set_default`,
+    `library.mount`. It has
     no key to carry a selection, so a client holding an explicit one
     must refuse the call rather than send it and let the selection
     evaporate. The daemon cannot make that refusal for the client: a
@@ -402,6 +403,19 @@ the exit-code bucket does not distinguish the two.
   copied, and the vector store is deliberately not carried over, so the
   clone starts unstamped and awaits its own `vectors reset`. Writes the
   registry.
+- `library.mount` — `{ name }` → `{ ok: true, name }`. Open the
+  registered library `name` and add it to the served set, without a
+  restart. `name` is a registry name, never a path: registering a root
+  stays a separate act, with its own failure modes. The mount runs the
+  same checks bring-up runs, in bring-up's order — a root another
+  mounted library already claims, an index profile that disagrees with
+  the served set on the reranker stage, and an embed backend that
+  cannot serve are each refused, so a library that starts cleanly also
+  mounts cleanly. Returns `-32010` when the registry does not carry the
+  name, `-32602` for a refused consistency check, and `-32017` when
+  another process holds the root's lock. Being a write, it takes the
+  write mutex — a concurrent write sees `-32001 busy` for the second or
+  so a mount takes — and fires `library.changed` on success.
 - `library.set_default` — `{ name }` → `{ ok: true, name }`. Move
   the registry's default-library pointer to `name`. The change is
   persisted to the on-disk registry, and the running daemon's
