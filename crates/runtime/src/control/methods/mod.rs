@@ -355,6 +355,7 @@ methods! {
     write no_queue async   unrouted
         "library.set_default" => libraries::set_default,
     write no_queue async   unrouted                   "library.mount" => libraries::mount,
+    write no_queue async   unrouted                   "library.unmount" => libraries::unmount,
 
     // library reads (sync, parametrised)
     read  no_queue sync    routed(LibraryOnlyParams)  "library.stats" => reads_library::stats,

@@ -222,6 +222,229 @@ async fn mount_refuses_a_root_another_mount_already_claims() -> Result<()> {
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// The point of unmounting: the root goes back. An implementation that
+/// only takes the name out of the map passes every listing assertion
+/// and fails this one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unmount_releases_the_data_root_lock() -> Result<()> {
+    use bookrack_session::{RootLock, is_root_lock_conflict};
+
+    let (sandbox, alpha, beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let runtime = start(runtime_root.path()).await?;
+
+    // Held while served, so the release below is a change of state and
+    // not a root that was never locked.
+    let held = RootLock::acquire(&beta, std::process::id(), "test");
+    assert!(
+        held.as_ref().err().is_some_and(is_root_lock_conflict),
+        "beta's root has to be locked while the daemon serves it",
+    );
+    drop(held);
+
+    let sock = runtime.control_sock.path.clone();
+    let beta_for_driver = beta.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.unmount","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert!(resp["error"].is_null(), "unmount was refused: {resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert_eq!(library_names(&resp)?, ["alpha"], "{resp}");
+
+        // The whole point: this process can now take the root.
+        RootLock::acquire(&beta_for_driver, std::process::id(), "test")
+            .map_err(|e| eyre!("the unmounted root is still locked: {e:#}"))?;
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// Unmounting a library with work still queued against it would let
+/// each of those jobs fail on its next pull — silently burning work the
+/// operator submitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unmount_refuses_a_library_with_queued_work() -> Result<()> {
+    let (sandbox, alpha, beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let mut opts = RuntimeOpts::headless(None, Some("alpha".to_string()));
+    opts.no_mcp = true;
+    opts.spawn_queue_worker = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = DaemonRuntime::start(opts).await?;
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        // Pause first so the job stays `Pending` instead of being
+        // pulled and finished before the unmount is attempted.
+        send(&mut w, r#"{"jsonrpc":"2.0","id":1,"method":"queue.pause"}"#).await?;
+        let _ = recv(&mut reader).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"ingest.submit","params":{"paths":["/tmp/unmount-fixture.txt"],"library":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert!(resp["result"]["job_ids"].is_array(), "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":3,"method":"library.unmount","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert!(
+            !resp["error"].is_null(),
+            "queued work did not stop the unmount: {resp}"
+        );
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("queued work"),
+            "the refusal has to name the queue as the reason: {resp}"
+        );
+        // Not the "unknown library" refusal dressed up as a reason: an
+        // implementation that reports every failed unmount that way
+        // would satisfy a bare is-error assertion.
+        assert!(
+            !message.contains("no library named"),
+            "the library is served; the refusal must not claim otherwise: {resp}"
+        );
+
+        // Still served — a refused unmount changes nothing.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":4,"method":"library.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let mut names = library_names(&resp)?;
+        names.sort_unstable();
+        assert_eq!(names, ["alpha", "beta"], "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// The two libraries a daemon cannot stop serving without contradicting
+/// what it reports: the one an unnamed call resolves to, and the one it
+/// is identified by. The fixture comes up under `beta` while the
+/// registry's default is `alpha`, so the two refusals land on different
+/// libraries and neither can stand in for the other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unmount_refuses_the_default_and_the_primary() -> Result<()> {
+    let (sandbox, alpha, beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let mut opts = RuntimeOpts::headless(None, Some("beta".to_string()));
+    opts.no_mcp = true;
+    opts.runtime_dir = Some(runtime_root.path().to_path_buf());
+    let runtime = DaemonRuntime::start(opts).await?;
+    assert_eq!(
+        runtime.registry.get(None)?.name(),
+        "alpha",
+        "the default has to differ from the primary for this test to discriminate",
+    );
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.unmount","params":{"name":"alpha"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("default"),
+            "the default's refusal has to say it is the default: {resp}"
+        );
+        let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("libraries default"),
+            "the default's refusal points at moving the pointer: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.unmount","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let message = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("came up under"),
+            "the primary's refusal has to say it is the bring-up selection: {resp}"
+        );
+        let hint = resp["error"]["data"]["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.contains("bookrack quit"),
+            "the primary's refusal points at restarting the daemon: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":3,"method":"library.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let mut names = library_names(&resp)?;
+        names.sort_unstable();
+        assert_eq!(names, ["alpha", "beta"], "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 fn library_names(resp: &Value) -> Result<Vec<&str>> {
     let entries = resp["result"]
         .as_array()

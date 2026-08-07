@@ -636,6 +636,20 @@ pub(crate) enum LibrariesAction {
         /// Registry name of the library to start serving.
         name: String,
     },
+    /// Unmount a library, releasing its data root.
+    ///
+    /// The daemon stops serving the library and lets go of its root
+    /// lock, so an offline command can touch that root. Refused for the
+    /// registry default, for the library the daemon came up under, and
+    /// for a library with queued work.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "libraries unmount demo",
+        "libraries unmount demo --json",
+    ])]
+    Unmount {
+        /// Registry name of the library to stop serving.
+        name: String,
+    },
     /// Clone the current library into a sibling at a new data root.
     ///
     /// Shares `books/` (the envelope store) via hardlinks by default,
@@ -2427,7 +2441,7 @@ mod tests {
         ("bookrack distill", 4),
         ("bookrack index-profile", 6),
         ("bookrack intake", 2),
-        ("bookrack libraries", 11),
+        ("bookrack libraries", 12),
         ("bookrack metadata", 10),
         ("bookrack papers", 13),
         ("bookrack papers corpus", 1),
@@ -2547,6 +2561,7 @@ mod tests {
         (&["libraries", "detect", "/tmp/library"], Reach::Local),
         (&["libraries", "list"], Reach::Routed),
         (&["libraries", "mount", "demo"], Reach::Routed),
+        (&["libraries", "unmount", "demo"], Reach::Routed),
         (&["list"], Reach::Routed),
         (&["logs"], Reach::Routed),
         (&["metadata", "reaudit", "1"], Reach::Routed),

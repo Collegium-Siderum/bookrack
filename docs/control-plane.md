@@ -43,9 +43,11 @@ alone. A second daemon pointed at a served root — even from a
 different runtime directory — fails to start and names the holder's
 recorded `pid=` and `role=`. `bookrack libraries remove --purge` takes
 the same lock before its detect gate, so purging a root a daemon is
-serving is refused (exit 2) rather than silently destroying live data
-— with eager mounting that covers every registered library, stop the
-daemon first.
+serving is refused (exit 2) rather than silently destroying live data.
+Eager mounting covers every registered library, so a purge always
+meets a held root; `bookrack libraries unmount <name>` gives that one
+root back without stopping the daemon, except for the registry default
+and the library the daemon came up under, which still need a restart.
 
 The registry lock is different in kind: short, not long. The library
 registry has two kinds of writer — the offline CLI verbs and the daemon
@@ -369,7 +371,7 @@ the exit-code bucket does not distinguish the two.
   - `unrouted` — the method answers about the daemon itself, or about
     every library at once: `status`, `daemon.status`, `doctor.gather`,
     `events.snapshot`, `library.list`, `library.set_default`,
-    `library.mount`. It has
+    `library.mount`, `library.unmount`. It has
     no key to carry a selection, so a client holding an explicit one
     must refuse the call rather than send it and let the selection
     evaporate. The daemon cannot make that refusal for the client: a
@@ -416,6 +418,21 @@ the exit-code bucket does not distinguish the two.
   another process holds the root's lock. Being a write, it takes the
   write mutex — a concurrent write sees `-32001 busy` for the second or
   so a mount takes — and fires `library.changed` on success.
+- `library.unmount` — `{ name }` → `{ ok: true, name }`. Stop serving
+  `name` and give its data root back. Three libraries are refused: the
+  registry's current default (an unnamed call would resolve to a key
+  the served set no longer has), the library the daemon came up under
+  (its identity is a bring-up fact, so the status card would go on
+  naming a library that left), and a library with pending or running
+  queue jobs (each would fail on its next pull). Each refusal is
+  `-32602` and names its own next step. "The last library" needs no
+  rule of its own — the default is always inside the served set, so a
+  one-library daemon's only library is its default. The root lock is
+  released when the last caller still using the library is done, which
+  may be after this call returns: a read in flight when the unmount
+  landed keeps the root held until it finishes, so a client that must
+  see the root free polls for it rather than assuming the return.
+  Fires `library.changed`.
 - `library.set_default` — `{ name }` → `{ ok: true, name }`. Move
   the registry's default-library pointer to `name`. The change is
   persisted to the on-disk registry, and the running daemon's

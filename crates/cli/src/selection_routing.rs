@@ -71,7 +71,8 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
             LibrariesAction::List { .. }
             | LibrariesAction::Info { .. }
             | LibrariesAction::Fork { .. }
-            | LibrariesAction::Mount { .. } => false,
+            | LibrariesAction::Mount { .. }
+            | LibrariesAction::Unmount { .. } => false,
         },
 
         Command::Config { .. }

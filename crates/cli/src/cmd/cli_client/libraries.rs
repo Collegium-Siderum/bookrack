@@ -1,4 +1,5 @@
-//! `bookrack libraries {info,mount,fork}` — control-plane wrapper.
+//! `bookrack libraries {info,mount,unmount,fork}` — control-plane
+//! wrapper.
 
 use std::path::{Path, PathBuf};
 
@@ -90,6 +91,22 @@ pub async fn run(action: LibrariesAction, runtime_dir: Option<PathBuf>) -> Resul
                 return Ok(());
             }
             println!("Mounted library '{name}'; the daemon serves it from now on.");
+            Ok(())
+        }
+        LibrariesAction::Unmount { name } => {
+            let response =
+                helpers::dispatch(&client, "library.unmount", json!({ "name": name })).await?;
+            if ctx().is_json() {
+                helpers::print_value(&response);
+                return Ok(());
+            }
+            if ctx().is_quiet() {
+                return Ok(());
+            }
+            println!(
+                "Unmounted library '{name}'; its data root is released once any call still \
+                 using it finishes."
+            );
             Ok(())
         }
         LibrariesAction::Fork {

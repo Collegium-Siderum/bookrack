@@ -178,6 +178,57 @@ pub async fn mount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value,
     .await
 }
 
+/// Stop serving a library and let go of its data root.
+///
+/// Refuses the registry default, the library the daemon came up under,
+/// and a library with queued work; see [`crate::mount::Mounter::unmount`]
+/// for why each of the three would otherwise leave the daemon
+/// describing something it no longer serves.
+///
+/// The root lock is released when the last caller holding the library's
+/// handle is done with it, which may be after this call returns: an
+/// in-flight read keeps the root held until it finishes.
+pub async fn unmount(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, RpcError> {
+    let name = mount_target("library.unmount", params)?;
+    let mounter = require_mounter("library.unmount", ctx)?;
+    let primary = ctx.info_context.library_name.clone();
+    let queued_jobs = queued_against(ctx, &name)?;
+    let target = name.clone();
+    run_write(ctx, &name, move || async move {
+        let facts = crate::mount::UnmountFacts {
+            primary: primary.as_deref(),
+            queued_jobs,
+        };
+        let handle = mounter.unmount(&target, facts).map_err(mount_err)?;
+        drop(handle);
+        tracing::info!(library = %target, "library unmounted at runtime");
+        Ok(json!({ "ok": true, "name": target }))
+    })
+    .await
+}
+
+/// Count the jobs against `library` the worker has not finished with.
+fn queued_against(ctx: &MethodContext, library: &str) -> Result<usize, RpcError> {
+    let state = ctx.queue_state.lock().map_err(|_| {
+        RpcError::new(
+            crate::control::jsonrpc::INTERNAL_ERROR,
+            "library.unmount: the queue state lock is poisoned",
+        )
+    })?;
+    Ok(state
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.library == library
+                && matches!(
+                    job.state,
+                    bookrack_core::queue::JobState::Pending
+                        | bookrack_core::queue::JobState::Running
+                )
+        })
+        .count())
+}
+
 fn mount_target(method: &str, params: &Option<Value>) -> Result<String, RpcError> {
     let raw = params
         .clone()

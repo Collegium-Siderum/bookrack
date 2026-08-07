@@ -81,6 +81,21 @@ impl From<PreflightRefusal> for MountRefusal {
     }
 }
 
+/// What an unmount has to know about the daemon around it.
+///
+/// Read by the handler from its own context and passed in, rather than
+/// reached for here: the mounter owns the registry, and the two facts
+/// below belong to the bring-up snapshot and the queue, which it does
+/// not.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnmountFacts<'a> {
+    /// The library this daemon came up under, `None` for a root
+    /// selected by path — which has no registry name to be.
+    pub primary: Option<&'a str>,
+    /// How many jobs against the library are pending or running.
+    pub queued_jobs: usize,
+}
+
 /// Drop-only owner of a host's whole mounted set.
 ///
 /// With each root's lock riding on its library's handle, the registry
@@ -195,10 +210,98 @@ impl Mounter {
     /// Dropping the returned handle asks for the root lock to be
     /// released; the release itself happens when the last caller still
     /// holding that handle is done with it.
+    ///
+    /// Three libraries are refused, each because unmounting it would
+    /// leave the daemon describing something it no longer serves:
+    ///
+    /// * the **registry default** — the no-name route would resolve to
+    ///   a key the mounted set no longer has, taking every unnamed call
+    ///   down with it;
+    /// * the **primary** — the daemon's identity is a bring-up fact, so
+    ///   the `status` card would go on naming a library that left;
+    /// * a library with **queued work** — a pending or running job
+    ///   against it would burn on the next pull, and the operator would
+    ///   see a failed ingest rather than a refused unmount.
+    ///
+    /// "The last library" needs no rule of its own: the registry's
+    /// default is always inside the mounted set, so a one-library
+    /// daemon's only library is its default and the first rule catches
+    /// it.
     pub fn unmount(
         &self,
         name: &str,
+        facts: UnmountFacts<'_>,
     ) -> Result<Arc<LibraryHandle<OllamaEmbedClient>>, MountRefusal> {
+        // Resolve first: a name the daemon does not serve gets the
+        // "unknown library" refusal rather than one of the three below,
+        // which would describe a library that is not there.
+        self.registry
+            .get(Some(name))
+            .map_err(MountRefusal::Registry)?;
+
+        if self
+            .registry
+            .default_name()
+            .map_err(MountRefusal::Registry)?
+            == name
+        {
+            return Err(MountRefusal::Refused {
+                library: name.to_string(),
+                problem: Problem::new("cannot unmount the registry's default library")
+                    .detail(
+                        "A call that names no library resolves to the default, so unmounting \
+                         it would leave every unnamed call with nothing to route to."
+                            .to_string(),
+                    )
+                    .hint(format!(
+                        "Move the pointer to another served library first — \
+                         `bookrack libraries default <other>` — then `bookrack libraries \
+                         unmount {name}`.",
+                    )),
+            });
+        }
+
+        if facts.primary == Some(name) {
+            return Err(MountRefusal::Refused {
+                library: name.to_string(),
+                problem: Problem::new("cannot unmount the library the daemon came up under")
+                    .detail(
+                        "The daemon's identity — what `bookrack status` reports as its \
+                         library and data root — is fixed at bring-up, so unmounting this \
+                         one would leave the status card describing a library that is no \
+                         longer served."
+                            .to_string(),
+                    )
+                    .hint(
+                        "Stop the daemon with `bookrack quit` and start it under another \
+                         library; changing which library a daemon is identified by means \
+                         changing the daemon."
+                            .to_string(),
+                    ),
+            });
+        }
+
+        // Pending and running both, not running alone: a pending job
+        // left behind starts after the handle is gone and fails, which
+        // is the silent loss this refusal exists to prevent.
+        let queued = facts.queued_jobs;
+        if queued > 0 {
+            return Err(MountRefusal::Refused {
+                library: name.to_string(),
+                problem: Problem::new("cannot unmount a library with queued work")
+                    .detail(format!(
+                        "{queued} job(s) against this library are pending or running; \
+                         each would fail on its next pull once the library stops being \
+                         served.",
+                    ))
+                    .hint(
+                        "Wait for the queue to drain, or drop the pending jobs with \
+                         `bookrack queue clear`, then unmount."
+                            .to_string(),
+                    ),
+            });
+        }
+
         Ok(self.registry.unmount(name)?)
     }
 
