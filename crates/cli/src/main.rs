@@ -20,8 +20,8 @@ mod util;
 use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
-    CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, ListArgs, LogsArgs,
-    PapersAction, QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction,
+    CorpusAction, DistillAction, DryrunArgs, FindArgs, IngestArgs, IntakeAction, ListArgs,
+    LogsArgs, PapersAction, QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction,
     WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
@@ -379,6 +379,17 @@ enum Command {
         #[command(subcommand)]
         action: PapersAction,
     },
+    /// Filter both catalogs from one verb.
+    ///
+    /// The same page `list` prints, narrowed by the columns both
+    /// catalogs carry. `--format` filters the book side and `--year` /
+    /// `--venue` / `--doi` the paper side, so each of those requires
+    /// `--scope` naming the side that has it.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "find --title \"Sample Title\"",
+        "find --year 2020 --scope paper",
+    ])]
+    Find(FindArgs),
     /// Browse both catalogs from one verb.
     ///
     /// Reads the book catalog and the paper catalog and prints a
@@ -1342,6 +1353,7 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
+        Command::Find(args) => cmd::cli_client::listing::find(args, None).await,
         Command::List(args) => cmd::cli_client::listing::list(args, None).await,
         Command::Show { id } => cmd::cli_client::show::run(id, None).await,
         Command::Glean(args) => {
@@ -1403,6 +1415,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. }
         | Command::Logs(_)
+        | Command::Find(_)
         | Command::List(_)
         | Command::Show { .. }
         | Command::Status
@@ -2298,6 +2311,7 @@ mod tests {
         "distill",
         "doctor",
         "dryrun",
+        "find",
         "glean",
         "ingest",
         "init",
@@ -2331,7 +2345,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 29),
+        ("bookrack", 30),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
@@ -2444,6 +2458,7 @@ mod tests {
         (&["distill", "list"], Reach::Local),
         (&["doctor"], Reach::Routed),
         (&["dryrun", "/tmp/book.epub"], Reach::Routed),
+        (&["find"], Reach::Routed),
         (&["glean", "/tmp/paper.pdf"], Reach::Routed),
         (&["index-profile", "list"], Reach::Local),
         (

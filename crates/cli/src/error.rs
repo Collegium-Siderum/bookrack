@@ -204,6 +204,16 @@ pub enum BookrackCliError {
     #[error("{}", .problem.summary)]
     ItemIdUnusable { problem: Problem },
 
+    /// A top-level read verb was handed a filter only one catalog
+    /// carries, under a scope that reaches the other. Refused before
+    /// the call goes out, because the side that does not carry the
+    /// column would answer with a params error naming a field the
+    /// operator did not think they were addressing. Operator input
+    /// rather than a bug: exit 2, and the reporter draws the three
+    /// parts.
+    #[error("{}", .problem.summary)]
+    FilterOffItsSide { problem: Problem },
+
     /// `libraries detect <path>` determined the path is not a confirmed
     /// or probable bookrack data root — a plain not-a-library verdict or
     /// an unreadable manifest. The renderer already printed the verdict;
@@ -231,7 +241,8 @@ impl BookrackCliError {
             Self::LibraryNotRoutable { .. }
             | Self::RootNotRoutable { .. }
             | Self::PreflightRefused { .. }
-            | Self::ItemIdUnusable { .. } => 2,
+            | Self::ItemIdUnusable { .. }
+            | Self::FilterOffItsSide { .. } => 2,
             Self::DetectNegative(_) => 1,
         }
     }
@@ -301,7 +312,8 @@ impl BookrackCliError {
             Self::LibraryNotRoutable { problem }
             | Self::RootNotRoutable { problem }
             | Self::PreflightRefused { problem }
-            | Self::ItemIdUnusable { problem } => {
+            | Self::ItemIdUnusable { problem }
+            | Self::FilterOffItsSide { problem } => {
                 return Some(problem.data.clone());
             }
             Self::RpcParamsInvalid { detail, .. } => {

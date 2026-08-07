@@ -2009,6 +2009,86 @@ async fn a_root_config_with_a_process_level_key_is_refused_and_annotated() -> Re
     Ok(())
 }
 
+/// A filter only one catalog carries is refused before a connection is
+/// opened, and the report says which side carries it.
+///
+/// Exit code cannot tell this apart from anything else the verb does
+/// wrong — every failure path here exits 2. What discriminates is the
+/// wording, and specifically the *negative* half: `daemon not running`
+/// is the only trace an invocation leaves when it went out on the wire,
+/// so its absence is what proves the refusal happened first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paper_filter_is_refused_before_the_call_goes_out() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for scope in ["all", "book"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["find", "--year", "2020", "--scope", scope])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--scope {scope} should be refused; stderr={stderr}",
+        );
+        assert!(
+            stderr.contains("--year filters the paper side only"),
+            "--scope {scope} should be refused by side, not by value: {stderr}",
+        );
+        assert!(
+            stderr.contains("--scope paper"),
+            "the hint should name the scope that works: {stderr}",
+        );
+        assert!(
+            !stderr.contains("bookrack daemon not running"),
+            "--scope {scope} reached the daemon client before being refused: {stderr}",
+        );
+    }
+    Ok(())
+}
+
+/// The same filter without any `--scope` is refused by the grammar,
+/// which is the half `clap` can express: a side-specific flag requires
+/// the flag that says which side.
+///
+/// The two halves are asserted apart because they fail differently —
+/// this one has no chance to phrase anything, and the one above has to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_side_specific_filter_requires_a_scope() -> Result<()> {
+    let sandbox = Sandbox::new();
+    for flag in ["--year", "--format"] {
+        let output = tokio::process::Command::from(bookrack_cmd!(&sandbox).build())
+            .args(["find", flag, "x"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{flag} without --scope should be refused; stderr={stderr}",
+        );
+        assert!(
+            stderr.contains("required arguments were not provided") && stderr.contains("--scope"),
+            "{flag} should be refused by the grammar for the missing scope: {stderr}",
+        );
+        assert!(
+            !stderr.contains("filters the"),
+            "{flag} was refused in the verb body, so the grammar let it through: {stderr}",
+        );
+        assert!(
+            !stderr.contains("bookrack daemon not running"),
+            "{flag} reached the daemon client: {stderr}",
+        );
+    }
+    Ok(())
+}
+
 /// Render a path as a TOML basic string for a registry `data_dir` value.
 /// Test paths from `tempfile` carry no quotes or backslashes on unix, so
 /// wrapping in quotes is sufficient here.

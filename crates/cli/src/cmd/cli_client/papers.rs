@@ -543,15 +543,25 @@ async fn list(args: PapersListArgs, runtime_dir: Option<PathBuf>) -> Result<()> 
 
 async fn find(args: PapersFindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
-    let params = json!({
+    let mut params = json!({
         "title_substring": args.title,
         "contributor_name": args.contributor,
+        "contributor_role": args.contributor_role,
         "year": args.year,
         "venue_substring": args.venue,
         "doi": args.doi,
         "limit": args.limit,
         "offset": args.offset,
     });
+    // Sent only when passed: the method reads an absent list and an
+    // empty one the same way, and an empty array on the wire says the
+    // operator asked for a filter they did not.
+    if !args.language.is_empty() {
+        params["language"] = Value::from(args.language.clone());
+    }
+    if !args.status.is_empty() {
+        params["statuses"] = Value::from(args.status.clone());
+    }
     let response = helpers::dispatch(&client, "library.find_papers", params).await?;
     emit_paper_list(&response);
     Ok(())

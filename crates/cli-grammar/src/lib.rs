@@ -1324,6 +1324,63 @@ pub struct ListArgs {
     pub offset: Option<u32>,
 }
 
+/// Filters and pagination for `bookrack find`.
+///
+/// The flags divide in two. The shared ones name a column both
+/// catalogs carry and are sent to whichever sides the scope reaches.
+/// The side-specific ones — `--format` on the book side, `--year` /
+/// `--venue` / `--doi` on the paper side — name a column only one
+/// catalog has, so each requires `--scope`, and the verb refuses a
+/// scope that reaches the other side before sending anything.
+///
+/// `--categories` has no flag: the dimension is empty on every real
+/// library, and a filter that always matches nothing is worse in help
+/// than absent.
+#[derive(clap::Args, Debug, Clone)]
+pub struct FindArgs {
+    /// Which catalogs to search. Defaults to both.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Substring match against the title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Exact-equality match against a contributor name.
+    #[arg(long)]
+    pub contributor: Option<String>,
+    /// Exact-equality match against a contributor's role.
+    #[arg(long = "contributor-role")]
+    pub contributor_role: Option<String>,
+    /// Language code to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub language: Vec<String>,
+    /// Lifecycle status to match; repeat the flag to accept any of
+    /// several. The vocabulary differs per side and is enforced by the
+    /// daemon.
+    #[arg(long)]
+    pub status: Vec<String>,
+    /// File format (`epub`, `pdf`, ...). Book side only.
+    #[arg(long, requires = "scope")]
+    pub format: Option<String>,
+    /// Exact-equality match against the year column. Paper side only.
+    #[arg(long, requires = "scope")]
+    pub year: Option<String>,
+    /// Substring match against the container title (journal,
+    /// proceedings, ...). Paper side only.
+    #[arg(long, requires = "scope")]
+    pub venue: Option<String>,
+    /// Exact-equality match against the DOI. Paper side only.
+    #[arg(long, requires = "scope")]
+    pub doi: Option<String>,
+    /// Maximum number of rows per side, so `--scope all` can return up
+    /// to twice this many. The server-side cap applies to each side.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip, applied to each side.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
 /// Pagination bundle for `papers list`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct PapersListArgs {
@@ -1345,6 +1402,17 @@ pub struct PapersFindArgs {
     /// Exact-equality match against a contributor name.
     #[arg(long)]
     pub contributor: Option<String>,
+    /// Exact-equality match against a contributor's role.
+    #[arg(long = "contributor-role")]
+    pub contributor_role: Option<String>,
+    /// Language code to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub language: Vec<String>,
+    /// Lifecycle status to match; repeat the flag to accept any of
+    /// several.
+    #[arg(long)]
+    pub status: Vec<String>,
     /// Exact-equality match against the year column.
     #[arg(long)]
     pub year: Option<String>,

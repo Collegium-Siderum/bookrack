@@ -19,13 +19,14 @@
 
 use std::path::PathBuf;
 
+use bookrack_cli::error::BookrackCliError;
 use bookrack_cli::library_param;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::RowTable;
-use bookrack_cli_grammar::{ListArgs, Scope};
+use bookrack_cli_grammar::{FindArgs, ListArgs, Scope};
 use bookrack_control_client::ControlClient;
-use bookrack_core::{ItemKind, TypedItemId};
+use bookrack_core::{ItemKind, Problem, TypedItemId};
 use eyre::Result;
 use serde_json::{Map, Value, json};
 
@@ -45,6 +46,8 @@ struct Side {
     kind: ItemKind,
     /// Control-plane method that pages it.
     list_method: &'static str,
+    /// Control-plane method that filters it.
+    find_method: &'static str,
     /// Key the response carries its rows under.
     rows_key: &'static str,
     /// Human table for one page of it.
@@ -54,6 +57,7 @@ struct Side {
 const BOOK: Side = Side {
     kind: ItemKind::Book,
     list_method: "library.list_books",
+    find_method: "library.find_books",
     rows_key: "books",
     table: format_book_list,
 };
@@ -61,6 +65,7 @@ const BOOK: Side = Side {
 const PAPER: Side = Side {
     kind: ItemKind::Paper,
     list_method: "library.list_papers",
+    find_method: "library.find_papers",
     rows_key: "papers",
     table: format_paper_list,
 };
@@ -79,22 +84,44 @@ fn sides(scope: Scope) -> &'static [Side] {
 
 pub async fn list(args: ListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
     let client = helpers::connect(runtime_dir.as_deref()).await?;
-    let params = page_params(&args);
+    let params = page_params(args.limit, args.offset);
     let mut pages: Vec<(&Side, Value)> = Vec::new();
     for side in sides(args.scope) {
         let response = helpers::dispatch(&client, side.list_method, params.clone()).await?;
         pages.push((side, response));
     }
+    emit(&client, &pages).await
+}
 
+pub async fn find(args: FindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let scope = args.scope;
+    // Before the connection, not merely before the call: an invocation
+    // refused here must not be able to read as a daemon that is down.
+    refuse_filters_off_their_side(scope, &args)?;
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
+    let mut pages: Vec<(&Side, Value)> = Vec::new();
+    for side in sides(scope) {
+        let response =
+            helpers::dispatch(&client, side.find_method, find_params(side.kind, &args)).await?;
+        pages.push((side, response));
+    }
+    emit(&client, &pages).await
+}
+
+/// Print one set of pages in whichever form the invocation asked for.
+///
+/// The library is looked up once, after the pages are in hand: a call
+/// that failed has nothing to name a library under.
+async fn emit(client: &ControlClient, pages: &[(&Side, Value)]) -> Result<()> {
     if ctx().is_quiet() {
         return Ok(());
     }
-    let library = answering_library(&client).await;
+    let library = answering_library(client).await;
     let library = library.as_deref();
     if ctx().is_json() {
-        helpers::print_value(&compose(&pages, library));
+        helpers::print_value(&compose(pages, library));
     } else {
-        println!("{}", render(&pages, library));
+        println!("{}", render(pages, library));
     }
     Ok(())
 }
@@ -102,15 +129,108 @@ pub async fn list(args: ListArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
 /// Paging parameters, sent to each side unchanged. The server-side cap
 /// is not restated here: a second copy of that number would drift from
 /// the one `config fixed` reports.
-fn page_params(args: &ListArgs) -> Value {
+fn page_params(limit: Option<u32>, offset: Option<u32>) -> Value {
     let mut params = json!({});
-    if let Some(n) = args.limit {
+    if let Some(n) = limit {
         params["limit"] = Value::from(n);
     }
-    if let Some(n) = args.offset {
+    if let Some(n) = offset {
         params["offset"] = Value::from(n);
     }
     params
+}
+
+/// The side-specific filters an invocation actually passed, each with
+/// the catalog that carries its column.
+///
+/// A shared filter is absent from this list by construction: the two
+/// catalogs both answer it, so there is nothing to refuse.
+fn filters_bound_to_one_side(args: &FindArgs) -> Vec<(&'static str, ItemKind)> {
+    [
+        ("--format", ItemKind::Book, args.format.is_some()),
+        ("--year", ItemKind::Paper, args.year.is_some()),
+        ("--venue", ItemKind::Paper, args.venue.is_some()),
+        ("--doi", ItemKind::Paper, args.doi.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, kind, passed)| passed.then_some((flag, kind)))
+    .collect()
+}
+
+/// Refuse a side-specific filter under a scope that reaches the other
+/// side.
+///
+/// `clap`'s `requires` covers only half of this: it can insist that
+/// `--scope` be present alongside `--format`, but it has no way to say
+/// which *value* that scope must take. The other half is judged here,
+/// where the report can explain which catalog carries the column
+/// instead of reporting an invalid value.
+///
+/// Left to the daemon, the same invocation would come back as a params
+/// error from whichever side does not know the field — a message about
+/// a wire key, for a flag the operator typed by name.
+fn refuse_filters_off_their_side(scope: Scope, args: &FindArgs) -> Result<(), BookrackCliError> {
+    let reached: Vec<ItemKind> = sides(scope).iter().map(|side| side.kind).collect();
+    for (flag, kind) in filters_bound_to_one_side(args) {
+        if reached != [kind] {
+            let side = kind.as_scope_str();
+            return Err(BookrackCliError::FilterOffItsSide {
+                problem: Problem::new(format!("{flag} filters the {side} side only"))
+                    .detail(format!(
+                        "The {side} catalog carries this column and the other one has no \
+                         equivalent, so the filter has nothing to match on the side this \
+                         scope also reaches."
+                    ))
+                    .hint(format!("Pass --scope {side} to filter on it.")),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One side's filter parameters.
+///
+/// Only the keys that side's method declares are sent. Filtering here
+/// rather than sending everything to both is what makes the refusal
+/// above meaningful: `#[serde(default)]` on the parameter structs
+/// means a side would silently ignore a field it does not carry, and
+/// the invocation would come back with an unfiltered page rather than
+/// an error.
+fn find_params(kind: ItemKind, args: &FindArgs) -> Value {
+    let mut params = Map::new();
+    let mut put = |key: &str, value: Option<&String>| {
+        if let Some(value) = value {
+            params.insert(key.to_string(), Value::from(value.as_str()));
+        }
+    };
+    put("title_substring", args.title.as_ref());
+    put("contributor_name", args.contributor.as_ref());
+    put("contributor_role", args.contributor_role.as_ref());
+    match kind {
+        ItemKind::Book => put("format", args.format.as_ref()),
+        ItemKind::Paper => {
+            put("year", args.year.as_ref());
+            put("venue_substring", args.venue.as_ref());
+            put("doi", args.doi.as_ref());
+        }
+        // No method filters reference rows; `sides` never yields it.
+        ItemKind::Reference => {}
+    }
+    for (key, values) in [("language", &args.language), ("statuses", &args.status)] {
+        if !values.is_empty() {
+            params.insert(
+                key.to_string(),
+                Value::Array(values.iter().map(|v| Value::from(v.as_str())).collect()),
+            );
+        }
+    }
+    if let Some(n) = args.limit {
+        params.insert("limit".to_string(), Value::from(n));
+    }
+    if let Some(n) = args.offset {
+        params.insert("offset".to_string(), Value::from(n));
+    }
+    Value::Object(params)
 }
 
 /// The library the rows came from, or `None` when nobody can say.
@@ -618,18 +738,17 @@ mod tests {
     #[test]
     fn every_method_this_verb_sends_is_routed_by_the_daemon() {
         for side in sides(Scope::All) {
-            let sig = REGISTRY
-                .iter()
-                .find(|sig| sig.name == side.list_method)
-                .unwrap_or_else(|| {
-                    panic!("`{}` is not in the daemon's method table", side.list_method)
-                });
-            assert_eq!(
-                sig.library_key,
-                Some("library"),
-                "`{}` does not take a library selection",
-                side.list_method
-            );
+            for method in [side.list_method, side.find_method] {
+                let sig = REGISTRY
+                    .iter()
+                    .find(|sig| sig.name == method)
+                    .unwrap_or_else(|| panic!("`{method}` is not in the daemon's method table"));
+                assert_eq!(
+                    sig.library_key,
+                    Some("library"),
+                    "`{method}` does not take a library selection"
+                );
+            }
         }
     }
 
@@ -733,6 +852,157 @@ mod tests {
         assert_eq!(card_library(None, Some(&no_served)), None);
         let unreadable = json!({ "library": "solo", "served": Value::Null });
         assert_eq!(card_library(None, Some(&unreadable)), None);
+    }
+
+    fn every_filter() -> FindArgs {
+        FindArgs {
+            scope: Scope::All,
+            title: Some("t".into()),
+            contributor: Some("c".into()),
+            contributor_role: Some("editor".into()),
+            language: vec!["en".into()],
+            status: vec!["ready".into()],
+            format: Some("epub".into()),
+            year: Some("2020".into()),
+            venue: Some("v".into()),
+            doi: Some("10.0/x".into()),
+            limit: None,
+            offset: None,
+        }
+    }
+
+    /// Each side is sent the keys its own method declares, and none of
+    /// the other's.
+    ///
+    /// This cannot be caught downstream: both parameter structs are
+    /// `#[serde(default)]` throughout, so a side handed the other's
+    /// keys ignores them silently and answers with a page filtered by
+    /// less than the operator asked for. The wrong answer looks like a
+    /// right one.
+    #[test]
+    fn each_side_is_sent_only_the_filters_it_carries() {
+        let args = every_filter();
+
+        let book = find_params(ItemKind::Book, &args);
+        let book = book.as_object().expect("an object");
+        assert_eq!(book.get("format"), Some(&json!("epub")));
+        for paper_only in ["year", "venue_substring", "doi"] {
+            assert_eq!(
+                book.get(paper_only),
+                None,
+                "the book side was sent {paper_only:?}: {book:?}"
+            );
+        }
+
+        let paper = find_params(ItemKind::Paper, &args);
+        let paper = paper.as_object().expect("an object");
+        assert_eq!(paper.get("year"), Some(&json!("2020")));
+        assert_eq!(paper.get("venue_substring"), Some(&json!("v")));
+        assert_eq!(paper.get("doi"), Some(&json!("10.0/x")));
+        assert_eq!(
+            paper.get("format"),
+            None,
+            "the paper side was sent a book-only filter: {paper:?}"
+        );
+
+        for shared in ["title_substring", "contributor_name", "contributor_role"] {
+            assert!(book.contains_key(shared), "book side lost {shared:?}");
+            assert!(paper.contains_key(shared), "paper side lost {shared:?}");
+        }
+        assert_eq!(book.get("language"), Some(&json!(["en"])));
+        assert_eq!(paper.get("statuses"), Some(&json!(["ready"])));
+    }
+
+    /// A filter nobody passed is absent from the parameters rather
+    /// than sent as null or as an empty list. An empty `statuses`
+    /// array is a filter matching nothing, which is not what "no
+    /// `--status`" means.
+    #[test]
+    fn an_unused_filter_is_not_sent_at_all() {
+        let args = FindArgs {
+            scope: Scope::All,
+            title: None,
+            contributor: None,
+            contributor_role: None,
+            language: Vec::new(),
+            status: Vec::new(),
+            format: None,
+            year: None,
+            venue: None,
+            doi: None,
+            limit: Some(5),
+            offset: None,
+        };
+        let params = find_params(ItemKind::Paper, &args);
+        assert_eq!(params, json!({ "limit": 5 }), "{params}");
+    }
+
+    /// A side-specific filter is refused unless the scope is exactly
+    /// its own side, and the report names the side rather than the
+    /// value.
+    #[test]
+    fn a_side_specific_filter_is_refused_off_its_side() {
+        let mut args = every_filter();
+        args.format = None;
+        args.venue = None;
+        args.doi = None;
+
+        for scope in [Scope::All, Scope::Book] {
+            let refused = refuse_filters_off_their_side(scope, &args)
+                .expect_err("--year does not apply to the book side");
+            let BookrackCliError::FilterOffItsSide { problem } = refused else {
+                panic!("a filter off its side should be its own refusal");
+            };
+            assert_eq!(problem.summary, "--year filters the paper side only");
+            assert!(
+                problem.data.detail.is_some(),
+                "the refusal states no detail"
+            );
+            let hint = problem.data.hint.expect("the refusal offers no hint");
+            assert!(
+                hint.contains("--scope paper"),
+                "the hint should name the scope that works: {hint}"
+            );
+        }
+
+        refuse_filters_off_their_side(Scope::Paper, &args)
+            .expect("--year applies to the paper side");
+    }
+
+    /// The book-side filter is refused the same way, from the other
+    /// direction. One side asserted alone would pass an
+    /// implementation that hard-coded the paper side.
+    #[test]
+    fn the_book_side_filter_is_refused_from_the_other_direction() {
+        let mut args = every_filter();
+        args.year = None;
+        args.venue = None;
+        args.doi = None;
+
+        let refused = refuse_filters_off_their_side(Scope::Paper, &args)
+            .expect_err("--format does not apply to the paper side");
+        let BookrackCliError::FilterOffItsSide { problem } = refused else {
+            panic!("a filter off its side should be its own refusal");
+        };
+        assert_eq!(problem.summary, "--format filters the book side only");
+
+        refuse_filters_off_their_side(Scope::Book, &args)
+            .expect("--format applies to the book side");
+    }
+
+    /// A page with no side-specific filter is never refused, whatever
+    /// the scope: the shared columns are on both catalogs.
+    #[test]
+    fn a_shared_filter_is_accepted_under_every_scope() {
+        let mut args = every_filter();
+        args.format = None;
+        args.year = None;
+        args.venue = None;
+        args.doi = None;
+        for scope in [Scope::All, Scope::Book, Scope::Paper] {
+            refuse_filters_off_their_side(scope, &args)
+                .unwrap_or_else(|_| panic!("a shared filter was refused under {scope}"));
+        }
     }
 
     /// The library is absent from the payload rather than null, so a
