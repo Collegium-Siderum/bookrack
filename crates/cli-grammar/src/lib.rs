@@ -124,6 +124,7 @@ pub struct IngestArgs {
 pub struct RemoveArgs {
     /// Intake id of the book to drop. Mutually exclusive with `--sha`;
     /// exactly one of the two must be supplied.
+    #[arg(value_parser = book_intake_id)]
     pub intake_id: Option<i64>,
     /// Drop the book whose source SHA-256 starts with this hex prefix.
     /// Mutually exclusive with the positional intake id.
@@ -429,6 +430,7 @@ pub enum WriteMetadataAction {
     ])]
     Set {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field column on `node_publication_attrs` to write
         /// (e.g. `title`, `publisher`, `year`, `language`).
@@ -455,6 +457,7 @@ pub enum WriteMetadataAction {
     ])]
     Clear {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field whose override is removed.
         #[arg(long)]
@@ -474,6 +477,7 @@ pub enum WriteMetadataAction {
     ])]
     Void {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The field whose extracted value is suppressed.
         #[arg(long)]
@@ -489,6 +493,7 @@ pub enum WriteMetadataAction {
     /// current effective metadata. The review status is untouched.
     Reaudit {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
     },
     /// Attribute a contributor to the book.
@@ -501,6 +506,7 @@ pub enum WriteMetadataAction {
     ])]
     ContributorAdd {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Contribution role: author / translator / editor / other.
         #[arg(long)]
@@ -527,6 +533,7 @@ pub enum WriteMetadataAction {
     ])]
     ContributorRemove {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// The contributor row's surrogate id.
         #[arg(long)]
@@ -541,6 +548,7 @@ pub enum WriteMetadataAction {
     /// Signs the override with a reason for the audit trail.
     Ack {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Why the gap was accepted.
         #[arg(long)]
@@ -552,6 +560,7 @@ pub enum WriteMetadataAction {
     /// pipeline never writes this status itself.
     Approve {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Optional note for the audit trail.
         #[arg(long)]
@@ -564,6 +573,7 @@ pub enum WriteMetadataAction {
     /// the rejected status.
     Reject {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
         /// Why the book was rejected.
         #[arg(long)]
@@ -572,6 +582,7 @@ pub enum WriteMetadataAction {
     /// Resume CHUNK→EMBED for a book held at the metadata gate.
     Advance {
         /// The intake id of the book.
+        #[arg(value_parser = book_intake_id)]
         book: i64,
     },
 }
@@ -778,6 +789,35 @@ fn paper_intake_id(raw: &str) -> Result<i64, String> {
                 .map_or(raw, |(_, rest)| rest)
                 .to_string(),
             expected: ItemKind::Paper,
+        }
+        .to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Accept a book's catalog intake id either bare or kind-prefixed.
+///
+/// Peer of [`paper_intake_id`], and the same shape for the same reason:
+/// the field stays an `i64`, so what reaches the control plane is the
+/// bare number the wire has always carried. A `paper:` prefix names the
+/// other catalog, whose ids number independently, so clap reports it
+/// and exits 2 before any dispatch.
+fn book_intake_id(raw: &str) -> Result<i64, String> {
+    if let Ok(intake_id) = raw.parse::<i64>() {
+        return Ok(intake_id);
+    }
+    match raw.parse::<TypedItemId>() {
+        Ok(TypedItemId::Book(intake_id)) => Ok(intake_id),
+        // Well formed, wrong catalog. The payload is read back off the
+        // input so the message can offer it under the kind this command
+        // reads.
+        Ok(other) => Err(TypedIdParseError::CatalogMismatch {
+            kind: other.kind(),
+            payload: raw
+                .split_once(':')
+                .map_or(raw, |(_, rest)| rest)
+                .to_string(),
+            expected: ItemKind::Book,
         }
         .to_string()),
         Err(err) => Err(err.to_string()),
@@ -1579,6 +1619,7 @@ mod tests {
             #[command(subcommand)]
             action: WriteMetadataAction,
         },
+        Remove(RemoveArgs),
         Vectors {
             #[command(subcommand)]
             action: WriteVectorsAction,
@@ -1612,6 +1653,103 @@ mod tests {
             TestCommand::Intake { action } => action,
             other => panic!("expected intake, got {other:?}"),
         }
+    }
+
+    /// Every book-side position that takes an intake id, paired with
+    /// the arguments it cannot parse without. Peer of
+    /// `PAPERS_INTAKE_ID_POSITIONS`; a position that never grew a
+    /// `value_parser` fails here rather than only in whichever leaf
+    /// happened to gain an example.
+    const BOOK_INTAKE_ID_POSITIONS: &[(&[&str], &[&str])] = &[
+        (&["remove"], &[]),
+        (&["metadata", "reaudit"], &[]),
+        (
+            &["metadata", "set"],
+            &["--field", "title", "--value", "Sample Title"],
+        ),
+        (&["metadata", "clear"], &["--field", "title"]),
+        (&["metadata", "void"], &["--field", "publisher"]),
+        (&["metadata", "ack"], &["--reason", "wrong source file"]),
+        (&["metadata", "approve"], &[]),
+        (&["metadata", "reject"], &["--reason", "wrong source file"]),
+        (&["metadata", "advance"], &[]),
+        (
+            &["metadata", "contributor-add"],
+            &["--role", "author", "--name", "Doe, Jane"],
+        ),
+        (
+            &["metadata", "contributor-remove"],
+            &["--contributor-id", "7"],
+        ),
+    ];
+
+    fn book_argv<'a>(leaf: &[&'a str], id: &'a str, rest: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = Vec::from(leaf);
+        argv.push(id);
+        argv.extend_from_slice(rest);
+        argv
+    }
+
+    /// The prefixed form projects onto the same parsed command as the
+    /// bare one — the prefix is read and dropped, not carried further.
+    #[test]
+    fn every_book_intake_id_position_accepts_both_forms() {
+        for (leaf, rest) in BOOK_INTAKE_ID_POSITIONS {
+            let bare = book_argv(leaf, "12", rest);
+            let typed = book_argv(leaf, "book:12", rest);
+            let parsed = |argv: &Vec<&str>| {
+                format!(
+                    "{:?}",
+                    TestCli::try_parse_from(argv.iter().copied())
+                        .unwrap_or_else(|err| panic!("{argv:?} must parse: {err}"))
+                        .command
+                )
+            };
+            assert_eq!(parsed(&bare), parsed(&typed), "{leaf:?}");
+        }
+    }
+
+    /// A paper id is well formed and names the other catalog, whose ids
+    /// number independently. Accepting it here would act on whichever
+    /// book happens to carry that number.
+    #[test]
+    fn every_book_intake_id_position_rejects_a_paper_id() {
+        for (leaf, rest) in BOOK_INTAKE_ID_POSITIONS {
+            let argv = book_argv(leaf, "paper:101", rest);
+            let Err(err) = TestCli::try_parse_from(argv.iter().copied()) else {
+                panic!("{argv:?} must not resolve a paper id");
+            };
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The parser hangs off the group member, so the two locators stay
+    /// mutually exclusive in the prefixed form too.
+    #[test]
+    fn remove_keeps_its_exclusive_group_with_a_typed_id() {
+        TestCli::try_parse_from(["remove", "book:12"]).expect("a typed id is a locator");
+        assert!(
+            TestCli::try_parse_from(["remove", "book:12", "--sha", "deadbeef"]).is_err(),
+            "a typed id and --sha must stay mutually exclusive"
+        );
+    }
+
+    /// The refusal names both catalogs and rewrites the id for the one
+    /// being read. The book side has no namespace to name, which is
+    /// what the catalog wording is for.
+    #[test]
+    fn a_paper_id_in_a_book_command_names_both_kinds() {
+        let Err(err) = TestCli::try_parse_from(["metadata", "approve", "paper:101"]) else {
+            panic!("a paper id must not resolve in a book-side command");
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("names the paper catalog"), "{rendered}");
+        assert!(rendered.contains("reads the book catalog"), "{rendered}");
+        assert!(rendered.contains("`book:101`"), "{rendered}");
     }
 
     fn parse_metadata(tokens: &[&str]) -> WriteMetadataAction {

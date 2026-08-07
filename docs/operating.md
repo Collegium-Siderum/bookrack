@@ -161,25 +161,28 @@ page.
 Books and papers are two pipelines with two catalogs, and each numbers
 its intakes from one independently. `101` therefore names one book and
 one paper, and nothing in the number says which is meant. A command
-whose namespace already fixes the pipeline — everything under
-`bookrack papers` — resolves that for you, which is why a bare id works
-there and has always worked.
+that already fixes the pipeline resolves that for you, which is why a
+bare id works there and has always worked: everything under `bookrack
+papers` reads the paper catalog, and the unprefixed write commands —
+`metadata`, `remove` — read the book catalog.
 
 An id can also be written with the pipeline in front of it:
 
 ```
 bookrack papers show paper:101
 bookrack papers metadata set paper:101 --field title --value "..."
+bookrack metadata set book:12 --field title --value "..."
+bookrack remove book:12
 ```
 
-Both forms mean the same thing, and every `bookrack papers` command
-that takes an intake id takes either. The prefixed form is what a
-listing prints, so an id copied out of one command can be pasted into
-the next without editing.
+Both forms mean the same thing, and every command that takes an intake
+id takes either. The prefixed form is what a listing prints, so an id
+copied out of one command can be pasted into the next without editing.
 
-The prefix must agree with the namespace. `bookrack papers show
-book:12` names the other catalog, so it is refused while arguments are
-being read — before anything is looked up or written — and exits `2`:
+The prefix must agree with the catalog the command reads. `bookrack
+papers show book:12` names the other catalog, so it is refused while
+arguments are being read — before anything is looked up or written —
+and exits `2`:
 
 ```
 $ bookrack papers show book:12
@@ -190,7 +193,8 @@ show book:12`.
 ```
 
 Refusing it is the point: the number is a valid paper id too, so
-accepting it would act on a paper the operator never named.
+accepting it would act on a paper the operator never named. The book
+side refuses `paper:101` the same way, and for the same reason.
 
 ### Reading one item by its id
 

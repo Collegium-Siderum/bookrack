@@ -534,6 +534,23 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Changed
 
+- **Book-side commands take a typed id wherever they take a bare one.**
+  `bookrack list` prints ids as `book:12`, but every book-side position
+  that takes an intake id — `remove` and the ten `metadata` actions —
+  accepted only the bare number, so an id copied out of a listing had
+  to have its prefix deleted before it could be pasted into the next
+  command. The paper side has taken both forms since typed ids landed.
+  Both forms now work on both sides and mean the same thing; the prefix
+  is read and dropped, so what reaches the control plane is the bare
+  number it has always carried.
+
+  The refusal matters more than the convenience: `bookrack metadata
+  approve paper:101` used to fail with `invalid digit found in string`,
+  which says nothing about the two catalogs. It is now refused while
+  arguments are being read, naming the catalog the id belongs to and
+  the one the command reads. `--book` and `--paper`, which filter
+  rather than address, still take a bare number on both sides.
+
 - **A typed id that names the wrong catalog says so in terms of
   catalogs, not command namespaces.** `bookrack papers show book:12`
   reported that the id `does not apply to the papers namespace`, which
