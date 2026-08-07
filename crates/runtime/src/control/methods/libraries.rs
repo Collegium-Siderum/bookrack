@@ -91,14 +91,35 @@ pub async fn fork(params: &Option<Value>, ctx: &MethodContext) -> Result<Value, 
     let cfg = handle.cfg_arc();
     let target = parsed.data_dir.clone();
     let new_name = parsed.new_name.clone();
+    // A daemon that cannot mount still forks: the clone is a real
+    // library on disk either way, and refusing to make one because
+    // this process cannot serve it would be the wrong trade.
+    let mounter = ctx.mounter.clone();
     run_write(ctx, handle.name(), move || async move {
         crate::cmd::libraries::fork(&cfg, &new_name, &target, &registry_path, mode, true, |_| {
             Ok(true)
         })
         .map_err(|e| write_err("library.fork", e))?;
+        // Mount failure does not roll the fork back: the library is
+        // built and registered by now, and undoing it would delete
+        // data to report a serving problem. The fork succeeds and says
+        // it is not being served, which leaves the operator one
+        // `libraries mount` away instead of one restore.
+        let mounted = match mounter {
+            Some(mounter) => match mounter.mount(&new_name).await {
+                Ok(()) => Ok(()),
+                Err(e) => Err(format!("{e:#}")),
+            },
+            None => Err(
+                "this daemon dispatches without library mounts, so it cannot serve the clone"
+                    .to_string(),
+            ),
+        };
         Ok(json!({
             "new_name": new_name,
             "data_dir": target,
+            "mounted": mounted.is_ok(),
+            "mount_error": mounted.err(),
         }))
     })
     .await

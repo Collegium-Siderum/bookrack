@@ -170,12 +170,6 @@ where
     println!();
     println!("forked '{}' at {}", new_name, target.display());
     println!("registry updated: {}", registry_path.display());
-    println!();
-    println!("next steps:");
-    println!("  bookrack quit");
-    println!("  bookrack libraries config {new_name} index_profile=<profile>");
-    println!("  bookrack --library {new_name} run");
-    println!("  bookrack vectors reset");
     Ok(())
 }
 

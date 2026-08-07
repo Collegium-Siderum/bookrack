@@ -32,8 +32,22 @@ fn world() -> (&'static Sandbox, PathBuf, PathBuf) {
     let sandbox = process_env(ProcessEnv::daemon().without_data_dir());
     let alpha = sandbox.data_root("alpha-root");
     let beta = sandbox.data_root("beta-root");
+    initialize(&alpha);
+    initialize(&beta);
     sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
     (sandbox, alpha, beta)
+}
+
+/// Give a root the catalogs a real library carries, so `library.fork`
+/// has something to clone. Bring-up creates them lazily; fork refuses
+/// a source that has none.
+fn initialize(root: &Path) {
+    for db in ["catalog.db", "papers_catalog.db"] {
+        bookrack_catalog::Catalog::open(&root.join(db)).expect("seed catalog");
+    }
+    for db in ["corpus.db", "papers_corpus.db"] {
+        bookrack_corpus::Corpus::open(&root.join(db)).expect("seed corpus");
+    }
 }
 
 /// Add `beta` to the on-disk registry after the daemon is already up.
@@ -433,6 +447,177 @@ async fn unmount_refuses_the_default_and_the_primary() -> Result<()> {
         let mut names = library_names(&resp)?;
         names.sort_unstable();
         assert_eq!(names, ["alpha", "beta"], "{resp}");
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// Forking used to leave the operator with a library the daemon could
+/// not see until it was restarted; the clone is served on the same
+/// call now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_forked_library_is_served_without_a_restart() -> Result<()> {
+    let (_sandbox, _alpha, _beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = start(runtime_root.path()).await?;
+    let clone_parent = tempfile::tempdir()?;
+    let clone_root = clone_parent.path().join("clone-root");
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "library.fork",
+            "params": {
+                "new_name": "clone",
+                "data_dir": clone_root,
+                "yes": true,
+            },
+        });
+        send(&mut w, &request.to_string()).await?;
+        let resp = recv(&mut reader).await?;
+        assert!(resp["error"].is_null(), "fork failed: {resp}");
+        let report = resp;
+
+        // No restart between the fork and this listing.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let mut names = library_names(&resp)?;
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["alpha", "clone"],
+            "the clone is not served without a restart: {resp}"
+        );
+        assert_eq!(
+            report["result"]["mounted"],
+            Value::Bool(true),
+            "the fork report has to say whether the clone is being served: {report}"
+        );
+
+        // Served, not merely listed: a read addressed to the clone
+        // reaches the clone's own root.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":3,"method":"library.info","params":{"name":"clone"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let root = resp["result"]["data_dir"]
+            .as_str()
+            .ok_or_else(|| eyre!("library.info carries no data_dir: {resp}"))?;
+        assert!(
+            root.ends_with("clone-root"),
+            "the clone's read routed elsewhere: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
+/// A clone the daemon cannot serve is still a clone: the fork reports
+/// success and says it is not being served, because rolling the fork
+/// back would delete a freshly built library to report a serving
+/// problem.
+///
+/// The fixture reaches that state the way a real machine can: the
+/// registry is a shared file, so another process removing an entry
+/// while the daemon serves it leaves a library mounted under a name
+/// the registry no longer carries. A fork may then claim that name —
+/// `fork` checks the registry, which does not have it — and the mount
+/// that follows collides with the library already answering to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_reports_when_the_new_library_could_not_be_mounted() -> Result<()> {
+    let (sandbox, alpha, beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    sandbox.write_registry_entries(
+        Some("alpha"),
+        &[("alpha", alpha.as_path()), ("beta", beta.as_path())],
+    );
+    let runtime = start(runtime_root.path()).await?;
+    // Somebody else edits the registry: `beta` is served but no longer
+    // registered, so its name is free as far as `fork` can tell.
+    sandbox.write_registry_entries(Some("alpha"), &[("alpha", alpha.as_path())]);
+
+    let clone_parent = tempfile::tempdir()?;
+    let clone_root = clone_parent.path().join("beta-clone-root");
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "library.fork",
+            "params": {
+                "new_name": "beta",
+                "data_dir": clone_root,
+                "yes": true,
+            },
+        });
+        send(&mut w, &request.to_string()).await?;
+        let resp = recv(&mut reader).await?;
+        assert!(
+            resp["error"].is_null(),
+            "a fork that built its library must not be reported as failed: {resp}"
+        );
+        assert_eq!(
+            resp["result"]["mounted"],
+            Value::Bool(false),
+            "the unserved clone was reported as served: {resp}"
+        );
+        assert!(
+            resp["result"]["mount_error"].is_string(),
+            "an unserved clone has to say why: {resp}"
+        );
+        // The clone is on disk and registered, so the report still
+        // names where it went.
+        assert!(
+            resp["result"]["data_dir"]
+                .as_str()
+                .unwrap_or_default()
+                .ends_with("beta-clone-root"),
+            "{resp}"
+        );
+
+        // The served set is untouched: `beta` still names the library
+        // that was already mounted, not the clone.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.info","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let root = resp["result"]["data_dir"]
+            .as_str()
+            .ok_or_else(|| eyre!("library.info carries no data_dir: {resp}"))?;
+        assert!(
+            root.ends_with("beta-root"),
+            "the failed mount displaced the library already serving that name: {resp}"
+        );
 
         send(
             &mut w,

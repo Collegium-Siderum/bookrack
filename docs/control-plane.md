@@ -396,15 +396,21 @@ the exit-code bucket does not distinguish the two.
   one per mounted library: the daemon's served set.
 - `library.info` — full status card for one library;
   `params.name` selects which.
-- `library.fork` — `{ new_name, data_dir, library? }` → the fork
-  report. `library` names the *source* — the one method that holds two
-  libraries at once, so it is written out rather than inherited.
+- `library.fork` — `{ new_name, data_dir, library? }` →
+  `{ new_name, data_dir, mounted, mount_error }`. `library` names the
+  *source* — the one method that holds two libraries at once, so it is
+  written out rather than inherited.
   Clones
   the served library into a sibling registry entry: the envelope store is
   hardlinked where the filesystem allows, the catalog and corpus are
   copied, and the vector store is deliberately not carried over, so the
   clone starts unstamped and awaits its own `vectors reset`. Writes the
-  registry.
+  registry, then mounts the clone, so it is served on the same call and
+  no restart is involved. A mount that fails does **not** roll the fork
+  back — the library is built and registered by then, and undoing it
+  would delete data to report a serving problem. Such a fork still
+  succeeds, with `mounted: false` and `mount_error` naming the reason;
+  the repair is `library.mount` against the name the fork registered.
 - `library.mount` — `{ name }` → `{ ok: true, name }`. Open the
   registered library `name` and add it to the served set, without a
   restart. `name` is a registry name, never a path: registering a root
