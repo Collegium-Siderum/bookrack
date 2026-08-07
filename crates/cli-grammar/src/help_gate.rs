@@ -100,6 +100,7 @@ pub const PARSE_EXEMPT: &[&str] = &[];
 pub const EXAMPLE_QUOTED_VALUES: &[&str] = &[
     "Doe, Jane",
     "Sample Title",
+    "a sample phrase",
     "venue lists no DOI",
     "wrong source file",
 ];

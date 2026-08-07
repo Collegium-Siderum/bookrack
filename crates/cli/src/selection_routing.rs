@@ -90,6 +90,7 @@ pub(crate) fn resolves_root_locally(command: &Command) -> bool {
         | Command::Papers { .. }
         | Command::Find(_)
         | Command::List(_)
+        | Command::Search(_)
         | Command::Show { .. }
         | Command::Dryrun(_)
         | Command::Quit

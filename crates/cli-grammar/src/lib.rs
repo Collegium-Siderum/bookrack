@@ -1324,6 +1324,32 @@ pub struct ListArgs {
     pub offset: Option<u32>,
 }
 
+/// Query and scope for `bookrack search`.
+///
+/// Unlike `list` and `find`, one method answers every scope: the
+/// merged search ranks both corpora against the same query, which is
+/// something neither catalog listing can do. There is therefore no
+/// paging here — `--top-k` is the whole result set.
+///
+/// The index-level knobs the method accepts — bypassing the ANN index,
+/// probe counts, refine factors — have no flags. They are per-call
+/// overrides of an index profile, and a flag would make tuning
+/// something done per invocation instead of on the profile that
+/// records it.
+#[derive(clap::Args, Debug, Clone)]
+pub struct SearchArgs {
+    /// What to search for.
+    pub query: String,
+    /// Which catalogs to search. `all` ranks both against the same
+    /// query; the control-plane method defaults to the book side
+    /// alone, so this flag is always sent rather than left out.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Maximum number of passages to return.
+    #[arg(long = "top-k")]
+    pub top_k: Option<usize>,
+}
+
 /// Filters and pagination for `bookrack find`.
 ///
 /// The flags divide in two. The shared ones name a column both

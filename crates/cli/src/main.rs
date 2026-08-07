@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
     CorpusAction, DistillAction, DryrunArgs, FindArgs, IngestArgs, IntakeAction, ListArgs,
-    LogsArgs, PapersAction, QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction,
-    WriteVectorsAction,
+    LogsArgs, PapersAction, QueueAction, RemoveArgs, RpcAction, SearchArgs, StampsAction,
+    WriteMetadataAction, WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -406,6 +406,20 @@ enum Command {
         "list --scope paper --limit 20",
     ])]
     List(ListArgs),
+    /// Search both pipelines from one verb.
+    ///
+    /// Ranks passages from the book corpus and the paper corpus
+    /// against the same query and prints them interleaved, each cited
+    /// by the item it came from. `--scope` narrows it to one corpus.
+    ///
+    /// A merged search is not recorded in the retrieval sidecar: its
+    /// results span two corpora and no single corpus fingerprint
+    /// describes them. A single-sided one is recorded as usual.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "search \"a sample phrase\"",
+        "search \"a sample phrase\" --scope book --top-k 5",
+    ])]
+    Search(SearchArgs),
     /// Show one item by its typed id.
     ///
     /// The id names its own pipeline (`book:12`, `paper:101`), so the
@@ -1355,6 +1369,7 @@ async fn run() -> Result<()> {
         }
         Command::Find(args) => cmd::cli_client::listing::find(args, None).await,
         Command::List(args) => cmd::cli_client::listing::list(args, None).await,
+        Command::Search(args) => cmd::cli_client::listing::search(args, None).await,
         Command::Show { id } => cmd::cli_client::show::run(id, None).await,
         Command::Glean(args) => {
             cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
@@ -1417,6 +1432,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Logs(_)
         | Command::Find(_)
         | Command::List(_)
+        | Command::Search(_)
         | Command::Show { .. }
         | Command::Status
         | Command::Quit
@@ -2326,6 +2342,7 @@ mod tests {
         "remove",
         "rpc",
         "run",
+        "search",
         "runs",
         "show",
         "stamps",
@@ -2345,7 +2362,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 30),
+        ("bookrack", 31),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
@@ -2480,6 +2497,7 @@ mod tests {
         (&["remove", "1"], Reach::Routed),
         (&["retrieval", "list"], Reach::Local),
         (&["rpc", "list"], Reach::Routed),
+        (&["search", "a sample phrase"], Reach::Routed),
         (&["run"], Reach::Local),
         (&["runs", "list"], Reach::Local),
         (&["show", "book:12"], Reach::Routed),

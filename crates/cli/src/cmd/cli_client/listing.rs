@@ -24,7 +24,7 @@ use bookrack_cli::library_param;
 use bookrack_cli::render::ctx;
 use bookrack_cli::render::human::truncate_to;
 use bookrack_cli::render::table::RowTable;
-use bookrack_cli_grammar::{FindArgs, ListArgs, Scope};
+use bookrack_cli_grammar::{FindArgs, ListArgs, Scope, SearchArgs};
 use bookrack_control_client::ControlClient;
 use bookrack_core::{ItemKind, Problem, TypedItemId};
 use eyre::Result;
@@ -106,6 +106,121 @@ pub async fn find(args: FindArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
         pages.push((side, response));
     }
     emit(&client, &pages).await
+}
+
+pub async fn search(args: SearchArgs, runtime_dir: Option<PathBuf>) -> Result<()> {
+    let client = helpers::connect(runtime_dir.as_deref()).await?;
+    let mut params = json!({
+        "query": args.query,
+        // Sent rather than left out: the method reads an absent kind as
+        // the book side, which is a different default from this verb's.
+        "kind": args.scope.to_string(),
+    });
+    if let Some(k) = args.top_k {
+        params["top_k"] = Value::from(k);
+    }
+    let response = helpers::dispatch(&client, "library.search", params).await?;
+    let hits = response.as_array().map(Vec::as_slice).unwrap_or_default();
+
+    if ctx().is_quiet() {
+        return Ok(());
+    }
+    let library = answering_library(&client).await;
+    let library = library.as_deref();
+    if ctx().is_json() {
+        helpers::print_value(&compose_hits(hits, library));
+    } else {
+        println!("{}", render_hits(hits, library));
+    }
+    Ok(())
+}
+
+/// The `--json` payload for one search.
+///
+/// It has no `pages` block, and that absence is the shape rather than
+/// an omission: the method answers with a bare array, `--top-k` is the
+/// whole result set, and there is no offset to page from. Copying the
+/// listing envelope would invent a pagination story the search side
+/// does not have.
+fn compose_hits(hits: &[Value], library: Option<&str>) -> Value {
+    let items: Vec<Value> = hits.iter().map(cited_row).collect();
+    let mut out = Map::new();
+    out.insert("items".to_string(), Value::Array(items));
+    if let Some(name) = library {
+        out.insert("library".to_string(), Value::from(name));
+    }
+    Value::Object(out)
+}
+
+/// One hit with the id that addresses the item it came from.
+///
+/// The kind is read back off the hit's own `kind` string — the third
+/// place the vocabulary is crossed, after the id parser and the scope
+/// flag. A hit naming a kind this build does not know keeps every
+/// field it arrived with and gains no `id`: a string assembled from an
+/// unknown kind would look like an id and resolve to nothing.
+fn cited_row(hit: &Value) -> Value {
+    let mut obj = hit.as_object().cloned().unwrap_or_default();
+    let id = hit
+        .get("kind")
+        .and_then(Value::as_str)
+        .and_then(ItemKind::from_scope_str)
+        .zip(hit.get("intake_id").and_then(Value::as_i64))
+        .and_then(|(kind, intake_id)| row_id(kind, intake_id));
+    if let Some(id) = id {
+        obj.insert("id".to_string(), Value::from(id.to_string()));
+    }
+    Value::Object(obj)
+}
+
+/// The human rendering of a result set: one numbered paragraph per
+/// hit, then the library they came from.
+fn render_hits(hits: &[Value], library: Option<&str>) -> String {
+    if hits.is_empty() {
+        return match library {
+            Some(name) => format!("no passages match\nlibrary: {name}"),
+            None => "no passages match".to_string(),
+        };
+    }
+    let mut out = String::new();
+    for (n, hit) in hits.iter().enumerate() {
+        let breadcrumb = match hit.get("breadcrumb").and_then(Value::as_str) {
+            Some(trail) if !trail.is_empty() => truncate_to(trail, 56),
+            // A passage whose ancestors carry no title still has to
+            // occupy the column, or the id and score shift left and
+            // stop lining up with the rows above.
+            _ => "-".to_string(),
+        };
+        let id = cited_row(hit)
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+            .to_string();
+        out.push_str(&format!("{}. {breadcrumb}  {id}  {}\n", n + 1, score(hit)));
+        let text = hit.get("text").and_then(Value::as_str).unwrap_or("");
+        out.push_str(&format!("   {}\n", truncate_to(text, 100)));
+    }
+    match library {
+        Some(name) => out.push_str(&format!("library: {name}")),
+        None => out.truncate(out.trim_end().len()),
+    }
+    out
+}
+
+/// The relevance figure a hit is labelled with.
+///
+/// Which one it is has to be said, because the two run in opposite
+/// directions: a distance is a gap and smaller is nearer, a rerank
+/// score is a judgement and larger is more relevant. An unlabelled
+/// number would be read as whichever the reader last saw.
+fn score(hit: &Value) -> String {
+    if let Some(score) = hit.get("rerank_score").and_then(Value::as_f64) {
+        format!("rerank {score:.3}")
+    } else if let Some(distance) = hit.get("distance").and_then(Value::as_f64) {
+        format!("distance {distance:.3}")
+    } else {
+        "-".to_string()
+    }
 }
 
 /// Print one set of pages in whichever form the invocation asked for.
@@ -1003,6 +1118,130 @@ mod tests {
             refuse_filters_off_their_side(scope, &args)
                 .unwrap_or_else(|_| panic!("a shared filter was refused under {scope}"));
         }
+    }
+
+    fn mixed_hits() -> Vec<Value> {
+        vec![
+            json!({
+                "text": "a book passage",
+                "breadcrumb": "Container \u{203a} Section",
+                "intake_id": 12,
+                "kind": "book",
+                "distance": 0.184_f64,
+            }),
+            json!({
+                "text": "a paper passage",
+                "breadcrumb": "",
+                "intake_id": 101,
+                "kind": "paper",
+                "distance": 0.212_f64,
+            }),
+        ]
+    }
+
+    /// Every hit's id prefix comes from that hit's own kind.
+    ///
+    /// A merged result set is the only place this can go wrong, and it
+    /// goes wrong quietly: an implementation taking the prefix from
+    /// `--scope` would be right on both single-sided searches and wrong
+    /// on half the rows of the merged one, printing ids that resolve to
+    /// real items in the other catalog.
+    #[test]
+    fn every_hit_is_cited_by_the_pipeline_that_indexed_it() {
+        let composed = compose_hits(&mixed_hits(), None);
+        let items = composed["items"].as_array().expect("an items array");
+        assert_eq!(items[0]["id"], json!("book:12"));
+        assert_eq!(items[1]["id"], json!("paper:101"));
+        for item in items {
+            let id = item["id"].as_str().expect("every hit carries an id");
+            let parsed = TypedItemId::from_str(id).expect("a cited id parses");
+            assert_eq!(
+                parsed.kind().as_scope_str(),
+                item["kind"].as_str().expect("every hit names its kind"),
+            );
+        }
+    }
+
+    /// A hit naming a kind this build does not know is printed without
+    /// an id rather than with one assembled from the unknown string.
+    ///
+    /// The assembled form is the tempting shortcut and it is worse than
+    /// nothing: it looks exactly like an id, and `show` would refuse it
+    /// with a message about an unknown kind rather than about a hit
+    /// this build cannot address.
+    #[test]
+    fn a_hit_of_an_unknown_kind_is_cited_without_an_id() {
+        let hits = vec![json!({
+            "text": "a passage",
+            "breadcrumb": "",
+            "intake_id": 5,
+            "kind": "chapter",
+            "distance": 0.3_f64,
+        })];
+        let composed = compose_hits(&hits, None);
+        let item = &composed["items"][0];
+        assert_eq!(
+            item.get("id"),
+            None,
+            "an unknown kind was given an id: {item}"
+        );
+        assert_eq!(
+            item["intake_id"],
+            json!(5),
+            "the hit's own fields are carried over untouched"
+        );
+        let rendered = render_hits(&hits, None);
+        assert!(
+            !rendered.contains("chapter:"),
+            "an id was assembled from an unknown kind:\n{rendered}"
+        );
+    }
+
+    /// The figure each hit is labelled with is the one that ordered
+    /// the results, and the label says which it is.
+    ///
+    /// A renderer that always printed `distance` would be wrong on a
+    /// reranking library in a way no assertion on the number alone can
+    /// catch: the two are both small floats, and only the ordering they
+    /// imply differs.
+    #[test]
+    fn a_hit_names_the_figure_it_is_scored_by() {
+        let mut reranked = mixed_hits()[0].clone();
+        reranked["rerank_score"] = json!(0.91_f64);
+        let with_rerank = render_hits(&[reranked], None);
+        assert!(with_rerank.contains("rerank 0.910"), "{with_rerank}");
+        assert!(
+            !with_rerank.contains("distance"),
+            "both figures were printed, so neither says which ordered the results:\n\
+             {with_rerank}"
+        );
+
+        let without = render_hits(&mixed_hits()[..1], None);
+        assert!(without.contains("distance 0.184"), "{without}");
+        assert!(!without.contains("rerank"), "{without}");
+    }
+
+    /// The search payload has no `pages` block: the method answers with
+    /// a bare array and there is nothing to page.
+    #[test]
+    fn a_search_payload_carries_no_page_block() {
+        let composed = compose_hits(&mixed_hits(), Some("alpha"));
+        assert_eq!(
+            composed.get("pages"),
+            None,
+            "the listing envelope was copied onto a surface with no paging: {composed}"
+        );
+        assert!(composed.get("items").is_some(), "{composed}");
+        assert_eq!(composed["library"], json!("alpha"));
+    }
+
+    /// A passage whose ancestors carry no title still occupies the
+    /// breadcrumb column, so the ids below it stay in line.
+    #[test]
+    fn a_hit_without_a_breadcrumb_still_holds_its_column() {
+        let rendered = render_hits(&mixed_hits()[1..], None);
+        let first = rendered.lines().next().expect("a first line");
+        assert!(first.starts_with("1. -  paper:101"), "{first:?}");
     }
 
     /// The library is absent from the payload rather than null, so a
