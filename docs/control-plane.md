@@ -445,11 +445,13 @@ the exit-code bucket does not distinguish the two.
   in-memory pointer — a cache of the on-disk value — follows it
   immediately, so the default survives a restart. Registry writes
   are serialized by a sibling lock file, so a concurrent CLI write
-  verb and this RPC cannot clobber each other. Returns `-32010`
-  (invalid library) with the list of known libraries when `name`
-  is not a registered library, whether the name is unknown to the
-  daemon or absent from the on-disk registry. Fires a
-  `library.changed` event so subscribers can refresh their view.
+  verb and this RPC cannot clobber each other. A `name` the registry
+  carries but this daemon is not serving is mounted first, so the
+  daemon is serving whatever it is about to route unnamed calls to;
+  without that the pointer could only ever move between the libraries
+  that happened to be mounted. Returns `-32010` (invalid library) with
+  the list of known libraries when `name` is not registered at all.
+  Fires a `library.changed` event so subscribers can refresh their view.
 - `events.subscribe` — `{ subscribed: true }` followed by an
   immediate snapshot bundle of `daemon.state`, `queue.list`,
   `queue.tick`, `library.list`, `library.changed`,
@@ -665,7 +667,11 @@ the exit-code bucket does not distinguish the two.
 Every write method takes an optional `library`: the registry name of
 the library it acts on. Absent, it resolves to the registry's current
 default — which is the library the daemon was brought up under until
-`library.set_default` moves it. A name the registry does not know is
+`library.set_default` moves it. `bookrack libraries default` sends that
+method whenever a daemon is listening, so the running daemon follows a
+pointer moved from the CLI rather than keeping the value it read at
+bring-up; with nothing listening it writes the registry directly and
+the next start picks the change up. A name the registry does not know is
 refused with `-32010 invalid library` before any store is opened, and
 a plan id minted against one library is not redeemable against
 another (`-32015`). `papers.remove` and the `remove` / `corpus.rebuild`

@@ -148,9 +148,17 @@ pub async fn set_default(params: &Option<Value>, ctx: &MethodContext) -> Result<
     let parsed: LibrarySetDefaultParams = serde_json::from_value(raw)
         .map_err(|e| RpcError::new(INVALID_PARAMS, format!("library.set_default params: {e}")))?;
 
-    // Validate against the registered libraries before touching disk, so
-    // an unknown name fails without a write.
-    ctx.registry.get(Some(&parsed.name)).map_err(registry_err)?;
+    // Validate before touching disk, so an unknown name fails without a
+    // write. The mounted set is not the whole answer: a library the
+    // registry carries but this daemon is not serving is a legitimate
+    // target, and refusing it would mean the pointer could only ever
+    // move between the libraries that happened to be mounted. Mount it
+    // instead, so the daemon is serving whatever it is about to route
+    // unnamed calls to.
+    if ctx.registry.get(Some(&parsed.name)).is_err() {
+        let mounter = require_mounter("library.set_default", ctx)?;
+        mounter.mount(&parsed.name).await.map_err(mount_err)?;
+    }
 
     // Persist to the registry, then refresh the in-memory cache.
     let registry_path = registry_target_path().ok_or_else(|| {

@@ -1273,10 +1273,56 @@ async fn run() -> Result<()> {
                     }
                 }
                 LibrariesAction::Default { name } => {
-                    // `libraries default` writes the registry directly,
-                    // so it works with no daemon and the pointer persists
-                    // across restarts. Resolve the registry file the same
-                    // way the daemon's fork helper does.
+                    // A running daemon caches this pointer, and a
+                    // registry write it never hears about leaves the two
+                    // disagreeing: `libraries list` would read the new
+                    // default off disk while unnamed calls kept going to
+                    // the old one. So hand the change to the daemon when
+                    // one is there — it writes the same registry file and
+                    // refreshes its own cache — and write the registry
+                    // here only when nothing is listening.
+                    match cmd::cli_client::helpers::connect(None).await {
+                        Ok(client) => {
+                            let params = serde_json::json!({ "name": name });
+                            let response = cmd::cli_client::helpers::dispatch(
+                                &client,
+                                "library.set_default",
+                                params,
+                            )
+                            .await?;
+                            if bookrack_cli::render::ctx().is_json() {
+                                cmd::cli_client::helpers::print_value(&response);
+                            } else if !bookrack_cli::render::ctx().is_quiet() {
+                                println!(
+                                    "default library set to '{name}'; \
+                                     the running daemon follows it now"
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // Only "nothing is listening" falls through to the
+                        // offline write. A daemon that is there but cannot
+                        // be reached is a failure to report, not a reason
+                        // to write behind its back and leave the two
+                        // answers disagreeing.
+                        Err(err) => {
+                            let absent = err
+                                .downcast_ref::<bookrack_cli::error::BookrackCliError>()
+                                .is_some_and(|e| {
+                                    matches!(
+                                        e,
+                                        bookrack_cli::error::BookrackCliError::DaemonNotRunning
+                                    )
+                                });
+                            if !absent {
+                                return Err(err);
+                            }
+                        }
+                    }
+                    // No daemon: write the registry directly, so the
+                    // pointer still persists across restarts. Resolve the
+                    // registry file the same way the daemon's fork helper
+                    // does.
                     let registry_path =
                         bookrack_config::registry_target_path().ok_or_else(|| {
                             eyre::eyre!(

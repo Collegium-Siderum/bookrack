@@ -630,6 +630,79 @@ async fn fork_reports_when_the_new_library_could_not_be_mounted() -> Result<()> 
     join_with_deadline(runtime, repl_handle, driver).await
 }
 
+/// Moving the default pointer at a library the daemon is not serving
+/// used to be refused, which meant the pointer could only ever move
+/// between whatever happened to be mounted. It mounts the target
+/// instead, so the daemon serves what it is about to route unnamed
+/// calls to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_default_mounts_a_registered_but_unmounted_library() -> Result<()> {
+    let (sandbox, alpha, beta) = world();
+    let runtime_root = tempfile::tempdir()?;
+    let runtime = start(runtime_root.path()).await?;
+    register_beta(sandbox, &alpha, &beta);
+    assert!(
+        runtime.registry.get(Some("beta")).is_err(),
+        "the fixture has to start with beta registered but unmounted",
+    );
+
+    let sock = runtime.control_sock.path.clone();
+    let repl_handle = tokio::task::spawn_blocking(|| -> Result<()> { Ok(()) });
+
+    let driver = tokio::spawn(async move {
+        let (mut reader, mut w) = connect(&sock).await?;
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":1,"method":"library.set_default","params":{"name":"beta"}}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        assert!(
+            resp["error"].is_null(),
+            "a registered library the daemon had not mounted was refused: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":2,"method":"library.list"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let mut names = library_names(&resp)?;
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["alpha", "beta"],
+            "the new default has to be served, not just pointed at: {resp}"
+        );
+
+        // An unnamed read resolves to it, which is the whole meaning of
+        // the pointer having moved.
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":3,"method":"library.info"}"#,
+        )
+        .await?;
+        let resp = recv(&mut reader).await?;
+        let root = resp["result"]["data_dir"]
+            .as_str()
+            .ok_or_else(|| eyre!("library.info carries no data_dir: {resp}"))?;
+        assert!(
+            root.ends_with("beta-root"),
+            "an unnamed call still resolves to the old default: {resp}"
+        );
+
+        send(
+            &mut w,
+            r#"{"jsonrpc":"2.0","id":99,"method":"daemon.shutdown"}"#,
+        )
+        .await?;
+        let _ = recv(&mut reader).await?;
+        Ok::<(), eyre::Report>(())
+    });
+    join_with_deadline(runtime, repl_handle, driver).await
+}
+
 fn library_names(resp: &Value) -> Result<Vec<&str>> {
     let entries = resp["result"]
         .as_array()
