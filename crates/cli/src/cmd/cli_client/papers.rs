@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use super::helpers;
 use super::helpers::DestructivePrompt;
-use super::listing::row_id;
+use super::listing::{page_footer, row_id};
 
 pub async fn run(
     action: PapersAction,
@@ -644,21 +644,9 @@ pub(super) fn format_paper_list(response: &Value) -> String {
         table.push_row([id, title, author, year, container]);
     }
     let mut out = table.render();
-    let truncated = response
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // A response that carries no total says nothing about the size of
-    // the result set, so neither does the footer.
-    if let Some(total) = response.get("total").and_then(Value::as_u64) {
-        if truncated {
-            out.push_str(&format!(
-                "\n(showing {} of {total}; pass --limit to see more)",
-                rows.len()
-            ));
-        } else if total as usize != rows.len() {
-            out.push_str(&format!("\n({} of {total})", rows.len()));
-        }
+    if let Some(footer) = page_footer(response, rows.len()) {
+        out.push('\n');
+        out.push_str(&footer);
     }
     out
 }

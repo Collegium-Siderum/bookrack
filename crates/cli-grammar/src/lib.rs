@@ -1278,6 +1278,52 @@ pub struct PapersIngestArgs {
     pub no_wait: bool,
 }
 
+/// Which catalogs a top-level read verb reaches.
+///
+/// The variant names render as the catalog `scope` strings themselves
+/// — `book` and `paper` — so the flag's vocabulary and the wire's are
+/// the same words rather than two tables to keep in step. `reference`
+/// has no value here: its rows are addressed by slug and no
+/// control-plane method lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Scope {
+    /// The book catalog only.
+    Book,
+    /// The paper catalog only.
+    Paper,
+    /// Both catalogs. The default: reading across the pipelines is
+    /// what these verbs exist for, and the per-side namespaces are
+    /// still there for one side at a time.
+    #[default]
+    All,
+}
+
+impl std::fmt::Display for Scope {
+    /// Renders the value clap accepts, read back off the derived
+    /// vocabulary so the two cannot disagree.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        clap::ValueEnum::to_possible_value(self)
+            .expect("no variant is skipped")
+            .get_name()
+            .fmt(f)
+    }
+}
+
+/// Side selection and pagination for `bookrack list`.
+#[derive(clap::Args, Debug, Clone)]
+pub struct ListArgs {
+    /// Which catalogs to browse.
+    #[arg(long, value_enum, default_value_t = Scope::All)]
+    pub scope: Scope,
+    /// Maximum number of rows per side, so `--scope all` can return up
+    /// to twice this many. The server-side cap applies to each side.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Number of leading rows to skip, applied to each side.
+    #[arg(long)]
+    pub offset: Option<u32>,
+}
+
 /// Pagination bundle for `papers list`.
 #[derive(clap::Args, Debug, Clone)]
 pub struct PapersListArgs {

@@ -20,8 +20,9 @@ mod util;
 use std::path::{Path, PathBuf};
 
 use bookrack_cli_grammar::{
-    CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, LogsArgs, PapersAction,
-    QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction, WriteVectorsAction,
+    CorpusAction, DistillAction, DryrunArgs, IngestArgs, IntakeAction, ListArgs, LogsArgs,
+    PapersAction, QueueAction, RemoveArgs, RpcAction, StampsAction, WriteMetadataAction,
+    WriteVectorsAction,
 };
 use bookrack_config::{Config, ConfigError, LibrarySelection};
 use bookrack_runtime::cmd::audit_profile::AuditProfileAction;
@@ -378,6 +379,22 @@ enum Command {
         #[command(subcommand)]
         action: PapersAction,
     },
+    /// Browse both catalogs from one verb.
+    ///
+    /// Reads the book catalog and the paper catalog and prints a
+    /// section for each, so a page covers the library rather than one
+    /// pipeline. `--scope` narrows it to one side; the namespaced form
+    /// — `bookrack papers list` — stays and means the same thing.
+    ///
+    /// Under `--json` the payload is assembled by this command: the
+    /// rows of both sides in one `items` array, with a `pages` block
+    /// carrying each side's own total. It is not the response of any
+    /// one control-plane method.
+    #[command(after_long_help = bookrack_cli_grammar::examples![
+        "list",
+        "list --scope paper --limit 20",
+    ])]
+    List(ListArgs),
     /// Show one item by its typed id.
     ///
     /// The id names its own pipeline (`book:12`, `paper:101`), so the
@@ -1325,6 +1342,7 @@ async fn run() -> Result<()> {
         Command::Papers { action } => {
             cmd::cli_client::papers::run(action, None, audit_profile).await
         }
+        Command::List(args) => cmd::cli_client::listing::list(args, None).await,
         Command::Show { id } => cmd::cli_client::show::run(id, None).await,
         Command::Glean(args) => {
             cmd::cli_client::papers::run(PapersAction::Ingest(args), None, audit_profile).await
@@ -1385,6 +1403,7 @@ fn accepts_audit_profile(command: &Command) -> bool {
         | Command::Runs { .. }
         | Command::Retrieval { .. }
         | Command::Logs(_)
+        | Command::List(_)
         | Command::Show { .. }
         | Command::Status
         | Command::Quit
@@ -2182,13 +2201,19 @@ mod tests {
         }
     }
 
+    /// The token an unknown subcommand carries is what the hint table
+    /// is keyed on, so it has to survive extraction verbatim.
+    ///
+    /// `ls` is the sample because it is a name an operator types and
+    /// this surface does not carry — the hint table answers it, and
+    /// unlike `list` it is not a spelling a verb could take over.
     #[test]
     fn invalid_subcommand_token_extracts_the_offending_string() {
-        let Err(err) = Cli::try_parse_from(["bookrack", "list"]) else {
-            panic!("`list` is not a valid subcommand and must error");
+        let Err(err) = Cli::try_parse_from(["bookrack", "ls"]) else {
+            panic!("`ls` is not a valid subcommand and must error");
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
-        assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("list"));
+        assert_eq!(invalid_subcommand_token(&err).as_deref(), Some("ls"));
     }
 
     #[test]
@@ -2278,6 +2303,7 @@ mod tests {
         "init",
         "intake",
         "libraries",
+        "list",
         "logs",
         "metadata",
         "papers",
@@ -2305,7 +2331,7 @@ mod tests {
     /// is a new help page, and a help page is a surface commitment, so the
     /// tree's shape is pinned here rather than left to grow silently.
     const SUBCOMMAND_COUNTS: &[(&str, usize)] = &[
-        ("bookrack", 28),
+        ("bookrack", 29),
         ("bookrack audit-profile", 3),
         ("bookrack config", 3),
         ("bookrack corpus", 1),
@@ -2430,6 +2456,7 @@ mod tests {
         (&["intake", "list-ocr-pending"], Reach::Routed),
         (&["libraries", "detect", "/tmp/library"], Reach::Local),
         (&["libraries", "list"], Reach::Routed),
+        (&["list"], Reach::Routed),
         (&["logs"], Reach::Routed),
         (&["metadata", "reaudit", "1"], Reach::Routed),
         (&["papers", "list"], Reach::Routed),

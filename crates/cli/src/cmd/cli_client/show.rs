@@ -28,8 +28,8 @@ use eyre::Result;
 use serde_json::{Value, json};
 
 use super::helpers;
+use super::listing::card_library;
 use super::papers::format_paper_detail;
-use super::status::default_served;
 
 pub async fn run(id: String, runtime_dir: Option<PathBuf>) -> Result<()> {
     let id = TypedItemId::from_str(&id).map_err(|err| BookrackCliError::ItemIdUnusable {
@@ -58,27 +58,6 @@ pub async fn run(id: String, runtime_dir: Option<PathBuf>) -> Result<()> {
         println!("library: {name}");
     }
     Ok(())
-}
-
-/// The library name a card should print, or `None` when nobody can
-/// say: the invocation named one, else the library an unnamed call
-/// resolves to — the registry default among the served set.
-///
-/// The answer to an unnamed call is not `status`'s `library` field.
-/// That one reports the primary, the library the daemon came up under,
-/// and a call naming none reaches the registry default instead. Taking
-/// the primary would put a name on the card that the record above it
-/// did not come from.
-///
-/// Nothing is guessed when the daemon cannot be asked: a row that is
-/// sometimes a placeholder is worse than a row that is sometimes
-/// absent, because only the second one is honest about not knowing.
-fn card_library(selected: Option<&str>, status: Option<&Value>) -> Option<String> {
-    if let Some(name) = selected {
-        return Some(name.to_string());
-    }
-    let served = status?.get("served")?;
-    default_served(served).map(String::from)
 }
 
 /// The control-plane call one typed id resolves to, together with the
@@ -267,78 +246,6 @@ mod tests {
                 call.method
             );
         }
-    }
-
-    /// A daemon serving two libraries, come up under the one the
-    /// registry does not point at. The shape `status` reports for it,
-    /// and the shape the card has to read correctly.
-    fn two_served_primary_is_not_default() -> Value {
-        json!({
-            "library": "beta",
-            "data_dir": "/data/beta",
-            "served": [
-                { "name": "alpha", "data_dir": "/data/alpha", "default": true, "primary": false },
-                { "name": "beta", "data_dir": "/data/beta", "default": false, "primary": true },
-            ],
-        })
-    }
-
-    /// An unnamed invocation reaches the registry default, so that is
-    /// the library the card names.
-    ///
-    /// The tempting implementation reads `status`'s `library` field,
-    /// which reports the primary. On the daemon above that would put
-    /// `beta` under a record fetched from `alpha` — a card whose
-    /// identity line and whose contents come from two libraries.
-    #[test]
-    fn an_unnamed_invocation_names_the_library_it_actually_reached() {
-        let status = two_served_primary_is_not_default();
-        assert_eq!(
-            card_library(None, Some(&status)).as_deref(),
-            Some("alpha"),
-            "an unnamed call reaches the registry default, not the primary",
-        );
-    }
-
-    /// One library is the ordinary case, and it is the one an
-    /// implementation reusing the status card's `served` row would get
-    /// wrong: that row is suppressed below two libraries, and a card
-    /// built on it would drop the library name exactly where operators
-    /// see it most.
-    #[test]
-    fn a_single_library_daemon_still_names_its_library() {
-        let status = json!({
-            "library": "solo",
-            "data_dir": "/data/solo",
-            "served": [
-                { "name": "solo", "data_dir": "/data/solo", "default": true, "primary": true },
-            ],
-        });
-        assert_eq!(card_library(None, Some(&status)).as_deref(), Some("solo"));
-    }
-
-    /// A named invocation already knows the answer and does not
-    /// second-guess it against the daemon: the selection is what routed
-    /// the call that produced the record.
-    #[test]
-    fn a_named_invocation_reports_the_library_it_named() {
-        let status = two_served_primary_is_not_default();
-        assert_eq!(
-            card_library(Some("beta"), Some(&status)).as_deref(),
-            Some("beta"),
-        );
-    }
-
-    /// Nothing to say and nothing said: no placeholder, no empty cell,
-    /// no row. Covers both ways the answer can be missing — the daemon
-    /// was not asked, and the daemon answered without a served set.
-    #[test]
-    fn an_unanswerable_library_prints_no_row_at_all() {
-        assert_eq!(card_library(None, None), None);
-        let no_served = json!({ "library": "solo", "data_dir": "/data/solo" });
-        assert_eq!(card_library(None, Some(&no_served)), None);
-        let unreadable = json!({ "library": "solo", "served": Value::Null });
-        assert_eq!(card_library(None, Some(&unreadable)), None);
     }
 
     /// A reference id is refused with all three parts: an operator who
