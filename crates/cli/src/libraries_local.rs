@@ -386,6 +386,10 @@ pub fn remove(name: String, purge: bool, yes: bool) -> Result<()> {
         if report.default_cleared {
             println!("  default cleared; set a new one with 'bookrack libraries default <name>'");
         }
+        // The entry is gone from the file; the library may still be
+        // open, holding its root, in a daemon that read the file
+        // earlier.
+        println!("  a running daemon keeps serving it until 'bookrack libraries unmount {name}'");
     }
     Ok(())
 }
@@ -618,7 +622,17 @@ fn render_config_write(
             eprintln!("note: {env} is set and overrides this value");
         }
     }
-    eprintln!("note: restart the daemon (or re-run 'bookrack run') to apply");
+    // Narrowed to what a restart is actually still for. Which
+    // libraries a daemon serves, and which one is the default, are
+    // changed while it runs; a root's own `config.toml` is read when
+    // that library is opened, so a change to it lands on the next
+    // open — which a restart forces, and so does unmounting and
+    // mounting the one library.
+    eprintln!(
+        "note: the daemon reads this file when it opens the library, so a change applies on \
+         the next open — restart it, or re-open just this library with 'bookrack libraries \
+         unmount <name>' then 'bookrack libraries mount <name>'"
+    );
 }
 
 /// Map a [`RootConfigSetError`] to the right exit code: an operator-input
@@ -720,6 +734,14 @@ fn render_add_report(report: &AddReport) {
     if report.became_default {
         println!("  set as the default library");
     }
+    // Registering is an offline write, so a running daemon has not
+    // heard about it. Which of the two — an entry the daemon serves on
+    // sight, or one it picks up when told — is a decision this line
+    // does not take: it names the command either way.
+    println!(
+        "  a running daemon serves it after 'bookrack libraries mount {}'",
+        report.key
+    );
 }
 
 /// The first segment of a uuid, for a compact display.

@@ -903,7 +903,11 @@ the tool description says which one it ran.
   the runner's two visible boundaries (`extract` on pull,
   `embed` on success); finer-grained progress is deferred.
 - `library.changed` — `{ library }` published after every successful
-  write command finishes.
+  write command finishes, which includes a `library.mount` or
+  `library.unmount` naming the library that joined or left the served
+  set. The payload does not say *what* happened, because every
+  subscriber's response is the same one: refresh what it believes the
+  library set to be.
 - `mcp.availability` — `{ paused }` published `true` at the start of
   every control-plane write command and `false` after it returns, so
   subscribers can advertise the MCP write surface as temporarily
@@ -1059,3 +1063,16 @@ the tool description says which one it ran.
   lock is held by a CLI daemon — by probe + `tray.focus` RPC
   followed by exit 0. No webview RPC surface exists yet; no
   control-plane methods were added or changed.
+- **Runtime mounting** — the set of libraries a daemon serves stops
+  being fixed at bring-up. New methods: `library.mount` and
+  `library.unmount`, both `unrouted` writes taking their own `name`
+  key. `library.fork` mounts the clone it creates and reports whether
+  it succeeded (`mounted`, `mount_error`); `library.set_default` mounts
+  a registered library it is not serving rather than refusing it. No
+  new event types and no new error codes: mount and unmount publish
+  `library.changed`, and their refusals reuse `-32010`, `-32602`, and
+  `-32017`. Each served root's lock moves onto that library's handle,
+  so a root is released when the last caller using the library
+  finishes rather than when the name leaves the registry. MCP gains no
+  mount tool — mounting is an operator action, and an agent naming an
+  unserved library should be told so rather than mount it.

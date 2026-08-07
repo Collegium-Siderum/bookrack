@@ -18,9 +18,15 @@ When its root is selected through the registry (`--library`, or the
 registry's `default`), the daemon mounts **every** registered library
 at bring-up: each one answers reads, and queue jobs route to their
 target library by name. A root selected directly by path that the
-registry does not know is served alone, as before. Mounting and
-unmounting libraries at runtime is not available yet — change the
-registry, then restart the daemon.
+registry does not know is served alone, as before. The set is not
+fixed at bring-up: `bookrack libraries mount <name>` adds a registered
+library to it and `bookrack libraries unmount <name>` takes one back
+out, both without a restart. `libraries unmount` refuses the registry
+default and the library the daemon came up under — the first is where
+every unqualified command goes, the second is what `bookrack status`
+reports the daemon as — and refuses a library with queue jobs still to
+run. `bookrack libraries fork` mounts the clone it creates, so a forked
+library is served on the same command.
 
 `bookrack libraries list` reads the registry file, so it works with no
 daemon and always shows every registered library. When a daemon does
@@ -41,9 +47,13 @@ library: a second daemon pointed at a served root — even from a
 different `BOOKRACK_RUNTIME_DIR` — fails to start and names the holder.
 Offline commands that would destroy data take it too, so `bookrack
 libraries remove --purge` refuses a root a daemon is serving rather
-than deleting it underneath — and since an eager daemon holds the lock
-on every registered library's root, run `bookrack quit` before purging
-any of them. Read-only commands take neither.
+than deleting it underneath. An eager daemon holds the lock on every
+registered library's root, so a purge always meets a held one: give
+that root back with `bookrack libraries unmount <name>` first, or —
+for the registry default and the library the daemon came up under,
+which unmounting refuses — `bookrack quit`. The root is released once
+any call still using that library finishes, so a purge racing a long
+read may need a second attempt. Read-only commands take neither.
 
 For a headless deployment — a systemd unit, a Windows service — run
 `bookrack-mcp` instead. It serves the same MCP endpoint, and takes

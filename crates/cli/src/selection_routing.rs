@@ -10,8 +10,8 @@
 //!     a different root, or an offline registry read/write;
 //!   * **daemon-routed** — the command acts through a running session,
 //!     so the selection is an assertion about the library that session
-//!     serves rather than a switch. [`crate::preflight`] refuses the
-//!     invocation when the assertion disagrees with the running daemon.
+//!     serves rather than a switch. The invocation is refused when the
+//!     assertion disagrees with the running daemon.
 //!
 //! The classification is an exhaustive `match` at every level: a new
 //! top-level command, a new `libraries` verb, and a new `index-profile`
@@ -19,7 +19,7 @@
 //! `matches!` would file them on the daemon-routed side silently.
 //!
 //! The split is leaf-grained where a namespace spans both sides:
-//! `libraries` has seven offline verbs among ten, and `index-profile
+//! `libraries` has seven offline verbs among twelve, and `index-profile
 //! apply` executes through the daemon unless it is a `--dry-run`.
 //! The top-level command names this module mentions are cross-asserted
 //! against the surface's own top-level whitelist in `main`'s tests —

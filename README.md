@@ -218,7 +218,9 @@ ingest is unavailable but EPUB and TXT still work.
   root self-describes with an identity manifest.
 - **Many libraries, one daemon** — started through the registry, the
   daemon mounts every registered library at bring-up: each answers
-  reads, and queue jobs route to their target library by name.
+  reads, and queue jobs route to their target library by name. The set
+  changes while it runs — `libraries mount` and `libraries unmount`
+  add and release a library without a restart.
 - **One-screen status** — `bookrack status` answers "is a daemon
   running, which library does it serve, is it busy" in a single
   no-argument call, and through the exit code alone under `--quiet`.

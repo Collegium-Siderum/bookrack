@@ -1681,9 +1681,18 @@ async fn libraries_config_edits_root_config_offline() -> Result<()> {
         String::from_utf8_lossy(&output.stderr),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // The edit lands in a file a running daemon read when it opened
+    // the library, so the note has to say the change is not live yet
+    // and name a way to make it so. Both routes are named because
+    // they differ in blast radius: a restart re-opens every library,
+    // re-mounting re-opens the one that was edited.
     assert!(
-        stderr.contains("restart the daemon"),
-        "a write should note the daemon restart: {stderr}",
+        stderr.contains("on the next open"),
+        "a write should say the change is not live until the library is re-opened: {stderr}",
+    );
+    assert!(
+        stderr.contains("restart") && stderr.contains("libraries mount"),
+        "the note should name both ways to re-open the library: {stderr}",
     );
     let written = std::fs::read_to_string(root.path().join("config.toml"))?;
     assert!(

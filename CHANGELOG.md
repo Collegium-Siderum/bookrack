@@ -10,6 +10,55 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Added
 
+- **A running daemon mounts and unmounts libraries.** The set a daemon
+  serves used to be decided once, at bring-up: a library registered
+  afterwards was invisible to it until a restart, and a root it held
+  could only be released by stopping it. `bookrack libraries mount
+  <name>` opens a registered library and starts serving it; `bookrack
+  libraries unmount <name>` stops serving one and gives its data root
+  back. Neither needs a restart.
+
+  Mounting runs the same checks bring-up runs — a root another mounted
+  library already claims, an index profile that disagrees with the
+  served set on the reranker stage, an embed backend that cannot serve
+  — so a library that starts cleanly also mounts cleanly. It takes a
+  registry name, never a path: registering a root stays `bookrack
+  libraries add`.
+
+  Unmounting refuses three libraries, each because the daemon would
+  otherwise go on describing something it no longer serves: the
+  registry default, which is where every unqualified command goes; the
+  library the daemon came up under, which is what `bookrack status`
+  reports it as; and a library with queue jobs still to run, which
+  would fail on their next pull. The root is released once any call
+  still using that library finishes, so it may come free a moment
+  after the command returns.
+
+  This is what `bookrack libraries remove --purge` needed: purging a
+  root a daemon serves no longer means stopping the daemon, only
+  unmounting that one library.
+
+- **A forked library is served without a restart.** `bookrack
+  libraries fork` mounts the clone it just built, so the new library
+  answers on the same command. A clone the daemon cannot serve is
+  still built and registered — undoing it would delete data to report
+  a serving problem — and the command says so, naming the reason and
+  the `libraries mount` that finishes the job. The next steps it
+  prints are the operator's now; they used to be written to the
+  daemon's own terminal, where the person who typed the command never
+  saw them.
+
+- **`bookrack libraries default` reaches the running daemon.** The
+  pointer has two homes — the registry file and the cache a daemon
+  seeds from it at start — and the command wrote only the file, so the
+  listing reported the new default while every unqualified command
+  kept reaching the old library. It now hands the change to the daemon
+  when one is listening; the daemon writes the same file and follows
+  the pointer immediately. With nothing listening it writes the
+  registry directly, as before. A library the daemon is not serving is
+  mounted rather than refused, so the pointer is no longer confined to
+  whatever happened to be mounted.
+
 - **Three verbs read across both pipelines.** `bookrack list`,
   `bookrack find`, and `bookrack search` read the book catalog and the
   paper catalog together, so a page covers the library rather than one
