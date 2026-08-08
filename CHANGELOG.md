@@ -6,7 +6,7 @@ follows [semver](https://semver.org/spec/v2.0.0.html). Each release
 section is the source of truth for the GitHub Release notes — the
 release workflow extracts the matching section verbatim from this file.
 
-## [Unreleased]
+## [0.11.0] - 2026-08-08
 
 ### Added
 
@@ -588,7 +588,8 @@ release workflow extracts the matching section verbatim from this file.
   that takes an intake id — `remove` and the ten `metadata` actions —
   accepted only the bare number, so an id copied out of a listing had
   to have its prefix deleted before it could be pasted into the next
-  command. The paper side has taken both forms since typed ids landed.
+  command. The paper side took both forms as soon as typed ids landed,
+  earlier in this release.
   Both forms now work on both sides and mean the same thing; the prefix
   is read and dropped, so what reaches the control plane is the bare
   number it has always carried.
@@ -4440,7 +4441,7 @@ is finalised; small-batch testing precedes a stable v0.1.0 cut.
   per-platform SHA-256 checksums (Linux x86_64, Windows x86_64, macOS
   arm64, macOS x86_64).
 
-[Unreleased]: https://github.com/Collegium-Siderum/bookrack/compare/v0.10.0...HEAD
+[0.11.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/Collegium-Siderum/bookrack/compare/v0.7.0...v0.8.0
