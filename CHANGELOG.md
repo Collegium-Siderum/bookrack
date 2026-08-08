@@ -987,6 +987,17 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **Stopping a daemon with Ctrl-C left attached clients without the
+  `daemon.state = stopping` notification.** A connection task exits on
+  the shutdown broadcast and, on its way out, forwards whatever is
+  already queued on its event subscription — so the terminal transition
+  has to be published *before* the broadcast, not after. `daemon.shutdown`
+  did that; the signal path did not, publishing from a second task woken
+  by the same broadcast. Which of the two ran first was up to the
+  scheduler, so a client watching a daemon stopped by SIGINT, SIGTERM,
+  or SIGHUP saw its connection drop with no explanation, sometimes.
+  Both entry points now share one function that fixes the order.
+
 - **`bookrack verify` reported an unreadable vector-store sidecar as a
   library that never built an index.** `vectors_meta.json` is read on a
   path that already tells an absent sidecar apart from a broken one —

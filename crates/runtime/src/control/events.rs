@@ -420,10 +420,45 @@ impl Drop for WorkingGuard {
     }
 }
 
+/// Publish the terminal `daemon.state = stopping` transition and then
+/// fire the shutdown broadcast, in that order.
+///
+/// Connection tasks exit on the broadcast and, on their way out, flush
+/// whatever is already queued on their event subscription. A transition
+/// published after the broadcast races that teardown and may reach no
+/// client at all, so both shutdown entry points — the signal task and
+/// `daemon.shutdown` — go through here rather than each restating the
+/// order for itself.
+pub fn initiate_shutdown(event_stream: &EventStreamHandle, shutdown_tx: &broadcast::Sender<()>) {
+    event_stream.set_stopping();
+    let _ = shutdown_tx.send(());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ts_rs::TS;
+
+    #[test]
+    fn shutdown_queues_stopping_ahead_of_the_broadcast() {
+        let handle = EventStreamHandle::default();
+        let mut events = handle.subscribe();
+        let (shutdown_tx, mut shutdown_rx) = broadcast::channel::<()>(8);
+
+        initiate_shutdown(&handle, &shutdown_tx);
+
+        // Stand where a connection task stands: it is woken by the
+        // broadcast, drains what is already queued, and leaves.
+        // Anything published after this point reaches no client.
+        shutdown_rx.try_recv().expect("shutdown broadcast fired");
+        let event = events
+            .try_recv()
+            .expect("the stopping transition was not queued ahead of the broadcast");
+        assert!(
+            matches!(event, Event::DaemonState(DaemonState::Stopping)),
+            "{event:?}"
+        );
+    }
 
     #[test]
     fn event_ts_export_contains_every_channel() {

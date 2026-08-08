@@ -897,7 +897,11 @@ the tool description says which one it ran.
     restore the queue cause — the persisted pause flag records no
     reason — so after a restart a failure-paused queue is visible
     through `queue.list`, not `daemon.state`.
-  - `stopping` — shutdown has been signalled; terminal.
+  - `stopping` — shutdown has been signalled; terminal. Published
+    before the daemon starts tearing connections down, and by whichever
+    path signalled it — `daemon.shutdown` or a platform signal — so an
+    attached subscriber is told why its connection is about to close
+    rather than just losing it.
 - `queue.tick` — `{ current, pending, running, last_finished? }`
   published immediately after every persisted change to the queue
   snapshot (`queue.json` in the daemon state directory), so a

@@ -545,6 +545,7 @@ impl DaemonRuntime {
         let signal_handle = tokio::spawn(signal_task(
             shutdown_tx.clone(),
             Arc::clone(&signal_triggered),
+            event_stream.clone(),
         ));
 
         // 11. queue state load + (opt) worker spawn. The snapshot lives
@@ -852,9 +853,13 @@ impl DaemonRuntime {
         let _ = foreground_rx.recv().await;
         tracing::info!("shutdown signalled, joining session tasks");
 
-        // Flip the daemon-state flag before draining clients so the
-        // `daemon.state=stopping` notification reaches every attached
-        // subscriber before its connection task exits.
+        // Backstop for a caller that fired the broadcast without going
+        // through `initiate_shutdown` — an embedder holding its own
+        // `shutdown_tx` clone. It cannot rescue that caller's attached
+        // subscribers: connection tasks wake on the same broadcast and
+        // flush only what is already queued, so a transition published
+        // here has already lost the race. Both in-tree entry points
+        // publish ahead of the broadcast instead; the repeat is a no-op.
         event_stream.set_stopping();
 
         match tokio::time::timeout(Duration::from_secs(3), control_accept_handle).await {
@@ -1243,7 +1248,11 @@ pub fn library_identification_label(id: LibraryIdentification) -> Option<&'stati
 }
 
 /// Aggregate the platform's shutdown signals onto the shared broadcast.
-async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBool>) -> Result<()> {
+async fn signal_task(
+    shutdown_tx: broadcast::Sender<()>,
+    triggered: Arc<AtomicBool>,
+    event_stream: EventStreamHandle,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -1269,7 +1278,7 @@ async fn signal_task(shutdown_tx: broadcast::Sender<()>, triggered: Arc<AtomicBo
         }
     }
     triggered.store(true, Ordering::SeqCst);
-    let _ = shutdown_tx.send(());
+    crate::control::events::initiate_shutdown(&event_stream, &shutdown_tx);
     Ok(())
 }
 
