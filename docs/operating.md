@@ -72,12 +72,15 @@ snapshots its log ring (see [Observability](#observability)).
 with `--recursive`) to the daemon and streams the queue worker's
 progress until the batch reaches a terminal state. `bookrack papers
 ingest <path>` is the parallel entry point for academic papers, which
-live in a second cluster under the same data root.
+live in a second cluster under the same data root. `bookrack glean` is
+the same verb at the top level — same arguments, same pipeline — so the
+paper side reads symmetrically with `bookrack ingest`.
 
 ```
 bookrack ingest /path/to/book.epub
 bookrack ingest --recursive /path/to/books-dir/
 bookrack papers ingest --recursive /path/to/papers-dir/
+bookrack glean --recursive /path/to/papers-dir/
 ```
 
 The command exits `5` when an awaited batch had any `Failed` or
