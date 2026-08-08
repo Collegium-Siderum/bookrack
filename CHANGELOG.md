@@ -987,6 +987,20 @@ release workflow extracts the matching section verbatim from this file.
 
 ### Fixed
 
+- **`bookrack verify` reported an unreadable vector-store sidecar as a
+  library that never built an index.** `vectors_meta.json` is read on a
+  path that already tells an absent sidecar apart from a broken one —
+  absent is how a fresh library looks, and is not a finding. The verify
+  report discarded that distinction and kept only the value, so a
+  truncated or malformed file left the same two empty fields an
+  index-free library leaves, and the whole `vectors` section went
+  missing rather than saying why. The report now carries a
+  `vectors_meta_error` naming the reason, flattened to its full source
+  chain so the parser's own message survives, and leaves it empty when
+  the sidecar is legitimately absent. A failure there says nothing
+  about the catalog or corpus, which are read through their own doors
+  and still report for themselves.
+
 - **A dry run no longer deletes the other pipeline's reports.** Both
   `bookrack dryrun` and `bookrack papers dryrun` write their artifacts
   under `<data_root>/dryruns/` and prune the directory to the newest

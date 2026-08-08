@@ -229,6 +229,10 @@ pub struct VerifyReport {
     pub missing_intake_files: Option<Vec<i64>>,
     pub vectors_built_at_chunk_count: Option<u64>,
     pub vectors_churn: Option<u64>,
+    /// Why `vectors_meta.json` could not be read, flattened to its full
+    /// source chain. Distinct from all three counts being absent, which
+    /// is a library that never built an ANN index.
+    pub vectors_meta_error: Option<String>,
 }
 
 /// Print the `bookrack verify` report. Quiet on success, loud on
@@ -279,9 +283,18 @@ pub fn verify(report: &VerifyReport) {
         }
     }
 
-    if report.vectors_built_at_chunk_count.is_some() || report.vectors_churn.is_some() {
+    if report.vectors_built_at_chunk_count.is_some()
+        || report.vectors_churn.is_some()
+        || report.vectors_meta_error.is_some()
+    {
         println!();
         println!("vectors:");
+        if let Some(err) = &report.vectors_meta_error {
+            println!("  meta:            FAILED");
+            for line in err.lines() {
+                println!("    {line}");
+            }
+        }
         if let Some(n) = report.vectors_built_at_chunk_count {
             println!("  chunks_at_build: {n}");
         }

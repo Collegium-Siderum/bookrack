@@ -466,7 +466,12 @@ the exit-code bucket does not distinguish the two.
 - `verify.run` — `{ library? }`; the cross-store verify report. Read-only:
   each store is opened through its own read-only door, which takes no
   write lock, so the report answers alongside a write in flight rather
-  than queueing behind the write mutex.
+  than queueing behind the write mutex. Each store reports for itself:
+  one that cannot be read carries its reason in its own `*_error` field
+  and leaves the others untouched. An absent store and an absent vector
+  sidecar are how a fresh library looks and are not errors —
+  `vectors_meta_error` is populated only when the sidecar is there and
+  unreadable.
 - `diagnose.run` — `{ out?, days?, no_scrub? }` → `{ out_path, files,
   scrubbed, scrub_gaps }`. Bundles crash reports, recent logs, and a
   catalog snapshot for a bug attachment. Scrubbed of local paths and
